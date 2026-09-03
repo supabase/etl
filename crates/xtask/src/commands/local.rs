@@ -4,7 +4,7 @@ use std::{
     env, fs,
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -29,6 +29,8 @@ const CLICKHOUSE_SERVICE: &str = "clickhouse";
 const ICEBERG_CATALOG_SERVICE: &str = "catalog-lakekeeper-api";
 /// Interval between readiness probes.
 const READINESS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Maximum time to wait for an already-running Iceberg catalog.
+const ICEBERG_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Starts Docker services when needed, waits for Postgres, and runs migrations.
 pub(crate) fn prepare_local_databases() -> Result<InitConfig> {
@@ -233,7 +235,11 @@ pub(crate) fn wait_for_iceberg_catalog() -> Result<()> {
     }
 
     let compose = DockerCompose::detect()?;
-    wait_until("Iceberg catalog", || {
+    if !compose_service_is_running(&compose, &config, ICEBERG_CATALOG_SERVICE)? {
+        bail!("Iceberg catalog is not running. Run `cargo x init` first.");
+    }
+
+    wait_until_with_timeout("Iceberg catalog", ICEBERG_READINESS_TIMEOUT, || {
         let mut cmd = compose.command(&config);
         cmd.args([
             "exec",
@@ -243,9 +249,28 @@ pub(crate) fn wait_for_iceberg_catalog() -> Result<()> {
             "healthcheck",
         ]);
         command_succeeds_silent(&mut cmd)
-    })?;
+    })
+    .context("Iceberg catalog did not become ready; run `cargo x init` and check Docker logs")?;
     println!("✅ Iceberg catalog is up and running on http://localhost:8182");
     Ok(())
+}
+
+/// Returns whether a Docker Compose service is currently running.
+fn compose_service_is_running(
+    compose: &DockerCompose,
+    config: &InitConfig,
+    service: &str,
+) -> Result<bool> {
+    let output = compose
+        .command(config)
+        .args(["ps", "--services", "--filter", "status=running", service])
+        .output()
+        .context("Failed to inspect Docker Compose services")?;
+    if !output.status.success() {
+        bail!("Failed to inspect Docker Compose services");
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| line == service))
 }
 
 /// Waits for an externally managed Postgres instance.
@@ -375,6 +400,28 @@ where
     }
 }
 
+/// Waits until a readiness probe succeeds or `timeout` elapses.
+fn wait_until_with_timeout<F>(description: &str, timeout: Duration, mut ready: F) -> Result<()>
+where
+    F: FnMut() -> Result<bool>,
+{
+    println!("⏳ Waiting for {description} to be ready...");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if ready()? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("Timed out waiting for {description}");
+        }
+
+        println!("waiting for {description}...");
+        thread::sleep(
+            READINESS_CHECK_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
 /// Returns whether a kubectl context exists.
 fn kubectl_context_exists(context: &str) -> Result<bool> {
     let output = Command::new("kubectl")
@@ -436,4 +483,17 @@ fn optional_env(key: &str) -> Option<String> {
 /// Escapes a value as a SQL string literal.
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_readiness_wait_honors_timeout() {
+        let error =
+            wait_until_with_timeout("test service", Duration::ZERO, || Ok(false)).unwrap_err();
+
+        assert_eq!(error.to_string(), "Timed out waiting for test service");
+    }
 }

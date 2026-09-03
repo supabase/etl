@@ -31,11 +31,17 @@ use crate::{
 /// up those changes.
 ///
 /// Before reconciliation, this best-effort checks durable source state. If the
-/// restart performed an initial table sync, it resets the VPA so
-/// reconciliation recreates it without a steady-state recommendation. Source
-/// inspection failures preserve the existing VPA and do not block restart.
-/// Kubernetes-initiated Pod restarts do not call this helper and preserve VPA
-/// state.
+/// restart would repeat an initial table sync, it deletes the VPA so
+/// reconciliation recreates it from the configured bounds and initial update
+/// mode. The upstream recommender may retain in-memory usage aggregates after
+/// the VPA is deleted. Source inspection failures preserve the existing VPA
+/// and do not block restart.
+///
+/// Kubelet container restarts and Kubernetes-initiated Pod replacements do not
+/// call this helper or delete the VPA. A replacement Pod may therefore receive
+/// an existing recommendation even when table copy will repeat. This is a
+/// limitation of making the copy-aware decision at the API boundary; a future
+/// controller with access to durable table state could own that lifecycle.
 ///
 /// If Kubernetes support is unavailable, or the pipeline has no active
 /// Kubernetes resources, the call returns `false` without reconciling.
@@ -72,6 +78,7 @@ pub(crate) async fn restart_replicator_if_running(
         source,
         destination,
         api_config.supabase_api_url.as_deref(),
+        api_config.replicator.destination_defaults.ducklake.copy_buffer,
         source_tls_config.get_tls_config(),
     )
     .await?;

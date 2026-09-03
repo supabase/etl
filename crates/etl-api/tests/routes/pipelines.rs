@@ -1,6 +1,6 @@
 use etl_api::{
     configs::{
-        pipeline::{ReplicatorResourcesConfig, UpdateApiPipelineConfig},
+        pipeline::{PipelineReplicatorResourceOverrideConfig, UpdateApiPipelineConfig},
         update::UpdateField,
     },
     k8s::PodStatus,
@@ -319,10 +319,9 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
     let destination_id = create_destination(&app, tenant_id).await;
 
     let mut config = new_pipeline_config();
-    config.replicator_resources = Some(ReplicatorResourcesConfig {
+    config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(750),
         memory_request_mib: Some(1536),
-        ..ReplicatorResourcesConfig::default()
     });
 
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
@@ -336,21 +335,19 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
         response.json().await.expect("failed to deserialize response");
     assert_eq!(
         response.config.replicator_resources,
-        Some(ReplicatorResourcesConfig {
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 
     let response = app.start_pipeline(tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        k8s_state.last_replicator_resources().await,
-        Some(ReplicatorResourcesConfig {
+        k8s_state.last_replicator_resource_override().await,
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -855,10 +852,9 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
 
     let create_calls_before = k8s_state.create_calls();
     let mut updated_pipeline_config = updated_pipeline_config();
-    updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
+    updated_pipeline_config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(900),
         memory_request_mib: Some(2048),
-        ..ReplicatorResourcesConfig::default()
     });
     let update_request = UpdatePipelineRequest {
         source_id,
@@ -871,11 +867,10 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(k8s_state.create_calls() > create_calls_before);
     assert_eq!(
-        k8s_state.last_replicator_resources().await,
-        Some(ReplicatorResourcesConfig {
+        k8s_state.last_replicator_resource_override().await,
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(900),
             memory_request_mib: Some(2048),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -926,10 +921,9 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     let pipeline_id = response.id;
 
     let mut updated_pipeline_config = updated_pipeline_config();
-    updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
+    updated_pipeline_config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(333),
         memory_request_mib: Some(444),
-        ..ReplicatorResourcesConfig::default()
     });
     let update_request = UpdatePipelineRequest {
         source_id,
@@ -941,17 +935,16 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(k8s_state.create_calls(), 0);
-    assert_eq!(k8s_state.last_replicator_resources().await, None);
+    assert_eq!(k8s_state.last_replicator_resource_override().await, None);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
     let response: ReadPipelineResponse =
         response.json().await.expect("failed to deserialize response");
     assert_eq!(
         response.config.replicator_resources,
-        Some(ReplicatorResourcesConfig {
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(333),
             memory_request_mib: Some(444),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -966,10 +959,9 @@ async fn invalid_replicator_resources_are_rejected() {
     let destination_id = create_destination(&app, tenant_id).await;
 
     let mut config = new_pipeline_config();
-    config.replicator_resources = Some(ReplicatorResourcesConfig {
+    config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(0),
         memory_request_mib: Some(100),
-        ..ReplicatorResourcesConfig::default()
     });
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
 

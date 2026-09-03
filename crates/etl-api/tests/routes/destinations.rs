@@ -579,8 +579,11 @@ async fn ducklake_destination_update_preserves_and_clears_encrypted_fields() {
             s3_use_ssl: UpdateField::Preserve,
             metadata_schema: UpdateField::Preserve,
             maintenance_target_file_size: UpdateField::Preserve,
+            parquet_row_group_size_bytes: UpdateField::Preserve,
+            parquet_row_group_size: UpdateField::Preserve,
             expire_snapshots_older_than: UpdateField::Preserve,
             maintenance_mode: UpdateField::Preserve,
+            copy_buffer: UpdateField::Preserve,
             table_sorting: UpdateField::Preserve,
         },
     };

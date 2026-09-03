@@ -260,6 +260,8 @@ mod ducklake {
             s3_use_ssl,
             metadata_schema,
             maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
             expire_snapshots_older_than,
             maintenance_mode,
             table_sorting,
@@ -291,6 +293,8 @@ mod ducklake {
             *s3_use_ssl,
             metadata_schema.clone(),
             maintenance_target_file_size.clone(),
+            parquet_row_group_size_bytes.clone(),
+            parquet_row_group_size.clone(),
             expire_snapshots_older_than.clone(),
         )
         .validate(ctx)

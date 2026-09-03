@@ -46,11 +46,13 @@ macro_rules! requires_version {
 /// Checks if the server version is below the specified version.
 ///
 /// This macro is useful for conditional logic when features are not available
-/// in older PostgreSQL versions.
+/// in older PostgreSQL versions. An unavailable server version is not
+/// considered below the required version, so this macro returns [`false`] for
+/// [`None`].
 #[macro_export]
 macro_rules! below_version {
     ($server_version:expr, $required:expr) => {
-        !$crate::version::meets_version($server_version, $required)
+        ($server_version).is_some_and(|version| version.get() < ($required))
     };
 }
 
@@ -110,6 +112,13 @@ mod tests {
         assert!(below_version!(version, POSTGRES_16));
         assert!(below_version!(version, POSTGRES_17));
         assert!(below_version!(version, POSTGRES_18));
+    }
+
+    #[test]
+    fn below_version_with_none() {
+        let version: Option<NonZeroI32> = None;
+        assert!(!below_version!(version, POSTGRES_14));
+        assert!(!below_version!(version, POSTGRES_18));
     }
 
     #[test]

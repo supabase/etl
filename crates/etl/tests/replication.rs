@@ -324,8 +324,8 @@ async fn collect_ddl_messages(
             continue;
         }
 
-        let content = message.content().expect("message content should decode");
-        let json = serde_json::from_str(content).expect("ddl message should be valid json");
+        let json =
+            serde_json::from_slice(message.content()).expect("ddl message should be valid json");
         println!("{json}");
         messages.push(json);
     }

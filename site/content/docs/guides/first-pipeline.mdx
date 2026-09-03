@@ -181,7 +181,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         batch: BatchConfig {
             max_fill_ms: 5000,
             memory_budget_ratio: 0.2,
-            max_bytes: 8 * 1024 * 1024,
+            max_bytes: 32 * 1024 * 1024,
         },
         table_error_retry_delay_ms: 10_000,
         table_error_retry_max_attempts: 5,
@@ -210,9 +210,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
   The example reads the standard `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`,
   and `PGPASSWORD` environment variables, with local defaults where possible.
   `Pipeline::start()` installs the ETL **source-side schema helpers** before
-  replication begins. `MemoryStore` is for this tutorial only: it does not
-  survive process restart. Production pipelines should use `PostgresStore` or
-  another durable [store](/guides/custom-implementations/).
+  replication begins, even when the tutorial keeps runtime state in
+  `MemoryStore`. The 20% batch-memory ratio is one global advisory target that
+  ETL divides across positions that can simultaneously hold an accumulating or
+  in-flight decoded batch. The 32 MiB value is the preferred ceiling for each
+  batch, not a reservation. This example disables emergency memory backpressure,
+  but dynamic batch sizing remains active. A single row can exceed the target
+  because ETL checks its decoded size afterward. `MemoryStore` is for this
+  tutorial only: it does not survive process restart. Production pipelines
+  should use `PostgresStore` or another durable
+  [store](/guides/custom-implementations/).
 </Callout>
 
 ## Run the pipeline [#run-the-pipeline] [step]

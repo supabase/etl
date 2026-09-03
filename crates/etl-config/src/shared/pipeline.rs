@@ -18,38 +18,46 @@ pub struct BatchConfig {
     ///
     /// This is the latency bound for stream batching: once the first item
     /// enters a batch, the batch is flushed when this timer elapses, even
-    /// if byte/row targets were not met.
+    /// if the byte target was not met.
     ///
     /// In practice, flush happens on the first trigger between this timeout and
-    /// the memory-based byte budget driven by
+    /// the memory-based byte target driven by
     /// [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
-    /// Ratio of process memory reserved for incoming stream batch bytes.
+    /// Maximum ratio of memory capacity targeted for decoded source batches.
     ///
     /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The configured memory is divided by the number of active streams at
-    /// runtime, so each stream gets only a per-stream share of the global
-    /// memory budget.
+    /// The resulting global target is divided across registered batch slots.
     ///
     /// Together with [`Self::max_fill_ms`], this controls stream flushes:
     /// batches flush either when their accumulated size estimate reaches
-    /// the per-stream byte budget or when the fill timeout elapses,
+    /// the advisory per-batch byte target or when the fill timeout elapses,
     /// whichever happens first.
     ///
-    /// The goal is to preserve headroom for allocations beyond incoming rows,
-    /// such as destination batch building and serialization buffers.
+    /// This is a batching heuristic, not a memory allocator or a hard bound.
+    /// ETL compares decoded size estimates with the target after each item, so
+    /// actual allocations can differ and one indivisible item can overshoot it.
+    /// Changes in the detected memory capacity or registered batch slots update
+    /// the effective target. A slot represents one position that may own an
+    /// accumulating or in-flight decoded batch. The configured ratio leaves the
+    /// rest of the detected capacity for destination batch building,
+    /// serialization, and other allocations.
     #[serde(default = "default_memory_budget_ratio")]
     #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
     pub memory_budget_ratio: f32,
-    /// Maximum preferred byte size for one source batch per active stream.
+    /// Maximum preferred byte size for one source batch.
     ///
-    /// This is a ceiling, not a target. The runtime still chooses the smaller
-    /// value between this limit and the memory-ratio budget computed from
-    /// [`Self::memory_budget_ratio`].
+    /// This bounds multi-row accumulation within one memory sampling interval,
+    /// even when a large pod has enough headroom to derive a much larger
+    /// dynamic target. It also limits destination batch latency and
+    /// serialization work. The runtime chooses the smaller value between this
+    /// ceiling and the target computed from [`Self::memory_budget_ratio`]. A
+    /// single source row may exceed it because rows cannot be split safely
+    /// after decoding.
     #[serde(default = "default_batch_max_bytes")]
-    #[cfg_attr(feature = "utoipa", schema(example = 8388608))]
+    #[cfg_attr(feature = "utoipa", schema(example = 33554432))]
     pub max_bytes: usize,
 }
 
@@ -57,19 +65,19 @@ impl BatchConfig {
     /// Default maximum fill time in milliseconds.
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
-    /// Default percentage of total memory used for batch bytes budgeting.
+    /// Default fraction used to calculate the global batch target.
     ///
-    /// This was empirically found to be a good value to avoid OOMs, but it's
-    /// highly dependent on how we measure the stream batches impacts on
-    /// memory.
+    /// The governor targets at most 20% of the detected system capacity or
+    /// cgroup memory limit for decoded batches. An indivisible row can exceed
+    /// the target after it has already been decoded.
     pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;
 
     /// Default maximum preferred source batch size in bytes.
     ///
-    /// The 8 MiB cap bounds a single stream's burst before reactive memory
-    /// backpressure can observe new allocations, while still fitting thousands
-    /// of typical CDC rows and staying near common streaming request limits.
-    pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
+    /// The 32 MiB cap supplies substantial destination work while bounding
+    /// multi-row accumulation before reactive memory backpressure can observe
+    /// new allocations. An indivisible source row can exceed the cap.
+    pub const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 }
 
 impl Validate for BatchConfig {
@@ -209,15 +217,30 @@ impl Validate for TableSyncCopyConfig {
     }
 }
 
-/// Memory-based backpressure configuration.
+/// Emergency memory backpressure configuration.
+///
+/// Capacity-derived batch sizing limits decoded batch growth, while this signal
+/// remains the whole-workload safety boundary for destination allocations,
+/// allocator retention, an oversized source row, or a cgroup limit reduction.
+/// Its resume threshold provides recovery headroom before source polling
+/// restarts.
+///
+/// Activating backpressure stops source polling but does not cancel destination
+/// work or prevent already buffered ETL batches from being flushed. This lets
+/// governed memory drain without introducing a lock cycle. If measured usage
+/// remains at or above the resume threshold after every ETL-owned batch has
+/// drained, polling intentionally remains paused: allocator-retained pages,
+/// destination work, database-driver queues, page cache, or another part of the
+/// measured memory domain is still consuming the recovery headroom. Resuming
+/// speculatively in that state would weaken the OOM safety boundary.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct MemoryBackpressureConfig {
-    /// Memory usage ratio above which backpressure is activated.
+    /// Memory usage ratio at or above which source polling is paused.
     ///
     /// Valid range is `(0.0, 1.0]`.
     pub activate_threshold: f32,
-    /// Memory usage ratio below which backpressure is released.
+    /// Memory usage ratio below which source polling resumes.
     ///
     /// Valid range is `[0.0, 1.0)`, and this value must be lower than
     /// [`Self::activate_threshold`].
@@ -226,8 +249,14 @@ pub struct MemoryBackpressureConfig {
 
 impl MemoryBackpressureConfig {
     /// Default memory usage ratio to activate backpressure.
+    ///
+    /// Activating at 85% leaves a margin before the cgroup or system capacity
+    /// is exhausted.
     pub const DEFAULT_ACTIVATE_THRESHOLD: f32 = 0.85;
     /// Default memory usage ratio to release backpressure.
+    ///
+    /// Resuming below 75% provides a 10% hysteresis band that absorbs allocator
+    /// lag and allocations that appear between samples.
     pub const DEFAULT_RESUME_THRESHOLD: f32 = 0.75;
 }
 
@@ -339,7 +368,11 @@ pub struct PipelineConfig {
     /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
-    /// Number of milliseconds between one memory usage refresh and another.
+    /// Number of milliseconds between coherent memory snapshots.
+    ///
+    /// One shared sampler drives dynamic batch targets and emergency
+    /// backpressure. Batch hot paths reuse each snapshot instead of reading
+    /// operating-system or cgroup files per row.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
@@ -360,7 +393,7 @@ pub struct PipelineConfig {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Whether [`Pipeline::start`] should run the source migrations that
+    /// Whether `Pipeline::start` should run the source migrations that
     /// install the schema helper functions and the `ddl_command_end` event
     /// trigger.
     ///
@@ -388,7 +421,10 @@ impl PipelineConfig {
     /// Default maximum worker connections per table during initial copy.
     pub const DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE: u16 = 4;
 
-    /// Default interval in milliseconds between one memory refresh and another.
+    /// Default interval in milliseconds between coherent memory snapshots.
+    ///
+    /// A 100 ms interval reacts quickly to allocation bursts and cgroup limit
+    /// changes without moving operating-system reads into per-row hot paths.
     pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
     /// Default interval in milliseconds between periodic replication monitor
@@ -551,7 +587,11 @@ pub struct PipelineConfigWithoutSecrets {
     /// workers can pull new ranges as they finish.
     #[serde(default = "default_max_copy_connections_per_table")]
     pub max_copy_connections_per_table: u16,
-    /// Number of milliseconds between one memory usage refresh and another.
+    /// Number of milliseconds between coherent memory snapshots.
+    ///
+    /// One shared sampler drives dynamic batch targets and emergency
+    /// backpressure. Batch hot paths reuse each snapshot instead of reading
+    /// operating-system or cgroup files per row.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
     /// Optional memory-based backpressure configuration.
@@ -570,7 +610,7 @@ pub struct PipelineConfigWithoutSecrets {
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Whether [`Pipeline::start`] should run the source migrations. See the
+    /// Whether `Pipeline::start` should run the source migrations. See the
     /// field of the same name on [`PipelineConfig`].
     #[serde(default = "default_run_source_migrations")]
     pub run_source_migrations: bool,

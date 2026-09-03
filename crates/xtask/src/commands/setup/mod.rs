@@ -12,7 +12,9 @@ use std::{
 use anyhow::{Context, Result};
 use api::write_api_config;
 use clap::{Args, Subcommand};
-use replicator::{IcebergCatalog, ReplicatorSetup, write_replicator_config};
+use replicator::{
+    IcebergCatalog, ReplicatorSetup, release_conflicting_apply_slot, write_replicator_config,
+};
 pub(crate) use replicator::{detect_replicator_destination, replicator_config_has_placeholders};
 
 use crate::{
@@ -48,7 +50,8 @@ enum SetupTarget {
 /// Options for `cargo x setup api`.
 #[derive(Args)]
 struct SetupApiArgs {
-    /// Overwrite an existing API configuration directory.
+    /// Rewrite API configuration, appending a new encryption key when it
+    /// exists.
     #[arg(long)]
     force: bool,
 }
@@ -186,8 +189,8 @@ impl SetupReplicatorArgs {
             wait_for_iceberg_catalog()?;
         }
 
-        write_replicator_config(&options, self.force)?;
-        options.release_conflicting_apply_slot()?;
+        let config = write_replicator_config(&options, self.force)?;
+        release_conflicting_apply_slot(&config)?;
 
         println!();
         println!("✅ Replicator configuration is ready.");
@@ -271,7 +274,9 @@ fn print_api_next_steps() {
     println!("  Swagger UI  http://127.0.0.1:8010/swagger-ui");
     println!("  Internal    http://127.0.0.1:8081/health_check");
     println!("  Keys        crates/etl-api/configuration/dev.yaml (gitignored)");
-    println!("  Rotate      cargo x setup api --force");
+    println!("  Add key     cargo x setup api --force");
+    println!("  Rotate data cargo x rotate-encryption-key");
+    println!("  Remove old encryption keys only after rotation succeeds.");
 }
 
 /// Prints how to start the replicator after setup.
@@ -316,11 +321,11 @@ pub(super) fn prompt(label: &str, default: &str) -> Result<String> {
     finish_prompt(default)
 }
 
-/// Reads a secret from stdin without echoing `default`.
+/// Reads a sensitive value from stdin without displaying `default`.
 ///
 /// Empty input keeps `default`. Passwords, usernames, account identifiers, and
-/// connection strings that embed credentials must use this so they are not
-/// written to the terminal.
+/// connection strings that embed credentials must use this so existing values
+/// are hidden. The terminal may still echo newly typed input.
 pub(super) fn prompt_secret(label: &str, default: &str) -> Result<String> {
     print!("{label} [hidden]: ");
     finish_prompt(default)

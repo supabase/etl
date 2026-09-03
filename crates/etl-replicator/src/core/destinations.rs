@@ -146,6 +146,12 @@ mod clickhouse {
     use super::super::{ReplicatorStore, pipeline};
     use crate::error::ReplicatorResult;
 
+    /// Returns whether a ClickHouse configuration requires public HTTPS
+    /// enforcement.
+    fn requires_public_network_policy(is_managed: bool, scheme: &str) -> bool {
+        is_managed || scheme == "https"
+    }
+
     /// Starts the ClickHouse destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
@@ -157,19 +163,54 @@ mod clickhouse {
             unreachable!("Destination kind should match ClickHouse config");
         };
 
-        let destination = ClickHouseDestination::new(
-            url.clone(),
-            user,
-            password.as_ref().map(|p| p.expose_secret().to_owned()),
-            database,
-            ClickHouseInserterConfig { engine: *engine, ..Default::default() },
-            ClickHouseClientConfig::default(),
-            store.clone(),
-        )?;
+        let password = password.as_ref().map(|password| password.expose_secret().to_owned());
+        let inserter_config = ClickHouseInserterConfig { engine: *engine, ..Default::default() };
+        let client_config = ClickHouseClientConfig::default();
+
+        // Managed configurations must use public HTTPS. Standalone HTTPS also
+        // uses the guard, while trusted standalone HTTP remains available for
+        // local development.
+        let enforce_public_network_policy =
+            requires_public_network_policy(replicator_config.supabase.is_some(), url.scheme());
+        let destination = if enforce_public_network_policy {
+            ClickHouseDestination::new_public(
+                url.clone(),
+                user,
+                password,
+                database,
+                inserter_config,
+                client_config,
+                store.clone(),
+            )
+            .await?
+        } else {
+            ClickHouseDestination::new(
+                url.clone(),
+                user,
+                password,
+                database,
+                inserter_config,
+                client_config,
+                store.clone(),
+            )?
+        };
         destination.validate_engine_support().await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn selects_public_network_policy_for_managed_and_https_configs() {
+            assert!(requires_public_network_policy(true, "http"));
+            assert!(requires_public_network_policy(true, "https"));
+            assert!(requires_public_network_policy(false, "https"));
+            assert!(!requires_public_network_policy(false, "http"));
+        }
     }
 }
 
@@ -213,8 +254,11 @@ mod ducklake {
             s3_use_ssl,
             metadata_schema,
             maintenance_target_file_size,
+            parquet_row_group_size_bytes,
+            parquet_row_group_size,
             expire_snapshots_older_than,
             maintenance_mode,
+            copy_buffer,
             table_sorting,
         } = &replicator_config.destination
         else {
@@ -248,18 +292,22 @@ mod ducklake {
         let external_maintenance =
             DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
 
-        let destination = DuckLakeDestination::new_with_table_sorting_and_external_maintenance(
+        let destination = DuckLakeDestination::builder(
             parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
             parse_ducklake_s3_data_path(data_path).map_err(ReplicatorError::config)?,
             *pool_size,
-            s3_config,
-            metadata_schema.clone(),
-            maintenance_target_file_size.clone(),
-            expire_snapshots_older_than.clone(),
-            table_sorting.clone(),
-            external_maintenance,
             store.clone(),
         )
+        .s3(s3_config)
+        .metadata_schema(metadata_schema.clone())
+        .maintenance_target_file_size(maintenance_target_file_size.clone())
+        .parquet_row_group_size_bytes(parquet_row_group_size_bytes.clone())
+        .parquet_row_group_size(parquet_row_group_size.clone())
+        .expire_snapshots_older_than(expire_snapshots_older_than.clone())
+        .copy_buffer(*copy_buffer)
+        .table_sorting(table_sorting.clone())
+        .external_maintenance(external_maintenance)
+        .build()
         .await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);

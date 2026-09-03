@@ -1,8 +1,8 @@
 use etl_config::{
     Environment,
     shared::{
-        DuckLakeMaintenanceMode, ReplicatorConfigWithoutSecrets, SupabaseConfigWithoutSecrets,
-        TlsConfig, Validate, ValidationError,
+        DuckLakeCopyBufferConfig, DuckLakeMaintenanceMode, ReplicatorConfigWithoutSecrets,
+        SupabaseConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
     },
 };
 use etl_maintenance::{
@@ -27,7 +27,7 @@ use crate::{
     },
     k8s::{
         DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer,
-        PipelineRuntimeIdentity, PodStatus, ReplicatorConfigMapFile, ReplicatorStatefulSetConfig,
+        PipelineRuntimeIdentity, PodStatus, ReplicatorConfigMapFile, ReplicatorWorkloadConfig,
         ducklake_maintenance_policy_from_config,
     },
 };
@@ -111,10 +111,10 @@ pub enum Secrets {
 
 /// Creates or updates the Kubernetes runtime for a pipeline.
 ///
-/// The runtime currently consists of secrets, configuration, maintenance,
-/// autoscaling, and the StatefulSet running the replicator. Updating the
-/// StatefulSet intentionally forces pod recreation so the replicator observes
-/// the latest runtime configuration.
+/// The runtime currently consists of secrets, configuration, maintenance, the
+/// StatefulSet running the replicator, and its VPA. Updating the StatefulSet
+/// intentionally forces pod recreation so the replicator observes the latest
+/// runtime configuration.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -125,6 +125,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     source: Source,
     destination: Destination,
     supabase_api_url: Option<&str>,
+    ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
     tls_config: TlsConfig,
 ) -> Result<(), K8sCoreError> {
     let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
@@ -150,7 +151,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     };
 
     let log_level = pipeline.config.log_level.clone().unwrap_or_default();
-    let replicator_resources = pipeline.config.replicator_resources.clone();
+    let replicator_resource_override = pipeline.config.replicator_resources.clone();
     let ducklake_maintenance = pipeline.config.ducklake_maintenance.clone();
     let replicator_config = build_replicator_config_without_secrets(
         // We are safe to perform this conversion, since the i64 -> u64 conversion performs wrap
@@ -161,6 +162,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         destination.config,
         pipeline.config,
         supabase_config,
+        ducklake_copy_buffer_default,
         tls_config,
     )?;
 
@@ -198,9 +200,9 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         k8s_client,
         &resource_prefix,
         &identity,
-        ReplicatorStatefulSetConfig {
+        ReplicatorWorkloadConfig {
             replicator_image,
-            replicator_resources,
+            replicator_resource_override,
             destination_type,
             ducklake_maintenance: ducklake_maintenance_for_kubernetes,
             log_level,
@@ -386,12 +388,14 @@ fn build_replicator_config_without_secrets(
     destination_config: StoredDestinationConfig,
     pipeline_config: StoredPipelineConfig,
     supabase_config: SupabaseConfigWithoutSecrets,
+    ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
     tls_config: TlsConfig,
 ) -> Result<ReplicatorConfigWithoutSecrets, ValidationError> {
     let pg_connection_config = source_config.into_connection_config(tls_config);
-
     let config = ReplicatorConfigWithoutSecrets {
-        destination: destination_config.into_etl_config().into(),
+        destination: destination_config
+            .into_etl_config_with_ducklake_copy_buffer_default(ducklake_copy_buffer_default)
+            .into(),
         pipeline: pipeline_config.into_etl_config(pipeline_id, pg_connection_config).into(),
         supabase: Some(supabase_config),
     };
@@ -541,9 +545,11 @@ async fn create_or_update_replicator_stateful_set(
     k8s_client: &dyn K8sClient,
     resource_prefix: &str,
     identity: &PipelineRuntimeIdentity,
-    config: ReplicatorStatefulSetConfig,
+    workload_config: &ReplicatorWorkloadConfig,
 ) -> Result<(), K8sCoreError> {
-    k8s_client.create_or_update_replicator_stateful_set(resource_prefix, identity, config).await?;
+    k8s_client
+        .create_or_update_replicator_stateful_set(resource_prefix, identity, workload_config)
+        .await?;
 
     Ok(())
 }
@@ -552,13 +558,25 @@ async fn create_or_update_replicator_workload(
     k8s_client: &dyn K8sClient,
     resource_prefix: &str,
     identity: &PipelineRuntimeIdentity,
-    config: ReplicatorStatefulSetConfig,
+    workload_config: ReplicatorWorkloadConfig,
 ) -> Result<(), K8sCoreError> {
-    // Apply the VPA first so newly admitted Pods observe its intended update mode.
+    // Apply the VPA first so newly admitted Pods observe its intended update mode
+    // and bounds.
     k8s_client
-        .create_or_update_replicator_vertical_pod_autoscaler(resource_prefix, identity)
+        .create_or_update_replicator_vertical_pod_autoscaler(
+            resource_prefix,
+            identity,
+            &workload_config,
+        )
         .await?;
-    create_or_update_replicator_stateful_set(k8s_client, resource_prefix, identity, config).await
+
+    create_or_update_replicator_stateful_set(
+        k8s_client,
+        resource_prefix,
+        identity,
+        &workload_config,
+    )
+    .await
 }
 
 /// Creates, updates, or deletes the DuckLake maintenance CR.
@@ -644,12 +662,18 @@ mod tests {
     use async_trait::async_trait;
     use etl_config::{
         SerializableSecretString,
-        shared::{BigQueryTableOptions, BigQueryTableOptionsConfig, ClickHouseEngine},
+        shared::{
+            BigQueryTableOptions, BigQueryTableOptionsConfig, ClickHouseEngine,
+            DestinationConfigWithoutSecrets,
+        },
     };
 
     use super::*;
     use crate::{
-        configs::{destination::StoredDestinationConfig, source::StoredSourceConfig},
+        configs::{
+            destination::StoredDestinationConfig,
+            pipeline::PipelineReplicatorResourceOverrideConfig, source::StoredSourceConfig,
+        },
         k8s::{
             DuckLakeMaintenanceResourceConfig, K8sClient, K8sError, PodStatus,
             ReplicatorConfigMapFile,
@@ -724,6 +748,31 @@ mod tests {
         }
     }
 
+    fn ducklake_destination_config(
+        copy_buffer: Option<DuckLakeCopyBufferConfig>,
+    ) -> StoredDestinationConfig {
+        StoredDestinationConfig::Ducklake {
+            catalog_url: SerializableSecretString::from("postgres://catalog".to_owned()),
+            catalog_pooler_url: None,
+            data_path: "s3://bucket/path".to_owned(),
+            pool_size: 4,
+            s3_access_key_id: Some(SerializableSecretString::from("key-id".to_owned())),
+            s3_secret_access_key: Some(SerializableSecretString::from("secret-key".to_owned())),
+            s3_region: None,
+            s3_endpoint: None,
+            s3_url_style: None,
+            s3_use_ssl: None,
+            metadata_schema: None,
+            maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: None,
+            parquet_row_group_size: None,
+            expire_snapshots_older_than: None,
+            maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer,
+            table_sorting: Default::default(),
+        }
+    }
+
     #[test]
     fn replicator_config_builder_validates_the_final_without_secret_config() {
         let destination_config = StoredDestinationConfig::BigQuery {
@@ -755,12 +804,52 @@ mod tests {
             destination_config,
             pipeline_config,
             supabase_config,
+            DuckLakeCopyBufferConfig::default(),
             TlsConfig::disabled(),
         )
         .unwrap_err();
 
         let ValidationError::InvalidFieldValue { field, .. } = error;
         assert_eq!(field, "table_options.tables[0]");
+    }
+
+    #[test]
+    fn replicator_config_builder_prefers_pipeline_copy_buffer_over_api_default() {
+        let api_default = DuckLakeCopyBufferConfig {
+            enabled: true,
+            target_bytes: 512 * 1024 * 1024,
+            max_total_bytes: 1024 * 1024 * 1024,
+        };
+        let pipeline_config =
+            DuckLakeCopyBufferConfig { enabled: false, ..DuckLakeCopyBufferConfig::default() };
+
+        for (stored_copy_buffer, expected) in
+            [(Some(pipeline_config), pipeline_config), (None, api_default)]
+        {
+            let pipeline_config = serde_json::from_value(serde_json::json!({
+                "publication_name": "example_publication"
+            }))
+            .unwrap();
+            let config = build_replicator_config_without_secrets(
+                1,
+                source_config_with_password(),
+                ducklake_destination_config(stored_copy_buffer),
+                pipeline_config,
+                SupabaseConfigWithoutSecrets {
+                    project_ref: "example-project-ref".to_owned(),
+                    api_url: None,
+                },
+                api_default,
+                TlsConfig::disabled(),
+            )
+            .unwrap();
+
+            let DestinationConfigWithoutSecrets::Ducklake { copy_buffer, .. } = config.destination
+            else {
+                unreachable!("destination kind should remain DuckLake");
+            };
+            assert_eq!(copy_buffer, expected);
+        }
     }
 
     #[async_trait]
@@ -885,7 +974,7 @@ mod tests {
             &self,
             resource_prefix: &str,
             _identity: &PipelineRuntimeIdentity,
-            _config: ReplicatorStatefulSetConfig,
+            _workload_config: &ReplicatorWorkloadConfig,
         ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("stateful-set:{resource_prefix}"));
             Ok(())
@@ -895,6 +984,7 @@ mod tests {
             &self,
             resource_prefix: &str,
             _identity: &PipelineRuntimeIdentity,
+            _workload_config: &ReplicatorWorkloadConfig,
         ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("vpa:{resource_prefix}"));
             Ok(())
@@ -1001,9 +1091,58 @@ mod tests {
             &client,
             "tenant-42",
             &pipeline_runtime_identity(),
-            ReplicatorStatefulSetConfig {
+            ReplicatorWorkloadConfig {
                 replicator_image: "etl-replicator:test".to_owned(),
-                replicator_resources: None,
+                replicator_resource_override: None,
+                destination_type: DestinationType::ClickHouse { password_secret_required: false },
+                ducklake_maintenance: None,
+                log_level: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["vpa:tenant-42", "stateful-set:tenant-42"]);
+    }
+
+    #[tokio::test]
+    async fn pipeline_resource_override_keeps_vpa_before_stateful_set() {
+        let client = RecordingK8sClient::default();
+
+        create_or_update_replicator_workload(
+            &client,
+            "tenant-42",
+            &pipeline_runtime_identity(),
+            ReplicatorWorkloadConfig {
+                replicator_image: "etl-replicator:test".to_owned(),
+                replicator_resource_override: Some(PipelineReplicatorResourceOverrideConfig {
+                    cpu_request_millicores: Some(500),
+                    memory_request_mib: None,
+                }),
+                destination_type: DestinationType::ClickHouse { password_secret_required: false },
+                ducklake_maintenance: None,
+                log_level: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(client.calls(), vec!["vpa:tenant-42", "stateful-set:tenant-42"]);
+    }
+
+    #[tokio::test]
+    async fn empty_pipeline_resource_override_keeps_vpa_enabled() {
+        let client = RecordingK8sClient::default();
+
+        create_or_update_replicator_workload(
+            &client,
+            "tenant-42",
+            &pipeline_runtime_identity(),
+            ReplicatorWorkloadConfig {
+                replicator_image: "etl-replicator:test".to_owned(),
+                replicator_resource_override: Some(
+                    PipelineReplicatorResourceOverrideConfig::default(),
+                ),
                 destination_type: DestinationType::ClickHouse { password_secret_required: false },
                 ducklake_maintenance: None,
                 log_level: Default::default(),
@@ -1154,8 +1293,11 @@ mod tests {
             s3_use_ssl: None,
             metadata_schema: None,
             maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: None,
+            parquet_row_group_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: Default::default(),
             table_sorting: Default::default(),
         };
 
@@ -1203,8 +1345,11 @@ mod tests {
             s3_use_ssl: None,
             metadata_schema: None,
             maintenance_target_file_size: None,
+            parquet_row_group_size_bytes: None,
+            parquet_row_group_size: None,
             expire_snapshots_older_than: None,
             maintenance_mode: DuckLakeMaintenanceMode::Kubernetes,
+            copy_buffer: Default::default(),
             table_sorting: Default::default(),
         };
 

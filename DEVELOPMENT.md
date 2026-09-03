@@ -33,8 +33,10 @@ cargo x run replicator
 ```
 
 Generated files in `crates/etl-api/configuration/` and
-`crates/etl-replicator/configuration/` are gitignored. Re-run with `--force` to
-replace them. Do not commit those files.
+`crates/etl-replicator/configuration/` are gitignored. Re-run replicator setup
+with `--force` to replace its files. API `--force` rewrites the config while
+preserving old encryption keys and appending a new key id. Do not commit those
+files.
 
 Need: Rust from `rust-toolchain.toml`, `psql`, SQLx CLI, and Docker Compose.
 `kubectl` plus [OrbStack](https://orbstack.dev) with Kubernetes if you run the
@@ -43,7 +45,7 @@ API.
 Install SQLx CLI:
 
 ```bash
-cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked
+cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
 ## Replicator
@@ -100,7 +102,14 @@ cargo x fmt              # nightly rustfmt (pinned)
 cargo x fmt --check
 cargo x check            # fmt, sort, clippy
 cargo x fix
+cargo x msrv             # verify MSRV consistency
 cargo x migrate          # API and ETL migrations
+cargo x deploy-local \
+  --cpu-request 125m \
+  --memory-request 250Mi # deploy replicator to local OrbStack k8s
+cargo x test-clickhouse  # run ClickHouse integration tests
+cargo x test-snowflake   # run Snowflake tests
+cargo x vendor-duckdb    # download and vendor DuckDB extensions
 cargo xtask nextest run  # full sharded test suite (needs Postgres)
 ```
 

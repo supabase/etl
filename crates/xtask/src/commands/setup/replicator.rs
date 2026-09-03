@@ -1,16 +1,10 @@
 //! Gitignored replicator configuration generation.
 
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{env, ffi::OsString, fs, path::Path, process::Command};
 
 use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
-use etl_config::shared::{DestinationConfig, IcebergConfig, ReplicatorConfig};
+use etl_config::shared::{DestinationConfig, IcebergConfig, PgConnectionConfig, ReplicatorConfig};
 use pg_escape::quote_literal;
 use secrecy::ExposeSecret;
 
@@ -170,93 +164,6 @@ impl ReplicatorSetup {
     /// Returns whether setup should wait for the local Iceberg REST catalog.
     pub(super) fn needs_local_iceberg_catalog(&self) -> bool {
         matches!(self.destination, DestinationSetup::Iceberg(IcebergSetup::Rest { .. }))
-    }
-
-    /// Drops an inactive apply slot for this pipeline when it is bound to a
-    /// different database.
-    ///
-    /// Slot names are cluster-wide. A previous pipeline with the same id on
-    /// another database, such as the first-pipeline tutorial, leaves
-    /// `supabase_etl_apply_1` behind and local setup then fails to start.
-    pub(super) fn release_conflicting_apply_slot(&self) -> Result<()> {
-        let slot_name = format!("supabase_etl_apply_{LOCAL_PIPELINE_ID}");
-        let quoted_slot = quote_literal(&slot_name);
-        let lookup = format!(
-            "select database || '|' || active::text from pg_replication_slots where slot_name = \
-             {quoted_slot}"
-        );
-        let output = Command::new("psql")
-            .args([
-                "-q",
-                "-h",
-                &self.postgres.host,
-                "-p",
-                &self.postgres.port,
-                "-U",
-                &self.postgres.username,
-                "-d",
-                "postgres",
-                "-tA",
-                "-c",
-                &lookup,
-            ])
-            .env("PGPASSWORD", &self.postgres.password)
-            .output()
-            .context("Failed to inspect replication slots")?;
-        if !output.status.success() {
-            bail!(
-                "Failed to inspect replication slots: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        let row = String::from_utf8_lossy(&output.stdout);
-        let row = row.trim();
-        if row.is_empty() {
-            return Ok(());
-        }
-
-        let Some((database, active)) = row.split_once('|') else {
-            bail!("Unexpected replication slot row: {row}");
-        };
-        if database == self.postgres.name {
-            return Ok(());
-        }
-        if active == "t" {
-            bail!(
-                "Replication slot {slot_name} is active on database `{database}`. Stop that \
-                 pipeline, or drop the slot:\n  select pg_drop_replication_slot('{slot_name}');"
-            );
-        }
-
-        let drop = format!("select pg_drop_replication_slot({quoted_slot})");
-        let status = Command::new("psql")
-            .args([
-                "-q",
-                "-h",
-                &self.postgres.host,
-                "-p",
-                &self.postgres.port,
-                "-U",
-                &self.postgres.username,
-                "-d",
-                "postgres",
-                "-tA",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "-c",
-                &drop,
-            ])
-            .env("PGPASSWORD", &self.postgres.password)
-            .status()
-            .context("Failed to drop leftover replication slot")?;
-        if !status.success() {
-            bail!("Failed to drop leftover replication slot {slot_name}");
-        }
-        println!(
-            "Dropped leftover replication slot {slot_name} (was bound to database `{database}`)."
-        );
-        Ok(())
     }
 
     /// Replaces the BigQuery service-account key when this setup is BigQuery.
@@ -558,13 +465,97 @@ impl IcebergSetup {
 
 /// Writes gitignored local replicator configuration when missing, or when
 /// `force` is set.
-pub(super) fn write_replicator_config(options: &ReplicatorSetup, force: bool) -> Result<PathBuf> {
+pub(super) fn write_replicator_config(
+    options: &ReplicatorSetup,
+    force: bool,
+) -> Result<ReplicatorConfig> {
     let directory = replicator_config_dir()?;
-    ensure_config_dir(&directory)?;
+    write_replicator_config_to(&directory, options, force)
+}
+
+/// Writes and loads local replicator configuration from `directory`.
+fn write_replicator_config_to(
+    directory: &Path,
+    options: &ReplicatorSetup,
+    force: bool,
+) -> Result<ReplicatorConfig> {
+    ensure_config_dir(directory)?;
 
     write_file(&directory.join("base.yaml"), REPLICATOR_BASE_YAML, force)?;
     write_file(&directory.join("dev.yaml"), &options.to_yaml(), force)?;
-    Ok(directory)
+    load_local_replicator_config(directory)
+}
+
+/// Drops an inactive apply slot when it is bound to a different database.
+///
+/// The loaded configuration is used because setup may preserve an existing
+/// `dev.yaml` instead of writing the newly calculated defaults.
+pub(super) fn release_conflicting_apply_slot(config: &ReplicatorConfig) -> Result<()> {
+    let pipeline = &config.pipeline;
+    let postgres = &pipeline.pg_connection;
+    let slot_name = format!("supabase_etl_apply_{}", pipeline.id);
+    let quoted_slot = quote_literal(&slot_name);
+    let lookup = format!(
+        "select database || '|' || active::text from pg_replication_slots where slot_name = \
+         {quoted_slot}"
+    );
+    let output = psql_command(postgres)
+        .args(["-tA", "-c", &lookup])
+        .output()
+        .context("Failed to inspect replication slots")?;
+    if !output.status.success() {
+        bail!("Failed to inspect replication slots: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let row = String::from_utf8_lossy(&output.stdout);
+    let row = row.trim();
+    if row.is_empty() {
+        return Ok(());
+    }
+
+    let Some((database, active)) = row.split_once('|') else {
+        bail!("Unexpected replication slot row: {row}");
+    };
+    if database == postgres.name {
+        return Ok(());
+    }
+    if active == "t" {
+        bail!(
+            "Replication slot {slot_name} is active on database `{database}`. Stop that pipeline, \
+             or drop the slot:\n  select pg_drop_replication_slot('{slot_name}');"
+        );
+    }
+
+    let drop = format!("select pg_drop_replication_slot({quoted_slot})");
+    let status = psql_command(postgres)
+        .args(["-tA", "-v", "ON_ERROR_STOP=1", "-c", &drop])
+        .status()
+        .context("Failed to drop leftover replication slot")?;
+    if !status.success() {
+        bail!("Failed to drop leftover replication slot {slot_name}");
+    }
+    println!("Dropped leftover replication slot {slot_name} (was bound to database `{database}`).");
+    Ok(())
+}
+
+/// Builds a `psql` command for the configured source Postgres instance.
+fn psql_command(config: &PgConnectionConfig) -> Command {
+    let mut command = Command::new("psql");
+    command.args([
+        "-q",
+        "-h",
+        &config.host,
+        "-p",
+        &config.port.to_string(),
+        "-U",
+        &config.username,
+        "-d",
+        "postgres",
+    ]);
+    if let Some(password) = &config.password {
+        command.env("PGPASSWORD", password.expose_secret());
+    }
+    command
 }
 
 /// Reads the destination kind from generated replicator configuration.
@@ -665,6 +656,8 @@ impl Drop for ConfigEnvGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     fn test_setup(
@@ -788,5 +781,16 @@ mod tests {
         let has_placeholders = replicator_config_has_placeholders(&directory).unwrap();
         let _ = fs::remove_dir_all(&directory);
         assert!(!has_placeholders);
+    }
+
+    #[test]
+    fn existing_replicator_config_remains_effective_without_force() {
+        let options = test_setup(DestinationPreset::ClickHouse, IcebergCatalog::Rest);
+        let directory =
+            write_replicator_yaml(&options.to_yaml().replace("etl_testdata", "existing_database"));
+        let loaded = write_replicator_config_to(&directory, &options, false).unwrap();
+        let _ = fs::remove_dir_all(&directory);
+
+        assert_eq!(loaded.pipeline.pg_connection.name, "existing_database");
     }
 }

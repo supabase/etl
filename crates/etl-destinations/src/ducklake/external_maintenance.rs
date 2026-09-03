@@ -328,7 +328,21 @@ where
     let operations = active_pause_operations(state, &pause);
     record_external_maintenance_pause_active(operations, true);
 
-    let external_pause = destination.acquire_external_maintenance_pause().await;
+    let pause_wait_timeout =
+        pause.expires_at.signed_duration_since(Utc::now()).to_std().unwrap_or(Duration::ZERO);
+    let Ok(external_pause) =
+        time::timeout(pause_wait_timeout, destination.acquire_external_maintenance_pause()).await
+    else {
+        info!(
+            run_id = %pause.run_id,
+            expires_at = %pause.expires_at.to_rfc3339(),
+            "ducklake external maintenance pause expired while waiting for foreground mutations \
+             to drain"
+        );
+        record_external_maintenance_pause_active(operations, false);
+        report_running(store, config.store_timeout).await;
+        return Ok(());
+    };
     if pause.expires_at <= Utc::now() {
         info!(
             run_id = %pause.run_id,

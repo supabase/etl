@@ -1,32 +1,23 @@
+use std::mem::size_of_val;
+
 /// Reports an approximate decoded in-memory size in bytes.
 ///
-/// This estimate is used for batching and backpressure. It does not represent
-/// the PostgreSQL source payload and must not be used for usage accounting.
+/// The estimate includes the inline value and heap allocations uniquely owned
+/// by it. Shared allocations, allocator bookkeeping, and destination-derived
+/// buffers are excluded. Batch accumulators sum individual estimates, so spare
+/// capacity in their outer containers is also excluded from this per-value
+/// contract. This estimate is used for batching; it does not represent the
+/// PostgreSQL source payload or measured process memory and must not be used
+/// for usage accounting.
 pub trait SizeHint {
     /// Returns the approximate decoded in-memory size for this value.
     fn size_hint(&self) -> usize;
 }
 
-impl<T, E> SizeHint for Result<T, E>
+/// Returns the estimated uniquely owned heap bytes for a value.
+pub(crate) fn owned_heap_size_hint<T>(value: &T) -> usize
 where
     T: SizeHint,
 {
-    fn size_hint(&self) -> usize {
-        match self {
-            Ok(value) => value.size_hint(),
-            Err(_) => 0,
-        }
-    }
-}
-
-impl<T> SizeHint for Option<T>
-where
-    T: SizeHint,
-{
-    fn size_hint(&self) -> usize {
-        match self {
-            Some(value) => value.size_hint(),
-            None => 0,
-        }
-    }
+    value.size_hint().saturating_sub(size_of_val(value))
 }

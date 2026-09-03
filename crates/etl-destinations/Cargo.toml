@@ -58,11 +58,15 @@ iceberg = [
 clickhouse = [
     "dep:clickhouse",
     "dep:metrics",
+    "dep:hyper-rustls",
+    "dep:hyper-util",
     "dep:tracing",
     "dep:tokio",
     "dep:serde",
     "dep:futures",
     "dep:parking_lot",
+    "dep:rustls",
+    "dep:tower-service",
     "dep:url",
     "dep:uuid",
 ]
@@ -86,7 +90,7 @@ snowflake = [
 ]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
 # put here the extra dependencies needed.
-test-utils = ["dep:uuid"]
+test-utils = ["dep:async-trait", "dep:uuid"]
 
 [dependencies]
 
@@ -104,6 +108,8 @@ etl-maintenance = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
 humantime = { workspace = true, optional = true }
+hyper-rustls = { workspace = true, optional = true, features = ["aws-lc-rs", "http1", "webpki-tokio"] }
+hyper-util = { workspace = true, optional = true, features = ["client-legacy", "http1", "tokio"] }
 iceberg = { workspace = true, optional = true }
 iceberg-catalog-rest = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
@@ -117,6 +123,7 @@ r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
 regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
+rustls = { workspace = true, optional = true, features = ["aws-lc-rs"] }
 secrecy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
@@ -126,6 +133,7 @@ thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
+tower-service = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true, default-features = true }
 url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
