@@ -65,7 +65,11 @@ impl SeedArgs {
         let db_exists = exists.trim() == "1";
 
         if db_exists && !self.force {
-            bail!("database {database} already exists (use --force to drop and recreate)");
+            println!(
+                "[seed] keeping existing database {database} (use --force to drop and recreate)"
+            );
+            println!("[seed] connect with: psql -h {host} -p {port} -U {user} -d {database}");
+            return Ok(());
         }
 
         if db_exists {

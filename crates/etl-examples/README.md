@@ -1,36 +1,41 @@
-# `etl` — Examples
+# `etl-examples`
 
-This crate contains practical examples demonstrating how to replicate data from Postgres to various destinations using the ETL pipeline.
+Runnable binaries that replicate a Postgres publication to a built-in
+destination using [Supabase ETL](https://supabase.github.io/etl/). ClickHouse is
+the fastest local path: `cargo x init` starts it, and no cloud account is
+required. See the
+[Destinations reference](https://supabase.github.io/etl/reference/destinations/)
+for maturity and limitations, and the
+[First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/) tutorial
+if you want to embed the `etl` crate instead.
 
 ## Available Examples
 
-| Example                         | Binary       | Feature      | Destination                                | Status      |
-| ------------------------------- | ------------ | ------------ | ------------------------------------------ | ----------- |
-| [BigQuery](#bigquery)           | `bigquery`   | `bigquery`   | Google BigQuery (cloud data warehouse)     | Stable      |
-| [ClickHouse](#clickhouse-setup) | `clickhouse` | `clickhouse` | ClickHouse (column-oriented OLAP database) | In progress |
-| [DuckLake](#ducklake)           | `ducklake`   | `ducklake`   | DuckLake (open data lake format)           | In progress |
-| [Snowflake](#snowflake)         | `snowflake`  | `snowflake`  | Snowflake (cloud data warehouse)           | In progress |
+| Example                     | Binary       | Feature      | Destination                            | Status      |
+| --------------------------- | ------------ | ------------ | -------------------------------------- | ----------- |
+| [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | In progress |
+| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable      |
+| [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | In progress |
+| [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | In progress |
 
-BigQuery is the stable, recommended default. Iceberg is deprecated and does
-not have an example here. See the
-[Destinations reference](https://supabase.github.io/etl/reference/destinations/)
-for the canonical status and limitations of every built-in destination.
+Iceberg is deprecated and is not recommended for new deployments. It has no
+example here.
 
-## Running an example
+## Running an Example
 
-The quickest way to run an example is via the xtask wrapper.
-
-After sourcing your `.env` (see `.env.example`), the DB connection is picked up automatically:
+The quickest path is `cargo x example` after sourcing `.env` (see `.env.example`):
 
 ```bash
 source .env
-cargo x example snowflake
-cargo x example bigquery
 cargo x example clickhouse
+cargo x example bigquery
 cargo x example ducklake
+cargo x example snowflake
 ```
 
-This handles the `-p etl-examples --features <name>` boilerplate, injects `TESTS_DATABASE_*` env vars as `--db-*` flags, and defaults `--db-name` to `etl_testdata` and `--publication` to `seed_pub` (matching `cargo x seed`).
+This handles the `-p etl-examples --features <name>` boilerplate, injects
+`TESTS_DATABASE_*` as `--db-*` flags, and defaults `--db-name` to `etl_testdata`
+and `--publication` to `seed_pub` (matching `cargo x seed`).
 
 Override any flag by passing it explicitly:
 
@@ -38,23 +43,18 @@ Override any flag by passing it explicitly:
 cargo x example snowflake --db-name mydb --publication my_pub
 ```
 
-### Building manually
+### Building Manually
 
 Each binary is feature-gated so you only compile the dependencies you need. Some
-destinations (e.g. `ducklake`) pull in heavy native dependencies that can take
-several minutes to compile.
+destinations (for example `ducklake`) pull in heavy native dependencies that can
+take several minutes to compile.
 
 ```bash
-# Build
-cargo build --bin bigquery -p etl-examples --features bigquery
-
-# Run
-cargo run --bin bigquery -p etl-examples --features bigquery -- [flags]
+cargo build --bin clickhouse -p etl-examples --features clickhouse
+cargo run --bin clickhouse -p etl-examples --features clickhouse -- [flags]
 ```
 
-Replace `bigquery` with `clickhouse`, `ducklake`, or `snowflake` as needed.
-
-### All examples
+Replace `clickhouse` with `bigquery`, `ducklake`, or `snowflake` as needed.
 
 ```bash
 cargo build -p etl-examples --all-features
@@ -62,24 +62,23 @@ cargo build -p etl-examples --all-features
 
 ---
 
-## Prerequisites (all examples)
+## Prerequisites
 
-All examples require a Postgres database with **logical replication** enabled:
+All examples require PostgreSQL 14 through 18 with logical replication enabled
+and a user that has the `REPLICATION` role. See
+[Configure Postgres](https://supabase.github.io/etl/guides/configure-postgres/)
+for production settings. Do not publish ETL-owned tables in the `etl` schema.
 
 ```sql
 -- postgresql.conf (or ALTER SYSTEM)
 wal_level = logical
-```
 
-The Postgres user must have the `REPLICATION` role:
-
-```sql
 ALTER USER my_user REPLICATION;
 ```
 
-### Quick database setup
+### Quick Database Setup
 
-The fastest way to get a seeded database with a publication is via the xtask:
+The fastest way to get a seeded database with a publication is:
 
 ```bash
 # Start the dev Postgres primary (port 5430) and read replica (port 6430)
@@ -91,131 +90,149 @@ cargo x seed --rows 100000            # more data
 cargo x seed --database mydb --force  # custom name, recreate if exists
 ```
 
-This creates three tables (users, orders, events) in the `public` schema and a
-`seed_pub` publication for them. Use `--help` for all options.
+This creates `users`, `orders`, and `events` in the `public` schema and a
+`seed_pub` publication for them. The destination-specific commands below use
+that local default (`localhost:5430`, database `etl_testdata`, user `postgres`,
+publication `seed_pub`). Change the flags if you use a different database.
 
-### Manual setup
-
-If you prefer to use your own tables:
+### Manual Setup
 
 ```sql
--- Specific tables
 CREATE PUBLICATION my_pub FOR TABLE orders, customers;
-
--- All tables in the database
-CREATE PUBLICATION my_pub FOR ALL TABLES;
 ```
+
+Avoid `FOR ALL TABLES` when the source database also stores ETL state; that
+publication would include the `etl` schema. Prefer an explicit table list or
+`FOR TABLES IN SCHEMA ...` for customer-owned schemas.
 
 ---
 
-## DuckLake
+## Start with ClickHouse
 
-Replicates a Postgres publication into a **DuckLake** data lake.
+`cargo x init` starts ClickHouse at `http://localhost:8123` (`etl` / `etl`).
+After `cargo x seed`:
 
-DuckLake separates storage into two components:
+```bash
+cargo x example clickhouse
+```
 
-| Component   | Role                                | Example                                              |
-| ----------- | ----------------------------------- | ---------------------------------------------------- |
-| **Catalog** | Metadata (tables, snapshots, stats) | PostgreSQL database                                  |
-| **Data**    | Row data as Parquet files           | Local directory or S3 / S3-compatible object storage |
+No cloud account is required. Full flags and table-engine notes are in
+[ClickHouse](#clickhouse) below. Use BigQuery, DuckLake, or Snowflake only when
+you already have those services.
 
-The destination loads the required DuckDB extensions before attaching the lake.
-Each batch of rows is committed as a single Parquet snapshot so the lake stays
-consistent and queryable at all times.
+## BigQuery
 
-### How it works
-
-1. The pipeline connects to Postgres and performs an initial bulk copy of every
-   table covered by the publication.
-2. It then replicates subsequent `INSERT`, `UPDATE`, and `DELETE` changes using
-   logical replication.
-3. Every Postgres table becomes a DuckLake table. The name is derived from the
-   source schema and table name:
-
-   | Postgres           | DuckLake            |
-   | ------------------ | ------------------- |
-   | `public.orders`    | `public_orders`     |
-   | `my_schema.events` | `my__schema_events` |
+Replicates a Postgres publication to a Google BigQuery dataset.
 
 ### Prerequisites
 
-1. A **PostgreSQL database** to act as the DuckLake catalog — create one if
-   you don't have one already:
-   ```sql
-   CREATE DATABASE ducklake_catalog;
-   ```
-2. A **data directory** (local) or an S3 / S3-compatible bucket where Parquet
-   files will be written.
+1. A Google Cloud project with the BigQuery API enabled.
+2. A service account with the **BigQuery Data Editor** and **BigQuery Job
+   User** roles.
+3. The service account key file downloaded from the GCP Console
+   (`IAM & Admin → Service Accounts → Keys → Add Key → JSON`).
+4. A BigQuery dataset created in your project.
 
 ### Run
 
 ```bash
-cargo run --bin ducklake -p etl-examples --features ducklake -- \
+cargo run --bin bigquery -p etl-examples --features bigquery -- \
     --db-host localhost \
-    --db-port 5432 \
-    --db-name mydb \
+    --db-port 5430 \
+    --db-name etl_testdata \
     --db-username postgres \
-    --db-password mypassword \
-    --catalog-url postgres://user:pass@localhost:5432/ducklake_catalog \
-    --data-path s3://bucket/lake_data \
-    --publication my_pub \
-    --s3-access-key-id my-access-key \
-    --s3-secret-access-key my-secret-key
+    --db-password postgres \
+    --bq-sa-key-file /path/to/service-account-key.json \
+    --bq-project-id your-gcp-project-id \
+    --bq-dataset-id your_bigquery_dataset_id \
+    --publication seed_pub
 ```
 
-## ClickHouse Setup
+### All Flags
 
-To run the ClickHouse example, you'll need a running ClickHouse instance accessible over HTTP(S).
-ClickHouse **23.5 or newer** is required for the default `ReplacingMergeTree` engine.
+| Flag                           | Default      | Description                              |
+| ------------------------------ | ------------ | ---------------------------------------- |
+| `--db-host`                    | _(required)_ | Postgres host                            |
+| `--db-port`                    | _(required)_ | Postgres port                            |
+| `--db-name`                    | _(required)_ | Postgres database name                   |
+| `--db-username`                | _(required)_ | Postgres user                            |
+| `--db-password`                | —            | Postgres password                        |
+| `--bq-sa-key-file`             | _(required)_ | Path to GCP service account key JSON     |
+| `--bq-project-id`              | _(required)_ | GCP project ID                           |
+| `--bq-dataset-id`              | _(required)_ | BigQuery dataset ID                      |
+| `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
+| `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
+| `--publication`                | _(required)_ | Postgres publication name                |
 
-Create a publication in Postgres:
+---
 
-```sql
-create publication my_pub
-for table table1, table2;
-```
+## ClickHouse
 
-Then run the ClickHouse example:
+Replicates a Postgres publication to ClickHouse over HTTP(S). ClickHouse **23.5
+or newer** is required for the default `ReplacingMergeTree` engine.
+
+`cargo x init` starts a local ClickHouse on `http://localhost:8123` with user
+`etl` / password `etl`.
+
+### Run
 
 ```bash
-cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
-        --db-host localhost \
-        --db-port 5432 \
-        --db-name postgres \
-        --db-username postgres \
-        --db-password password \
-        --clickhouse-url http://localhost:8123 \
-        --clickhouse-user default \
-        --clickhouse-database default \
-        --publication my_pub
+cargo run --bin clickhouse -p etl-examples --features clickhouse -- \
+    --db-host localhost \
+    --db-port 5430 \
+    --db-name etl_testdata \
+    --db-username postgres \
+    --db-password postgres \
+    --clickhouse-url http://localhost:8123 \
+    --clickhouse-user etl \
+    --clickhouse-password etl \
+    --clickhouse-database default \
+    --publication seed_pub
 ```
 
-### Table engines
+For HTTPS, pass an `https://` URL. TLS uses webpki root certificates.
 
-The destination supports two layouts, chosen per pipeline via `--clickhouse-engine`:
+### All Flags
+
+| Flag                           | Default                 | Description                                              |
+| ------------------------------ | ----------------------- | -------------------------------------------------------- |
+| `--db-host`                    | _(required)_            | Postgres host                                            |
+| `--db-port`                    | _(required)_            | Postgres port                                            |
+| `--db-name`                    | _(required)_            | Postgres database name                                   |
+| `--db-username`                | _(required)_            | Postgres user                                            |
+| `--db-password`                | —                       | Postgres password                                        |
+| `--clickhouse-url`             | _(required)_            | ClickHouse HTTP(S) URL                                   |
+| `--clickhouse-user`            | _(required)_            | ClickHouse user                                          |
+| `--clickhouse-password`        | —                       | ClickHouse password                                      |
+| `--clickhouse-database`        | _(required)_            | ClickHouse database                                      |
+| `--clickhouse-engine`          | `replacing_merge_tree`  | `replacing_merge_tree` or `merge_tree`                   |
+| `--max-batch-fill-duration-ms` | `5000`                  | Max time to wait before flushing a batch                 |
+| `--max-table-sync-workers`     | `4`                     | Concurrent workers during initial copy                   |
+| `--publication`                | _(required)_            | Postgres publication name                                |
+
+### Table Engines
+
+Choose the layout per pipeline with `--clickhouse-engine`:
 
 | Flag value                       | Engine               | Use it for                                              |
 | -------------------------------- | -------------------- | ------------------------------------------------------- |
 | `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replicas. Source must have a primary key. |
 | `merge_tree`                     | `MergeTree`          | Append-only event log. Works for PK-less source tables. |
 
-Table names are derived from the Postgres schema and table name using double-underscore
-escaping (e.g. `public.orders` -> `public_orders`, `my_schema.t` -> `my__schema_t`).
+Table names are derived from the Postgres schema and table name using
+double-underscore escaping (`public.orders` → `public_orders`,
+`my_schema.t` → `my__schema_t`).
 
 #### ReplacingMergeTree (default)
 
-Each replicated table is created as `ReplacingMergeTree(_etl_version, _etl_deleted)` keyed
-on the source primary key. Two trailing columns drive dedup and tombstone handling:
+Each replicated table is created as `ReplacingMergeTree(_etl_version, _etl_deleted)`
+keyed on the source primary key:
 
-- `_etl_version UInt128` -- the packed Postgres event sequence key:
-  `(commit_lsn << 64) | tx_ordinal`. Higher values win during a `FINAL` merge, so the
-  latest event per primary key wins. Encoding both the commit LSN and the in-transaction
-  ordinal gives a total order across all events, including multiple row events that
-  share a WAL record.
-- `_etl_deleted UInt8` -- tombstone flag. `1` for DELETE events, `0` otherwise.
+- `_etl_version UInt128` — packed `(commit_lsn << 64) | tx_ordinal`. Higher
+  values win during a `FINAL` merge.
+- `_etl_deleted UInt8` — `1` for DELETE events, `0` otherwise.
 
-Alongside each table, the destination also creates a `<table>__current` view that hides
-the ReplacingMergeTree internals:
+A companion `<table>__current` view hides those internals:
 
 ```sql
 CREATE VIEW IF NOT EXISTS "public_orders__current" AS
@@ -224,85 +241,98 @@ FROM "public_orders" FINAL
 WHERE _etl_deleted = 0
 ```
 
-Read patterns:
-
-- Prefer the `__current` view for current-state queries.
-- Or query the base table with `SELECT ... FROM "public_orders" FINAL WHERE _etl_deleted = 0`
-  directly.
-
-`OPTIMIZE` guidance:
-
-- The replicator never runs `OPTIMIZE ... FINAL CLEANUP`. Background merges already
-  collapse duplicates over time; physical removal of tombstones is operator-driven.
-- To reclaim deleted rows on disk, run `OPTIMIZE TABLE "<table>" FINAL CLEANUP` on a
-  schedule that matches your retention requirements.
+Prefer the `__current` view for current-state queries. The replicator never
+runs `OPTIMIZE ... FINAL CLEANUP`; run that yourself when you want to reclaim
+deleted rows on disk.
 
 #### MergeTree
 
-Each replicated table is created as `MergeTree() ORDER BY tuple()` with two CDC metadata
-columns appended to every row:
+Each replicated table is created as `MergeTree() ORDER BY tuple()` with:
 
 - `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
-- `cdc_lsn`: the Postgres commit LSN at the time of the change
+- `cdc_lsn`: the Postgres commit LSN
 
-Read patterns:
+Current state per primary key:
 
-- Current state per primary key: take the latest event by `cdc_lsn` with `LIMIT 1 BY`,
-  then filter out tombstones. Example:
+```sql
+SELECT <user columns> FROM (
+    SELECT * FROM "public_orders"
+    ORDER BY cdc_lsn DESC LIMIT 1 BY (id)
+)
+WHERE cdc_operation != 'DELETE'
+```
 
-  ```sql
-  SELECT <user columns> FROM (
-      SELECT * FROM "public_orders"
-      ORDER BY cdc_lsn DESC LIMIT 1 BY (id)
-  )
-  WHERE cdc_operation != 'DELETE'
-  ```
+---
 
-- Event log queries: read the table directly; every CDC event is preserved.
+## DuckLake
 
-### Connection notes
+Replicates a Postgres publication into a DuckLake data lake. DuckLake separates
+storage into a **catalog** (metadata) and **data** (Parquet files). The
+destination module can use `file`, `s3`, or `gs` data paths; this example binary
+requires an `s3://` data path and S3-compatible credentials.
 
-For HTTPS connections, provide an `https://` URL -- TLS is handled automatically using
-webpki root certificates. Use `--clickhouse-password` if your ClickHouse instance requires
-authentication.
+| Component   | Role                                | Example                               |
+| ----------- | ----------------------------------- | ------------------------------------- |
+| **Catalog** | Metadata (tables, snapshots, stats) | PostgreSQL database or a `file://` DB |
+| **Data**    | Row data as Parquet files           | S3 / S3-compatible object storage     |
 
-### Example configuration
+Each batch of rows is committed as a single Parquet snapshot. Source tables map
+to DuckLake names with double-underscore escaping (`public.orders` →
+`public_orders`, `my_schema.events` → `my__schema_events`).
 
-This is a fuller example that also enables a dedicated DuckDB log dump on
-shutdown:
+### Prerequisites
+
+1. A PostgreSQL database to act as the DuckLake catalog:
+   ```sql
+   CREATE DATABASE ducklake_catalog;
+   ```
+2. An S3 or S3-compatible bucket for Parquet files.
+
+### Run
 
 ```bash
 cargo run --bin ducklake -p etl-examples --features ducklake -- \
-    --db-host postgres.etl-data-plane.svc.cluster.local \
-    --db-port 5432 \
-    --db-name mydb \
+    --db-host localhost \
+    --db-port 5430 \
+    --db-name etl_testdata \
     --db-username postgres \
-    --db-password password \
-    --catalog-url "postgres://postgres:password@postgres.etl-data-plane.svc.cluster.local:5432/mydb?sslmode=disable" \
+    --db-password postgres \
+    --catalog-url postgres://postgres:postgres@localhost:5430/ducklake_catalog \
     --data-path s3://bucket/lake_data \
-    --publication my_pub \
-    --s3-access-key-id my-access-key \
-    --s3-secret-access-key my-secret-key \
-    --metadata-schema ducklake \
-    --pool-size 4 \
-    --max-batch-fill-duration-ms 5000 \
-    --max-table-sync-workers 4 \
+    --publication seed_pub \
+    --s3-access-key-id placeholder-access-key \
+    --s3-secret-access-key placeholder-secret-key
+```
+
+### S3-Compatible Endpoint
+
+```bash
+cargo run --bin ducklake -p etl-examples --features ducklake -- \
+    --db-host localhost \
+    --db-port 5430 \
+    --db-name etl_testdata \
+    --db-username postgres \
+    --db-password postgres \
+    --catalog-url "postgres://postgres:postgres@localhost:5430/ducklake_catalog?sslmode=disable" \
+    --data-path s3://bucket-name/ \
+    --publication seed_pub \
+    --s3-access-key-id placeholder-access-key \
+    --s3-secret-access-key placeholder-secret-key \
+    --s3-region us-east-1 \
+    --s3-endpoint 127.0.0.1:5000/s3 \
+    --metadata-schema ducklake
+```
+
+Optional DuckDB logging on shutdown:
+
+```bash
     --duckdb-log-storage-path /tmp/duckdb_logs \
     --duckdb-log-dump-path /tmp/duckdb_logs_dump.csv
 ```
 
-In this example:
+### Vendored DuckDB Extensions
 
-- `--catalog-url` points to the PostgreSQL database that stores DuckLake metadata.
-- `--data-path` points to the S3 / S3-compatible location for Parquet files.
-- `--metadata-schema ducklake` keeps DuckLake metadata tables in a dedicated Postgres schema.
-- `--duckdb-log-storage-path` enables `CALL enable_logging(storage_path = ...)` for each DuckDB connection.
-- `--duckdb-log-dump-path` writes a CSV dump of `SELECT * FROM duckdb_logs` during graceful shutdown.
-
-### Vendored DuckDB extensions
-
-For offline local development on Linux or macOS, you can prefetch the required
-DuckDB extensions into the repository and point the destination at them:
+For offline local development on Linux or macOS:
 
 ```bash
 cargo x vendor-duckdb
@@ -311,33 +341,10 @@ ETL_DUCKDB_EXTENSION_ROOT="$(pwd)/vendor/duckdb/extensions" \
 ```
 
 If `ETL_DUCKDB_EXTENSION_ROOT` is unset, the destination also checks the
-repository-local `vendor/duckdb/extensions` directory automatically. Docker
-images do not need the env var because they already ship vendored extensions at
-`/app/duckdb_extensions`.
+repository-local `vendor/duckdb/extensions` directory. Docker images ship
+vendored extensions at `/app/duckdb_extensions`.
 
-### Run (S3 / S3-compatible data)
-
-```bash
-cargo run --bin ducklake -p etl-examples --features ducklake -- \
-    --db-host <pg-host> \
-    --db-port <pg-port> \
-    --db-name <pg-database> \
-    --db-username <pg-user> \
-    --db-password <pg-password> \
-    --catalog-url "postgres://<pg-user>:<pg-password>@<pg-host>:<pg-port>/<pg-database>?sslmode=disable" \
-    --data-path s3://<bucket-name>/ \
-    --publication <publication-name> \
-    --s3-access-key-id <access-key-id> \
-    --s3-secret-access-key <secret-access-key> \
-    --s3-region <region> \
-    --s3-endpoint <host>:<port>/<path> \
-    --metadata-schema <schema-name>
-```
-
-The example CLI requires S3 / S3-compatible cloud credentials. The destination
-loads DuckDB's `httpfs` extension during connection setup.
-
-### All flags
+### All Flags
 
 | Flag                           | Default      | Description                                                       |
 | ------------------------------ | ------------ | ----------------------------------------------------------------- |
@@ -362,72 +369,20 @@ loads DuckDB's `httpfs` extension during connection setup.
 | `--duckdb-log-storage-path`    | —            | Enables DuckDB file-backed logging for each DuckDB connection     |
 | `--duckdb-log-dump-path`       | —            | CSV file written from `duckdb_logs` during graceful shutdown      |
 
-### Query the replicated data
-
-Use the DuckDB CLI (install with `brew install duckdb` on macOS) to query the
-lake at any time — even while the pipeline is running:
+### Query the Replicated Data
 
 ```bash
 duckdb :memory: -c "
   INSTALL ducklake; LOAD ducklake;
-  ATTACH 'ducklake:postgres:host=''localhost'' port=''5432'' dbname=''ducklake_catalog'' user=''user'' password=''pass'''
+  ATTACH 'ducklake:postgres:host=''localhost'' port=''5430'' dbname=''ducklake_catalog'' user=''postgres'' password=''postgres'''
     AS lake (DATA_PATH 's3://bucket/lake_data');
   SELECT * FROM lake.public_orders;
-  SELECT COUNT(*) FROM lake.public_customers;
 "
 ```
-
-### Verbose logging
 
 ```bash
 RUST_LOG=debug cargo run --bin ducklake -p etl-examples --features ducklake -- [flags]
 ```
-
----
-
-## BigQuery
-
-Replicates a Postgres publication to a Google BigQuery dataset.
-
-### Prerequisites
-
-1. A Google Cloud project with the BigQuery API enabled.
-2. A service account with the **BigQuery Data Editor** and **BigQuery Job
-   User** roles.
-3. The service account key file downloaded from the GCP Console
-   (`IAM & Admin → Service Accounts → Keys → Add Key → JSON`).
-4. A BigQuery dataset created in your project.
-
-### Run
-
-```bash
-cargo run --bin bigquery -p etl-examples --features bigquery -- \
-    --db-host localhost \
-    --db-port 5432 \
-    --db-name postgres \
-    --db-username postgres \
-    --db-password password \
-    --bq-sa-key-file /path/to/service-account-key.json \
-    --bq-project-id your-gcp-project-id \
-    --bq-dataset-id your_bigquery_dataset_id \
-    --publication my_pub
-```
-
-### All flags
-
-| Flag                           | Default      | Description                              |
-| ------------------------------ | ------------ | ---------------------------------------- |
-| `--db-host`                    | _(required)_ | Postgres host                            |
-| `--db-port`                    | _(required)_ | Postgres port                            |
-| `--db-name`                    | _(required)_ | Postgres database name                   |
-| `--db-username`                | _(required)_ | Postgres user                            |
-| `--db-password`                | —            | Postgres password                        |
-| `--bq-sa-key-file`             | _(required)_ | Path to GCP service account key JSON     |
-| `--bq-project-id`              | _(required)_ | GCP project ID                           |
-| `--bq-dataset-id`              | _(required)_ | BigQuery dataset ID                      |
-| `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
-| `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
-| `--publication`                | _(required)_ | Postgres publication name                |
 
 ---
 
@@ -458,9 +413,13 @@ cargo run --bin snowflake -p etl-examples --features snowflake -- \
     --publication seed_pub
 ```
 
-The Snowflake example reads credentials from `TESTS_SNOWFLAKE_CONNECTION` only. The JSON object must contain `account`, `user`, `database`, `schema`, and `private_key`; `role` and `private_key_passphrase` are optional. Put `private_key` last so the target account details remain easy to inspect before the secret material.
+The Snowflake example reads credentials from `TESTS_SNOWFLAKE_CONNECTION` only.
+The JSON object must contain `account`, `user`, `database`, `schema`, and
+`private_key`; `role` and `private_key_passphrase` are optional. Put
+`private_key` last so the target account details remain easy to inspect before
+the secret material.
 
-### All flags
+### All Flags
 
 | Flag                           | Default      | Description                              |
 | ------------------------------ | ------------ | ---------------------------------------- |
@@ -468,7 +427,7 @@ The Snowflake example reads credentials from `TESTS_SNOWFLAKE_CONNECTION` only. 
 | `--db-port`                    | _(required)_ | Postgres port                            |
 | `--db-name`                    | _(required)_ | Postgres database name                   |
 | `--db-username`                | _(required)_ | Postgres user                            |
-| `--db-password`                | --           | Postgres password                        |
+| `--db-password`                | —            | Postgres password                        |
 | `--max-batch-fill-duration-ms` | `5000`       | Max time to wait before flushing a batch |
 | `--max-table-sync-workers`     | `4`          | Concurrent workers during initial copy   |
 | `--publication`                | _(required)_ | Postgres publication name                |

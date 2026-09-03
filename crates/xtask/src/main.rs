@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
     FixArgs, FixPipelineArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs,
-    PgFillTableArgs, PostgresArgs, RotateEncryptionKeyArgs, SeedArgs, TestArgs, TestClickhouseArgs,
-    TestSnowflakeArgs, VendorDuckdbArgs,
+    PgFillTableArgs, PostgresArgs, RotateEncryptionKeyArgs, RunArgs, SeedArgs, SetupArgs, TestArgs,
+    TestClickhouseArgs, TestSnowflakeArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -37,7 +37,7 @@ enum Command {
     Fix(FixArgs),
     /// Format code with nightly rustfmt.
     Fmt(FmtArgs),
-    /// Set up the local development environment.
+    /// Start local Docker services and run migrations.
     Init(InitArgs),
     /// Run database migrations.
     Migrate(MigrateArgs),
@@ -56,6 +56,11 @@ enum Command {
     PgFillTable(PgFillTableArgs),
     /// Manage test Postgres clusters.
     Postgres(PostgresArgs),
+    /// Run the API or replicator with generated local configuration.
+    Run(RunArgs),
+    /// Generate local configuration. API setup also applies Kubernetes
+    /// resources.
+    Setup(SetupArgs),
     /// Re-encrypt API source and destination configs with the latest configured
     /// key.
     #[command(name = "rotate-encryption-key")]
@@ -97,6 +102,8 @@ async fn main() -> Result<()> {
         Command::Nextest(cmd) => cmd.run(),
         Command::PgFillTable(cmd) => cmd.run(),
         Command::Postgres(cmd) => cmd.run(),
+        Command::Run(cmd) => cmd.run(),
+        Command::Setup(cmd) => cmd.run(),
         Command::RotateEncryptionKey(cmd) => cmd.run().await,
         Command::Seed(cmd) => cmd.run(),
         Command::Test(cmd) => cmd.run(),

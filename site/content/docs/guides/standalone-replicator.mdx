@@ -26,36 +26,65 @@ you need a custom destination, a custom store, or application-specific runtime
 orchestration. See [First Pipeline](/guides/first-pipeline/) for the library
 path.
 
-## Prerequisites
+## Fastest local start
 
-- Rust 1.95.0, as pinned by `rust-toolchain.toml`.
-- PostgreSQL 14 through 18 configured for logical replication.
-- A publication containing the tables and operations you want to replicate.
-- A Google Cloud project with the BigQuery API enabled and a dataset for the
-  replicated tables.
-- A service account with the BigQuery Data Editor and BigQuery Job User roles.
-
-Complete [Configure Postgres](/guides/configure-postgres/) before starting the
-replicator. PostgreSQL 15 or newer is recommended for column and row
-publication filters, and PostgreSQL 16 or newer is required when replication
-connects to a physical read replica.
-
-## Build the binary
-
-Clone the repository and build only the destination features you need. BigQuery
-is the stable, recommended default:
+ClickHouse is the default destination. `cargo x init` starts Postgres and
+ClickHouse; no cloud account is required.
 
 ```bash title="Terminal"
 git clone https://github.com/supabase/etl.git
 cd etl
-cargo build --release -p etl-replicator --no-default-features --features bigquery
+cargo x init
+cargo x setup replicator
+cargo x seed
+cargo x run replicator
+```
+
+That writes gitignored config under `crates/etl-replicator/configuration/`,
+seeds a publication named `seed_pub`, and starts replication into local
+ClickHouse at `http://localhost:8123` (`etl` / `etl`). Seed tables appear as
+`public_users`, `public_orders`, and `public_events`, plus `__current` views:
+
+```bash title="Terminal"
+curl -sS 'http://localhost:8123/?user=etl&password=etl' \
+  --data-binary 'SELECT count() FROM "public_users__current"'
+```
+
+Stop the replicator with Ctrl+C.
+
+The rest of this guide shows how to build the binary yourself and point it at
+ClickHouse with your own configuration directory. Other built-in destinations
+use the same binary with a different `--features` flag; see
+[Destinations](/reference/destinations/).
+
+## Prerequisites
+
+- Rust 1.95.0, as pinned by `rust-toolchain.toml`.
+- PostgreSQL 14 through 18 configured for logical replication, including a
+  replication user and publication. Complete
+  [Configure Postgres](/guides/configure-postgres/) first, or use the local
+  Postgres from `cargo x init`.
+- ClickHouse 23.5 or newer. Local Docker from `cargo x init` is enough.
+
+PostgreSQL 15 or newer is recommended for column and row publication filters,
+and PostgreSQL 16 or newer is required when replication connects to a physical
+read replica.
+
+## Build the binary
+
+Clone the repository and build only the destination features you need.
+ClickHouse is the local default:
+
+```bash title="Terminal"
+git clone https://github.com/supabase/etl.git
+cd etl
+cargo build --release -p etl-replicator --no-default-features --features clickhouse
 ```
 
 The executable is written to `target/release/etl-replicator`. Available
-destination features are `bigquery`, `clickhouse`, `ducklake`, `snowflake`, and
-the currently deprecated `iceberg` implementation. BigQuery is the stable,
-recommended default; review [Destinations](/reference/destinations/) before
-choosing a module.
+destination features are `clickhouse`, `bigquery`, `ducklake`, `snowflake`, and
+the currently deprecated `iceberg` implementation. Review
+[Destinations](/reference/destinations/) before choosing a module.
 
 ## Create the configuration
 
@@ -63,31 +92,35 @@ The replicator reads a required `base.yaml` plus an environment-specific file
 from a configuration directory. Keep that directory outside the repository so
 credentials cannot be committed accidentally.
 
-Create `/absolute/path/to/etl-config/base.yaml` with the BigQuery destination
+Create `/absolute/path/to/etl-config/base.yaml` with the ClickHouse destination
 and Postgres source settings:
 
 ```yaml title="base.yaml"
 destination:
-  big_query:
-    project_id: example-gcp-project
-    dataset_id: etl_dataset
-    service_account_key: "{}"
-    max_staleness_mins: null
+  clickhouse:
+    url: "http://localhost:8123"
+    user: "etl"
+    password: "etl"
+    database: default
 
 pipeline:
   id: 1
-  publication_name: etl_publication
+  publication_name: seed_pub
   pg_connection:
-    host: 127.0.0.1
+    host: localhost
     hostaddr: null
-    port: 5432
-    name: example_database
-    username: etl_user
-    password: null
+    port: 5430
+    name: etl_testdata
+    username: postgres
+    password: postgres
     tls:
       enabled: false
       trusted_root_certs: ""
 ```
+
+Those host, port, and password values match the published `cargo x init` Docker
+defaults. For a remote ClickHouse, change `url`, `user`, `password`, and
+`database`, and enable TLS on both connections.
 
 Create `/absolute/path/to/etl-config/prod.yaml` for production overrides. It
 may be empty when `base.yaml` contains the complete configuration:
@@ -103,14 +136,19 @@ keys. For example:
 
 ```bash title="Terminal"
 export APP_PIPELINE__PG_CONNECTION__PASSWORD='placeholder-password'
-export APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY='placeholder-service-account-json'
+export APP_DESTINATION__CLICKHOUSE__PASSWORD='placeholder-clickhouse-password'
 ```
 
-The credential values above and the `{}` service-account key in `base.yaml` are
-intentionally invalid placeholders. Supply the complete service-account JSON
-through your runtime's secret manager or protected environment rather than
-tracked files, shell history, logs, or process arguments. Enable TLS and
-provide trusted root certificates for networked production connections.
+Do not put real secrets in tracked files, shell history, logs, or process
+arguments. Enable TLS and provide trusted root certificates for networked
+production connections.
+
+Cloud destinations such as BigQuery need a service-account key instead of a
+ClickHouse password:
+
+```bash title="Terminal"
+export APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY='placeholder-service-account-json'
+```
 
 ## Run the replicator
 
