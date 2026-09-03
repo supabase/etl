@@ -193,8 +193,8 @@ impl BatchMemoryGovernor {
     /// changes. This keeps one frozen global target per revision and one
     /// consistent per-slot target for all callers.
     pub(crate) fn batch_size_target_bytes(&self) -> usize {
-        // We do a first quick check on snapshot versions without locking, just to see if we don't
-        // need to recompute the target.
+        // We do a first quick check on snapshot versions without locking, just to see
+        // if we don't need to recompute the target.
         let memory_snapshot_revision = self.memory_monitor.snapshot_revision();
         if memory_snapshot_revision != self.state.memory_snapshot_revision.load(Ordering::Acquire) {
             self.try_refresh_batch_size_target();
@@ -218,8 +218,9 @@ impl BatchMemoryGovernor {
 
         let memory = self.memory_monitor.capacity_snapshot();
 
-        // We check if the revision is the same while under the lock, since we can't modify the current
-        // revision in any other paths than this one, so we have consistency while checking this.
+        // We check if the revision is the same while under the lock, since we can't
+        // modify the current revision in any other paths than this one, so we
+        // have consistency while checking this.
         if self.state.memory_snapshot_revision.load(Ordering::Relaxed) == memory.revision {
             return;
         }
@@ -228,8 +229,8 @@ impl BatchMemoryGovernor {
         let snapshot_batch_target_bytes =
             calculate_batch_memory_target(memory.total_memory_bytes, self.memory_budget_ratio);
 
-        // We update the target and compute the individual batch size given the amount of batch slots
-        // currently active in the system.
+        // We update the target and compute the individual batch size given the amount
+        // of batch slots currently active in the system.
         update.snapshot_batch_target_bytes = snapshot_batch_target_bytes;
         self.state.recalculate_batch_size_target(&update);
 
