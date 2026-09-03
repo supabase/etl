@@ -386,10 +386,10 @@ fn cell_to_array_cell(cell: &Cell) -> Option<&ArrayCell> {
 
 /// Builds an Arrow list array from [`TableRow`]s for a specific field.
 ///
-/// This function creates an Arrow [`ListArray`] by processing [`Cell::Array`]
-/// values from the specified field index. It delegates to type-specific
-/// builders based on the list element type, reusing the existing primitive and
-/// string array building infrastructure.
+/// This function creates an Arrow [`arrow::array::ListArray`] by processing
+/// [`Cell::Array`] values from the specified field index. It delegates to
+/// type-specific builders based on the list element type, reusing the existing
+/// primitive and string array building infrastructure.
 ///
 /// Returns an [`ArrayRef`] containing a list array with the appropriate element
 /// type. Rows with non-array cells become null entries in the resulting list

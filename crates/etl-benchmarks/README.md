@@ -70,18 +70,25 @@ smoke runs do not park behind local memory heuristics. Pass
 `--enable-memory-backpressure` when you explicitly want to include that behavior
 in a benchmark run.
 
-The stream batch memory budget is separate from backpressure and remains active
-by default. `--memory-budget-ratio` defaults to `0.2`, which means the ideal
-stream batch byte budget is computed as:
+Dynamic batch sizing is separate from emergency backpressure and remains active
+by default. `--memory-budget-ratio` defaults to `0.2`, which computes one global
+advisory decoded-batch target for each detected capacity snapshot as:
 
 ```text
-detected_memory_limit * 0.2 / active_streams
+detected_memory_capacity * 0.2
 ```
 
-The detector uses the cgroup memory limit when the benchmark is running inside a
-limited container, and host memory otherwise. If memory backpressure is enabled,
-it activates at 85% used memory and resumes at 75%, with memory refreshed every
-100ms.
+The runtime divides that target across registered batch slots, then caps each
+batch at 32 MiB. A slot is one position that may own an accumulating or in-flight
+decoded batch. The target is advisory: size is checked after decoding each item,
+so one indivisible row may exceed it. The detector uses the effective cgroup
+capacity visible to the process when it is running inside a limited container,
+and host memory otherwise.
+
+Emergency backpressure independently activates at 85% used memory and resumes
+below 75%, with one coherent memory snapshot every 100ms. This whole-process
+signal covers destination allocations and allocator-retained memory that the
+decoded batch estimate does not model.
 
 ## Quick Smoke Run
 
@@ -325,8 +332,10 @@ Important workflow inputs:
 - `max_table_sync_workers`: table-copy worker parallelism.
 - `max_copy_connections_per_table`: per-table copy connection parallelism.
 - `batch_max_fill_ms`: stream batch fill timeout.
-- `memory_budget_ratio`: ratio of detected memory reserved for stream batch
-  bytes. Defaults to `0.2`.
+- `memory_budget_ratio`: maximum ratio of detected memory targeted globally for
+  decoded batches before division across registered batch slots. A slot is one
+  position that may own an accumulating or in-flight decoded batch. Defaults to
+  `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
 - `destination`: `null`, `bigquery`, `clickhouse`, or `snowflake`.

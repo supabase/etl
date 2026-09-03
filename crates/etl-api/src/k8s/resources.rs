@@ -10,7 +10,9 @@
 //! StatefulSet startup allocation. When autoscaling is omitted, each resolved
 //! startup value is used as both VPA bounds. Container limits have no separate
 //! resolution: Kubernetes materialization uses each resolved request as its
-//! limit to preserve Guaranteed QoS.
+//! limit to preserve Guaranteed QoS. This also gives the replicator memory
+//! monitor one effective container-leaf cgroup constraint to observe through
+//! sysinfo in the private cgroup namespace normally used by these pods.
 
 use crate::{config::K8sConfig, configs::pipeline::PipelineReplicatorResourceOverrideConfig};
 

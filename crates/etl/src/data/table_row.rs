@@ -1,9 +1,6 @@
 use std::mem::size_of;
 
-use crate::data::{
-    PgNumeric, PgTimeTz, SizeHint,
-    cell::{ArrayCell, Cell},
-};
+use crate::data::{ArrayCell, Cell, PgNumeric, PgTimeTz, SizeHint, owned_heap_size_hint};
 
 /// Represents a complete row of data from a database table.
 ///
@@ -11,11 +8,10 @@ use crate::data::{
 /// columns of a database table. The values are ordered to match the table's
 /// column order and include proper type information for each cell.
 #[derive(Debug)]
-#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TableRow {
-    /// Approximate decoded in-memory size hint in bytes.
+    /// Cached decoded in-memory size, or zero after mutable access.
     size_hint_bytes: usize,
-    /// Column values in table column order
+    /// Column values in table column order.
     values: Vec<Cell>,
 }
 
@@ -38,12 +34,22 @@ impl TableRow {
 
     /// Returns mutable access to row values in table column order.
     pub fn values_mut(&mut self) -> &mut Vec<Cell> {
+        // The returned Vec can change both its allocation and nested cell
+        // allocations, so a later size query must recompute the estimate.
+        self.size_hint_bytes = 0;
         &mut self.values
     }
 
     /// Consumes the row and returns its values in table column order.
     pub fn into_values(self) -> Vec<Cell> {
         self.values
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Clone for TableRow {
+    fn clone(&self) -> Self {
+        Self::new(self.values.clone())
     }
 }
 
@@ -55,7 +61,11 @@ impl PartialEq for TableRow {
 
 impl SizeHint for TableRow {
     fn size_hint(&self) -> usize {
-        self.size_hint_bytes
+        if self.size_hint_bytes == 0 {
+            estimate_table_row_allocated_bytes(&self.values, self.values.capacity())
+        } else {
+            self.size_hint_bytes
+        }
     }
 }
 
@@ -64,9 +74,8 @@ impl SizeHint for TableRow {
 /// Partial rows preserve the present values in replicated-schema order and
 /// separately record which replicated-column positions are missing.
 #[derive(Debug)]
-#[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct PartialTableRow {
-    /// Approximate decoded in-memory size hint in bytes.
+    /// Cached decoded in-memory size.
     size_hint_bytes: usize,
     /// Total number of replicated columns for the table schema.
     total_columns: usize,
@@ -85,9 +94,7 @@ impl PartialTableRow {
     ) -> Self {
         let size_hint_bytes = estimate_partial_table_row_allocated_bytes(
             &table_row,
-            &missing_column_indexes,
             missing_column_indexes.capacity(),
-            total_columns,
         );
 
         Self { size_hint_bytes, total_columns, table_row, missing_column_indexes }
@@ -118,10 +125,12 @@ impl PartialTableRow {
     pub fn into_parts(self) -> (TableRow, Vec<usize>) {
         (self.table_row, self.missing_column_indexes)
     }
+}
 
-    /// Consumes the row and returns the present values.
-    pub fn into_values(self) -> Vec<Cell> {
-        self.table_row.into_values()
+#[cfg(any(test, feature = "test-utils"))]
+impl Clone for PartialTableRow {
+    fn clone(&self) -> Self {
+        Self::new(self.total_columns, self.table_row.clone(), self.missing_column_indexes.clone())
     }
 }
 
@@ -151,11 +160,6 @@ pub enum UpdatedTableRow {
 }
 
 impl UpdatedTableRow {
-    /// Returns whether this row image is partial.
-    pub fn is_partial(&self) -> bool {
-        matches!(self, Self::Partial(_))
-    }
-
     /// Returns the full row when available.
     pub fn as_full(&self) -> Option<&TableRow> {
         match self {
@@ -167,10 +171,12 @@ impl UpdatedTableRow {
 
 impl SizeHint for UpdatedTableRow {
     fn size_hint(&self) -> usize {
-        match self {
-            Self::Full(row) => row.size_hint(),
-            Self::Partial(row) => row.size_hint(),
-        }
+        let owned_heap_bytes = match self {
+            Self::Full(row) => owned_heap_size_hint(row),
+            Self::Partial(row) => owned_heap_size_hint(row),
+        };
+
+        size_of::<Self>().saturating_add(owned_heap_bytes)
     }
 }
 
@@ -198,11 +204,6 @@ pub enum OldTableRow {
 }
 
 impl OldTableRow {
-    /// Returns whether this image contains only replica-identity columns.
-    pub fn is_key(&self) -> bool {
-        matches!(self, Self::Key(_))
-    }
-
     /// Returns the full row payload when available.
     pub fn as_full(&self) -> Option<&TableRow> {
         match self {
@@ -210,37 +211,15 @@ impl OldTableRow {
             Self::Key(_) => None,
         }
     }
-
-    /// Consumes the image and returns the full row payload when available.
-    pub fn into_full(self) -> Option<TableRow> {
-        match self {
-            Self::Full(row) => Some(row),
-            Self::Key(_) => None,
-        }
-    }
-
-    /// Returns the key row payload when available.
-    pub fn as_key(&self) -> Option<&TableRow> {
-        match self {
-            Self::Full(_) => None,
-            Self::Key(row) => Some(row),
-        }
-    }
-
-    /// Consumes the image and returns the key row payload when available.
-    pub fn into_key(self) -> Option<TableRow> {
-        match self {
-            Self::Full(_) => None,
-            Self::Key(row) => Some(row),
-        }
-    }
 }
 
 impl SizeHint for OldTableRow {
     fn size_hint(&self) -> usize {
-        match self {
-            Self::Full(row) | Self::Key(row) => row.size_hint(),
-        }
+        let owned_heap_bytes = match self {
+            Self::Full(row) | Self::Key(row) => owned_heap_size_hint(row),
+        };
+
+        size_of::<Self>().saturating_add(owned_heap_bytes)
     }
 }
 
@@ -259,14 +238,11 @@ fn estimate_table_row_allocated_bytes(values: &[Cell], values_capacity: usize) -
 /// Returns an estimate of allocated bytes for a partial row payload.
 fn estimate_partial_table_row_allocated_bytes(
     table_row: &TableRow,
-    missing_column_indexes: &[usize],
     missing_column_indexes_capacity: usize,
-    _total_columns: usize,
 ) -> usize {
-    let mut total = size_of::<PartialTableRow>().saturating_add(table_row.size_hint());
+    let mut total = size_of::<PartialTableRow>().saturating_add(owned_heap_size_hint(table_row));
     total =
         total.saturating_add(missing_column_indexes_capacity.saturating_mul(size_of::<usize>()));
-    let _ = missing_column_indexes;
 
     total
 }
@@ -304,10 +280,16 @@ fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
     }
 }
 
+/// Returns the owned text bytes of an arbitrary-precision JSON number.
+fn estimate_json_number_allocated_bytes(value: &serde_json::Number) -> usize {
+    value.as_str().len()
+}
+
 /// Returns an estimate of additional heap bytes owned by a JSON value.
 fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
     match value {
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+        serde_json::Value::Null | serde_json::Value::Bool(_) => 0,
+        serde_json::Value::Number(value) => estimate_json_number_allocated_bytes(value),
         serde_json::Value::String(value) => value.capacity(),
         serde_json::Value::Array(values) => {
             let mut total = values.capacity().saturating_mul(size_of::<serde_json::Value>());
@@ -316,10 +298,21 @@ fn estimate_json_allocated_bytes(value: &serde_json::Value) -> usize {
             }
             total
         }
-        serde_json::Value::Object(values) => values.iter().fold(0usize, |acc, (key, value)| {
-            let with_key = acc.saturating_add(key.capacity());
-            with_key.saturating_add(estimate_json_allocated_bytes(value))
-        }),
+        serde_json::Value::Object(values) => {
+            // Count stable key/value storage without depending on serde_json's
+            // private map-node layout or allocation strategy.
+            let mut total = values
+                .len()
+                .saturating_mul(size_of::<String>().saturating_add(size_of::<serde_json::Value>()));
+
+            for (key, value) in values {
+                total = total
+                    .saturating_add(key.capacity())
+                    .saturating_add(estimate_json_allocated_bytes(value));
+            }
+
+            total
+        }
     }
 }
 
@@ -380,5 +373,198 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             }
             total
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn table_row_size_hint_uses_container_and_nested_capacities() {
+        let mut text = String::with_capacity(127);
+        text.push_str("text");
+        let text_capacity = text.capacity();
+
+        let mut bytes = Vec::with_capacity(257);
+        bytes.extend_from_slice(&[1, 2, 3]);
+        let bytes_capacity = bytes.capacity();
+
+        let numeric = PgNumeric::from_str("123456789012345678901234567890.1234").unwrap();
+        let numeric_bytes = match &numeric {
+            PgNumeric::Value { digits, .. } => digits.capacity() * size_of::<i16>(),
+            _ => unreachable!(),
+        };
+
+        let mut strings = Vec::with_capacity(5);
+        let mut nested_text = String::with_capacity(63);
+        nested_text.push('x');
+        let nested_text_capacity = nested_text.capacity();
+        strings.push(Some(nested_text));
+        strings.push(None);
+        let strings_bytes = strings.capacity() * size_of::<Option<String>>() + nested_text_capacity;
+
+        let mut values = Vec::with_capacity(8);
+        values.push(Cell::String(text));
+        values.push(Cell::Bytes(bytes));
+        values.push(Cell::Numeric(numeric));
+        values.push(Cell::Array(ArrayCell::String(strings)));
+        let values_capacity = values.capacity();
+
+        let row = TableRow::new(values);
+        let expected = size_of::<TableRow>()
+            + values_capacity * size_of::<Cell>()
+            + text_capacity
+            + bytes_capacity
+            + numeric_bytes
+            + strings_bytes;
+
+        assert_eq!(row.size_hint(), expected);
+        assert_eq!(row.size_hint(), expected);
+    }
+
+    #[test]
+    fn mutable_row_access_invalidates_the_cached_size_hint() {
+        let mut row = TableRow::new(vec![Cell::I64(1)]);
+        let initial_size_hint = row.size_hint();
+
+        let mut text = String::with_capacity(1_024);
+        text.push_str("new value");
+        row.values_mut().push(Cell::String(text));
+
+        assert_eq!(row.size_hint_bytes, 0);
+        assert_eq!(
+            row.size_hint(),
+            estimate_table_row_allocated_bytes(row.values(), row.values.capacity())
+        );
+        assert!(row.size_hint() > initial_size_hint);
+    }
+
+    #[test]
+    fn cloned_rows_rebuild_size_hint_caches_for_cloned_capacities() {
+        let mut text = String::with_capacity(1_024);
+        text.push_str("payload");
+        let mut row = TableRow::new(Vec::with_capacity(8));
+        row.values_mut().push(Cell::String(text));
+
+        let cloned_row = row.clone();
+        assert_ne!(cloned_row.size_hint_bytes, 0);
+        assert_eq!(
+            cloned_row.size_hint(),
+            estimate_table_row_allocated_bytes(cloned_row.values(), cloned_row.values.capacity(),)
+        );
+
+        let mut missing_column_indexes = Vec::with_capacity(8);
+        missing_column_indexes.push(1);
+        let partial = PartialTableRow::new(2, cloned_row, missing_column_indexes);
+        let cloned_partial = partial.clone();
+        assert_eq!(partial.total_columns(), 2);
+        assert_eq!(
+            cloned_partial.size_hint(),
+            estimate_partial_table_row_allocated_bytes(
+                cloned_partial.table_row(),
+                cloned_partial.missing_column_indexes.capacity(),
+            )
+        );
+    }
+
+    #[test]
+    fn json_size_hint_covers_owned_numbers_arrays_and_objects() {
+        let number: serde_json::Value =
+            serde_json::from_str("123456789012345678901234567890").unwrap();
+        assert_eq!(estimate_json_allocated_bytes(&number), 30);
+
+        let array: serde_json::Value =
+            serde_json::from_str(r#"[1,2,3,4,5,"a string payload that owns heap memory"]"#)
+                .unwrap();
+        let serde_json::Value::Array(array_values) = &array else {
+            unreachable!();
+        };
+        let expected_array_bytes = array_values.capacity() * size_of::<serde_json::Value>()
+            + array_values.iter().map(estimate_json_allocated_bytes).sum::<usize>();
+        assert_eq!(estimate_json_allocated_bytes(&array), expected_array_bytes);
+
+        let object: serde_json::Value =
+            serde_json::from_str(r#"{"key":"nested string payload"}"#).unwrap();
+        let serde_json::Value::Object(object_values) = &object else {
+            unreachable!();
+        };
+        let (key, value) = object_values.iter().next().unwrap();
+        let expected_object_bytes = size_of::<String>()
+            + size_of::<serde_json::Value>()
+            + key.capacity()
+            + estimate_json_allocated_bytes(value);
+        assert_eq!(estimate_json_allocated_bytes(&object), expected_object_bytes);
+    }
+
+    #[test]
+    fn array_size_hints_cover_scalar_and_nested_allocations() {
+        let mut integers = Vec::with_capacity(7);
+        integers.push(Some(1));
+        assert_eq!(
+            estimate_array_allocated_bytes(&ArrayCell::I64(integers)),
+            7 * size_of::<Option<i64>>()
+        );
+
+        let numeric = PgNumeric::from_str("123456789012345678901234567890.1234").unwrap();
+        let numeric_heap_bytes = estimated_pg_numeric_allocated_bytes(&numeric);
+        let mut numerics = Vec::with_capacity(5);
+        numerics.push(Some(numeric));
+        assert_eq!(
+            estimate_array_allocated_bytes(&ArrayCell::Numeric(numerics)),
+            5 * size_of::<Option<PgNumeric>>() + numeric_heap_bytes
+        );
+
+        let mut bytes = Vec::with_capacity(257);
+        bytes.push(1);
+        let mut byte_arrays = Vec::with_capacity(3);
+        byte_arrays.push(Some(bytes));
+        assert_eq!(
+            estimate_array_allocated_bytes(&ArrayCell::Bytes(byte_arrays)),
+            3 * size_of::<Option<Vec<u8>>>() + 257
+        );
+
+        let json: serde_json::Value =
+            serde_json::from_str(r#"{"object":[1,2,3],"text":"payload"}"#).unwrap();
+        let json_heap_bytes = estimate_json_allocated_bytes(&json);
+        let mut json_values = Vec::with_capacity(4);
+        json_values.push(Some(json));
+        assert_eq!(
+            estimate_array_allocated_bytes(&ArrayCell::Json(json_values)),
+            4 * size_of::<Option<serde_json::Value>>() + json_heap_bytes
+        );
+    }
+
+    #[test]
+    fn row_wrapper_hints_do_not_double_count_inline_rows() {
+        let mut text = String::with_capacity(211);
+        text.push('x');
+        let table_row = TableRow::new(vec![Cell::String(text)]);
+        let table_row_heap_bytes = owned_heap_size_hint(&table_row);
+
+        let mut missing_column_indexes = Vec::with_capacity(4);
+        missing_column_indexes.push(1);
+        let missing_column_indexes_capacity = missing_column_indexes.capacity();
+        let partial = PartialTableRow::new(2, table_row, missing_column_indexes);
+
+        assert_eq!(
+            partial.size_hint(),
+            size_of::<PartialTableRow>()
+                + table_row_heap_bytes
+                + missing_column_indexes_capacity * size_of::<usize>()
+        );
+        let cloned_partial = partial.clone();
+        assert_eq!(partial.total_columns(), 2);
+        let cloned_partial_heap_bytes = owned_heap_size_hint(&cloned_partial);
+        assert_eq!(
+            UpdatedTableRow::Partial(cloned_partial).size_hint(),
+            size_of::<UpdatedTableRow>() + cloned_partial_heap_bytes
+        );
+        assert_eq!(
+            OldTableRow::Key(TableRow::new(vec![Cell::I64(1)])).size_hint(),
+            size_of::<OldTableRow>() + size_of::<Cell>()
+        );
     }
 }

@@ -45,7 +45,10 @@ pub(crate) const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
     "etl_memory_backpressure_transitions_total";
 pub(crate) const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
     "etl_memory_backpressure_activation_duration_seconds";
-pub(crate) const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
+pub(crate) const ETL_MEMORY_USED_BYTES: &str = "etl_memory_used_bytes";
+pub(crate) const ETL_MEMORY_TOTAL_BYTES: &str = "etl_memory_total_bytes";
+pub(crate) const ETL_BATCH_SIZE_TARGET_BYTES: &str = "etl_batch_size_target_bytes";
+pub(crate) const ETL_BATCH_REGISTERED_SLOTS: &str = "etl_batch_registered_slots";
 pub(crate) const ETL_APPLY_LOOP_RECEIVED_LAG_BYTES: &str = "etl_apply_loop_received_lag_bytes";
 pub(crate) const ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES: &str =
     "etl_apply_loop_effective_flush_lag_bytes";
@@ -76,6 +79,8 @@ pub(crate) const OUTCOME_LABEL: &str = "outcome";
 pub(crate) const ERROR_TYPE_LABEL: &str = "error_type";
 /// Label key for transition direction ("activate" or "resume").
 pub(crate) const DIRECTION_LABEL: &str = "direction";
+/// Label key for the selected memory measurement domain.
+pub(crate) const MEMORY_SOURCE_LABEL: &str = "source";
 /// Label key for how durability was confirmed ("direct" or "deferred").
 pub(crate) const CONFIRMATION_LABEL: &str = "confirmation";
 /// Label key for the destination write status ("accepted" or "durable").
@@ -311,9 +316,30 @@ pub(crate) fn register_metrics() {
         );
 
         describe_gauge!(
-            ETL_IDEAL_BATCH_SIZE_BYTES,
+            ETL_MEMORY_USED_BYTES,
             Unit::Bytes,
-            "Current ideal batch size in bytes."
+            "Current memory usage in bytes for the selected system or cgroup memory domain, \
+             labeled by source."
+        );
+
+        describe_gauge!(
+            ETL_MEMORY_TOTAL_BYTES,
+            Unit::Bytes,
+            "Current memory capacity in bytes for the selected system or cgroup memory domain, \
+             labeled by source."
+        );
+
+        describe_gauge!(
+            ETL_BATCH_SIZE_TARGET_BYTES,
+            Unit::Bytes,
+            "Current advisory decoded byte target for each registered batch slot."
+        );
+
+        describe_gauge!(
+            ETL_BATCH_REGISTERED_SLOTS,
+            Unit::Count,
+            "Current number of registered batch-producing positions used to divide the global \
+             decoded-batch target."
         );
 
         describe_gauge!(
