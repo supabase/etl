@@ -18,7 +18,7 @@ use metrics::gauge;
 use tracing::debug;
 
 use crate::{
-    observability::{ETL_BATCH_ACTIVE_SLOTS, ETL_BATCH_SIZE_TARGET_BYTES},
+    observability::{ETL_BATCH_REGISTERED_SLOTS, ETL_BATCH_SIZE_TARGET_BYTES},
     pipeline::PipelineId,
     runtime::MemoryMonitor,
 };
@@ -39,20 +39,20 @@ fn calculate_batch_memory_target(total_memory_bytes: u64, memory_budget_ratio: f
     ratio_of_bytes(total_memory_bytes, memory_budget_ratio)
 }
 
-/// Divides one snapshot-scoped target across the current batch slots.
+/// Divides one snapshot-scoped target across the registered batch slots.
 ///
-/// Each potential accumulating or in-flight batch receives an equal target,
-/// then the configured preferred maximum caps one batch. A one-byte floor makes
-/// the next indivisible item flush immediately when no calculated capacity
-/// remains.
+/// Each slot represents one position that may own an accumulating or in-flight
+/// decoded batch. Every slot receives an equal target, then the configured
+/// preferred maximum caps one batch. A one-byte floor makes the next
+/// indivisible item flush immediately when no calculated capacity remains.
 fn calculate_per_slot_batch_size_target(
     snapshot_batch_target_bytes: u64,
-    active_batch_slots: usize,
+    registered_batch_slots: usize,
     max_batch_bytes: usize,
 ) -> usize {
-    let active_batch_slots = active_batch_slots.max(1);
+    let registered_batch_slots = registered_batch_slots.max(1);
     let per_slot_batch_size_bytes =
-        (bytes_to_usize(snapshot_batch_target_bytes) / active_batch_slots).max(1);
+        (bytes_to_usize(snapshot_batch_target_bytes) / registered_batch_slots).max(1);
 
     per_slot_batch_size_bytes.min(max_batch_bytes.max(1))
 }
@@ -60,8 +60,8 @@ fn calculate_per_slot_batch_size_target(
 /// Snapshot-derived values changed under one short update lock.
 #[derive(Debug)]
 struct BatchMemoryUpdateState {
-    /// Potential batches that may exist concurrently.
-    active_batch_slots: usize,
+    /// Batch-producing positions currently registered with the governor.
+    registered_batch_slots: usize,
     /// Global advisory target frozen for the current memory snapshot.
     snapshot_batch_target_bytes: u64,
 }
@@ -73,7 +73,7 @@ struct BatchMemoryState {
     update_state: Mutex<BatchMemoryUpdateState>,
     /// Memory snapshot revision used by the frozen global target.
     memory_snapshot_revision: AtomicU64,
-    /// Current advisory target for one active batch slot.
+    /// Current advisory target for one registered batch slot.
     batch_size_target_bytes: AtomicUsize,
     /// Preferred ceiling for one batch.
     max_batch_bytes: usize,
@@ -92,7 +92,7 @@ impl BatchMemoryState {
 
         Self {
             update_state: Mutex::new(BatchMemoryUpdateState {
-                active_batch_slots: 0,
+                registered_batch_slots: 0,
                 snapshot_batch_target_bytes,
             }),
             memory_snapshot_revision: AtomicU64::new(memory_snapshot_revision),
@@ -105,7 +105,7 @@ impl BatchMemoryState {
     fn recalculate_batch_size_target(&self, update: &BatchMemoryUpdateState) {
         let batch_size_target_bytes = calculate_per_slot_batch_size_target(
             update.snapshot_batch_target_bytes,
-            update.active_batch_slots,
+            update.registered_batch_slots,
             self.max_batch_bytes,
         );
 
@@ -113,30 +113,30 @@ impl BatchMemoryState {
         gauge!(ETL_BATCH_SIZE_TARGET_BYTES).set(batch_size_target_bytes as f64);
     }
 
-    /// Adds active batch slots and updates their shared target.
+    /// Adds registered batch slots and updates their shared target.
     fn register_batch_slots(&self, slots: usize) {
         let mut update = self.update_state.lock().unwrap_or_else(PoisonError::into_inner);
-        update.active_batch_slots = update
-            .active_batch_slots
+        update.registered_batch_slots = update
+            .registered_batch_slots
             .checked_add(slots)
-            .expect("active batch slot count should fit in usize");
-        gauge!(ETL_BATCH_ACTIVE_SLOTS).set(update.active_batch_slots as f64);
+            .expect("registered batch slot count should fit in usize");
+        gauge!(ETL_BATCH_REGISTERED_SLOTS).set(update.registered_batch_slots as f64);
         self.recalculate_batch_size_target(&update);
     }
 
-    /// Removes active batch slots and updates the remaining shared target.
+    /// Removes registered batch slots and updates the remaining shared target.
     fn unregister_batch_slots(&self, slots: usize) {
         let mut update = self.update_state.lock().unwrap_or_else(PoisonError::into_inner);
-        update.active_batch_slots = update
-            .active_batch_slots
+        update.registered_batch_slots = update
+            .registered_batch_slots
             .checked_sub(slots)
             .expect("registered batch slot count should not underflow");
-        gauge!(ETL_BATCH_ACTIVE_SLOTS).set(update.active_batch_slots as f64);
+        gauge!(ETL_BATCH_REGISTERED_SLOTS).set(update.registered_batch_slots as f64);
         self.recalculate_batch_size_target(&update);
     }
 }
 
-/// Governs decoded batch memory across active batch slots.
+/// Governs decoded batch memory across registered batch-producing positions.
 #[derive(Debug, Clone)]
 pub(crate) struct BatchMemoryGovernor {
     /// Pipeline identifier included in diagnostic logs.
@@ -162,7 +162,7 @@ impl BatchMemoryGovernor {
             memory.total_memory_bytes,
             f64::from(memory_budget_ratio),
         );
-        gauge!(ETL_BATCH_ACTIVE_SLOTS).set(0.0);
+        gauge!(ETL_BATCH_REGISTERED_SLOTS).set(0.0);
 
         Self {
             pipeline_id,
@@ -176,8 +176,8 @@ impl BatchMemoryGovernor {
         }
     }
 
-    /// Registers potential concurrent retained batches and returns a guard that
-    /// unregisters them on drop.
+    /// Registers positions that may own concurrent decoded batches and returns
+    /// a guard that unregisters them on drop.
     pub(crate) fn register_batch_slots(&self, slots: usize) -> BatchSlotsGuard {
         let slots = slots.max(1);
         self.state.register_batch_slots(slots);
@@ -193,8 +193,7 @@ impl BatchMemoryGovernor {
     /// changes. This keeps one frozen global target per revision and one
     /// consistent per-slot target for all callers.
     pub(crate) fn batch_size_target_bytes(&self) -> usize {
-        // We do a first quick check on snapshot versions without locking, just to see
-        // if we don't need to recompute the target.
+        // Avoid locking when the governor already reflects the latest snapshot.
         let memory_snapshot_revision = self.memory_monitor.snapshot_revision();
         if memory_snapshot_revision != self.state.memory_snapshot_revision.load(Ordering::Acquire) {
             self.try_refresh_batch_size_target();
@@ -218,19 +217,16 @@ impl BatchMemoryGovernor {
 
         let memory = self.memory_monitor.capacity_snapshot();
 
-        // We check if the revision is the same while under the lock, since we can't
-        // modify the current revision in any other paths than this one, so we
-        // have consistency while checking this.
+        // Recheck under the lock shared by target refreshes and slot changes.
         if self.state.memory_snapshot_revision.load(Ordering::Relaxed) == memory.revision {
             return;
         }
 
-        // We calcculate the memory target for batches in bytes.
         let snapshot_batch_target_bytes =
             calculate_batch_memory_target(memory.total_memory_bytes, self.memory_budget_ratio);
 
-        // We update the target and compute the individual batch size given the amount
-        // of batch slots currently active in the system.
+        // Freeze the global target for this snapshot, then divide it across the
+        // currently registered batch slots.
         update.snapshot_batch_target_bytes = snapshot_batch_target_bytes;
         self.state.recalculate_batch_size_target(&update);
 
@@ -243,14 +239,14 @@ impl BatchMemoryGovernor {
             total_memory_bytes = memory.total_memory_bytes,
             memory_budget_ratio = self.memory_budget_ratio,
             snapshot_batch_target_bytes,
-            active_batch_slots = update.active_batch_slots,
+            registered_batch_slots = update.registered_batch_slots,
             batch_size_target_bytes = self.state.batch_size_target_bytes.load(Ordering::Relaxed),
             "computed snapshot batch memory target"
         );
     }
 }
 
-/// RAII guard that decrements active batch slots on drop.
+/// RAII guard that unregisters batch-producing positions on drop.
 #[derive(Debug)]
 pub(crate) struct BatchSlotsGuard {
     /// Shared governor state updated when this guard is dropped.
@@ -271,7 +267,7 @@ mod tests {
     use crate::runtime::MemoryMonitor;
 
     #[test]
-    fn batch_size_target_divides_global_target_by_active_batch_slots() {
+    fn batch_size_target_divides_global_target_by_registered_batch_slots() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_total_memory_bytes_for_test(10_000);
         let governor = BatchMemoryGovernor::new(1, memory_monitor, 0.2, 10_000);

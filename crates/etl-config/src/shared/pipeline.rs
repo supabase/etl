@@ -18,7 +18,7 @@ pub struct BatchConfig {
     ///
     /// This is the latency bound for stream batching: once the first item
     /// enters a batch, the batch is flushed when this timer elapses, even
-    /// if byte/row targets were not met.
+    /// if the byte target was not met.
     ///
     /// In practice, flush happens on the first trigger between this timeout and
     /// the memory-based byte target driven by
@@ -29,8 +29,7 @@ pub struct BatchConfig {
     /// Maximum ratio of memory capacity targeted for decoded source batches.
     ///
     /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The resulting global target is divided across potential concurrent
-    /// batches.
+    /// The resulting global target is divided across registered batch slots.
     ///
     /// Together with [`Self::max_fill_ms`], this controls stream flushes:
     /// batches flush either when their accumulated size estimate reaches
@@ -40,10 +39,11 @@ pub struct BatchConfig {
     /// This is a batching heuristic, not a memory allocator or a hard bound.
     /// ETL compares decoded size estimates with the target after each item, so
     /// actual allocations can differ and one indivisible item can overshoot it.
-    /// Changes in the detected memory capacity or active batch slots update the
-    /// effective target. The configured ratio leaves the rest of the detected
-    /// capacity for destination batch building, serialization, and other
-    /// allocations.
+    /// Changes in the detected memory capacity or registered batch slots update
+    /// the effective target. A slot represents one position that may own an
+    /// accumulating or in-flight decoded batch. The configured ratio leaves the
+    /// rest of the detected capacity for destination batch building,
+    /// serialization, and other allocations.
     #[serde(default = "default_memory_budget_ratio")]
     #[cfg_attr(feature = "utoipa", schema(example = 0.2))]
     pub memory_budget_ratio: f32,
@@ -65,9 +65,9 @@ impl BatchConfig {
     /// Default maximum fill time in milliseconds.
     pub const DEFAULT_MAX_FILL_MS: u64 = 10000;
 
-    /// Default fraction used for batch byte budgeting.
+    /// Default fraction used to calculate the global batch target.
     ///
-    /// The governor targets at most 20% of the current system capacity or
+    /// The governor targets at most 20% of the detected system capacity or
     /// cgroup memory limit for decoded batches. An indivisible row can exceed
     /// the target after it has already been decoded.
     pub const DEFAULT_MEMORY_BUDGET_RATIO: f32 = 0.2;

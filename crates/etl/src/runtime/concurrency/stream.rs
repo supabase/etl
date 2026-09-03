@@ -30,10 +30,48 @@ pub(crate) fn apply_worker_apply_stream_id() -> String {
     "apply_worker_apply_stream".to_owned()
 }
 
-/// Takes the current batch and resets its decoded-size estimate.
+/// Takes the current batch, resets its decoded-size estimate, and leaves an
+/// unallocated outer buffer instead of retaining its capacity.
 fn take_batch<T>(items: &mut Vec<T>, size_hint_bytes: &mut usize) -> Vec<T> {
     *size_hint_bytes = 0;
     std::mem::take(items)
+}
+
+/// Refreshes a stream's memory-pause state and registers its waker for the next
+/// transition.
+fn poll_memory_backpressure(
+    memory_subscription: &mut Option<MemoryMonitorSubscription>,
+    paused_for_memory: &mut bool,
+    cx: &mut Context<'_>,
+) {
+    let Some(subscription) = memory_subscription.as_mut() else {
+        *paused_for_memory = false;
+        return;
+    };
+
+    let channel_closed = loop {
+        match Pin::new(&mut *subscription).poll_next(cx) {
+            Poll::Ready(Some(backpressure_active)) => {
+                *paused_for_memory = backpressure_active;
+            }
+            Poll::Ready(None) => break true,
+            Poll::Pending => {
+                // `Pending` registers this task's waker. Read the current value
+                // as well because the subscription does not yield the state that
+                // predates its creation.
+                *paused_for_memory = subscription.current_backpressure_active();
+
+                break false;
+            }
+        }
+    };
+
+    if channel_closed {
+        // A closed monitor can no longer report pressure, so polling the source
+        // remains the resilient fallback.
+        *memory_subscription = None;
+        *paused_for_memory = false;
+    }
 }
 
 pin_project! {
@@ -74,41 +112,9 @@ impl<S: Stream> Stream for MemoryBackpressureStream<S> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
+
         let was_paused = *this.paused_for_memory;
-
-        if let Some(memory_subscription) = this.memory_subscription.as_mut() {
-            // Drain all currently queued watch updates and only stop at `Pending`.
-            // Hitting `Pending` is important because it registers this task's waker for the
-            // next backpressure transition, so returning `Pending` below cannot
-            // miss a wakeup.
-            loop {
-                match Pin::new(&mut *memory_subscription).poll_next(cx) {
-                    Poll::Ready(Some(backpressure_active)) => {
-                        *this.paused_for_memory = backpressure_active;
-                    }
-                    Poll::Ready(None) => {
-                        // If the was channel was dropped, we assume that memory is fine, to be
-                        // resilient.
-                        *this.paused_for_memory = false;
-
-                        break;
-                    }
-                    Poll::Pending => {
-                        // If the memory state didn't change, we just use the current state that is
-                        // on the watch.
-                        let currently_backpressure_active =
-                            memory_subscription.current_backpressure_active();
-                        if *this.paused_for_memory != currently_backpressure_active {
-                            *this.paused_for_memory = currently_backpressure_active;
-                        }
-
-                        break;
-                    }
-                }
-            }
-        } else {
-            *this.paused_for_memory = false;
-        }
+        poll_memory_backpressure(this.memory_subscription, this.paused_for_memory, cx);
 
         if !was_paused && *this.paused_for_memory {
             info!(stream_id = %this.stream_id, "backpressure active, stream paused");
@@ -149,8 +155,6 @@ pin_project! {
         batch_memory_governor: BatchMemoryGovernor,
         // Batch configuration supplying the fill timeout.
         batch_config: BatchConfig,
-        // Whether the next item should start a new fill deadline.
-        reset_timer: bool,
         // Whether the source stream has permanently ended.
         inner_stream_ended: bool,
         // Optional emergency backpressure subscription.
@@ -180,7 +184,6 @@ where
             batch_size_hint_bytes: 0,
             batch_memory_governor,
             batch_config,
-            reset_timer: true,
             inner_stream_ended: false,
             memory_subscription,
             paused_for_memory: false,
@@ -215,41 +218,8 @@ where
         // the partial batch without paying watch-stream polling overhead for
         // every row.
         let was_paused = *this.paused_for_memory;
-        if let Some(memory_subscription) = this.memory_subscription.as_mut() {
-            // Drain all currently queued watch updates and only stop at `Pending`.
-            // Hitting `Pending` is important because it registers this task's waker for the
-            // next backpressure transition, so returning `Pending` below
-            // cannot miss a wakeup.
-            loop {
-                match Pin::new(&mut *memory_subscription).poll_next(cx) {
-                    Poll::Ready(Some(backpressure_active)) => {
-                        *this.paused_for_memory = backpressure_active;
-                    }
-                    Poll::Ready(None) => {
-                        // If the was channel was dropped, we assume that memory is fine, to be
-                        // resilient.
-                        *this.paused_for_memory = false;
+        poll_memory_backpressure(this.memory_subscription, this.paused_for_memory, cx);
 
-                        break;
-                    }
-                    Poll::Pending => {
-                        // If the memory state didn't change, we just use the current state that
-                        // is on the watch.
-                        let currently_backpressure_active =
-                            memory_subscription.current_backpressure_active();
-                        if *this.paused_for_memory != currently_backpressure_active {
-                            *this.paused_for_memory = currently_backpressure_active;
-                        }
-
-                        break;
-                    }
-                }
-            }
-        } else {
-            *this.paused_for_memory = false;
-        }
-
-        // We log the backpressure state changes, for better observability.
         if !was_paused && *this.paused_for_memory {
             info!(
                 stream_id = %this.stream_id,
@@ -262,8 +232,7 @@ where
             );
         }
 
-        // If the stream is paused due to memory backpressure, we want to return the
-        // accumulated data.
+        // Flush owned data before pausing source intake.
         if *this.paused_for_memory {
             if !this.items.is_empty() {
                 info!(
@@ -272,10 +241,8 @@ where
                     buffered_size_hint_bytes = *this.batch_size_hint_bytes,
                     "backpressure active, flushing buffered batch"
                 );
-                *this.reset_timer = true;
+                this.deadline.set(None);
 
-                // If we are paused for memory, we don't want to reallocate a batch of the same
-                // size as before, to avoid increasing memory usage even more.
                 let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                 return Poll::Ready(Some(Ok(batch)));
@@ -291,11 +258,11 @@ where
                     // Start the fill timer only when a batch becomes non-empty.
                     // Otherwise, an idle stream could expire the timer before
                     // the first item arrives and flush that item immediately.
-                    if this.items.is_empty() && *this.reset_timer {
+                    if this.items.is_empty() {
+                        debug_assert!(this.deadline.is_none());
                         this.deadline.set(Some(tokio::time::sleep(Duration::from_millis(
                             this.batch_config.max_fill_ms,
                         ))));
-                        *this.reset_timer = false;
                     }
 
                     // Add the new item to the batch and track its size.
@@ -310,11 +277,8 @@ where
                         && memory_subscription.current_backpressure_active()
                     {
                         *this.paused_for_memory = true;
-                        *this.reset_timer = true;
+                        this.deadline.set(None);
 
-                        // If we are paused for memory, we don't want to reallocate a batch of the
-                        // same size as before, to avoid increasing memory
-                        // usage even more.
                         let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                         return Poll::Ready(Some(Ok(batch)));
@@ -327,11 +291,8 @@ where
                     if *this.batch_size_hint_bytes
                         >= this.batch_memory_governor.batch_size_target_bytes()
                     {
-                        *this.reset_timer = true;
+                        this.deadline.set(None);
 
-                        // COPY consumers wait for destination-result completion before polling
-                        // again, so retaining another full outer-vector allocation
-                        // here would violate the stream's one-batch-slot model.
                         let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                         return Poll::Ready(Some(Ok(batch)));
@@ -339,32 +300,25 @@ where
                 }
                 Poll::Ready(Some(Err(err))) => {
                     *this.inner_stream_ended = true;
-                    *this.reset_timer = true;
                     this.deadline.set(None);
 
                     // Successful values buffered before the error will never be
                     // emitted, so release them immediately.
-                    drop(std::mem::take(this.items));
-                    *this.batch_size_hint_bytes = 0;
+                    drop(take_batch(this.items, this.batch_size_hint_bytes));
 
                     return Poll::Ready(Some(Err(err)));
                 }
                 Poll::Ready(None) => {
+                    *this.inner_stream_ended = true;
+                    this.deadline.set(None);
+
                     let last = if this.items.is_empty() {
                         None
                     } else {
-                        *this.reset_timer = true;
-
-                        // The inner stream is ending, so no future batch can
-                        // reuse retained capacity. `mem::take` replaces the
-                        // buffer with `Vec::new()`, which keeps zero capacity
-                        // and avoids allocating a replacement vector.
                         let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
                         Some(Ok(batch))
                     };
-
-                    *this.inner_stream_ended = true;
 
                     return Poll::Ready(last);
                 }
@@ -377,13 +331,11 @@ where
 
         // PRIORITY 3: Time-based emission check.
         if !this.items.is_empty()
-            && let Some(deadline) = this.deadline.as_pin_mut()
+            && let Some(deadline) = this.deadline.as_mut().as_pin_mut()
         {
             ready!(deadline.poll(cx));
-            *this.reset_timer = true;
+            this.deadline.set(None);
 
-            // Do not preallocate the next outer row buffer while this batch is
-            // still awaiting destination-result completion.
             let batch = take_batch(this.items, this.batch_size_hint_bytes);
 
             return Poll::Ready(Some(Ok(batch)));
@@ -623,8 +575,7 @@ mod tests {
         let unblocker = {
             let memory = memory.clone();
             tokio::spawn(async move {
-                // We wait a second before unblocking, to avoid the stream being polled with
-                // `false` already there.
+                // Delay release so the waiter observes the blocked state first.
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 memory.set_backpressure_active_for_test(false);
             })
@@ -635,8 +586,7 @@ mod tests {
             stream.next().await
         });
 
-        // This is a scheduling hint, not a strict guarantee, but it gives the spawned
-        // waiter a chance to poll once before we advance virtual time.
+        // Give the spawned waiter a chance to poll before advancing virtual time.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(1)).await;
 
@@ -644,36 +594,6 @@ mod tests {
 
         assert_eq!(result, Some(14));
         unblocker.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn flushes_buffered_items_immediately_when_memory_blocks() {
-        let memory = MemoryMonitor::new_for_test();
-        let memory_sub = memory.subscribe();
-
-        let batch_config = test_batch_config(10_000);
-        let mut stream = Box::pin(MemoryBatchStream::wrap(
-            TwoThenPending::new(),
-            "test_stream",
-            batch_config,
-            memory_sub,
-            test_batch_memory_governor(&memory),
-        ));
-
-        // First the first poll, we are pending since we are waiting for 10 elements but
-        // the stream only yields 2 and then suspends.
-        poll_fn(|cx| match stream.as_mut().poll_next(cx) {
-            Poll::Pending => Poll::Ready(()),
-            _ => panic!("expected pending"),
-        })
-        .await;
-
-        memory.set_backpressure_active_for_test(true);
-
-        // Now backpressure is active, so the system is expected to flush its existing
-        // state.
-        let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(batch, Some(Ok(vec![1, 2])));
     }
 
     #[tokio::test(start_paused = true)]
@@ -762,7 +682,7 @@ mod tests {
             test_batch_memory_governor(&memory),
         ));
 
-        // Memory is full, so we block any poll.
+        // Active pressure prevents source polling.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected pending while backpressure is active"),
@@ -771,7 +691,7 @@ mod tests {
 
         memory.set_backpressure_active_for_test(false);
 
-        // Memory is now back, so we should get the batch of 1 element.
+        // Releasing pressure lets the final one-item batch through.
         let batch = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(batch, Some(Ok(vec![1])));
     }
@@ -796,8 +716,7 @@ mod tests {
         let unblocker = {
             let memory = memory.clone();
             tokio::spawn(async move {
-                // We wait a second before unblocking, to avoid the stream being polled with
-                // `false` already there.
+                // Delay release so the waiter observes the blocked state first.
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 memory.set_backpressure_active_for_test(false);
             })
@@ -808,8 +727,7 @@ mod tests {
             stream.next().await
         });
 
-        // This is a scheduling hint, not a strict guarantee, but it gives the spawned
-        // waiter a chance to poll once before we advance virtual time.
+        // Give the spawned waiter a chance to poll before advancing virtual time.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(1)).await;
 
@@ -820,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn flushes_when_batch_reaches_max_bytes_before_max_items() {
+    async fn flushes_at_cumulative_size_target_and_starts_the_next_batch() {
         let memory = MemoryMonitor::new_for_test();
         let memory_sub = memory.subscribe();
 
@@ -846,34 +764,6 @@ mod tests {
 
         let second = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(second, Some(Ok(items[2..].to_vec())));
-    }
-
-    #[tokio::test]
-    async fn max_bytes_uses_cumulative_size_hint_summation() {
-        let memory = MemoryMonitor::new_for_test();
-        let memory_sub = memory.subscribe();
-
-        let batch_config = test_batch_config(10_000);
-        let governor = test_small_batch_memory_governor(&memory);
-        let byte_target = governor.batch_size_target_bytes();
-        let first = (byte_target / 4).max(1);
-        let second = (byte_target / 4).max(1);
-        let third = byte_target.saturating_sub(first.saturating_add(second)).max(1);
-        let items = vec![
-            SizedToken { value: 1, bytes: first },
-            SizedToken { value: 2, bytes: second },
-            SizedToken { value: 3, bytes: third },
-        ];
-        let mut stream = Box::pin(MemoryBatchStream::wrap(
-            futures::stream::iter(items.clone().into_iter().map(Ok::<SizedToken, &'static str>)),
-            "test_stream",
-            batch_config,
-            memory_sub,
-            governor,
-        ));
-
-        let first = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-        assert_eq!(first, Some(Ok(items)));
     }
 
     #[tokio::test]

@@ -71,18 +71,19 @@ smoke runs do not park behind local memory heuristics. Pass
 in a benchmark run.
 
 Dynamic batch sizing is separate from emergency backpressure and remains active
-by default. `--memory-budget-ratio` defaults to `0.2`, which initially computes
-one global advisory decoded-batch target as:
+by default. `--memory-budget-ratio` defaults to `0.2`, which computes one global
+advisory decoded-batch target for each detected capacity snapshot as:
 
 ```text
 detected_memory_capacity * 0.2
 ```
 
-The runtime divides that target across potential concurrent batch slots, then
-caps each batch at 32 MiB. The target is advisory: size is
-checked after decoding each item, so one indivisible row may exceed it. The
-detector uses the effective cgroup capacity visible to the process when it is
-running inside a limited container, and host memory otherwise.
+The runtime divides that target across registered batch slots, then caps each
+batch at 32 MiB. A slot is one position that may own an accumulating or in-flight
+decoded batch. The target is advisory: size is checked after decoding each item,
+so one indivisible row may exceed it. The detector uses the effective cgroup
+capacity visible to the process when it is running inside a limited container,
+and host memory otherwise.
 
 Emergency backpressure independently activates at 85% used memory and resumes
 below 75%, with one coherent memory snapshot every 100ms. This whole-process
@@ -332,7 +333,9 @@ Important workflow inputs:
 - `max_copy_connections_per_table`: per-table copy connection parallelism.
 - `batch_max_fill_ms`: stream batch fill timeout.
 - `memory_budget_ratio`: maximum ratio of detected memory targeted globally for
-  decoded batches before division across active batch slots. Defaults to `0.2`.
+  decoded batches before division across registered batch slots. A slot is one
+  position that may own an accumulating or in-flight decoded batch. Defaults to
+  `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
 - `destination`: `null`, `bigquery`, `clickhouse`, or `snowflake`.

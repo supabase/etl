@@ -263,6 +263,7 @@ struct BackpressureMonitor {
 /// backpressure is active.
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryMonitor {
+    /// Shared sampler state and optional emergency backpressure controller.
     inner: Arc<MemoryMonitorInner>,
 }
 
@@ -412,9 +413,8 @@ impl MemoryMonitor {
     pub(crate) fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
         let backpressure = self.inner.backpressure.as_ref()?;
 
-        // We snapshot the current state of the watch channel and create a stream out of
-        // it. The stream will return the new values from this point onward,
-        // independently of when it will be polled.
+        // Retain a receiver for current-state reads while the stream yields only
+        // changes that occur after subscription.
         let rx = backpressure.active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
@@ -518,6 +518,7 @@ fn compute_next_backpressure_active(
     used_percent >= activate_threshold
 }
 
+/// Records whether emergency memory backpressure is currently active.
 fn emit_backpressure_active_metric(backpressure_active: bool) {
     gauge!(ETL_MEMORY_BACKPRESSURE_ACTIVE).set(if backpressure_active { 1.0 } else { 0.0 });
 }
@@ -552,6 +553,7 @@ fn emit_memory_snapshot_metrics(
     .set(snapshot.total as f64);
 }
 
+/// Counts one emergency backpressure activation or resume transition.
 fn emit_transition_metric(backpressure_active: bool) {
     counter!(
         ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
@@ -560,6 +562,7 @@ fn emit_transition_metric(backpressure_active: bool) {
     .increment(1);
 }
 
+/// Records the duration of one completed emergency backpressure interval.
 fn emit_activation_duration_metric(duration: Duration) {
     histogram!(ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS).record(duration.as_secs_f64());
 }
@@ -629,7 +632,9 @@ pub(crate) struct MemoryCapacitySnapshot {
 /// `Pending` while memory is active without risking missed wakeups.
 #[derive(Debug)]
 pub(crate) struct MemoryMonitorSubscription {
+    /// Receiver used for race-free current-state reads.
     current_rx: watch::Receiver<bool>,
+    /// Stream of changes that occur after subscription.
     updates: WatchStream<bool>,
 }
 

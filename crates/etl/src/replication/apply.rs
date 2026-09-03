@@ -119,8 +119,8 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// Maximum number of decoded event batches that may coexist for one apply loop.
 ///
 /// One batch may be owned by a pending destination result while the apply loop
-/// accumulates the next batch. Register both potential owners so each producer
-/// receives a share of the configured decoded-batch capacity.
+/// accumulates the next batch. Register both positions so each receives a share
+/// of the configured decoded-batch capacity.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
 /// Maximum number of table schema cleanups buffered per apply loop.
 ///
@@ -1271,7 +1271,7 @@ where
 
         // Slot registration belongs to the apply loop because its state machine
         // determines how many decoded batches can coexist. Keep the guard alive
-        // until the loop exits so both potential owners divide the shared target.
+        // until the loop exits so both positions divide the shared target.
         let _batch_slot_guard = batch_memory_governor.register_batch_slots(APPLY_LOOP_BATCH_SLOTS);
         let mut apply_loop = Self {
             config: Arc::clone(&config),
@@ -1940,7 +1940,7 @@ where
         // We clear the state up front because this flush is no longer in flight.
         let processing_paused = self.state.resume_processing();
 
-        // Explode the result into parts which are used for handling the flush result.
+        // Decompose the completed result into its metadata, timing, and outcome.
         let (metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
         // If there was an error in the flushing, we return it immediately.
@@ -2279,12 +2279,8 @@ where
         self.destination.write_events(events, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
-        // We reset the deadline for the batch, since we are now flushing a new batch.
-        // The new deadline will start as soon as we process a new element.
-        //
-        // It's important to note that the deadline is removed only when the batch is
-        // flushed and not before this way, if a batch fails to flush due to
-        // inflight, it will be re-tried indefinitely until that finishes.
+        // Reset only after dispatch. A batch deferred behind an in-flight write
+        // keeps its deadline until that write completes and dispatch is retried.
         self.state.reset_flush_deadline();
 
         Ok(())
