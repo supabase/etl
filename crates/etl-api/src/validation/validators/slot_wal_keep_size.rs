@@ -67,13 +67,12 @@ impl RecommendationBasis {
             Self::HistoricalWalRate => {
                 "The estimate uses the available historical average WAL rate for the source \
                  Postgres instance but cannot predict activity during initial sync. If the source \
-                 remains idle, substantially less may be sufficient; if writes continue, use this \
-                 value as a conservative baseline."
+                 remains idle, substantially less may be sufficient."
             }
             Self::TableSizeFallback => {
                 "The estimate uses a table-size fallback because usable WAL history is \
                  unavailable. If the source remains idle during initial sync, substantially less \
-                 may be sufficient; if writes continue, use this value as a conservative baseline."
+                 may be sufficient."
             }
         }
     }
@@ -332,10 +331,11 @@ fn recommendation_warning(
              planning recommendation of {recommended_size}. During initial sync, the pipeline \
              will copy existing rows from `{}`, the largest selected table (approximately \
              {largest_table_size}), then catch up on retained WAL before ongoing \
-             replication.\n\n{workload_context}\n\nIf Postgres removes the required WAL before \
-             catch-up, the replication slot can become unusable and the table may need to run its \
-             initial sync again. Increase the setting in `postgresql.conf` or the managed-service \
-             database parameter settings, then reload Postgres.\n\n{DISK_SPACE_WARNING}",
+             replication.\n\n{workload_context} If writes continue, use this value as a \
+             conservative baseline.\n\nIf Postgres removes the required WAL before catch-up, the \
+             replication slot can become unusable and the table may need to run its initial sync \
+             again. Increase the setting in `postgresql.conf` or the managed-service database \
+             parameter settings, then reload Postgres.\n\n{DISK_SPACE_WARNING}",
             recommendation.largest_table_name,
         ),
     )
@@ -556,6 +556,7 @@ mod tests {
         assert!(below[0].reason.contains("usable WAL history is unavailable"));
         assert!(below[0].reason.contains("source remains idle during initial sync"));
         assert!(below[0].reason.contains("substantially less may be sufficient"));
+        assert!(below[0].reason.contains("use this value as a conservative baseline"));
         assert!(below[0].reason.contains("copy existing rows"));
         assert!(below[0].reason.contains("catch up on retained WAL"));
         assert!(below[0].reason.contains("before ongoing replication"));
@@ -577,6 +578,7 @@ mod tests {
         assert!(failures[0].reason.contains("historical average WAL rate for the source Postgres"));
         assert!(failures[0].reason.contains("cannot predict activity during initial sync"));
         assert!(failures[0].reason.contains("substantially less may be sufficient"));
+        assert!(failures[0].reason.contains("use this value as a conservative baseline"));
         assert!(failures[0].reason.contains("copy existing rows"));
         assert!(failures[0].reason.contains("catch up on retained WAL"));
         assert!(!failures[0].reason.contains("MiB/s"));
@@ -606,8 +608,26 @@ mod tests {
             assert!(
                 failures[0].reason.contains("Choose a setting based on expected WAL generation")
             );
+            assert!(!failures[0].reason.contains("this value"));
             assert_uses_initial_sync_terminology(&failures[0].reason);
         }
+    }
+
+    #[test]
+    fn capped_size_fallback_does_not_reference_an_unshown_value() {
+        let recommendation = recommendation_for(10_240, 0.0, 0.0);
+
+        assert_eq!(recommendation.recommended_mb, MAX_AUTOMATIC_RECOMMENDATION_MB);
+        assert!(recommendation.recommendation_was_capped);
+
+        let failures =
+            slot_wal_keep_size_failures(MAX_AUTOMATIC_RECOMMENDATION_MB / 2, Some(&recommendation));
+
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].reason.contains("table-size fallback"));
+        assert!(failures[0].reason.contains("Choose a setting based on expected WAL generation"));
+        assert!(!failures[0].reason.contains("this value"));
+        assert_uses_initial_sync_terminology(&failures[0].reason);
     }
 
     #[test]
