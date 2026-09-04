@@ -1,25 +1,22 @@
 use async_trait::async_trait;
 use etl_config::shared::TableSyncCopyConfig;
-use etl_postgres::store::catalog::ETL_SCHEMA_NAME;
+use etl_postgres::{store::catalog::ETL_SCHEMA_NAME, version::POSTGRES_15};
 use sqlx::{FromRow, postgres::types::Oid};
 
-use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+use super::{
+    super::{ValidationContext, ValidationError, ValidationFailure, Validator},
+    MAX_REPORTED_OBJECTS,
+    slot_wal_keep_size::{
+        SlotWalKeepSizeRecommendation, recommend_slot_wal_keep_size, slot_wal_keep_size_failures,
+    },
+};
 
-/// PostgreSQL default for `wal_level`.
-const DEFAULT_WAL_LEVEL: &str = "replica";
-/// PostgreSQL default for `max_replication_slots`.
-const DEFAULT_MAX_REPLICATION_SLOTS: i32 = 10;
-/// PostgreSQL default for `max_wal_senders`.
-const DEFAULT_MAX_WAL_SENDERS: i32 = 10;
-/// PostgreSQL default for `max_slot_wal_keep_size`.
-const DEFAULT_MAX_SLOT_WAL_KEEP_SIZE_MB: i64 = -1;
-/// PostgreSQL default for `idle_replication_slot_timeout`.
-const DEFAULT_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 0;
-/// Minimum practical per-slot WAL retention for logical replication.
-const MIN_SLOT_WAL_KEEP_SIZE_MB: i64 = 1024;
+/// Value used when PostgreSQL does not support
+/// `idle_replication_slot_timeout`.
+const UNSUPPORTED_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 0;
 /// Low idle replication slot timeout warning threshold in seconds.
 ///
-/// Values at or below this are too aggressive for ordinary ETL deploys,
+/// Values at or below this are too aggressive for ordinary pipeline deploys,
 /// maintenance windows, and incident pauses.
 const LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 300;
 
@@ -70,12 +67,21 @@ impl Validator for PublicationExistsValidator {
 /// Validates source settings needed for reliable logical replication.
 #[derive(Debug)]
 pub(super) struct LogicalReplicationSettingsValidator {
+    /// Maximum number of concurrent initial table-copy workers.
     max_table_sync_workers: u16,
+    /// Name of the publication whose initial-copy workload is estimated.
+    publication_name: String,
+    /// Table selection applied to the initial-copy workload.
+    table_sync_copy: TableSyncCopyConfig,
 }
 
 impl LogicalReplicationSettingsValidator {
-    pub(super) fn new(max_table_sync_workers: u16) -> Self {
-        Self { max_table_sync_workers }
+    pub(super) fn new(
+        max_table_sync_workers: u16,
+        publication_name: String,
+        table_sync_copy: TableSyncCopyConfig,
+    ) -> Self {
+        Self { max_table_sync_workers, publication_name, table_sync_copy }
     }
 }
 
@@ -114,63 +120,60 @@ impl Validator for LogicalReplicationSettingsValidator {
         let audit = sqlx::query_as::<_, LogicalReplicationSettingsAudit>(
             r#"
             select
-                coalesce(current_setting('wal_level', true), $1::text) as wal_level,
-                (
-                    select rolsuper or rolreplication
+                current_setting('wal_level') as wal_level,
+                exists (
+                    select 1
                     from pg_roles
                     where rolname = current_user
+                      and (rolsuper or rolreplication)
                 ) as has_replication_permission,
-                coalesce(
-                    (
-                        select setting::int
-                        from pg_settings
-                        where name = 'max_replication_slots'
-                    ),
-                    $2::int
-                ) as max_replication_slots,
+                current_setting('max_replication_slots')::int as max_replication_slots,
                 (
                     select count(*)
                     from pg_replication_slots
                 ) as used_replication_slots,
-                coalesce(
-                    (
-                        select setting::int
-                        from pg_settings
-                        where name = 'max_wal_senders'
-                    ),
-                    $3::int
-                ) as max_wal_senders,
+                current_setting('max_wal_senders')::int as max_wal_senders,
                 (
                     select count(*)
                     from pg_stat_replication
                 ) as active_wal_senders,
+                settings.max_slot_wal_keep_size_mb,
                 coalesce(
-                    (
-                        select setting::bigint
-                        from pg_settings
-                        where name = 'max_slot_wal_keep_size'
-                    ),
-                    $4::bigint
-                ) as max_slot_wal_keep_size_mb,
-                coalesce(
-                    (
-                        select setting::bigint
-                        from pg_settings
-                        where name = 'idle_replication_slot_timeout'
-                    ),
-                    $5::bigint
+                    settings.idle_replication_slot_timeout_seconds,
+                    $1::bigint
                 ) as idle_replication_slot_timeout_seconds
+            from (
+                select
+                    max(setting::bigint)
+                        filter (where name = 'max_slot_wal_keep_size')
+                        as max_slot_wal_keep_size_mb,
+                    max(setting::bigint)
+                        filter (where name = 'idle_replication_slot_timeout')
+                        as idle_replication_slot_timeout_seconds
+                from pg_settings
+                where name in (
+                    'max_slot_wal_keep_size',
+                    'idle_replication_slot_timeout'
+                )
+            ) settings
             "#,
         )
-        .bind(DEFAULT_WAL_LEVEL)
-        .bind(DEFAULT_MAX_REPLICATION_SLOTS)
-        .bind(DEFAULT_MAX_WAL_SENDERS)
-        .bind(DEFAULT_MAX_SLOT_WAL_KEEP_SIZE_MB)
-        .bind(DEFAULT_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
+        .bind(UNSUPPORTED_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
         .fetch_one(source_pool)
         .await?;
 
-        Ok(logical_replication_settings_failures(audit, self.max_table_sync_workers))
+        let recommendation = if audit.max_slot_wal_keep_size_mb > 0 {
+            recommend_slot_wal_keep_size(source_pool, &self.publication_name, &self.table_sync_copy)
+                .await
+        } else {
+            None
+        };
+
+        Ok(logical_replication_settings_failures(
+            audit,
+            self.max_table_sync_workers,
+            recommendation.as_ref(),
+        ))
     }
 }
 
@@ -197,12 +200,12 @@ impl Validator for PublicationHasTablesValidator {
             .as_ref()
             .expect("source pool required for publication tables validation");
 
-        // Check if publication publishes all tables or has specific tables
-        let result: Option<(bool, i64)> = sqlx::query_as(
+        let has_tables: Option<bool> = sqlx::query_scalar(
             r#"
-            select
-                p.puballtables,
-                (select count(*) from pg_publication_tables pt where pt.pubname = p.pubname)
+            select exists (
+                select 1
+                from pg_get_publication_tables(p.pubname)
+            )
             from pg_publication p
             where p.pubname = $1
             "#,
@@ -211,13 +214,13 @@ impl Validator for PublicationHasTablesValidator {
         .fetch_optional(source_pool)
         .await?;
 
-        // If publication doesn't exist, skip this check (PublicationExistsValidator
-        // handles it)
-        let Some((puballtables, table_count)) = result else {
+        let Some(has_tables) = has_tables else {
+            // The publication existence validator reports the actionable
+            // prerequisite failure.
             return Ok(vec![]);
         };
 
-        if puballtables || table_count > 0 {
+        if has_tables {
             Ok(vec![])
         } else {
             Ok(vec![ValidationFailure::critical(
@@ -277,22 +280,16 @@ impl Validator for SelectedTableIdsInPublicationValidator {
         let Some((has_tables, published_oids)) = sqlx::query_as::<_, (bool, Vec<Oid>)>(
             r#"
                 select
-                    p.puballtables or exists (
-                        select 1
-                        from pg_publication_tables pt
-                        where pt.pubname = p.pubname
-                    ),
-                    array(
-                        select c.oid
-                        from pg_publication_tables pt
-                        join pg_namespace n on n.nspname = pt.schemaname
-                        join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
-                        where pt.pubname = p.pubname
-                          and c.oid = any($2::oid[])
-                        order by c.oid
+                    count(gpt.relid) > 0,
+                    coalesce(
+                        array_agg(distinct gpt.relid)
+                            filter (where gpt.relid = any($2::oid[])),
+                        array[]::oid[]
                     )
                 from pg_publication p
+                left join lateral pg_get_publication_tables(p.pubname) gpt on true
                 where p.pubname = $1
+                group by p.oid
                 "#,
         )
         .bind(&self.publication_name)
@@ -369,12 +366,13 @@ impl Validator for PublicationExcludesEtlTablesValidator {
                         (
                             select array_agg(t.table_name order by t.table_name)
                             from (
-                                select pt.schemaname || '.' || pt.tablename as table_name
-                                from pg_publication_tables pt
-                                where pt.pubname = p.pubname
-                                  and pt.schemaname = $2
-                                order by pt.tablename
-                                limit 100
+                                select distinct format('%I.%I', n.nspname, c.relname) as table_name
+                                from pg_get_publication_tables(p.pubname) gpt
+                                join pg_class c on c.oid = gpt.relid
+                                join pg_namespace n on n.oid = c.relnamespace
+                                where n.nspname = $2
+                                order by table_name
+                                limit $3
                             ) t
                         ),
                         array[]::text[]
@@ -385,6 +383,7 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             )
             .bind(&self.publication_name)
             .bind(ETL_SCHEMA_NAME)
+            .bind(MAX_REPORTED_OBJECTS)
             .fetch_optional(source_pool)
             .await?
         else {
@@ -395,11 +394,11 @@ impl Validator for PublicationExcludesEtlTablesValidator {
 
         if puballtables {
             return Ok(vec![ValidationFailure::critical(
-                "Publication Includes ETL Tables",
+                "Publication Includes Pipeline Metadata Tables",
                 format!(
-                    "Publication `{}` is defined `FOR ALL TABLES`, which also publishes ETL's \
-                     internal schema tables when they exist.\n\nUse an explicit table list, or \
-                     `FOR TABLES IN SCHEMA` with only customer-owned schemas. A `FOR ALL TABLES` \
+                    "Publication `{}` is defined `FOR ALL TABLES`, which can also publish the \
+                     pipeline's internal metadata tables.\n\nUse an explicit table list, or `FOR \
+                     TABLES IN SCHEMA` with only customer-owned schemas. A `FOR ALL TABLES` \
                      publication cannot be narrowed in place, so replace it with a publication \
                      that excludes the `{ETL_SCHEMA_NAME}` schema and select that publication for \
                      the pipeline.",
@@ -410,12 +409,13 @@ impl Validator for PublicationExcludesEtlTablesValidator {
 
         if !published_etl_tables.is_empty() {
             return Ok(vec![ValidationFailure::critical(
-                "Publication Includes ETL Tables",
+                "Publication Includes Pipeline Metadata Tables",
                 format!(
-                    "Publication `{}` includes ETL internal tables: {}.\n\nRemove the listed \
+                    "Publication `{}` includes internal pipeline tables: {}.\n\nRemove the listed \
                      tables from the publication before starting the pipeline. A publication \
-                     owner can run `ALTER PUBLICATION {} DROP TABLE <schema.table>, ...`. ETL \
-                     state tables are implementation details and must not be replicated.",
+                     owner can run `ALTER PUBLICATION {} DROP TABLE <schema.table>, ...`. \
+                     Pipeline metadata tables are implementation details and must not be \
+                     replicated.",
                     self.publication_name,
                     format_code_list(&published_etl_tables),
                     self.publication_name
@@ -423,7 +423,7 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             )]);
         }
 
-        if server_version_num >= 15_00_00 {
+        if server_version_num >= POSTGRES_15 {
             let publishes_etl_schema: bool = sqlx::query_scalar(
                 r#"
                 select exists (
@@ -443,7 +443,7 @@ impl Validator for PublicationExcludesEtlTablesValidator {
 
             if publishes_etl_schema {
                 return Ok(vec![ValidationFailure::critical(
-                    "Publication Includes ETL Tables",
+                    "Publication Includes Pipeline Metadata Tables",
                     format!(
                         "Publication `{}` includes the `{ETL_SCHEMA_NAME}` schema.\n\nRemove that \
                          schema from the publication with `ALTER PUBLICATION {} DROP TABLES IN \
@@ -482,29 +482,23 @@ impl Validator for GeneratedColumnsValidator {
             .as_ref()
             .expect("source pool required for generated columns validation");
 
-        // Find tables with generated columns using pg_publication_rel for direct OID
-        // access
         let tables_with_generated: Vec<String> = sqlx::query_scalar(
             r#"
-            select distinct n.nspname || '.' || c.relname
-            from pg_publication_rel pr
-            join pg_publication p on p.oid = pr.prpubid
-            join pg_class c on c.oid = pr.prrelid
-            join pg_namespace n on n.oid = c.relnamespace
-            where p.pubname = $1
-              and exists (
-                select 1
-                from pg_attribute a
-                where a.attrelid = pr.prrelid
-                  and a.attnum > 0
-                  and not a.attisdropped
-                  and a.attgenerated != ''
-              )
-            order by 1
-            limit 100
+            select distinct format('%I.%I', n.nspname, c.relname) as table_name
+            from pg_publication_tables pt
+            join pg_namespace n on n.nspname = pt.schemaname
+            join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+            join pg_attribute a on a.attrelid = c.oid
+            where pt.pubname = $1
+              and a.attnum > 0
+              and not a.attisdropped
+              and a.attgenerated != ''
+            order by table_name
+            limit $2
             "#,
         )
         .bind(&self.publication_name)
+        .bind(MAX_REPORTED_OBJECTS)
         .fetch_all(source_pool)
         .await?;
 
@@ -536,6 +530,7 @@ fn format_code_list(values: &[String]) -> String {
 fn logical_replication_settings_failures(
     audit: LogicalReplicationSettingsAudit,
     max_table_sync_workers: u16,
+    slot_wal_keep_size_recommendation: Option<&SlotWalKeepSizeRecommendation>,
 ) -> Vec<ValidationFailure> {
     let mut failures = Vec::new();
 
@@ -554,6 +549,9 @@ fn logical_replication_settings_failures(
     ));
     failures.extend(slot_wal_keep_size_failures(
         audit.max_slot_wal_keep_size_mb,
+        slot_wal_keep_size_recommendation,
+    ));
+    failures.extend(idle_replication_slot_timeout_failures(
         audit.idle_replication_slot_timeout_seconds,
     ));
 
@@ -666,70 +664,28 @@ fn wal_sender_failures(
     failures
 }
 
-/// Builds validation failures for slot WAL retention settings.
-fn slot_wal_keep_size_failures(
-    max_slot_wal_keep_size_mb: i64,
+/// Builds validation failures for idle replication slot timeout settings.
+fn idle_replication_slot_timeout_failures(
     idle_replication_slot_timeout_seconds: i64,
 ) -> Vec<ValidationFailure> {
-    let mut failures = Vec::new();
-
-    match max_slot_wal_keep_size_mb {
-        -1 => failures.push(ValidationFailure::warning(
-            "Unlimited Slot WAL Retention",
-            "`max_slot_wal_keep_size` is unlimited.\n\nLogical replication slots can retain WAL \
-             indefinitely when ETL is paused, disconnected, or stuck on a table error. This does \
-             not prevent the pipeline from starting, but an abandoned or stalled slot can fill \
-             the source database disk.\n\nSet a bounded value large enough for your write volume \
-             and longest expected initial copy in `postgresql.conf` or the managed-service \
-             database parameter settings, then reload the PostgreSQL configuration. For example, \
-             a database administrator can run `ALTER SYSTEM SET max_slot_wal_keep_size = '10GB'` \
-             followed by `SELECT pg_reload_conf()` on self-managed PostgreSQL.",
-        )),
-        0 => failures.push(ValidationFailure::critical(
-            "Slot WAL Retention Disabled",
-            "`max_slot_wal_keep_size` is 0 MB, leaving no per-slot WAL retention headroom.\n\nA \
-             logical replication slot can be invalidated as soon as it falls behind at a \
-             checkpoint, which can force ETL to restart table copies or require slot recreation. \
-             Set `max_slot_wal_keep_size` to a positive value in `postgresql.conf` or the \
-             managed-service database parameter settings, then reload the PostgreSQL \
-             configuration. Size it for source write volume, available disk, and the longest \
-             expected ETL downtime.",
-        )),
-        1..MIN_SLOT_WAL_KEEP_SIZE_MB => failures.push(ValidationFailure::warning(
-            "Low Slot WAL Retention",
-            format!(
-                "`max_slot_wal_keep_size` is {max_slot_wal_keep_size_mb} MB, which is below ETL's \
-                 recommended minimum of {MIN_SLOT_WAL_KEEP_SIZE_MB} MB.\n\nThis may be too small \
-                 for logical replication during large transactions, destination outages, or long \
-                 initial table copies. Increase it in `postgresql.conf` or the managed-service \
-                 database parameter settings, then reload the PostgreSQL configuration. Size it \
-                 based on source write volume, available disk, and the longest time ETL may need \
-                 to catch up. On self-managed PostgreSQL, a database administrator can run `ALTER \
-                 SYSTEM SET max_slot_wal_keep_size = '1GB'` followed by `SELECT pg_reload_conf()` \
-                 to apply ETL's minimum."
-            ),
-        )),
-        _ => {}
-    }
-
     if (1..=LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
         .contains(&idle_replication_slot_timeout_seconds)
     {
-        failures.push(ValidationFailure::warning(
+        vec![ValidationFailure::warning(
             "Low Idle Replication Slot Timeout",
             format!(
                 "`idle_replication_slot_timeout` is {idle_replication_slot_timeout_seconds} \
-                 seconds, which is below ETL's recommended minimum of \
+                 seconds, which is below the pipeline's recommended minimum of \
                  {LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS} seconds.\n\nPostgreSQL can \
-                 invalidate ETL's logical replication slot after a short deploy, maintenance \
-                 window, or incident pause, with `pg_replication_slots.invalidation_reason = \
-                 'idle_timeout'`.\n\nUse `0` to disable idle-slot invalidation, or choose a value \
-                 safely above expected ETL downtime. Change the setting in `postgresql.conf` or \
-                 the managed-service database parameter settings, then reload the PostgreSQL \
-                 configuration."
+                 invalidate the pipeline's logical replication slot after a short deploy, \
+                 maintenance window, or incident pause, with \
+                 `pg_replication_slots.invalidation_reason = 'idle_timeout'`.\n\nUse `0` to \
+                 disable idle-slot invalidation, or choose a value safely above expected pipeline \
+                 downtime. Change the setting in `postgresql.conf` or the managed-service \
+                 database parameter settings, then reload the PostgreSQL configuration."
             ),
-        ));
+        )]
+    } else {
+        Vec::new()
     }
-
-    failures
 }

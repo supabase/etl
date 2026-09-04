@@ -39,8 +39,8 @@ impl Validator for ClickHouseValidator {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse URL Invalid",
                 format!(
-                    "ClickHouse URL must use `https`, but this URL uses `{scheme}`.\n\nETL \
-                     requires TLS to protect credentials and replicated rows. Update the \
+                    "ClickHouse URL must use `https`, but this URL uses `{scheme}`.\n\nThe \
+                     pipeline requires TLS to protect credentials and replicated rows. Update the \
                      destination URL to the ClickHouse HTTPS endpoint, including its port when \
                      required."
                 ),
@@ -50,7 +50,7 @@ impl Validator for ClickHouseValidator {
         if self.user.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "ClickHouse User Required",
-                "Enter the ClickHouse user that ETL should connect with.",
+                "Enter the ClickHouse user that the pipeline should connect with.",
             )]);
         }
 

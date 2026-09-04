@@ -38,11 +38,15 @@ impl ReplicaIdentityValidator {
 /// Replica identity catalog data for one publication table.
 #[derive(Debug, FromRow)]
 struct TableReplicaIdentityAudit {
+    /// Whether the publication emits update events.
+    publication_publishes_updates: bool,
+    /// Whether the publication emits delete events.
+    publication_publishes_deletes: bool,
     /// Schema-qualified table name for warning output.
     table_name: String,
     /// Raw `pg_class.relreplident` value for the table.
     relreplident: String,
-    /// Table primary-key column numbers from `pg_constraint.conkey`.
+    /// Table primary-key column numbers from `pg_index.indkey`.
     primary_key_attnums: Vec<i32>,
     /// Key column numbers from the index marked by `pg_index.indisreplident`.
     replica_identity_index_attnums: Vec<i32>,
@@ -67,81 +71,40 @@ impl Validator for ReplicaIdentityValidator {
             return Ok(vec![]);
         };
 
-        let Some((publication_publishes_updates, publication_publishes_deletes)) =
-            sqlx::query_as::<_, (bool, bool)>(
-                r#"
-            select pubupdate, pubdelete
-            from pg_publication
-            where pubname = $1
-            "#,
-            )
-            .bind(&self.publication_name)
-            .fetch_optional(source_pool)
-            .await?
-        else {
-            // If the publication doesn't exist, skip this check. Pipeline
-            // validation reports the actionable publication failure.
-            return Ok(vec![]);
-        };
-
         let table_identities = sqlx::query_as::<_, TableReplicaIdentityAudit>(
             r#"
             select
-                n.nspname || '.' || c.relname as table_name,
+                p.pubupdate as publication_publishes_updates,
+                p.pubdelete as publication_publishes_deletes,
+                format('%I.%I', n.nspname, c.relname) as table_name,
                 c.relreplident::text as relreplident,
-                coalesce(pk.primary_key_attnums, array[]::int4[]) as primary_key_attnums,
-                coalesce(ri.replica_identity_index_attnums, array[]::int4[])
-                    as replica_identity_index_attnums
+                array(
+                    select x.attnum::int4
+                    from pg_index i
+                    cross join lateral unnest(i.indkey) with ordinality as x(attnum, n)
+                    where i.indrelid = c.oid
+                      and i.indisprimary
+                      and i.indisvalid
+                      and x.n <= i.indnkeyatts
+                      and x.attnum > 0
+                    order by x.n
+                ) as primary_key_attnums,
+                array(
+                    select x.attnum::int4
+                    from pg_index i
+                    cross join lateral unnest(i.indkey) with ordinality as x(attnum, n)
+                    where i.indrelid = c.oid
+                      and i.indisreplident
+                      and i.indisvalid
+                      and i.indislive
+                      and x.n <= i.indnkeyatts
+                      and x.attnum > 0
+                    order by x.n
+                ) as replica_identity_index_attnums
             from pg_publication p
             cross join lateral pg_get_publication_tables(p.pubname) gpt
             join pg_class c on c.oid = gpt.relid
             join pg_namespace n on n.oid = c.relnamespace
-            left join lateral (
-                with direct_parent as (
-                    select i.inhparent as parent_oid
-                    from pg_inherits i
-                    where i.inhrelid = c.oid
-                    order by i.inhseqno
-                    limit 1
-                ),
-                primary_key_cols as (
-                    select x.attnum::int4 as attnum, x.n::int4 as position
-                    from pg_constraint con
-                    cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-                    where con.conrelid = c.oid
-                      and con.contype = 'p'
-                ),
-                parent_primary_key_cols as (
-                    select x.attnum::int4 as attnum, x.n::int4 as position
-                    from direct_parent dp
-                    join pg_constraint con
-                      on con.conrelid = dp.parent_oid
-                     and con.contype = 'p'
-                    cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-                ),
-                effective_primary_key_cols as (
-                    select pkc.attnum, pkc.position
-                    from primary_key_cols pkc
-                    union all
-                    select ppkc.attnum, ppkc.position
-                    from parent_primary_key_cols ppkc
-                    where not exists (
-                        select 1
-                        from primary_key_cols pkc
-                    )
-                )
-                select array_agg(epkc.attnum order by epkc.position) as primary_key_attnums
-                from effective_primary_key_cols epkc
-            ) pk on true
-            left join lateral (
-                select array_agg(x.attnum::int4 order by x.n) as replica_identity_index_attnums
-                from pg_index i
-                cross join lateral unnest(i.indkey) with ordinality as x(attnum, n)
-                where i.indrelid = c.oid
-                  and i.indisreplident
-                  and x.n <= i.indnkeyatts
-                  and x.attnum > 0
-            ) ri on true
             where p.pubname = $1
             order by n.nspname, c.relname
             "#,
@@ -149,6 +112,14 @@ impl Validator for ReplicaIdentityValidator {
         .bind(&self.publication_name)
         .fetch_all(source_pool)
         .await?;
+
+        let Some(first_table_identity) = table_identities.first() else {
+            // A missing or empty publication has no table identities to
+            // validate. Pipeline validation reports either prerequisite.
+            return Ok(vec![]);
+        };
+        let publication_publishes_updates = first_table_identity.publication_publishes_updates;
+        let publication_publishes_deletes = first_table_identity.publication_publishes_deletes;
 
         let mut currently_unsupported_tables = Vec::new();
         let mut warning_tables = Vec::new();

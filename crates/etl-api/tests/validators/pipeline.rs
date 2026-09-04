@@ -1,9 +1,6 @@
 use etl_api::validation::{FailureType, ValidationContext, validate_pipeline, validate_source};
 use etl_config::{Environment, shared::TableSyncCopyConfig};
-use etl_postgres::{
-    below_version, source::extract_server_version, sqlx::test_utils::drop_pg_database,
-    version::POSTGRES_15,
-};
+use etl_postgres::{sqlx::test_utils::drop_pg_database, version::POSTGRES_15};
 use sqlx::{Executor, postgres::types::Oid};
 
 use super::{create_pipeline_config, create_validation_context_with_source};
@@ -251,7 +248,8 @@ async fn validate_pipeline_rejects_explicit_etl_tables() {
     let pipeline_config = create_pipeline_config("etl_table_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let etl_failure = failures.iter().find(|f| f.name == "Publication Includes ETL Tables");
+    let etl_failure =
+        failures.iter().find(|f| f.name == "Publication Includes Pipeline Metadata Tables");
     assert!(etl_failure.is_some(), "Should reject publications containing ETL tables");
     assert_eq!(etl_failure.unwrap().failure_type, FailureType::Critical);
     assert!(
@@ -272,7 +270,8 @@ async fn validate_pipeline_rejects_all_tables_publication() {
     let pipeline_config = create_pipeline_config("all_tables_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let etl_failure = failures.iter().find(|f| f.name == "Publication Includes ETL Tables");
+    let etl_failure =
+        failures.iter().find(|f| f.name == "Publication Includes Pipeline Metadata Tables");
     assert!(etl_failure.is_some(), "Should reject FOR ALL TABLES publications");
     assert_eq!(etl_failure.unwrap().failure_type, FailureType::Critical);
     assert!(
@@ -287,9 +286,12 @@ async fn validate_pipeline_rejects_all_tables_publication() {
 async fn validate_pipeline_rejects_etl_schema_publication() {
     let (ctx, pool, config) = create_validation_context_with_source().await;
 
-    let server_version =
-        sqlx::query_scalar::<_, String>("show server_version").fetch_one(&pool).await.unwrap();
-    if below_version!(extract_server_version(server_version), POSTGRES_15) {
+    let server_version_num: i32 =
+        sqlx::query_scalar("select current_setting('server_version_num')::int")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    if server_version_num < POSTGRES_15 {
         drop_pg_database(&config).await;
         return;
     }
@@ -300,7 +302,8 @@ async fn validate_pipeline_rejects_etl_schema_publication() {
     let pipeline_config = create_pipeline_config("etl_schema_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let etl_failure = failures.iter().find(|f| f.name == "Publication Includes ETL Tables");
+    let etl_failure =
+        failures.iter().find(|f| f.name == "Publication Includes Pipeline Metadata Tables");
     assert!(etl_failure.is_some(), "Should reject publications containing the ETL schema");
     assert_eq!(etl_failure.unwrap().failure_type, FailureType::Critical);
     assert!(
@@ -376,6 +379,43 @@ async fn validate_pipeline_generated_columns() {
         gen_failure.unwrap().reason.contains("gen_col_table"),
         "Failure reason should mention the table name"
     );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_pipeline_generated_columns_in_schema_publication() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    let server_version_num: i32 =
+        sqlx::query_scalar("select current_setting('server_version_num')::int")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    if server_version_num < POSTGRES_15 {
+        drop_pg_database(&config).await;
+        return;
+    }
+
+    pool.execute("create schema app").await.unwrap();
+    pool.execute(
+        "create table app.generated_values (
+            id bigint primary key,
+            source_value int,
+            derived_value int generated always as (source_value * 2) stored
+        )",
+    )
+    .await
+    .unwrap();
+    pool.execute("create publication generated_schema_pub for tables in schema app").await.unwrap();
+
+    let pipeline_config = create_pipeline_config("generated_schema_pub");
+    let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
+
+    let failure =
+        failures.iter().find(|failure| failure.name == "Tables With Generated Columns").unwrap();
+    assert_eq!(failure.failure_type, FailureType::Warning);
+    assert!(failure.reason.contains("app.generated_values"));
 
     drop_pg_database(&config).await;
 }
