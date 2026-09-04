@@ -84,18 +84,17 @@ pub(super) async fn recommend_slot_wal_keep_size(
 
     // The catalog surface used below is shared by every supported PostgreSQL
     // version (14 through 18). PostgreSQL size functions inspect relation
-    // storage without scanning table rows. `pg_partition_tree` makes one
-    // published partition root a single logical table whose size is the sum
-    // of its leaf partitions, including nested range, list, hash, and default
+    // storage without scanning table rows. The recursive inheritance tree
+    // matches the initial-copy `select` behavior: unless `only` is specified,
+    // PostgreSQL scans both ordinary inheritance descendants and declarative
     // partitions. `pg_table_size` includes table forks and TOAST, which the
     // initial copy reads, but excludes indexes, which it does not read.
     let query = sqlx::query_as::<_, RecommendationInputs>(
         r#"
-        with selected_tables as (
+        with recursive selected_tables as (
             select distinct
                 c.oid,
-                format('%I.%I', n.nspname, c.relname) as table_name,
-                c.relkind
+                format('%I.%I', n.nspname, c.relname) as table_name
             from pg_publication p
             cross join lateral pg_get_publication_tables(p.pubname) gpt
             join pg_class c on c.oid = gpt.relid
@@ -106,22 +105,24 @@ pub(super) async fn recommend_slot_wal_keep_size(
                   or (c.oid = any($3::oid[])) = $2
               )
         ),
+        relation_tree(root_oid, relation_oid) as (
+            select oid, oid
+            from selected_tables
+
+            union
+
+            select rt.root_oid, i.inhrelid
+            from relation_tree rt
+            join pg_inherits i on i.inhparent = rt.relation_oid
+        ),
         table_sizes as (
             select
                 st.oid,
                 st.table_name,
-                case st.relkind
-                    when 'p' then coalesce(
-                        (
-                            select sum(pg_table_size(pt.relid))
-                            from pg_partition_tree(st.oid) pt
-                            where pt.isleaf
-                        ),
-                        0
-                    )
-                    else pg_table_size(st.oid)
-                end::bigint as table_bytes
+                coalesce(sum(pg_table_size(rt.relation_oid)), 0)::bigint as table_bytes
             from selected_tables st
+            join relation_tree rt on rt.root_oid = st.oid
+            group by st.oid, st.table_name
         ),
         wal_statistics as (
             select

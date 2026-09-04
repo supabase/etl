@@ -10,7 +10,6 @@ pub(crate) struct SourceValidator;
 
 #[derive(Debug, FromRow)]
 struct SourceRoleAudit {
-    /// Database role used by the current source session.
     current_user: String,
     rolcanlogin: bool,
     rolreplication: bool,
