@@ -14,10 +14,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use thiserror::Error;
 use utoipa::ToSchema;
-#[doc(hidden)]
-pub use validators::slot_wal_keep_size::{
-    SlotWalKeepSizeRecommendation, recommend_slot_wal_keep_size,
-};
 
 use crate::{
     config::ApiConfig,

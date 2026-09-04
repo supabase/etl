@@ -1,10 +1,7 @@
 //! Replication-slot WAL retention recommendations.
 
-use std::time::Duration;
-
 use etl_config::shared::TableSyncCopyConfig;
-use sqlx::{FromRow, postgres::types::Oid};
-use tokio::time::timeout;
+use sqlx::{FromRow, PgPool, postgres::types::Oid};
 use tracing::warn;
 
 use crate::validation::ValidationFailure;
@@ -32,8 +29,6 @@ const COPY_OVERHEAD_SECONDS: u128 = 2 * 60;
 const MIN_WAL_STATISTICS_SECONDS: u64 = 60 * 60;
 /// Largest value pipeline preflight automatically recommends, in mebibytes.
 const MAX_AUTOMATIC_RECOMMENDATION_MB: i64 = 1024 * 1024;
-/// Maximum time an advisory catalog estimate may add to preflight.
-const RECOMMENDATION_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Inputs used to recommend a bounded replication-slot WAL retention setting.
 #[derive(Debug, FromRow)]
@@ -51,7 +46,7 @@ struct RecommendationInputs {
 
 /// A replication-slot WAL retention recommendation.
 #[derive(Debug, PartialEq, Eq)]
-pub struct SlotWalKeepSizeRecommendation {
+pub(super) struct SlotWalKeepSizeRecommendation {
     /// Qualified name of the table which determined the copy duration.
     largest_table_name: String,
     /// Estimated on-disk table bytes used by the model.
@@ -62,24 +57,12 @@ pub struct SlotWalKeepSizeRecommendation {
     recommendation_was_capped: bool,
 }
 
-impl SlotWalKeepSizeRecommendation {
-    /// Returns the qualified name of the table which determined the estimate.
-    pub fn largest_table_name(&self) -> &str {
-        &self.largest_table_name
-    }
-
-    /// Returns the estimated on-disk size of the largest table, in bytes.
-    pub fn largest_table_bytes(&self) -> u64 {
-        self.largest_table_bytes
-    }
-}
-
 /// Best-effort estimates a slot WAL retention limit for initial copy.
 ///
-/// Query errors and timeouts return `None` because this recommendation is
-/// advisory and must not prevent pipeline creation.
-pub async fn recommend_slot_wal_keep_size(
-    source_pool: &sqlx::PgPool,
+/// Query errors, including source statement timeouts, return `None` because
+/// this recommendation is advisory and must not prevent pipeline creation.
+pub(super) async fn recommend_slot_wal_keep_size(
+    source_pool: &PgPool,
     publication_name: &str,
     table_sync_copy: &TableSyncCopyConfig,
 ) -> Option<SlotWalKeepSizeRecommendation> {
@@ -181,29 +164,31 @@ pub async fn recommend_slot_wal_keep_size(
     .bind(selection_mode)
     .bind(&selected_table_ids);
 
-    match timeout(RECOMMENDATION_QUERY_TIMEOUT, query.fetch_optional(source_pool)).await {
-        Ok(Ok(inputs)) => inputs.map(build_recommendation),
-        Ok(Err(error)) => {
+    match query.fetch_optional(source_pool).await {
+        Ok(inputs) => inputs.map(build_recommendation),
+        Err(error) => {
             warn!(error = %error, "failed to estimate slot wal retention");
-            None
-        }
-        Err(_) => {
-            warn!(
-                timeout_seconds = RECOMMENDATION_QUERY_TIMEOUT.as_secs(),
-                "slot wal retention estimate timed out"
-            );
             None
         }
     }
 }
 
 /// Builds validation failures for a configured slot WAL retention limit.
-pub(super) fn failures(
+pub(super) fn slot_wal_keep_size_failures(
     max_slot_wal_keep_size_mb: i64,
     recommendation: Option<&SlotWalKeepSizeRecommendation>,
 ) -> Vec<ValidationFailure> {
     match max_slot_wal_keep_size_mb {
-        -1 => Vec::new(),
+        -1 => vec![ValidationFailure::warning(
+            "Unlimited Slot WAL Retention",
+            "`max_slot_wal_keep_size` is unlimited.\n\nLogical replication slots can retain WAL \
+             indefinitely when the pipeline is paused, disconnected, or stuck on a table error. \
+             This does not prevent the pipeline from starting, but an abandoned or stalled slot \
+             can fill the source database disk.\n\nSet a bounded value large enough for your \
+             write volume and longest expected initial copy in `postgresql.conf` or the \
+             managed-service database parameter settings, then reload PostgreSQL. Make sure the \
+             source has enough free disk for the configured retention.",
+        )],
         0 => vec![ValidationFailure::critical(
             "Slot WAL Retention Disabled",
             "`max_slot_wal_keep_size` is 0 MB, leaving no per-slot WAL retention headroom.\n\nA \
@@ -215,6 +200,9 @@ pub(super) fn failures(
              expected pipeline downtime.",
         )],
         configured_mb if configured_mb > 0 => match recommendation {
+            Some(recommendation) if recommendation.recommendation_was_capped => {
+                vec![capped_recommendation_warning(configured_mb, recommendation)]
+            }
             Some(recommendation) if configured_mb < recommendation.recommended_mb => {
                 vec![recommendation_warning(configured_mb, recommendation)]
             }
@@ -307,12 +295,6 @@ fn recommendation_warning(
     let current_size = format_mebibytes(configured_mb);
     let recommended_size = format_mebibytes(recommendation.recommended_mb);
     let largest_table_size = format_bytes(u128::from(recommendation.largest_table_bytes));
-    let cap_notice = if recommendation.recommendation_was_capped {
-        " The estimate reached the pipeline's 1 TiB recommendation limit; review source disk \
-         capacity before increasing the setting."
-    } else {
-        ""
-    };
 
     ValidationFailure::warning(
         "Slot WAL Retention Below Recommendation",
@@ -323,10 +305,34 @@ fn recommendation_warning(
              retain the WAL generated from the pipeline's copy starting point until the table \
              copy finishes. The pipeline then resumes streaming from that same point without \
              missing changes. If PostgreSQL removes the required WAL first, the replication slot \
-             can become unusable and the table may need to be copied \
-             again.{cap_notice}\n\nIncrease `max_slot_wal_keep_size` in `postgresql.conf` or the \
-             managed-service database parameter settings, then reload PostgreSQL. Make sure the \
-             source has enough free disk for the additional WAL.",
+             can become unusable and the table may need to be copied again.\n\nIncrease \
+             `max_slot_wal_keep_size` in `postgresql.conf` or the managed-service database \
+             parameter settings, then reload PostgreSQL. Make sure the source has enough free \
+             disk for the additional WAL.",
+            recommendation.largest_table_name,
+        ),
+    )
+}
+
+/// Builds the warning shown when the estimate exceeds the automatic cap.
+fn capped_recommendation_warning(
+    configured_mb: i64,
+    recommendation: &SlotWalKeepSizeRecommendation,
+) -> ValidationFailure {
+    let current_size = format_mebibytes(configured_mb);
+    let largest_table_size = format_bytes(u128::from(recommendation.largest_table_bytes));
+
+    ValidationFailure::warning(
+        "Slot WAL Retention Requires Manual Planning",
+        format!(
+            "`max_slot_wal_keep_size` is {current_size}. The estimate reached the pipeline's 1 \
+             TiB automatic recommendation limit, so the required retention may be higher. The \
+             largest table selected for initial copy is `{}` at approximately \
+             {largest_table_size}.\n\nReview the source's WAL generation rate, expected copy \
+             duration, and available disk before choosing a setting. PostgreSQL must retain the \
+             WAL generated from the pipeline's copy starting point until the table copy finishes; \
+             otherwise, the replication slot can become unusable and the table may need to be \
+             copied again.",
             recommendation.largest_table_name,
         ),
     )
@@ -354,7 +360,7 @@ fn format_mebibytes(mebibytes: i64) -> String {
 mod tests {
     use super::{
         GIBIBYTE, MAX_AUTOMATIC_RECOMMENDATION_MB, MEBIBYTE, RecommendationInputs,
-        SlotWalKeepSizeRecommendation, build_recommendation, failures,
+        SlotWalKeepSizeRecommendation, build_recommendation, slot_wal_keep_size_failures,
     };
     use crate::validation::FailureType;
 
@@ -498,9 +504,12 @@ mod tests {
     fn finite_setting_warns_only_below_recommendation() {
         let recommendation = recommendation_for(50, 0.0, 0.0);
 
-        let below = failures(recommendation.recommended_mb - 1, Some(&recommendation));
-        let equal = failures(recommendation.recommended_mb, Some(&recommendation));
-        let above = failures(recommendation.recommended_mb + 1, Some(&recommendation));
+        let below =
+            slot_wal_keep_size_failures(recommendation.recommended_mb - 1, Some(&recommendation));
+        let equal =
+            slot_wal_keep_size_failures(recommendation.recommended_mb, Some(&recommendation));
+        let above =
+            slot_wal_keep_size_failures(recommendation.recommended_mb + 1, Some(&recommendation));
 
         assert_eq!(below.len(), 1);
         assert_eq!(below[0].name, "Slot WAL Retention Below Recommendation");
@@ -518,7 +527,7 @@ mod tests {
     fn historical_recommendation_uses_the_simple_warning() {
         let recommendation = recommendation_for(50, 10.0, 24.0 * 60.0 * 60.0);
 
-        let failures = failures(8 * 1024, Some(&recommendation));
+        let failures = slot_wal_keep_size_failures(8 * 1024, Some(&recommendation));
 
         assert_eq!(failures.len(), 1);
         assert!(failures[0].reason.contains("77 GiB"));
@@ -528,32 +537,36 @@ mod tests {
     }
 
     #[test]
-    fn oversized_model_is_capped_and_explains_manual_planning() {
+    fn capped_model_always_explains_manual_planning() {
         let recommendation = recommendation_for(500, 100.0, 24.0 * 60.0 * 60.0);
-
-        let failures = failures(1023 * 1024, Some(&recommendation));
 
         assert_eq!(recommendation.recommended_mb, 1024 * 1024);
         assert!(recommendation.recommendation_was_capped);
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].reason.contains("1 TiB recommendation limit"));
-        assert!(failures[0].reason.contains("review source disk capacity"));
+
+        for configured_mb in [1023 * 1024, 1024 * 1024, 1025 * 1024] {
+            let failures = slot_wal_keep_size_failures(configured_mb, Some(&recommendation));
+
+            assert_eq!(failures.len(), 1);
+            assert_eq!(failures[0].name, "Slot WAL Retention Requires Manual Planning");
+            assert_eq!(failures[0].failure_type, FailureType::Warning);
+            assert!(failures[0].reason.contains("1 TiB automatic recommendation limit"));
+            assert!(failures[0].reason.contains("Review the source's WAL generation rate"));
+        }
     }
 
     #[test]
-    fn unlimited_setting_does_not_warn() {
-        let recommendation = recommendation_for(50, 0.0, 0.0);
+    fn unlimited_setting_warns_about_unbounded_disk_growth() {
+        let failures = slot_wal_keep_size_failures(-1, None);
 
-        let failures = failures(-1, Some(&recommendation));
-
-        assert!(failures.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].name, "Unlimited Slot WAL Retention");
+        assert_eq!(failures[0].failure_type, FailureType::Warning);
+        assert!(failures[0].reason.contains("fill the source database disk"));
     }
 
     #[test]
     fn disabled_setting_remains_critical() {
-        let recommendation = recommendation_for(50, 0.0, 0.0);
-
-        let failures = failures(0, Some(&recommendation));
+        let failures = slot_wal_keep_size_failures(0, None);
 
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].name, "Slot WAL Retention Disabled");
@@ -562,8 +575,8 @@ mod tests {
 
     #[test]
     fn static_floor_is_used_when_no_dynamic_estimate_exists() {
-        let below = failures(1023, None);
-        let equal = failures(1024, None);
+        let below = slot_wal_keep_size_failures(1023, None);
+        let equal = slot_wal_keep_size_failures(1024, None);
 
         assert_eq!(below.len(), 1);
         assert_eq!(below[0].name, "Low Slot WAL Retention");

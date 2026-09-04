@@ -4,7 +4,9 @@ use etl_postgres::store::catalog::ETL_SCHEMA_NAME;
 use sqlx::{FromRow, postgres::types::Oid};
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
-use crate::validation::validators::slot_wal_keep_size;
+use crate::validation::validators::slot_wal_keep_size::{
+    SlotWalKeepSizeRecommendation, recommend_slot_wal_keep_size, slot_wal_keep_size_failures,
+};
 
 /// PostgreSQL default for `wal_level`.
 const DEFAULT_WAL_LEVEL: &str = "replica";
@@ -176,12 +178,8 @@ impl Validator for LogicalReplicationSettingsValidator {
         .await?;
 
         let recommendation = if audit.max_slot_wal_keep_size_mb > 0 {
-            slot_wal_keep_size::recommend_slot_wal_keep_size(
-                source_pool,
-                &self.publication_name,
-                &self.table_sync_copy,
-            )
-            .await
+            recommend_slot_wal_keep_size(source_pool, &self.publication_name, &self.table_sync_copy)
+                .await
         } else {
             None
         };
@@ -557,7 +555,7 @@ fn format_code_list(values: &[String]) -> String {
 fn logical_replication_settings_failures(
     audit: LogicalReplicationSettingsAudit,
     max_table_sync_workers: u16,
-    slot_wal_keep_size_recommendation: Option<&slot_wal_keep_size::SlotWalKeepSizeRecommendation>,
+    slot_wal_keep_size_recommendation: Option<&SlotWalKeepSizeRecommendation>,
 ) -> Vec<ValidationFailure> {
     let mut failures = Vec::new();
 
@@ -574,7 +572,7 @@ fn logical_replication_settings_failures(
         audit.active_wal_senders,
         max_table_sync_workers,
     ));
-    failures.extend(slot_wal_keep_size::failures(
+    failures.extend(slot_wal_keep_size_failures(
         audit.max_slot_wal_keep_size_mb,
         slot_wal_keep_size_recommendation,
     ));
