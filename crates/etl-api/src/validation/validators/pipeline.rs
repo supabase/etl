@@ -4,6 +4,7 @@ use etl_postgres::store::catalog::ETL_SCHEMA_NAME;
 use sqlx::{FromRow, postgres::types::Oid};
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
+use crate::validation::validators::slot_wal_keep_size;
 
 /// PostgreSQL default for `wal_level`.
 const DEFAULT_WAL_LEVEL: &str = "replica";
@@ -15,11 +16,9 @@ const DEFAULT_MAX_WAL_SENDERS: i32 = 10;
 const DEFAULT_MAX_SLOT_WAL_KEEP_SIZE_MB: i64 = -1;
 /// PostgreSQL default for `idle_replication_slot_timeout`.
 const DEFAULT_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 0;
-/// Minimum practical per-slot WAL retention for logical replication.
-const MIN_SLOT_WAL_KEEP_SIZE_MB: i64 = 1024;
 /// Low idle replication slot timeout warning threshold in seconds.
 ///
-/// Values at or below this are too aggressive for ordinary ETL deploys,
+/// Values at or below this are too aggressive for ordinary pipeline deploys,
 /// maintenance windows, and incident pauses.
 const LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 300;
 
@@ -71,11 +70,17 @@ impl Validator for PublicationExistsValidator {
 #[derive(Debug)]
 pub(super) struct LogicalReplicationSettingsValidator {
     max_table_sync_workers: u16,
+    publication_name: String,
+    table_sync_copy: TableSyncCopyConfig,
 }
 
 impl LogicalReplicationSettingsValidator {
-    pub(super) fn new(max_table_sync_workers: u16) -> Self {
-        Self { max_table_sync_workers }
+    pub(super) fn new(
+        max_table_sync_workers: u16,
+        publication_name: String,
+        table_sync_copy: TableSyncCopyConfig,
+    ) -> Self {
+        Self { max_table_sync_workers, publication_name, table_sync_copy }
     }
 }
 
@@ -170,7 +175,22 @@ impl Validator for LogicalReplicationSettingsValidator {
         .fetch_one(source_pool)
         .await?;
 
-        Ok(logical_replication_settings_failures(audit, self.max_table_sync_workers))
+        let recommendation = if audit.max_slot_wal_keep_size_mb > 0 {
+            slot_wal_keep_size::recommend_slot_wal_keep_size(
+                source_pool,
+                &self.publication_name,
+                &self.table_sync_copy,
+            )
+            .await
+        } else {
+            None
+        };
+
+        Ok(logical_replication_settings_failures(
+            audit,
+            self.max_table_sync_workers,
+            recommendation.as_ref(),
+        ))
     }
 }
 
@@ -395,11 +415,11 @@ impl Validator for PublicationExcludesEtlTablesValidator {
 
         if puballtables {
             return Ok(vec![ValidationFailure::critical(
-                "Publication Includes ETL Tables",
+                "Publication Includes Pipeline Metadata Tables",
                 format!(
-                    "Publication `{}` is defined `FOR ALL TABLES`, which also publishes ETL's \
-                     internal schema tables when they exist.\n\nUse an explicit table list, or \
-                     `FOR TABLES IN SCHEMA` with only customer-owned schemas. A `FOR ALL TABLES` \
+                    "Publication `{}` is defined `FOR ALL TABLES`, which can also publish the \
+                     pipeline's internal metadata tables.\n\nUse an explicit table list, or `FOR \
+                     TABLES IN SCHEMA` with only customer-owned schemas. A `FOR ALL TABLES` \
                      publication cannot be narrowed in place, so replace it with a publication \
                      that excludes the `{ETL_SCHEMA_NAME}` schema and select that publication for \
                      the pipeline.",
@@ -410,12 +430,13 @@ impl Validator for PublicationExcludesEtlTablesValidator {
 
         if !published_etl_tables.is_empty() {
             return Ok(vec![ValidationFailure::critical(
-                "Publication Includes ETL Tables",
+                "Publication Includes Pipeline Metadata Tables",
                 format!(
-                    "Publication `{}` includes ETL internal tables: {}.\n\nRemove the listed \
+                    "Publication `{}` includes internal pipeline tables: {}.\n\nRemove the listed \
                      tables from the publication before starting the pipeline. A publication \
-                     owner can run `ALTER PUBLICATION {} DROP TABLE <schema.table>, ...`. ETL \
-                     state tables are implementation details and must not be replicated.",
+                     owner can run `ALTER PUBLICATION {} DROP TABLE <schema.table>, ...`. \
+                     Pipeline metadata tables are implementation details and must not be \
+                     replicated.",
                     self.publication_name,
                     format_code_list(&published_etl_tables),
                     self.publication_name
@@ -443,7 +464,7 @@ impl Validator for PublicationExcludesEtlTablesValidator {
 
             if publishes_etl_schema {
                 return Ok(vec![ValidationFailure::critical(
-                    "Publication Includes ETL Tables",
+                    "Publication Includes Pipeline Metadata Tables",
                     format!(
                         "Publication `{}` includes the `{ETL_SCHEMA_NAME}` schema.\n\nRemove that \
                          schema from the publication with `ALTER PUBLICATION {} DROP TABLES IN \
@@ -536,6 +557,7 @@ fn format_code_list(values: &[String]) -> String {
 fn logical_replication_settings_failures(
     audit: LogicalReplicationSettingsAudit,
     max_table_sync_workers: u16,
+    slot_wal_keep_size_recommendation: Option<&slot_wal_keep_size::SlotWalKeepSizeRecommendation>,
 ) -> Vec<ValidationFailure> {
     let mut failures = Vec::new();
 
@@ -552,8 +574,11 @@ fn logical_replication_settings_failures(
         audit.active_wal_senders,
         max_table_sync_workers,
     ));
-    failures.extend(slot_wal_keep_size_failures(
+    failures.extend(slot_wal_keep_size::failures(
         audit.max_slot_wal_keep_size_mb,
+        slot_wal_keep_size_recommendation,
+    ));
+    failures.extend(idle_replication_slot_timeout_failures(
         audit.idle_replication_slot_timeout_seconds,
     ));
 
@@ -666,70 +691,28 @@ fn wal_sender_failures(
     failures
 }
 
-/// Builds validation failures for slot WAL retention settings.
-fn slot_wal_keep_size_failures(
-    max_slot_wal_keep_size_mb: i64,
+/// Builds validation failures for idle replication slot timeout settings.
+fn idle_replication_slot_timeout_failures(
     idle_replication_slot_timeout_seconds: i64,
 ) -> Vec<ValidationFailure> {
-    let mut failures = Vec::new();
-
-    match max_slot_wal_keep_size_mb {
-        -1 => failures.push(ValidationFailure::warning(
-            "Unlimited Slot WAL Retention",
-            "`max_slot_wal_keep_size` is unlimited.\n\nLogical replication slots can retain WAL \
-             indefinitely when ETL is paused, disconnected, or stuck on a table error. This does \
-             not prevent the pipeline from starting, but an abandoned or stalled slot can fill \
-             the source database disk.\n\nSet a bounded value large enough for your write volume \
-             and longest expected initial copy in `postgresql.conf` or the managed-service \
-             database parameter settings, then reload the PostgreSQL configuration. For example, \
-             a database administrator can run `ALTER SYSTEM SET max_slot_wal_keep_size = '10GB'` \
-             followed by `SELECT pg_reload_conf()` on self-managed PostgreSQL.",
-        )),
-        0 => failures.push(ValidationFailure::critical(
-            "Slot WAL Retention Disabled",
-            "`max_slot_wal_keep_size` is 0 MB, leaving no per-slot WAL retention headroom.\n\nA \
-             logical replication slot can be invalidated as soon as it falls behind at a \
-             checkpoint, which can force ETL to restart table copies or require slot recreation. \
-             Set `max_slot_wal_keep_size` to a positive value in `postgresql.conf` or the \
-             managed-service database parameter settings, then reload the PostgreSQL \
-             configuration. Size it for source write volume, available disk, and the longest \
-             expected ETL downtime.",
-        )),
-        1..MIN_SLOT_WAL_KEEP_SIZE_MB => failures.push(ValidationFailure::warning(
-            "Low Slot WAL Retention",
-            format!(
-                "`max_slot_wal_keep_size` is {max_slot_wal_keep_size_mb} MB, which is below ETL's \
-                 recommended minimum of {MIN_SLOT_WAL_KEEP_SIZE_MB} MB.\n\nThis may be too small \
-                 for logical replication during large transactions, destination outages, or long \
-                 initial table copies. Increase it in `postgresql.conf` or the managed-service \
-                 database parameter settings, then reload the PostgreSQL configuration. Size it \
-                 based on source write volume, available disk, and the longest time ETL may need \
-                 to catch up. On self-managed PostgreSQL, a database administrator can run `ALTER \
-                 SYSTEM SET max_slot_wal_keep_size = '1GB'` followed by `SELECT pg_reload_conf()` \
-                 to apply ETL's minimum."
-            ),
-        )),
-        _ => {}
-    }
-
     if (1..=LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
         .contains(&idle_replication_slot_timeout_seconds)
     {
-        failures.push(ValidationFailure::warning(
+        vec![ValidationFailure::warning(
             "Low Idle Replication Slot Timeout",
             format!(
                 "`idle_replication_slot_timeout` is {idle_replication_slot_timeout_seconds} \
-                 seconds, which is below ETL's recommended minimum of \
+                 seconds, which is below the pipeline's recommended minimum of \
                  {LOW_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS} seconds.\n\nPostgreSQL can \
-                 invalidate ETL's logical replication slot after a short deploy, maintenance \
-                 window, or incident pause, with `pg_replication_slots.invalidation_reason = \
-                 'idle_timeout'`.\n\nUse `0` to disable idle-slot invalidation, or choose a value \
-                 safely above expected ETL downtime. Change the setting in `postgresql.conf` or \
-                 the managed-service database parameter settings, then reload the PostgreSQL \
-                 configuration."
+                 invalidate the pipeline's logical replication slot after a short deploy, \
+                 maintenance window, or incident pause, with \
+                 `pg_replication_slots.invalidation_reason = 'idle_timeout'`.\n\nUse `0` to \
+                 disable idle-slot invalidation, or choose a value safely above expected pipeline \
+                 downtime. Change the setting in `postgresql.conf` or the managed-service \
+                 database parameter settings, then reload the PostgreSQL configuration."
             ),
-        ));
+        )]
+    } else {
+        Vec::new()
     }
-
-    failures
 }

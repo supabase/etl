@@ -4,7 +4,7 @@ use sqlx::FromRow;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
-/// Validates the connected source role profile for ETL.
+/// Validates the connected source role profile for a pipeline.
 #[derive(Debug)]
 pub(crate) struct SourceValidator;
 
@@ -43,9 +43,9 @@ impl Validator for SourceValidator {
         if current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Username",
-                "The source connection is not using the ETL account authorized for this \
-                 deployment.\n\nUpdate the source credentials to use the authorized ETL account, \
-                 or ask the ETL API operator to review the account configured for this source.",
+                "The source connection is not using the database account configured for this \
+                 pipeline.\n\nUpdate the source credentials to use the configured account, or ask \
+                 the deployment operator to review the account configured for this source.",
             )]);
         }
 
@@ -55,7 +55,7 @@ impl Validator for SourceValidator {
         let audit = sqlx::query_as::<_, SourceRoleAudit>(
             r#"
             with target as (
-              -- Load the direct role attributes for the trusted ETL user.
+              -- Load the direct role attributes for the trusted pipeline user.
               select
                 oid,
                 rolcanlogin,
@@ -83,10 +83,10 @@ impl Validator for SourceValidator {
               where c.relkind in ('r', 'p')
             ),
             etl_table_ownership as (
-              -- Determine whether the trusted role controls every existing ETL table.
+              -- Determine whether the trusted role controls every existing pipeline table.
               -- pg_has_role(..., 'USAGE') means the owning role's privileges are
               -- immediately available without requiring SET ROLE, which matches
-              -- how ETL connects and operates.
+              -- how the pipeline connects and operates.
               select
                 coalesce(bool_and(pg_has_role($1, relowner, 'USAGE')), true)
                   as controls_all_existing_etl_tables
@@ -132,10 +132,10 @@ impl Validator for SourceValidator {
         let Some(audit) = audit else {
             return Ok(vec![ValidationFailure::critical(
                 "Invalid Source Role Attributes",
-                "The ETL account authorized for this deployment is not available in the source \
-                 database.\n\nAsk the database administrator and ETL API operator to review the \
+                "The database account configured for this pipeline is not available in the source \
+                 database.\n\nAsk the database administrator or deployment operator to review the \
                  source account configuration, or update the source credentials to use an \
-                 authorized ETL account.",
+                 authorized account.",
             )]);
         };
 
@@ -151,10 +151,10 @@ impl Validator for SourceValidator {
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
                 "Invalid Source Role Attributes",
-                "The authorized ETL account does not have sufficient access to use this source \
-                 database.\n\nAsk a database administrator to grant the account the access \
-                 required for ETL, or update the source connection to use an appropriately \
-                 configured ETL account.",
+                "The account configured for this pipeline does not have sufficient access to use \
+                 this source database.\n\nAsk a database administrator to grant the required \
+                 access, or update the source connection to use an appropriately configured \
+                 account.",
             ));
         }
 
@@ -168,11 +168,11 @@ impl Validator for SourceValidator {
 
         if !has_required_etl_schema_permissions {
             failures.push(ValidationFailure::critical(
-                "Invalid Source ETL Schema Permissions",
-                "The authorized ETL account does not have sufficient access to initialize or \
-                 manage ETL metadata in the source database.\n\nAsk a database administrator to \
-                 grant the account the required ETL access, or update the source connection to \
-                 use an appropriately configured ETL account.",
+                "Invalid Source Pipeline Metadata Permissions",
+                "The account configured for this pipeline does not have sufficient access to \
+                 initialize or manage pipeline metadata in the source database.\n\nAsk a database \
+                 administrator to grant the required access, or update the source connection to \
+                 use an appropriately configured account.",
             ));
         }
 

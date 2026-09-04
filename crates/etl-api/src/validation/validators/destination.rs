@@ -171,8 +171,8 @@ macro_rules! disabled_destination {
                     format!("{} Backend Disabled", $destination),
                     format!(
                         "This API server was built without {} destination support.\n\nChoose a \
-                         destination enabled on this deployment, or ask the ETL API operator to \
-                         deploy a build with {} support enabled.",
+                         destination enabled on this deployment, or ask the deployment operator \
+                         to deploy a build with {} support enabled.",
                         $destination, $destination
                     ),
                 )]))
