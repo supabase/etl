@@ -67,7 +67,7 @@ impl DestinationValidator {
 
     /// Builds the primary-key validator for destinations that require source
     /// primary keys.
-    fn primary_key_validator(&self) -> Option<PrimaryKeyValidator> {
+    fn primary_key_validator(&self, server_version_num: i32) -> Option<PrimaryKeyValidator> {
         let publication_name = self.publication_name.clone()?;
 
         match &self.config {
@@ -77,6 +77,7 @@ impl DestinationValidator {
                 "BigQuery uses the source primary key to match rows during initial loads, \
                  upserts, deletes, and updates that change primary-key values.",
                 true,
+                server_version_num,
             )),
             ApiDestinationConfig::ClickHouse {
                 engine: ClickHouseEngine::ReplacingMergeTree,
@@ -87,6 +88,7 @@ impl DestinationValidator {
                 "ClickHouse ReplacingMergeTree uses the source primary key as the `ORDER BY` and \
                  deduplication key.",
                 true,
+                server_version_num,
             )),
             ApiDestinationConfig::ClickHouse { engine: ClickHouseEngine::MergeTree, .. } => {
                 Some(PrimaryKeyValidator::new(
@@ -95,6 +97,7 @@ impl DestinationValidator {
                     "ClickHouse uses replicated source primary-key columns to apply row-level \
                      updates and deletes when a source primary key exists.",
                     false,
+                    server_version_num,
                 ))
             }
             _ => None,
@@ -103,17 +106,19 @@ impl DestinationValidator {
 
     /// Builds a nullable-array warning for destinations that cannot preserve
     /// top-level NULL arrays.
-    fn nullable_array_validator(&self) -> Option<NullableArrayValidator> {
+    fn nullable_array_validator(&self, server_version_num: i32) -> Option<NullableArrayValidator> {
         let publication_name = self.publication_name.clone()?;
 
         match &self.config {
             ApiDestinationConfig::BigQuery { .. } => Some(NullableArrayValidator::new(
                 publication_name,
                 NullableArrayBehavior::CoercesToEmpty,
+                server_version_num,
             )),
             ApiDestinationConfig::ClickHouse { .. } => Some(NullableArrayValidator::new(
                 publication_name,
                 NullableArrayBehavior::CannotEncode,
+                server_version_num,
             )),
             _ => None,
         }
@@ -140,12 +145,28 @@ impl Validator for DestinationValidator {
             failures.extend(validator.validate(ctx).await?);
         }
 
-        if let Some(validator) = self.primary_key_validator() {
-            failures.extend(validator.validate(ctx).await?);
-        }
+        if self.publication_name.is_some()
+            && matches!(
+                &self.config,
+                ApiDestinationConfig::BigQuery { .. } | ApiDestinationConfig::ClickHouse { .. }
+            )
+        {
+            let Some(source_pool) = ctx.source_pool.as_ref() else {
+                return Ok(failures);
+            };
 
-        if let Some(validator) = self.nullable_array_validator() {
-            failures.extend(validator.validate(ctx).await?);
+            let server_version_num =
+                sqlx::query_scalar("select current_setting('server_version_num')::int")
+                    .fetch_one(source_pool)
+                    .await?;
+
+            if let Some(validator) = self.primary_key_validator(server_version_num) {
+                failures.extend(validator.validate(ctx).await?);
+            }
+
+            if let Some(validator) = self.nullable_array_validator(server_version_num) {
+                failures.extend(validator.validate(ctx).await?);
+            }
         }
 
         Ok(failures)

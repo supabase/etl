@@ -6,12 +6,16 @@ use tracing::warn;
 
 use crate::validation::ValidationFailure;
 
-/// Minimum practical per-slot WAL retention for logical replication.
-const MIN_SLOT_WAL_KEEP_SIZE_MB: i64 = 1024;
 /// Number of bytes in one mebibyte.
 const MEBIBYTE: u128 = 1024 * 1024;
 /// Number of bytes in one gibibyte.
 const GIBIBYTE: u128 = 1024 * MEBIBYTE;
+/// Number of bytes in one tebibyte.
+const TEBIBYTE: u128 = 1024 * GIBIBYTE;
+/// Number of mebibytes in one gibibyte.
+const MEBIBYTES_PER_GIBIBYTE: i64 = 1024;
+/// Minimum practical per-slot WAL retention for logical replication.
+const MIN_SLOT_WAL_KEEP_SIZE_MB: i64 = MEBIBYTES_PER_GIBIBYTE;
 /// Initial-copy throughput used to estimate how long a table pins WAL.
 const ASSUMED_COPY_BYTES_PER_SECOND: u128 = 10 * MEBIBYTE;
 /// Numerator of the largest-table fraction used without useful WAL history.
@@ -28,15 +32,15 @@ const COPY_OVERHEAD_SECONDS: u128 = 2 * 60;
 /// Minimum statistics age before the average WAL rate informs a recommendation.
 const MIN_WAL_STATISTICS_SECONDS: u64 = 60 * 60;
 /// Largest value pipeline preflight automatically recommends, in mebibytes.
-const MAX_AUTOMATIC_RECOMMENDATION_MB: i64 = 1024 * 1024;
+const MAX_AUTOMATIC_RECOMMENDATION_MB: i64 = 1024 * MEBIBYTES_PER_GIBIBYTE;
 
 /// Inputs used to recommend a bounded replication-slot WAL retention setting.
 #[derive(Debug, FromRow)]
 struct RecommendationInputs {
     /// Qualified name of the largest logical table selected for initial copy.
     largest_table_name: String,
-    /// On-disk bytes used by the largest logical table, including indexes and
-    /// TOAST.
+    /// On-disk bytes used by the largest logical table, including TOAST but
+    /// excluding indexes.
     largest_table_bytes: i64,
     /// Cluster-wide WAL bytes generated per second since statistics were reset.
     average_wal_bytes_per_second: f64,
@@ -66,83 +70,64 @@ pub(super) async fn recommend_slot_wal_keep_size(
     publication_name: &str,
     table_sync_copy: &TableSyncCopyConfig,
 ) -> Option<SlotWalKeepSizeRecommendation> {
-    let (selection_mode, selected_table_ids): (&str, Vec<Oid>) = match table_sync_copy {
-        TableSyncCopyConfig::IncludeAllTables => ("include_all", Vec::new()),
-        TableSyncCopyConfig::SkipAllTables => return None,
-        TableSyncCopyConfig::IncludeTables { table_ids } => {
-            ("include", table_ids.iter().copied().map(Oid).collect())
-        }
-        TableSyncCopyConfig::SkipTables { table_ids } => {
-            ("skip", table_ids.iter().copied().map(Oid).collect())
-        }
-    };
+    let (include_selected_table_ids, selected_table_ids): (Option<bool>, Vec<Oid>) =
+        match table_sync_copy {
+            TableSyncCopyConfig::IncludeAllTables => (None, Vec::new()),
+            TableSyncCopyConfig::SkipAllTables => return None,
+            TableSyncCopyConfig::IncludeTables { table_ids } => {
+                (Some(true), table_ids.iter().copied().map(Oid).collect())
+            }
+            TableSyncCopyConfig::SkipTables { table_ids } => {
+                (Some(false), table_ids.iter().copied().map(Oid).collect())
+            }
+        };
 
     // The catalog surface used below is shared by every supported PostgreSQL
     // version (14 through 18). PostgreSQL size functions inspect relation
-    // storage without scanning table rows. The recursive relation tree makes
-    // one published partition root a single logical table whose size is the
-    // sum of its leaf partitions, including nested range, list, hash, and
-    // default partitions through their common `pg_inherits` representation.
-    // `pg_total_relation_size` includes user indexes even though the pipeline does
-    // not copy them. That deliberate overestimate supplies useful cold-start
-    // headroom without reading customer rows, while also including TOAST and
-    // auxiliary table storage.
+    // storage without scanning table rows. `pg_partition_tree` makes one
+    // published partition root a single logical table whose size is the sum
+    // of its leaf partitions, including nested range, list, hash, and default
+    // partitions. `pg_table_size` includes table forks and TOAST, which the
+    // initial copy reads, but excludes indexes, which it does not read.
     let query = sqlx::query_as::<_, RecommendationInputs>(
         r#"
-        with recursive selected_tables as (
+        with selected_tables as (
             select distinct
                 c.oid,
                 format('%I.%I', n.nspname, c.relname) as table_name,
                 c.relkind
-            from pg_publication_tables pt
-            join pg_namespace n on n.nspname = pt.schemaname
-            join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
-            where pt.pubname = $1
+            from pg_publication p
+            cross join lateral pg_get_publication_tables(p.pubname) gpt
+            join pg_class c on c.oid = gpt.relid
+            join pg_namespace n on n.oid = c.relnamespace
+            where p.pubname = $1
               and (
-                  $2 = 'include_all'
-                  or ($2 = 'include' and c.oid = any($3::oid[]))
-                  or ($2 = 'skip' and not (c.oid = any($3::oid[])))
+                  $2::boolean is null
+                  or (c.oid = any($3::oid[])) = $2
               )
-        ),
-        relation_tree(root_oid, relation_oid, relkind) as (
-            select oid, oid, relkind
-            from selected_tables
-
-            union
-
-            select rt.root_oid, child.oid, child.relkind
-            from relation_tree rt
-            join pg_inherits i on i.inhparent = rt.relation_oid
-            join pg_class child on child.oid = i.inhrelid
-            where rt.relkind = 'p'
         ),
         table_sizes as (
             select
                 st.oid,
                 st.table_name,
-                least(
-                    coalesce(
-                        sum(pg_total_relation_size(rt.relation_oid))
-                            filter (where rt.relkind = 'r'),
+                case st.relkind
+                    when 'p' then coalesce(
+                        (
+                            select sum(pg_table_size(pt.relid))
+                            from pg_partition_tree(st.oid) pt
+                            where pt.isleaf
+                        ),
                         0
-                    ),
-                    9223372036854775807
-                )::bigint as table_bytes
+                    )
+                    else pg_table_size(st.oid)
+                end::bigint as table_bytes
             from selected_tables st
-            join relation_tree rt on rt.root_oid = st.oid
-            group by st.oid, st.table_name
         ),
         wal_statistics as (
             select
-                coalesce(
-                    (
-                        wal_bytes
-                        / nullif(extract(epoch from clock_timestamp() - stats_reset), 0)
-                    )::double precision,
-                    0::double precision
-                ) as average_wal_bytes_per_second,
+                wal_bytes::double precision as wal_bytes,
                 greatest(
-                    extract(epoch from clock_timestamp() - stats_reset),
+                    extract(epoch from statement_timestamp() - stats_reset),
                     0
                 )::double precision as wal_statistics_seconds
             from pg_stat_wal
@@ -150,18 +135,19 @@ pub(super) async fn recommend_slot_wal_keep_size(
         select
             ts.table_name as largest_table_name,
             ts.table_bytes as largest_table_bytes,
-            coalesce(ws.average_wal_bytes_per_second, 0::double precision)
-                as average_wal_bytes_per_second,
-            coalesce(ws.wal_statistics_seconds, 0::double precision)
-                as wal_statistics_seconds
+            coalesce(
+                ws.wal_bytes / nullif(ws.wal_statistics_seconds, 0),
+                0::double precision
+            ) as average_wal_bytes_per_second,
+            ws.wal_statistics_seconds
         from table_sizes ts
-        left join wal_statistics ws on true
+        cross join wal_statistics ws
         order by ts.table_bytes desc, ts.oid
         limit 1
         "#,
     )
     .bind(publication_name)
-    .bind(selection_mode)
+    .bind(include_selected_table_ids)
     .bind(&selected_table_ids);
 
     match query.fetch_optional(source_pool).await {
@@ -264,18 +250,15 @@ fn build_recommendation(inputs: RecommendationInputs) -> SlotWalKeepSizeRecommen
         .div_ceil(HISTORICAL_WAL_SAFETY_DENOMINATOR);
     let has_usable_wal_history =
         wal_statistics_seconds >= MIN_WAL_STATISTICS_SECONDS && average_wal_bytes_per_second > 0;
-    let minimum_retention_bytes =
-        u128::try_from(MIN_SLOT_WAL_KEEP_SIZE_MB).unwrap_or(0).saturating_mul(MEBIBYTE);
-    let size_based_recommendation_bytes = size_based_retention_bytes.max(minimum_retention_bytes);
+    let size_based_recommendation_bytes = size_based_retention_bytes.max(GIBIBYTE);
     let raw_recommendation_bytes = if has_usable_wal_history {
         size_based_recommendation_bytes.max(historical_retention_bytes)
     } else {
         size_based_recommendation_bytes
     };
     let recommendation_gib = raw_recommendation_bytes.div_ceil(GIBIBYTE);
-    let uncapped_recommended_mb = recommendation_gib.saturating_mul(1024);
-    let maximum_recommended_mb =
-        u128::try_from(MAX_AUTOMATIC_RECOMMENDATION_MB).unwrap_or(u128::MAX);
+    let uncapped_recommended_mb = recommendation_gib.saturating_mul(GIBIBYTE / MEBIBYTE);
+    let maximum_recommended_mb = TEBIBYTE / MEBIBYTE;
     let recommended_mb = i64::try_from(uncapped_recommended_mb.min(maximum_recommended_mb))
         .unwrap_or(MAX_AUTOMATIC_RECOMMENDATION_MB);
 
@@ -349,8 +332,8 @@ fn format_bytes(bytes: u128) -> String {
 
 /// Formats a PostgreSQL setting expressed in mebibytes.
 fn format_mebibytes(mebibytes: i64) -> String {
-    if mebibytes >= 1024 && mebibytes % 1024 == 0 {
-        format!("{} GiB", mebibytes / 1024)
+    if mebibytes >= MEBIBYTES_PER_GIBIBYTE && mebibytes % MEBIBYTES_PER_GIBIBYTE == 0 {
+        format!("{} GiB", mebibytes / MEBIBYTES_PER_GIBIBYTE)
     } else {
         format!("{mebibytes} MiB")
     }
@@ -359,8 +342,9 @@ fn format_mebibytes(mebibytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GIBIBYTE, MAX_AUTOMATIC_RECOMMENDATION_MB, MEBIBYTE, RecommendationInputs,
-        SlotWalKeepSizeRecommendation, build_recommendation, slot_wal_keep_size_failures,
+        GIBIBYTE, MAX_AUTOMATIC_RECOMMENDATION_MB, MEBIBYTE, MEBIBYTES_PER_GIBIBYTE,
+        MIN_SLOT_WAL_KEEP_SIZE_MB, RecommendationInputs, SlotWalKeepSizeRecommendation,
+        build_recommendation, slot_wal_keep_size_failures,
     };
     use crate::validation::FailureType;
 
@@ -396,7 +380,10 @@ mod tests {
         for (table_gibibytes, expected_recommendation_gibibytes, expected_capped) in cases {
             let recommendation = recommendation_for(table_gibibytes, 0.0, 0.0);
 
-            assert_eq!(recommendation.recommended_mb, expected_recommendation_gibibytes * 1024);
+            assert_eq!(
+                recommendation.recommended_mb,
+                expected_recommendation_gibibytes * MEBIBYTES_PER_GIBIBYTE
+            );
             assert_eq!(recommendation.recommendation_was_capped, expected_capped);
         }
     }
@@ -418,24 +405,16 @@ mod tests {
             let recommendation =
                 recommendation_for(table_gibibytes, wal_mebibytes_per_second, 24.0 * 60.0 * 60.0);
 
-            assert_eq!(recommendation.recommended_mb, expected_gibibytes * 1024);
+            assert_eq!(recommendation.recommended_mb, expected_gibibytes * MEBIBYTES_PER_GIBIBYTE);
             assert_eq!(recommendation.recommendation_was_capped, expected_capped);
         }
-    }
-
-    #[test]
-    fn mature_wal_history_can_raise_the_recommendation() {
-        let recommendation = recommendation_for(50, 10.0, 24.0 * 60.0 * 60.0);
-
-        assert_eq!(recommendation.largest_table_bytes, 50 * GIBIBYTE as u64);
-        assert_eq!(recommendation.recommended_mb, 77 * 1024);
     }
 
     #[test]
     fn short_wal_history_does_not_raise_the_recommendation() {
         let recommendation = recommendation_for(50, 100.0, 30.0 * 60.0);
 
-        assert_eq!(recommendation.recommended_mb, 8 * 1024);
+        assert_eq!(recommendation.recommended_mb, 8 * MEBIBYTES_PER_GIBIBYTE);
     }
 
     #[test]
@@ -453,7 +432,7 @@ mod tests {
             });
 
             assert!(recommendation.recommended_mb >= previous_recommendation);
-            assert_eq!(recommendation.recommended_mb % 1024, 0);
+            assert_eq!(recommendation.recommended_mb % MEBIBYTES_PER_GIBIBYTE, 0);
             previous_recommendation = recommendation.recommended_mb;
         }
 
@@ -527,7 +506,8 @@ mod tests {
     fn historical_recommendation_uses_the_simple_warning() {
         let recommendation = recommendation_for(50, 10.0, 24.0 * 60.0 * 60.0);
 
-        let failures = slot_wal_keep_size_failures(8 * 1024, Some(&recommendation));
+        let failures =
+            slot_wal_keep_size_failures(8 * MEBIBYTES_PER_GIBIBYTE, Some(&recommendation));
 
         assert_eq!(failures.len(), 1);
         assert!(failures[0].reason.contains("77 GiB"));
@@ -540,10 +520,14 @@ mod tests {
     fn capped_model_always_explains_manual_planning() {
         let recommendation = recommendation_for(500, 100.0, 24.0 * 60.0 * 60.0);
 
-        assert_eq!(recommendation.recommended_mb, 1024 * 1024);
+        assert_eq!(recommendation.recommended_mb, MAX_AUTOMATIC_RECOMMENDATION_MB);
         assert!(recommendation.recommendation_was_capped);
 
-        for configured_mb in [1023 * 1024, 1024 * 1024, 1025 * 1024] {
+        for configured_mb in [
+            MAX_AUTOMATIC_RECOMMENDATION_MB - MEBIBYTES_PER_GIBIBYTE,
+            MAX_AUTOMATIC_RECOMMENDATION_MB,
+            MAX_AUTOMATIC_RECOMMENDATION_MB + MEBIBYTES_PER_GIBIBYTE,
+        ] {
             let failures = slot_wal_keep_size_failures(configured_mb, Some(&recommendation));
 
             assert_eq!(failures.len(), 1);
@@ -575,8 +559,8 @@ mod tests {
 
     #[test]
     fn static_floor_is_used_when_no_dynamic_estimate_exists() {
-        let below = slot_wal_keep_size_failures(1023, None);
-        let equal = slot_wal_keep_size_failures(1024, None);
+        let below = slot_wal_keep_size_failures(MIN_SLOT_WAL_KEEP_SIZE_MB - 1, None);
+        let equal = slot_wal_keep_size_failures(MIN_SLOT_WAL_KEEP_SIZE_MB, None);
 
         assert_eq!(below.len(), 1);
         assert_eq!(below[0].name, "Low Slot WAL Retention");

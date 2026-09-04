@@ -11,7 +11,7 @@ mod nullable_array;
 mod pipeline;
 mod primary_key;
 mod replica_identity;
-pub(super) mod slot_wal_keep_size;
+mod slot_wal_keep_size;
 #[cfg(feature = "snowflake")]
 mod snowflake;
 mod source;
@@ -27,6 +27,9 @@ pub(super) use source::SourceValidator;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 use crate::configs::pipeline::ApiPipelineConfig;
+
+/// Maximum number of source objects included in one validation finding.
+const MAX_REPORTED_OBJECTS: i64 = 100;
 
 /// Composite validator for pipeline prerequisites.
 #[derive(Debug)]

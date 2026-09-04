@@ -1,23 +1,19 @@
 use async_trait::async_trait;
 use etl_config::shared::TableSyncCopyConfig;
-use etl_postgres::store::catalog::ETL_SCHEMA_NAME;
+use etl_postgres::{store::catalog::ETL_SCHEMA_NAME, version::POSTGRES_15};
 use sqlx::{FromRow, postgres::types::Oid};
 
-use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
-use crate::validation::validators::slot_wal_keep_size::{
-    SlotWalKeepSizeRecommendation, recommend_slot_wal_keep_size, slot_wal_keep_size_failures,
+use super::{
+    super::{ValidationContext, ValidationError, ValidationFailure, Validator},
+    MAX_REPORTED_OBJECTS,
+    slot_wal_keep_size::{
+        SlotWalKeepSizeRecommendation, recommend_slot_wal_keep_size, slot_wal_keep_size_failures,
+    },
 };
 
-/// PostgreSQL default for `wal_level`.
-const DEFAULT_WAL_LEVEL: &str = "replica";
-/// PostgreSQL default for `max_replication_slots`.
-const DEFAULT_MAX_REPLICATION_SLOTS: i32 = 10;
-/// PostgreSQL default for `max_wal_senders`.
-const DEFAULT_MAX_WAL_SENDERS: i32 = 10;
-/// PostgreSQL default for `max_slot_wal_keep_size`.
-const DEFAULT_MAX_SLOT_WAL_KEEP_SIZE_MB: i64 = -1;
-/// PostgreSQL default for `idle_replication_slot_timeout`.
-const DEFAULT_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 0;
+/// Value used when PostgreSQL does not support
+/// `idle_replication_slot_timeout`.
+const UNSUPPORTED_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 0;
 /// Low idle replication slot timeout warning threshold in seconds.
 ///
 /// Values at or below this are too aggressive for ordinary pipeline deploys,
@@ -71,8 +67,11 @@ impl Validator for PublicationExistsValidator {
 /// Validates source settings needed for reliable logical replication.
 #[derive(Debug)]
 pub(super) struct LogicalReplicationSettingsValidator {
+    /// Maximum number of concurrent initial table-copy workers.
     max_table_sync_workers: u16,
+    /// Name of the publication whose initial-copy workload is estimated.
     publication_name: String,
+    /// Table selection applied to the initial-copy workload.
     table_sync_copy: TableSyncCopyConfig,
 }
 
@@ -121,59 +120,45 @@ impl Validator for LogicalReplicationSettingsValidator {
         let audit = sqlx::query_as::<_, LogicalReplicationSettingsAudit>(
             r#"
             select
-                coalesce(current_setting('wal_level', true), $1::text) as wal_level,
-                (
-                    select rolsuper or rolreplication
+                current_setting('wal_level') as wal_level,
+                exists (
+                    select 1
                     from pg_roles
                     where rolname = current_user
+                      and (rolsuper or rolreplication)
                 ) as has_replication_permission,
-                coalesce(
-                    (
-                        select setting::int
-                        from pg_settings
-                        where name = 'max_replication_slots'
-                    ),
-                    $2::int
-                ) as max_replication_slots,
+                current_setting('max_replication_slots')::int as max_replication_slots,
                 (
                     select count(*)
                     from pg_replication_slots
                 ) as used_replication_slots,
-                coalesce(
-                    (
-                        select setting::int
-                        from pg_settings
-                        where name = 'max_wal_senders'
-                    ),
-                    $3::int
-                ) as max_wal_senders,
+                current_setting('max_wal_senders')::int as max_wal_senders,
                 (
                     select count(*)
                     from pg_stat_replication
                 ) as active_wal_senders,
+                settings.max_slot_wal_keep_size_mb,
                 coalesce(
-                    (
-                        select setting::bigint
-                        from pg_settings
-                        where name = 'max_slot_wal_keep_size'
-                    ),
-                    $4::bigint
-                ) as max_slot_wal_keep_size_mb,
-                coalesce(
-                    (
-                        select setting::bigint
-                        from pg_settings
-                        where name = 'idle_replication_slot_timeout'
-                    ),
-                    $5::bigint
+                    settings.idle_replication_slot_timeout_seconds,
+                    $1::bigint
                 ) as idle_replication_slot_timeout_seconds
+            from (
+                select
+                    max(setting::bigint)
+                        filter (where name = 'max_slot_wal_keep_size')
+                        as max_slot_wal_keep_size_mb,
+                    max(setting::bigint)
+                        filter (where name = 'idle_replication_slot_timeout')
+                        as idle_replication_slot_timeout_seconds
+                from pg_settings
+                where name in (
+                    'max_slot_wal_keep_size',
+                    'idle_replication_slot_timeout'
+                )
+            ) settings
             "#,
         )
-        .bind(DEFAULT_WAL_LEVEL)
-        .bind(DEFAULT_MAX_REPLICATION_SLOTS)
-        .bind(DEFAULT_MAX_WAL_SENDERS)
-        .bind(DEFAULT_MAX_SLOT_WAL_KEEP_SIZE_MB)
-        .bind(DEFAULT_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
+        .bind(UNSUPPORTED_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS)
         .fetch_one(source_pool)
         .await?;
 
@@ -215,12 +200,12 @@ impl Validator for PublicationHasTablesValidator {
             .as_ref()
             .expect("source pool required for publication tables validation");
 
-        // Check if publication publishes all tables or has specific tables
-        let result: Option<(bool, i64)> = sqlx::query_as(
+        let has_tables: Option<bool> = sqlx::query_scalar(
             r#"
-            select
-                p.puballtables,
-                (select count(*) from pg_publication_tables pt where pt.pubname = p.pubname)
+            select exists (
+                select 1
+                from pg_get_publication_tables(p.pubname)
+            )
             from pg_publication p
             where p.pubname = $1
             "#,
@@ -229,13 +214,13 @@ impl Validator for PublicationHasTablesValidator {
         .fetch_optional(source_pool)
         .await?;
 
-        // If publication doesn't exist, skip this check (PublicationExistsValidator
-        // handles it)
-        let Some((puballtables, table_count)) = result else {
+        let Some(has_tables) = has_tables else {
+            // The publication existence validator reports the actionable
+            // prerequisite failure.
             return Ok(vec![]);
         };
 
-        if puballtables || table_count > 0 {
+        if has_tables {
             Ok(vec![])
         } else {
             Ok(vec![ValidationFailure::critical(
@@ -295,22 +280,16 @@ impl Validator for SelectedTableIdsInPublicationValidator {
         let Some((has_tables, published_oids)) = sqlx::query_as::<_, (bool, Vec<Oid>)>(
             r#"
                 select
-                    p.puballtables or exists (
-                        select 1
-                        from pg_publication_tables pt
-                        where pt.pubname = p.pubname
-                    ),
-                    array(
-                        select c.oid
-                        from pg_publication_tables pt
-                        join pg_namespace n on n.nspname = pt.schemaname
-                        join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
-                        where pt.pubname = p.pubname
-                          and c.oid = any($2::oid[])
-                        order by c.oid
+                    count(gpt.relid) > 0,
+                    coalesce(
+                        array_agg(distinct gpt.relid)
+                            filter (where gpt.relid = any($2::oid[])),
+                        array[]::oid[]
                     )
                 from pg_publication p
+                left join lateral pg_get_publication_tables(p.pubname) gpt on true
                 where p.pubname = $1
+                group by p.oid
                 "#,
         )
         .bind(&self.publication_name)
@@ -387,12 +366,13 @@ impl Validator for PublicationExcludesEtlTablesValidator {
                         (
                             select array_agg(t.table_name order by t.table_name)
                             from (
-                                select pt.schemaname || '.' || pt.tablename as table_name
-                                from pg_publication_tables pt
-                                where pt.pubname = p.pubname
-                                  and pt.schemaname = $2
-                                order by pt.tablename
-                                limit 100
+                                select distinct format('%I.%I', n.nspname, c.relname) as table_name
+                                from pg_get_publication_tables(p.pubname) gpt
+                                join pg_class c on c.oid = gpt.relid
+                                join pg_namespace n on n.oid = c.relnamespace
+                                where n.nspname = $2
+                                order by table_name
+                                limit $3
                             ) t
                         ),
                         array[]::text[]
@@ -403,6 +383,7 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             )
             .bind(&self.publication_name)
             .bind(ETL_SCHEMA_NAME)
+            .bind(MAX_REPORTED_OBJECTS)
             .fetch_optional(source_pool)
             .await?
         else {
@@ -442,7 +423,7 @@ impl Validator for PublicationExcludesEtlTablesValidator {
             )]);
         }
 
-        if server_version_num >= 15_00_00 {
+        if server_version_num >= POSTGRES_15 {
             let publishes_etl_schema: bool = sqlx::query_scalar(
                 r#"
                 select exists (
@@ -501,29 +482,23 @@ impl Validator for GeneratedColumnsValidator {
             .as_ref()
             .expect("source pool required for generated columns validation");
 
-        // Find tables with generated columns using pg_publication_rel for direct OID
-        // access
         let tables_with_generated: Vec<String> = sqlx::query_scalar(
             r#"
-            select distinct n.nspname || '.' || c.relname
-            from pg_publication_rel pr
-            join pg_publication p on p.oid = pr.prpubid
-            join pg_class c on c.oid = pr.prrelid
-            join pg_namespace n on n.oid = c.relnamespace
-            where p.pubname = $1
-              and exists (
-                select 1
-                from pg_attribute a
-                where a.attrelid = pr.prrelid
-                  and a.attnum > 0
-                  and not a.attisdropped
-                  and a.attgenerated != ''
-              )
-            order by 1
-            limit 100
+            select distinct format('%I.%I', n.nspname, c.relname) as table_name
+            from pg_publication_tables pt
+            join pg_namespace n on n.nspname = pt.schemaname
+            join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+            join pg_attribute a on a.attrelid = c.oid
+            where pt.pubname = $1
+              and a.attnum > 0
+              and not a.attisdropped
+              and a.attgenerated != ''
+            order by table_name
+            limit $2
             "#,
         )
         .bind(&self.publication_name)
+        .bind(MAX_REPORTED_OBJECTS)
         .fetch_all(source_pool)
         .await?;
 
