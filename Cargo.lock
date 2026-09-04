@@ -2527,7 +2527,7 @@ dependencies = [
 [[package]]
 name = "gcp-bigquery-client"
 version = "0.28.0"
-source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904#7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904"
+source = "git+https://github.com/supabase/gcp-bigquery-client?rev=8035bcd1a7c3f08f8679326c40200b11901e38ed#8035bcd1a7c3f08f8679326c40200b11901e38ed"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4713,7 +4713,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "base64 0.23.1",
  "byteorder",
@@ -4730,7 +4730,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "byteorder",
  "bytes",
@@ -4745,7 +4745,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "bytes",
  "chrono",
@@ -6752,7 +6752,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=c4b8de06aaa99f71800126bedcca6e623d368357#c4b8de06aaa99f71800126bedcca6e623d368357"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "async-trait",
  "byteorder",
