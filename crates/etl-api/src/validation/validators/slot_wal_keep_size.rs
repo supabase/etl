@@ -33,6 +33,8 @@ const COPY_OVERHEAD_SECONDS: u128 = 2 * 60;
 const MIN_WAL_STATISTICS_SECONDS: u64 = 60 * 60;
 /// Largest value pipeline preflight automatically recommends, in mebibytes.
 const MAX_AUTOMATIC_RECOMMENDATION_MB: i64 = 1024 * MEBIBYTES_PER_GIBIBYTE;
+/// Emphasized disk-capacity reminder appended to retention failures.
+const DISK_SPACE_WARNING: &str = "**Make sure the source has enough free disk for retained WAL.**";
 
 /// Inputs used to recommend a bounded replication-slot WAL retention setting.
 #[derive(Debug, FromRow)]
@@ -199,19 +201,23 @@ pub(super) fn slot_wal_keep_size_failures(
     match max_slot_wal_keep_size_mb {
         -1 => vec![ValidationFailure::warning(
             "Unlimited Slot WAL Retention",
-            "`max_slot_wal_keep_size` is unlimited. A paused, disconnected, or stalled pipeline \
-             can retain WAL until the source disk fills.\n\nSet a bounded value sized for \
-             expected write volume, initial sync duration, downtime, and available disk. Change \
-             it in `postgresql.conf` or the managed-service database parameter settings, then \
-             reload Postgres.",
+            format!(
+                "`max_slot_wal_keep_size` is unlimited. A paused, disconnected, or stalled \
+                 pipeline can retain WAL until the source disk fills.\n\nSet a bounded value \
+                 sized for expected write volume, initial sync duration, and downtime. Change it \
+                 in `postgresql.conf` or the managed-service database parameter settings, then \
+                 reload Postgres.\n\n{DISK_SPACE_WARNING}"
+            ),
         )],
         0 => vec![ValidationFailure::critical(
             "Slot WAL Retention Disabled",
-            "`max_slot_wal_keep_size` is 0 MB. A slot can be invalidated at a checkpoint as soon \
-             as the pipeline falls behind, forcing slot recreation or a restart of the table's \
-             initial sync.\n\nSet a positive value sized for expected write volume, downtime, and \
-             available disk in `postgresql.conf` or the managed-service database parameter \
-             settings, then reload Postgres.",
+            format!(
+                "`max_slot_wal_keep_size` is 0 MB. A slot can be invalidated at a checkpoint as \
+                 soon as the pipeline falls behind, forcing slot recreation or a restart of the \
+                 table's initial sync.\n\nSet a positive value sized for expected write volume \
+                 and downtime in `postgresql.conf` or the managed-service database parameter \
+                 settings, then reload Postgres.\n\n{DISK_SPACE_WARNING}"
+            ),
         )],
         configured_mb if configured_mb > 0 => match recommendation {
             Some(recommendation) if recommendation.recommendation_was_capped => {
@@ -231,7 +237,8 @@ pub(super) fn slot_wal_keep_size_failures(
                          value may work if the source stays idle, but active writes can exhaust \
                          it quickly.\n\nReview expected write activity and available disk. If \
                          needed, increase the setting in `postgresql.conf` or the managed-service \
-                         database parameter settings, then reload Postgres."
+                         database parameter settings, then reload \
+                         Postgres.\n\n{DISK_SPACE_WARNING}"
                     ),
                 )]
             }
@@ -328,8 +335,7 @@ fn recommendation_warning(
              replication.\n\n{workload_context}\n\nIf Postgres removes the required WAL before \
              catch-up, the replication slot can become unusable and the table may need to run its \
              initial sync again. Increase the setting in `postgresql.conf` or the managed-service \
-             database parameter settings, then reload Postgres and make sure the source has \
-             enough free disk.",
+             database parameter settings, then reload Postgres.\n\n{DISK_SPACE_WARNING}",
             recommendation.largest_table_name,
         ),
     )
@@ -354,7 +360,7 @@ fn capped_recommendation_warning(
              replication.\n\n{workload_context}\n\nChoose a setting based on expected WAL \
              generation, initial sync duration, and available disk. If Postgres removes the \
              required WAL before catch-up, the replication slot can become unusable and the table \
-             may need to run its initial sync again.",
+             may need to run its initial sync again.\n\n{DISK_SPACE_WARNING}",
             recommendation.largest_table_name,
         ),
     )
@@ -381,9 +387,9 @@ fn format_mebibytes(mebibytes: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        GIBIBYTE, MAX_AUTOMATIC_RECOMMENDATION_MB, MEBIBYTE, MEBIBYTES_PER_GIBIBYTE,
-        MIN_SLOT_WAL_KEEP_SIZE_MB, RecommendationInputs, SlotWalKeepSizeRecommendation,
-        build_recommendation, slot_wal_keep_size_failures,
+        DISK_SPACE_WARNING, GIBIBYTE, MAX_AUTOMATIC_RECOMMENDATION_MB, MEBIBYTE,
+        MEBIBYTES_PER_GIBIBYTE, MIN_SLOT_WAL_KEEP_SIZE_MB, RecommendationInputs,
+        SlotWalKeepSizeRecommendation, build_recommendation, slot_wal_keep_size_failures,
     };
     use crate::validation::FailureType;
 
@@ -411,6 +417,7 @@ mod tests {
         assert!(!reason.contains("whole copy"));
         assert!(!reason.contains("copy starting point"));
         assert!(!reason.contains("copy duration"));
+        assert!(reason.ends_with(DISK_SPACE_WARNING));
     }
 
     #[test]
