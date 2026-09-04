@@ -135,6 +135,55 @@ jobs:
         if: matrix.check == 'sort'
         run: cargo sort --workspace --grouped --check
 
+  check-tls-aws-lc:
+    name: TLS Backend (AWS-LC only)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      # Library crates with default features off and only the AWS-LC backend selected.
+      TLS_FEATURES: etl/tls-rustls-aws-lc-rs,etl-postgres/tls-rustls-aws-lc-rs,etl-postgres/store,etl-maintenance/tls-rustls-aws-lc-rs,etl-destinations/tls-rustls-aws-lc-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          key: tls-aws-lc
+
+      - name: Verify SQLx Ring Feature Is Absent
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # ducklake makes sqlx a dependency of etl-destinations and etl-maintenance;
+          # resolving the feature graph does not compile DuckDB.
+          sqlx_features="$(cargo tree \
+            -p etl -p etl-postgres -p etl-maintenance -p etl-destinations \
+            --no-default-features \
+            --features "${TLS_FEATURES},etl-destinations/ducklake" \
+            -e features -i sqlx)"
+
+          if ! grep -q 'sqlx feature "tls-rustls-aws-lc-rs"' <<< "${sqlx_features}"; then
+            echo "sqlx feature tls-rustls-aws-lc-rs is not enabled" >&2
+            exit 1
+          fi
+
+          if grep -q 'sqlx feature "tls-rustls-ring"' <<< "${sqlx_features}"; then
+            echo "sqlx feature tls-rustls-ring is enabled by:" >&2
+            grep -A5 'sqlx feature "tls-rustls-ring"' <<< "${sqlx_features}" >&2
+            exit 1
+          fi
+
+      - name: Check AWS-LC Build
+        run: |
+          cargo check \
+            -p etl -p etl-postgres -p etl-maintenance -p etl-destinations \
+            --no-default-features \
+            --features "${TLS_FEATURES}"
+
   check-actions:
     name: Actions Lint
     runs-on: blacksmith-4vcpu-ubuntu-2404

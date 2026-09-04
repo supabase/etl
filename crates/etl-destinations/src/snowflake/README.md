@@ -21,7 +21,7 @@ To run a specific destination test directly:
 
 ```bash
 source .env
-cargo test -p etl-destinations --no-default-features --features snowflake,test-utils -- --ignored authenticate_against_snowflake
+cargo test -p etl-destinations --no-default-features --features snowflake,test-utils,tls-rustls-ring -- --ignored authenticate_against_snowflake
 ```
 
 ### Connection String
