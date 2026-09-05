@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use etl_postgres::version::POSTGRES_15;
 
+use super::MAX_REPORTED_OBJECTS;
 use crate::validation::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
 /// Validates source primary keys for destinations that require them.
@@ -16,6 +17,8 @@ pub(super) struct PrimaryKeyValidator {
     reason: &'static str,
     /// Whether every publication table must have a primary key.
     require_primary_key: bool,
+    /// Numeric PostgreSQL server version used to select supported catalogs.
+    server_version_num: i32,
 }
 
 impl PrimaryKeyValidator {
@@ -25,8 +28,9 @@ impl PrimaryKeyValidator {
         destination_name: &'static str,
         reason: &'static str,
         require_primary_key: bool,
+        server_version_num: i32,
     ) -> Self {
-        Self { publication_name, destination_name, reason, require_primary_key }
+        Self { publication_name, destination_name, reason, require_primary_key, server_version_num }
     }
 }
 
@@ -40,142 +44,59 @@ impl Validator for PrimaryKeyValidator {
             return Ok(vec![]);
         };
 
-        let publication_exists: bool = sqlx::query_scalar(
-            r#"
-            select exists(
-                select 1
-                from pg_publication
-                where pubname = $1
-            )
-            "#,
-        )
-        .bind(&self.publication_name)
-        .fetch_one(source_pool)
-        .await?;
-
-        if !publication_exists {
-            // If the publication doesn't exist, skip this check. Pipeline
-            // validation reports the actionable publication failure.
-            return Ok(vec![]);
-        }
-
         let tables_without_pk: Vec<String> = sqlx::query_scalar(
             r#"
-            select n.nspname || '.' || c.relname
+            select format('%I.%I', n.nspname, c.relname)
             from pg_publication p
             cross join lateral pg_get_publication_tables(p.pubname) gpt
             join pg_class c on c.oid = gpt.relid
             join pg_namespace n on n.oid = c.relnamespace
-            left join lateral (
-                with direct_parent as (
-                    select i.inhparent as parent_oid
-                    from pg_inherits i
-                    where i.inhrelid = c.oid
-                    order by i.inhseqno
-                    limit 1
-                ),
-                primary_key_cols as (
-                    select x.attnum::int4 as attnum, x.n::int4 as position
-                    from pg_constraint con
-                    cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-                    where con.conrelid = c.oid
-                      and con.contype = 'p'
-                ),
-                parent_primary_key_cols as (
-                    select x.attnum::int4 as attnum, x.n::int4 as position
-                    from direct_parent dp
-                    join pg_constraint con
-                      on con.conrelid = dp.parent_oid
-                     and con.contype = 'p'
-                    cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-                ),
-                effective_primary_key_cols as (
-                    select pkc.attnum, pkc.position
-                    from primary_key_cols pkc
-                    union all
-                    select ppkc.attnum, ppkc.position
-                    from parent_primary_key_cols ppkc
-                    where not exists (
-                        select 1
-                        from primary_key_cols pkc
-                    )
-                )
-                select array_agg(epkc.attnum order by epkc.position) as primary_key_attnums
-                from effective_primary_key_cols epkc
-            ) pk on true
             where p.pubname = $1
-              and cardinality(coalesce(pk.primary_key_attnums, array[]::int4[])) = 0
+              and not exists (
+                select 1
+                from pg_index i
+                where i.indrelid = c.oid
+                  and i.indisprimary
+                  and i.indisvalid
+              )
             order by n.nspname, c.relname
-            limit 100
+            limit $2
             "#,
         )
         .bind(&self.publication_name)
+        .bind(MAX_REPORTED_OBJECTS)
         .fetch_all(source_pool)
         .await?;
 
-        let server_version_num: i32 =
-            sqlx::query_scalar("select current_setting('server_version_num')::int")
-                .fetch_one(source_pool)
-                .await?;
-        let tables_with_omitted_pk_columns = if server_version_num >= POSTGRES_15 {
+        let tables_with_omitted_pk_columns = if self.server_version_num >= POSTGRES_15 {
             sqlx::query_as::<_, (String, String)>(
                 r#"
                 with publication_tables as (
                     select
-                        n.nspname || '.' || c.relname as table_name,
+                        format('%I.%I', n.nspname, c.relname) as table_name,
                         c.oid as table_oid,
-                        coalesce(pt.attnames, array[]::name[]) as replicated_column_names
+                        gpt.attrs::smallint[] as replicated_attnums
                     from pg_publication p
                     cross join lateral pg_get_publication_tables(p.pubname) gpt
                     join pg_class c on c.oid = gpt.relid
                     join pg_namespace n on n.oid = c.relnamespace
-                    left join pg_publication_tables pt
-                      on pt.pubname = p.pubname
-                     and pt.schemaname = n.nspname
-                     and pt.tablename = c.relname
                     where p.pubname = $1
                 ),
                 primary_key_cols as (
                     select
                         pt.table_name,
                         pt.table_oid,
-                        pt.replicated_column_names,
-                        epkc.attnum,
-                        epkc.position
+                        pt.replicated_attnums,
+                        x.attnum,
+                        x.n::int4 as position
                     from publication_tables pt
-                    cross join lateral (
-                        with direct_parent as (
-                            select i.inhparent as parent_oid
-                            from pg_inherits i
-                            where i.inhrelid = pt.table_oid
-                            order by i.inhseqno
-                            limit 1
-                        ),
-                        table_primary_key_cols as (
-                            select x.attnum::int4 as attnum, x.n::int4 as position
-                            from pg_constraint con
-                            cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-                            where con.conrelid = pt.table_oid
-                              and con.contype = 'p'
-                        ),
-                        parent_primary_key_cols as (
-                            select x.attnum::int4 as attnum, x.n::int4 as position
-                            from direct_parent dp
-                            join pg_constraint con
-                              on con.conrelid = dp.parent_oid
-                             and con.contype = 'p'
-                            cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-                        )
-                        select tpkc.attnum, tpkc.position
-                        from table_primary_key_cols tpkc
-                        union all
-                        select ppkc.attnum, ppkc.position
-                        from parent_primary_key_cols ppkc
-                        where not exists (
-                            select 1
-                            from table_primary_key_cols tpkc
-                        )
-                    ) epkc
+                    join pg_index i
+                      on i.indrelid = pt.table_oid
+                     and i.indisprimary
+                     and i.indisvalid
+                    cross join lateral unnest(i.indkey) with ordinality as x(attnum, n)
+                    where x.n <= i.indnkeyatts
+                      and x.attnum > 0
                 )
                 select
                     pk.table_name,
@@ -184,14 +105,17 @@ impl Validator for PrimaryKeyValidator {
                 join pg_attribute a
                   on a.attrelid = pk.table_oid
                  and a.attnum = pk.attnum
-                where cardinality(pk.replicated_column_names) > 0
-                  and a.attname <> all(pk.replicated_column_names)
+                -- Before PostgreSQL 18, NULL means that no publication column
+                -- list was specified, so no primary-key column is omitted.
+                where pk.replicated_attnums is not null
+                  and pk.attnum <> all(pk.replicated_attnums)
                 group by pk.table_name
                 order by pk.table_name
-                limit 100
+                limit $2
                 "#,
             )
             .bind(&self.publication_name)
+            .bind(MAX_REPORTED_OBJECTS)
             .fetch_all(source_pool)
             .await?
         } else {

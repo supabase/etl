@@ -22,7 +22,7 @@ use crate::{
     },
     replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext, WorkerType},
     runtime::{
-        BatchBudgetController, MemoryMonitor, TableSyncWorkerPool,
+        BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
         concurrency::ShutdownRx,
         error_policy::{RetryDirective, build_error_handling_policy},
     },
@@ -84,7 +84,7 @@ pub(crate) struct ApplyWorker<S, D> {
     shutdown_rx: ShutdownRx,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
-    batch_budget: BatchBudgetController,
+    batch_memory_governor: BatchMemoryGovernor,
 }
 
 impl<S, D> ApplyWorker<S, D> {
@@ -106,7 +106,7 @@ impl<S, D> ApplyWorker<S, D> {
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
     ) -> Self {
-        let batch_budget = BatchBudgetController::new(
+        let batch_memory_governor = BatchMemoryGovernor::new(
             pipeline_id,
             memory_monitor.clone(),
             config.batch.memory_budget_ratio,
@@ -123,7 +123,7 @@ impl<S, D> ApplyWorker<S, D> {
             shutdown_rx,
             table_sync_worker_permits,
             memory_monitor,
-            batch_budget,
+            batch_memory_governor,
         }
     }
 }
@@ -283,10 +283,9 @@ where
             shutdown_rx: attempt_shutdown_rx.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
-            batch_budget: self.batch_budget.clone(),
+            batch_memory_governor: self.batch_memory_governor.clone(),
         });
 
-        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
@@ -298,7 +297,7 @@ where
             worker_context,
             attempt_shutdown_rx,
             self.memory_monitor.clone(),
-            self.batch_budget.clone(),
+            self.batch_memory_governor.clone(),
             None,
         )
         .await?;

@@ -63,8 +63,8 @@ pub enum ApiDestinationConfig {
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint URL.
-        #[schema(value_type = String, example = "http://test:8123")]
+        /// ClickHouse HTTPS endpoint URL.
+        #[schema(value_type = String, example = "https://clickhouse.example.com:8443")]
         #[serde(deserialize_with = "crate::utils::trim_http_url")]
         url: Url,
         /// ClickHouse user name

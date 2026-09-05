@@ -1,33 +1,46 @@
 # Development Guide
 
-This guide covers setting up your development environment, running migrations, and common development workflows for the ETL project.
+How to work in this repository. Coding agents should follow
+[AGENTS.md](AGENTS.md) (first-time setup and implementation rules).
 
-## Table of Contents
+The open-source project is the replication engine: the `etl` library, the
+`etl-replicator` binary, and the built-in destinations. Product docs live at
+[supabase.github.io/etl](https://supabase.github.io/etl/).
 
-- [Task Runner](#task-runner)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Database Setup](#database-setup)
-  - [Using the Setup Script](#using-the-setup-script)
-  - [Manual Setup](#manual-setup)
-- [Database Migrations](#database-migrations)
-  - [ETL API Migrations](#etl-api-migrations)
-  - [ETL Source And Store Migrations](#etl-source-and-store-migrations)
-- [Running the Services](#running-the-services)
-- [Kubernetes Setup](#kubernetes-setup)
-- [Common Development Tasks](#common-development-tasks)
+`etl-api` is an optional Kubernetes control-plane for deploying replicators.
+You do not need it to run ETL.
 
-## Prerequisites
+## Start here
 
-Before starting, ensure you have the following installed:
+```bash
+cargo x init
+```
 
-### Required Tools
+That starts local Postgres, ClickHouse, and the Iceberg REST catalog, and runs
+migrations. It does not write service configuration or apply Kubernetes
+resources.
 
-- **Rust** (latest stable): [Install Rust](https://rustup.rs/)
-- **PostgreSQL client** (`psql`): Required for database operations
-- **Docker Compose**: For running PostgreSQL and other services
-- **kubectl**: For Kubernetes operations
-- **SQLx CLI**: For database migrations
+Then set up the service you want:
+
+```bash
+cargo x setup api
+cargo x run api
+
+# or, ClickHouse by default:
+cargo x setup replicator
+cargo x seed
+cargo x run replicator
+```
+
+Generated files in `crates/etl-api/configuration/` and
+`crates/etl-replicator/configuration/` are gitignored. Re-run replicator setup
+with `--force` to replace its files. API `--force` rewrites the config while
+preserving old encryption keys and appending a new key id. Do not commit those
+files.
+
+Need: Rust from `rust-toolchain.toml`, `psql`, SQLx CLI, and Docker Compose.
+`kubectl` plus [OrbStack](https://orbstack.dev) with Kubernetes if you run the
+API.
 
 Install SQLx CLI:
 
@@ -35,680 +48,138 @@ Install SQLx CLI:
 cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
 ```
 
-### Optional Tools
+## Replicator
 
-- **OrbStack**: Recommended for local Kubernetes development (alternative to Docker Desktop)
-  - [Install OrbStack](https://orbstack.dev)
-  - Enable Kubernetes in OrbStack settings
+ClickHouse is the default and uses the Docker service from `cargo x init`. No
+cloud credentials are required. Iceberg REST also uses local Docker. Cloud
+destinations write fake identifiers and placeholder secrets; override them with
+`APP_DESTINATION__*` for a real run.
 
-## Task Runner
+| Destination | Setup | Then |
+| --- | --- | --- |
+| `clickhouse` (default) | `cargo x setup replicator` | `cargo x seed && cargo x run replicator` |
+| `iceberg` | `cargo x setup replicator --destination iceberg` | `cargo x seed && cargo x run replicator` |
+| `bigquery` | `cargo x setup replicator --destination bigquery` | export `APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY`, then `cargo x run replicator` |
+| `ducklake` | `cargo x setup replicator --destination ducklake` | export `APP_DESTINATION__DUCKLAKE__S3_*`, then `cargo x run replicator` |
+| `snowflake` | `cargo x setup replicator --destination snowflake` | export `APP_DESTINATION__SNOWFLAKE__PRIVATE_KEY`, then `cargo x run replicator` |
 
-Common development tasks are available through `cargo x`, a shorthand alias for `cargo xtask`.
-Run `cargo x --help` to see all available commands.
+Iceberg is deprecated. For a Supabase catalog, add `--iceberg-catalog supabase`
+and export `APP_DESTINATION__ICEBERG__SUPABASE__*`.
+
+`cargo x setup replicator --help` lists flags. `--interactive` prompts for hosts
+and names. `cargo x run replicator` compiles the destination from the generated
+config. The replicator does not need Kubernetes. Re-run `cargo x seed` as often
+as you like; it keeps the existing database unless you pass `--force`.
+
+When the replicator is running, seed tables show up in ClickHouse as
+`public_users`, `public_orders`, and `public_events`, plus `__current` views:
 
 ```bash
-cargo x fmt              # format code with nightly rustfmt
-cargo x fmt --check      # check formatting without changes
-cargo x check            # pre-PR gate: fmt, sort, clippy
-cargo x fix              # auto-fix: clippy --fix, fmt, sort
+curl -sS 'http://localhost:8123/?user=etl&password=etl' \
+  --data-binary 'SELECT count() FROM "public_users__current"'
+```
+
+Stop the replicator with Ctrl+C.
+
+## API
+
+```bash
+cargo x setup api
+cargo x run api
+```
+
+`cargo x setup api` writes API configuration and applies Kubernetes resources.
+If you skipped `cargo x init`, it also starts the local stack. Health is at
+http://127.0.0.1:8010/health_check, Swagger at `/swagger-ui`. See
+`crates/etl-api/README.md` for configuration.
+
+## Everyday commands
+
+`cargo x` is the task runner. `cargo x --help` lists every command.
+
+```bash
+cargo x fmt              # nightly rustfmt (pinned)
+cargo x fmt --check
+cargo x check            # fmt, sort, clippy
+cargo x fix
 cargo x msrv             # verify MSRV consistency
-cargo x init             # set up local dev environment
-cargo x migrate          # run database migrations
-cargo x deploy-local     # deploy replicator to local OrbStack k8s
+cargo x migrate          # API and ETL migrations
+cargo x deploy-local \
+  --cpu-request 125m \
+  --memory-request 250Mi # deploy replicator to local OrbStack k8s
 cargo x test-clickhouse  # run ClickHouse integration tests
 cargo x test-snowflake   # run Snowflake tests
 cargo x vendor-duckdb    # download and vendor DuckDB extensions
+cargo xtask nextest run  # full sharded test suite (needs Postgres)
 ```
 
-## Formatting
+## Local stack
 
-The workspace stays on the stable toolchain pinned in `rust-toolchain.toml` for builds, tests, and linting.
-Formatting is the only workflow that uses nightly Rust, because the repository relies on nightly-only
-`rustfmt` options for import grouping and layout.
+`cargo x init` defaults:
+
+| Service | Address |
+| --- | --- |
+| Postgres | `localhost:5430` (`postgres` / `postgres`) |
+| Postgres replica | `localhost:6430` |
+| ClickHouse | `http://localhost:8123` (`etl` / `etl`) |
+| Iceberg catalog | `http://localhost:8182` |
+| MinIO | `http://localhost:9010` (`minio-admin` / `minio-admin-password`) |
+
+Override with `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`,
+`POSTGRES_PASSWORD`, `POSTGRES_DB`, `CLICKHOUSE_*`, or `SKIP_DOCKER=1` when
+Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
+`POSTGRES_REPLICA_DATA_VOLUME`, `CLICKHOUSE_DATA_VOLUME`.
+
+`cargo xtask postgres start` starts only the test Postgres clusters.
+`cargo xtask multigres --help` covers the optional Multigres cluster.
+
+## Configuration
+
+Both binaries load `configuration/base.yaml`, then
+`configuration/{environment}.yaml`, then `APP_` environment variables (nested
+keys use `__`). `APP_ENVIRONMENT` defaults to `prod`. `cargo x run` sets `dev`
+and points `APP_CONFIG_DIR` at the generated directory.
+
+Generated files include only required fields. Encryption keys and API keys are
+random. Local Docker passwords are the published Compose defaults. Cloud
+destination secrets are fake placeholders.
+
+## Tests
+
+After `cargo x init`:
 
 ```bash
-cargo x fmt
-cargo x fmt --check
+cargo xtask nextest run
 ```
 
-Both default to `nightly-2026-04-15`. You can temporarily override the formatter toolchain with
-`RUSTFMT_NIGHTLY_TOOLCHAIN`, but CI and the repository defaults should stay pinned so formatting does not drift.
-
-## Quick Start
-
-The fastest way to get started:
+Unit tests that do not need Postgres:
 
 ```bash
-# From the project root
-cargo x init
+cargo nextest run --workspace --all-features --lib
 ```
 
-This script will:
-1. Start PostgreSQL, ClickHouse, and the local Iceberg dependencies via Docker Compose.
-2. Run etl-api migrations.
-3. Seed the default replicator image.
-4. Configure the Kubernetes environment (OrbStack).
-
-## Database Setup
-
-### Using the Setup Script
-
-`cargo x init` provides a complete development environment setup:
-
-```bash
-# Use default settings (Postgres on port 5430)
-cargo x init
-
-# Customize database settings
-POSTGRES_PORT=5432 POSTGRES_DB=mydb cargo x init
-
-# Skip Docker if you already have Postgres running
-SKIP_DOCKER=1 cargo x init
-
-# Use persistent storage
-POSTGRES_DATA_VOLUME=/path/to/data cargo x init
-```
-
-**Environment Variables:**
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `POSTGRES_USER` | `postgres` | Database user |
-| `POSTGRES_PASSWORD` | `postgres` | Database password |
-| `POSTGRES_DB` | `postgres` | Database name |
-| `POSTGRES_PORT` | `5430` | Database port |
-| `POSTGRES_REPLICA_PORT` | `6430` | Read replica database port |
-| `POSTGRES_HOST` | `localhost` | Database host |
-| `POSTGRES_MAX_WAL_SENDERS` | `100` | Local Postgres WAL sender capacity for replication tests |
-| `POSTGRES_MAX_REPLICATION_SLOTS` | `100` | Local Postgres slot capacity for physical and logical replication tests |
-| `POSTGRES_WAL_SENDER_TIMEOUT` | `10s` | Local Postgres WAL sender timeout used by replication tests |
-| `POSTGRES_REPLICA_WAL_RECEIVER_STATUS_INTERVAL` | `1s` | Read replica WAL receiver feedback interval |
-| `POSTGRES_REPLICA_MAX_STANDBY_STREAMING_DELAY` | `-1` | Read replica conflict delay used to avoid canceling long test copies |
-| `CLICKHOUSE_HTTP_PORT` | `8123` | ClickHouse HTTP port |
-| `CLICKHOUSE_NATIVE_PORT` | `9001` | ClickHouse native TCP port (mapped to container `9000`; host default avoids the replicator's `9000` metrics port) |
-| `CLICKHOUSE_USER` | `etl` | ClickHouse user for the local Docker Compose setup |
-| `CLICKHOUSE_PASSWORD` | `etl` | ClickHouse password for the local Docker Compose setup |
-| `SKIP_DOCKER` | (empty) | Skip Docker Compose if set |
-| `POSTGRES_DATA_VOLUME` | (empty) | Path for PostgreSQL persistent storage |
-| `POSTGRES_REPLICA_DATA_VOLUME` | (empty) | Path for PostgreSQL read replica persistent storage |
-| `CLICKHOUSE_DATA_VOLUME` | (empty) | Path for ClickHouse persistent storage |
-| `REPLICATOR_IMAGE` | `ramsup/etl-replicator:latest` | Default replicator image |
-
-PostgreSQL 18+ containers store data under `/var/lib/postgresql/<major>/data`, so the Docker Compose setup mounts the parent `/var/lib/postgresql` directory to keep upgrades compatible.
-
-The source PostgreSQL container started by `cargo x init` or `cargo xtask postgres start` supports TLS by default. The task runner generates a local test CA and server certificate under `target/postgres-tls/`, then copies the server certificate and key into the container. Local clients may still connect without TLS; set `TESTS_DATABASE_TLS_ENABLED=true` when running tests to require verified TLS using the generated root certificate.
-
-The same local PostgreSQL setup also starts a physical read replica for logical decoding tests. By default, the primary listens on `localhost:5430` and the replica listens on `localhost:6430`. Additional sharded test clusters use the same `+1000` port offset for their replicas. The replica is created with `pg_basebackup`, streams from the primary through a physical replication slot, and enables `hot_standby_feedback`. ETL logical slots are created on the read replica during these tests; the primary only owns the physical slot that feeds the replica.
-
-For PostgreSQL 17 and newer, the read replica also enables `sync_replication_slots`, so the pipeline failover tests can verify that ETL failover slots become synchronized and promotion-ready. PostgreSQL 14 through 16 use the same replica setup without that unsupported setting, and the failover tests skip on those versions.
-
-The same Docker Compose stack also starts ClickHouse on `http://localhost:8123` by default, which is enough for local destination development and ClickHouse integration tests.
-
-### Multigres Setup
-
-Start the ephemeral two-cell Multigres compatibility cluster with:
-
-```bash
-cargo xtask multigres start
-```
-
-Run the isolated Multigres tests with:
-
-```bash
-cargo xtask multigres test
-```
-
-The test command recreates the dedicated `etl-multigres` Compose project before it runs. Treat data in this local compatibility cluster as ephemeral; the reset prevents a previous primary switch or failed test from affecting slot synchronization in the next run.
-
-The command pulls the pinned official all-in-one image and exposes the zone-one multigateway on `127.0.0.1:15432`. The mounted `mtconfig.yaml` enables Multigres slot-based replication so the gateway admits persistent failover logical slots and the poolers synchronize them. Two cells match the upstream compatibility image's minimum and support the graceful `multigres cluster switch-primary` path. Override `MULTIGRES_IMAGE`, `MULTIGRES_NUM_CELLS`, or `MULTIGRES_GATEWAY_PORT` to test a deliberate image upgrade, a three-cell topology, or a different local port.
-
-At the pinned image digest, a three-cell slot-based cluster can start with one follower's physical slot inactive even though WAL streaming is connected. PostgreSQL then blocks logical decoding on `synchronized_standby_slots`. Keep the two-cell default for graceful-switchover tests, and verify that every required follower physical slot is active before using three cells for crash-failover coverage.
-
-The current compatibility cluster serves the fixed `postgres` database through the gateway. The normal ETL integration suite cannot run unchanged against it because [`PgDatabase`](crates/etl-postgres/src/tokio/test_utils.rs) creates a unique database for every test. For now, only the ignored `pipeline_failover::pipeline_multigres_failover` test in the `multigres` target uses Multigres. The test owns its pipeline, table, publication, and replication-slot identities and supplies them to the Multigres database helper, which operates inside the fixed database and reconnects after failover.
-
-At the pinned image revision, a replication stream is pinned to one pooler and is torn down during a leader change. The ETL apply worker reconnects through the gateway and resumes the synchronized failover slot on the new primary. The test waits until the standby slot's confirmed position reaches an acknowledged streaming write, holds the next write unacknowledged across the primary switch, and verifies that the promoted standby retransmits it without repeating the initial copy or the previously acknowledged write. Transparent same-connection repointing is described by Multigres as a later gateway feature and is not asserted by this test.
-
-CI runs `Multigres Tests` concurrently with the regular PostgreSQL matrix on a separate runner with a separately provisioned cluster, so its primary switch cannot affect any other test process.
-
-Connect manually with the documented local test credentials:
-
-```bash
-PGPASSWORD=postgres psql -h 127.0.0.1 -p 15432 -U postgres -d postgres
-```
-
-Remove the ephemeral cluster when it is no longer needed:
-
-```bash
-docker compose -f scripts/docker/docker-compose-multigres.yaml down
-```
-
-### Manual Setup
-
-If you prefer manual setup or have an existing PostgreSQL instance:
-
-**Important:** The etl-api migrations and ETL source/store migrations can run on **separate databases**. You might have:
-- The etl-api using its own dedicated Postgres instance for the control plane
-- The ETL source helpers and Postgres store tables on the database you're replicating from (source database)
-- Or both on the same database (for simpler local development setups)
-
-#### Single Database Setup
-
-If using one database for both the API and ETL source/store objects:
-
-```bash
-export DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/DB
-
-# Run all migrations on the same database
-cargo x migrate
-```
-
-#### Separate Database Setup
-
-If using separate databases (recommended for production):
-
-```bash
-# API migrations on the control plane database
-export DATABASE_URL=postgres://USER:PASSWORD@API_HOST:PORT/API_DB
-cargo x migrate etl-api
-
-# ETL migrations on the source database
-export DATABASE_URL=postgres://USER:PASSWORD@SOURCE_HOST:PORT/SOURCE_DB
-cargo x migrate etl
-```
-
-This separation allows you to:
-- Scale the control plane independently from replication workloads
-- Keep ETL source/store objects close to the source data
-- Isolate concerns between infrastructure management and data replication
-
-## Database Migrations
-
-The project uses SQLx for database migrations. There are two sets of migrations:
-
-### ETL API Migrations
-
-Located in `crates/etl-api/migrations/`, these create the control plane schema (`app` schema) for managing tenants, sources, destinations, and pipelines.
-
-**Running API migrations:**
-
-```bash
-# From project root
-cargo x migrate etl-api
-
-# Or manually with SQLx CLI
-sqlx migrate run --source crates/etl-api/migrations
-```
-
-**Creating a new API migration:**
-
-```bash
-cd crates/etl-api
-sqlx migrate add <migration_name>
-```
-
-**Resetting the API database:**
-
-```bash
-cd crates/etl-api
-sqlx migrate revert
-```
-
-**Updating SQLx metadata after schema changes:**
-
-```bash
-cd crates/etl-api
-cargo sqlx prepare
-```
-
-### ETL Source And Store Migrations
-
-Located under `crates/etl/migrations/`, these prepare the source database:
-
-- `crates/etl/migrations/source/`: ETL source helpers required by every pipeline, such as schema snapshot functions and the DDL event trigger. `Pipeline::start()` runs these automatically.
-- `crates/etl/migrations/postgres_store/`: Postgres-backed state store tables used to persist replication state, versioned table schemas, and destination metadata. `PostgresStore::new()` runs these automatically.
-
-Both migration sets write to `etl._sqlx_migrations`. When running them
-separately, always use SQLx's `--ignore-missing` flag so each migrator validates
-its own versions while ignoring versions owned by the other set.
-
-Do not edit an already-applied migration file, including comments or
-whitespace. SQLx stores a SHA-384 checksum of the full migration contents, so
-even comment-only changes will break existing databases with a checksum
-mismatch.
-
-**Running ETL migrations manually:**
-
-```bash
-# From project root
-cargo x migrate etl
-
-# Or manually with SQLx CLI (requires setting search_path)
-psql $DATABASE_URL -c "create schema if not exists etl;"
-sqlx migrate run --source crates/etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
-sqlx migrate run --source crates/etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
-```
-
-**Reverting ETL migrations manually:**
-
-```bash
-# Revert source migrations.
-sqlx migrate revert --source crates/etl/migrations/source --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
-
-# Revert Postgres store migrations.
-sqlx migrate revert --source crates/etl/migrations/postgres_store --database-url "${DATABASE_URL}?options=-csearch_path%3Detl" --ignore-missing
-```
-
-Use `--target-version 0` to revert every migration in one migration set. Revert
-source and Postgres store migrations separately because ordering is scoped to
-the selected migration folder.
-
-**Important:** Migrations are run automatically at the appropriate runtime
-boundary: source migrations when a pipeline starts, and Postgres store
-migrations when the Postgres-backed state store is initialized. However, if you
-integrate the `etl` crate directly into your own application and want to prepare
-the source database ahead of time, you can also run these migrations manually.
-This design decision ensures:
-- The standalone replicator binary works out-of-the-box
-- Library users have explicit control over when migrations run
-- CI/CD pipelines can pre-apply migrations independently
-
-**When to run migrations manually:**
-- Integrating `etl` as a library in your own application
-- Pre-creating the replication state store schema before deployment
-- Testing migrations independently
-- CI/CD pipelines that separate migration and deployment steps
-
-**Creating a new Postgres state store migration:**
-
-```bash
-cd crates/etl
-sqlx migrate add -r --source migrations/postgres_store <migration_name>
-```
-
-**Creating a new ETL source migration:**
-
-```bash
-cd crates/etl
-sqlx migrate add -r --source migrations/source <migration_name>
-```
-
-## Running the Services
-
-Both `etl-api` and `etl-replicator` binaries use hierarchical configuration loading from the `configuration/` directory within each crate. Configuration is loaded in this order:
-
-1. **Base configuration**: `configuration/base.yaml` (always loaded)
-2. **Environment-specific**: `configuration/{environment}.yaml` (e.g., `dev.yaml`, `prod.yaml`)
-3. **Environment variable overrides**: Prefixed with `APP_` (e.g., `APP_DATABASE__URL`)
-
-**Environment Selection:**
-
-The environment is determined by the `APP_ENVIRONMENT` variable:
-- **Default**: `prod` (if `APP_ENVIRONMENT` is not set)
-- **Available**: `dev`, `staging`, `prod`
-
-```bash
-# Run with dev environment
-APP_ENVIRONMENT=dev cargo run
-
-# Run with production environment (default)
-cargo run
-
-# Override specific config values
-APP_ENVIRONMENT=dev APP_DATABASE__URL=postgres://localhost/mydb cargo run
-```
-
-### ETL API
-
-#### Running from Source
-
-```bash
-cd crates/etl-api
-APP_ENVIRONMENT=dev cargo run
-```
-
-The API loads configuration from `crates/etl-api/configuration/{environment}.yaml`. See `crates/etl-api/README.md` for available configuration options.
-
-#### Running with Docker
-
-Docker images are available for the etl-api. You must mount the configuration files and can override settings via environment variables:
-
-```bash
-docker run \
-  -v $(pwd)/crates/etl-api/configuration/base.yaml:/app/configuration/base.yaml \
-  -v $(pwd)/crates/etl-api/configuration/dev.yaml:/app/configuration/dev.yaml \
-  -e APP_ENVIRONMENT=dev \
-  -p 8080:8080 \
-  ramsup/etl-api:latest
-```
-
-**Configuration requirements:**
-- Mount both `base.yaml` and your environment-specific config file (e.g., `dev.yaml`)
-- Set `APP_ENVIRONMENT` to match your mounted environment file
-- Override specific values using `APP_` prefixed environment variables
-
-#### Kubernetes Setup (ETL API Only)
-
-The etl-api manages replicator deployments on Kubernetes by dynamically creating StatefulSets, Secrets, and ConfigMaps. The etl-api requires Kubernetes, but the **etl-replicator binary can run independently without any Kubernetes setup**.
-
-**Prerequisites:**
-- OrbStack with Kubernetes enabled (or another local Kubernetes cluster)
-- `kubectl` configured with the `orbstack` context
-- Pre-defined Kubernetes resources (see below)
-
-**Required Pre-Defined Resources:**
-
-The etl-api expects these resources to exist before it can deploy replicators:
-
-1. **Namespace**: `etl-data-plane` - Where all replicator pods and related resources are created
-2. **ServiceAccount**: `etl-replicator` - Used by replicator pods created by the etl-api
-
-These are defined in `scripts/k8s/local/` and should be applied before running the API:
-
-```bash
-kubectl --context orbstack apply -f scripts/k8s/local
-```
-
-**Note:** For the complete list of expected Kubernetes resources and their specifications, refer to the constants and resource creation logic in `crates/etl-api/src/k8s/http.rs`.
-
-### ETL Replicator
-
-The replicator can run as a standalone binary without Kubernetes.
-
-#### Running from Source
-
-```bash
-cd crates/etl-replicator
-APP_ENVIRONMENT=dev cargo run
-```
-
-The replicator loads configuration from `crates/etl-replicator/configuration/{environment}.yaml`.
-
-#### Running with Docker
-
-Docker images are available for the etl-replicator. You must mount the configuration files and can override settings via environment variables:
-
-```bash
-docker run \
-  -v $(pwd)/crates/etl-replicator/configuration/base.yaml:/app/configuration/base.yaml \
-  -v $(pwd)/crates/etl-replicator/configuration/dev.yaml:/app/configuration/dev.yaml \
-  -e APP_ENVIRONMENT=dev \
-  etl-replicator:latest
-```
-
-**Configuration requirements:**
-- Mount both `base.yaml` and your environment-specific config file (e.g., `dev.yaml`)
-- Set `APP_ENVIRONMENT` to match your mounted environment file
-- Override specific values using `APP_` prefixed environment variables
-
-**Note:** While the replicator is typically deployed as a Kubernetes pod managed by the etl-api, it does not require Kubernetes to function. You can run it as a standalone process on any machine with the appropriate configuration.
-
-## Running Tests
-
-The project includes comprehensive test suites that require a PostgreSQL database. Tests use environment variables for database configuration to ensure isolation and reproducibility.
-
-### Test Environment Variables
-
-#### PostgreSQL Test Variables
-
-All tests that interact with PostgreSQL require the following environment variables to be set:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TESTS_DATABASE_HOST` | **Yes** | PostgreSQL server hostname (e.g., `localhost`) |
-| `TESTS_DATABASE_PORT` | **Yes** | PostgreSQL server port (e.g., `5430`) |
-| `TESTS_DATABASE_REPLICA_HOST` | No | Read replica hostname for tests that require standby logical decoding; defaults to `TESTS_DATABASE_HOST` |
-| `TESTS_DATABASE_REPLICA_PORT` | No | Read replica port for tests that require standby logical decoding; defaults to `TESTS_DATABASE_PORT + 1000` |
-| `TESTS_DATABASE_USERNAME` | **Yes** | Database user (e.g., `postgres`) |
-| `TESTS_DATABASE_PASSWORD` | No | Database password (optional) |
-| `TESTS_DATABASE_TLS_ENABLED` | No | Require verified TLS for Postgres test clients when set to `true` |
-| `TESTS_DATABASE_TLS_ROOT_CERT` | No | Path to the trusted root certificate; defaults to `target/postgres-tls/root.crt` |
-
-**Note:** Each test creates a unique database with a UUID-based name to ensure test isolation. The test databases are automatically cleaned up after tests complete.
-
-#### BigQuery Test Variables
-
-BigQuery destination tests require Google Cloud credentials:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TESTS_BIGQUERY_PROJECT_ID` | **Yes** | GCP project ID for BigQuery |
-| `TESTS_BIGQUERY_SA_KEY_PATH` | **Yes** | Path to service account JSON key file |
-
-**Note:** BigQuery tests are only run when the `bigquery` and `test-utils` features are enabled. Each test creates a unique dataset with a UUID-based name for isolation.
-
-#### Iceberg Test Variables
-
-Iceberg destination tests use local MinIO and Lakekeeper instances. The following services must be running:
-
-- **Lakekeeper**: `http://localhost:8182` (REST catalog)
-- **MinIO**: `http://localhost:9010` (S3-compatible storage)
-  - Username: `minio-admin`
-  - Password: `minio-admin-password`
-
-**Note:** Iceberg tests are only run when the `iceberg` and `test-utils` features are enabled. These use hardcoded local URLs and do not require environment variables.
-
-#### ClickHouse Test Variables
-
-ClickHouse destination tests require a reachable ClickHouse HTTP endpoint:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TESTS_CLICKHOUSE_URL` | **Yes** | ClickHouse HTTP URL (for example, `http://localhost:8123`) |
-| `TESTS_CLICKHOUSE_USER` | **Yes** | ClickHouse user name (for the local Docker Compose setup, use `etl`) |
-| `TESTS_CLICKHOUSE_PASSWORD` | No | ClickHouse password; for the local Docker Compose setup, use `etl` |
-
-**Note:** ClickHouse tests are only run when the `clickhouse` and `test-utils` features are enabled. Each test creates a unique database in ClickHouse and drops it automatically when the test finishes. The Docker Compose setup started by `cargo x init` is sufficient for these tests.
-
-#### Property Test Variables
-
-Property tests built on the shared runner in `etl::test_utils::property`
-(for example the value roundtrip tests in
-`crates/etl/tests/value_roundtrip.rs` and
-`crates/etl-destinations/tests/clickhouse/destination.rs`) run
-randomly generated cases until a wall-clock budget elapses:
-
-| Variable                    | Description                                                                                                                |
-|-----------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| `PROPERTY_TEST_BUDGET_SECS` | Override the wall-clock budget per property; cheap properties default to `2` seconds and expensive properties default to `32` seconds |
-| `PROPERTY_TEST_SEED`        | Pin the chunk RNG seed to replay a failing chunk; the failure panic prints the seed to use                                 |
-
-#### Test Output and Logging
-
-| Variable | Description |
-|----------|-------------|
-| `ENABLE_TRACING=1` | Enable tracing output during test execution (useful for debugging) |
-| `RUST_LOG` | Control log level (e.g., `debug`, `info`, `warn`, `error`) |
-
-**Example:**
-```bash
-# Run tests with debug output
-ENABLE_TRACING=1 RUST_LOG=debug cargo test test_name -- --nocapture
-```
-
-### Setting Up Test Environment
-
-#### Option 1: Inline Environment Variables (Recommended)
-
-The most reliable way is to set environment variables directly in the test command:
-
-```bash
-TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api
-```
-
-#### Option 2: Export in Current Shell Session
-
-Export variables in your current shell session, then run tests:
-
-```bash
-# PostgreSQL test configuration
-export TESTS_DATABASE_HOST=localhost
-export TESTS_DATABASE_PORT=5430
-export TESTS_DATABASE_REPLICA_HOST=localhost
-export TESTS_DATABASE_REPLICA_PORT=6430
-export TESTS_DATABASE_USERNAME=postgres
-export TESTS_DATABASE_PASSWORD=postgres
-# Optional when using the local Docker Compose Postgres from cargo x init.
-export TESTS_DATABASE_TLS_ENABLED=true
-
-# BigQuery test configuration (optional - only needed for BigQuery tests)
-export TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
-export TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
-
-# ClickHouse test configuration (optional - only needed for ClickHouse tests)
-export TESTS_CLICKHOUSE_URL=http://localhost:8123
-export TESTS_CLICKHOUSE_USER=etl
-export TESTS_CLICKHOUSE_PASSWORD=etl
-
-# Enable test output (optional)
-export ENABLE_TRACING=1
-export RUST_LOG=info
-
-# Now run tests
-cargo test -p etl-api
-```
-
-#### Option 3: Use a `.env` File
-
-Create a `.env.test` file and source it:
-
-```bash
-# .env.test
-
-# PostgreSQL (required for most tests)
-TESTS_DATABASE_HOST=localhost
-TESTS_DATABASE_PORT=5430
-TESTS_DATABASE_USERNAME=postgres
-TESTS_DATABASE_PASSWORD=postgres
-
-# BigQuery (optional - only for BigQuery tests)
-TESTS_BIGQUERY_PROJECT_ID=your-gcp-project-id
-TESTS_BIGQUERY_SA_KEY_PATH=/path/to/service-account-key.json
-
-# ClickHouse (optional - only for ClickHouse tests)
-TESTS_CLICKHOUSE_URL=http://localhost:8123
-TESTS_CLICKHOUSE_USER=etl
-TESTS_CLICKHOUSE_PASSWORD=etl
-
-# Test output (optional)
-ENABLE_TRACING=1
-RUST_LOG=info
-```
-
-```bash
-# Source the file and run tests
-source .env.test
-cargo test -p etl-api
-```
-
-### Running Tests
-
-**Important:** Environment variables must be set in the same command as `cargo test`, or exported in your current shell session before running tests.
-
-```bash
-# Run all tests (requires env variables)
-TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test
-
-# Run tests for a specific package
-TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api
-
-# Run tests for packages with test-utils feature (etl, etl-postgres, etl-destinations)
-TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl --features test-utils
-
-# Run a specific test
-TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres cargo test -p etl-api --test tenants tenant_can_be_created
-
-# Run tests with tracing output for debugging
-TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres ENABLE_TRACING=1 RUST_LOG=info cargo test -p etl-api --test tenants tenant_can_be_created -- --nocapture
-
-# Run the ClickHouse destination integration test against the local Docker Compose service
-TESTS_DATABASE_HOST=localhost TESTS_DATABASE_PORT=5430 TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres TESTS_CLICKHOUSE_URL=http://localhost:8123 TESTS_CLICKHOUSE_USER=etl TESTS_CLICKHOUSE_PASSWORD=etl cargo nextest run -p etl-destinations --features clickhouse,test-utils --test main clickhouse::
-```
-
-**Packages requiring `--features test-utils`:**
-- `etl`
-- `etl-postgres`
-- `etl-destinations`
-
-**Packages that don't require feature flags:**
-- `etl-api`
-- `etl-config`
-- `etl-telemetry`
-- `etl-replicator`
-
-**Note:** Ensure PostgreSQL is running and accessible at the configured host and port before running tests. The test suite will fail if it cannot connect to the database or if the required environment variables are not set.
-
-## Fuzzing
-
-The `fuzz/` crate contains `cargo-fuzz` targets for the parsers that consume
-external input: the Postgres text cell codec (`parse_text_cell`), the COPY
-row codec (`parse_copy_row`), the bytea hex parser
-(`parse_bytea_hex_string`), and a parse/print/parse stability check for
-numeric text values (`numeric_text_roundtrip`). Hand-written seeds live in
-`fuzz/corpus/<target>/`; generated corpus entries should not be committed.
-
-```bash
-# Install the runner once, then fuzz a target on the nightly toolchain
-cargo install cargo-fuzz
-cargo +nightly fuzz run parse_text_cell -- -max_total_time=60
-```
-
-CI runs every target for 120 seconds daily via
-`.github/workflows/fuzz.yml`. Each run restores the newest cached corpus
-for its target and saves the grown one, so coverage accumulates across
-days; crash inputs are uploaded as workflow artifacts on failure.
+Integration tests need `TESTS_DATABASE_HOST`, `TESTS_DATABASE_PORT`, and
+`TESTS_DATABASE_USERNAME` (local defaults: `localhost`, `5430`, `postgres`).
+ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
+`TESTS_CLICKHOUSE_PASSWORD`. Iceberg tests use the local catalog and MinIO from
+`cargo x init`. BigQuery tests need `TESTS_BIGQUERY_PROJECT_ID` and
+`TESTS_BIGQUERY_SA_KEY_PATH`.
+
+Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
+Parser fuzz targets live in `fuzz/`.
 
 ## Troubleshooting
 
-### Database Connection Issues
-
-If you encounter connection issues:
-
-1. Verify PostgreSQL is running:
-   ```bash
-   docker-compose -f scripts/docker/docker-compose.yaml ps
-   ```
-
-2. Check the connection:
-   ```bash
-   psql $DATABASE_URL -c "SELECT 1;"
-   ```
-
-3. Ensure the correct port is used (default: 5430)
-
-### Migration Issues
-
-If migrations fail:
-
-1. Check if the database exists:
-   ```bash
-   psql $DATABASE_URL -c "\l"
-   ```
-
-2. Verify SQLx CLI is installed:
-   ```bash
-   sqlx --version
-   ```
-
-3. Check migration history:
-   ```bash
-   psql $DATABASE_URL -c "SELECT * FROM _sqlx_migrations;"
-   ```
-
-### Kubernetes Issues
-
-If Kubernetes resources aren't deploying:
-
-1. Verify context:
-   ```bash
-   kubectl config current-context
-   ```
-
-2. Check cluster status:
-   ```bash
-   kubectl cluster-info
-   ```
-
-3. View events:
-   ```bash
-   kubectl get events -n etl-control-plane --sort-by='.lastTimestamp'
-   ```
+- Nothing listens on 5430: run `cargo x init` (or `SKIP_DOCKER=1` with
+  `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
+  `POSTGRES_DB`).
+- API exits on Kubernetes: enable OrbStack Kubernetes, then `cargo x setup api`.
+- Replicator config missing: `cargo x setup replicator` (ClickHouse) or
+  `--destination <name>`.
+- `cargo x seed` keeps `etl_testdata` if it already exists. Recreate with
+  `cargo x seed --force`.
+- Replicator fails with `replication slot "supabase_etl_apply_1" was not
+  created in this database`: another pipeline used id `1` on this Postgres
+  cluster (for example the first-pipeline tutorial). `cargo x setup
+  replicator` drops an inactive leftover slot. If the slot is still active,
+  stop that process, then re-run setup.

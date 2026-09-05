@@ -2090,6 +2090,8 @@ dependencies = [
  "futures",
  "gcp-bigquery-client",
  "humantime",
+ "hyper-rustls",
+ "hyper-util",
  "iceberg",
  "iceberg-catalog-rest",
  "jsonwebtoken",
@@ -2117,6 +2119,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tonic",
+ "tower-service",
  "tracing",
  "url",
  "uuid",
@@ -2524,7 +2527,7 @@ dependencies = [
 [[package]]
 name = "gcp-bigquery-client"
 version = "0.28.0"
-source = "git+https://github.com/iambriccardo/gcp-bigquery-client?rev=7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904#7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904"
+source = "git+https://github.com/supabase/gcp-bigquery-client?rev=8035bcd1a7c3f08f8679326c40200b11901e38ed#8035bcd1a7c3f08f8679326c40200b11901e38ed"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4710,7 +4713,7 @@ dependencies = [
 [[package]]
 name = "postgres-protocol"
 version = "0.6.12"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "base64 0.23.1",
  "byteorder",
@@ -4727,7 +4730,7 @@ dependencies = [
 [[package]]
 name = "postgres-replication"
 version = "0.6.7"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "byteorder",
  "bytes",
@@ -4742,7 +4745,7 @@ dependencies = [
 [[package]]
 name = "postgres-types"
 version = "0.2.14"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "bytes",
  "chrono",
@@ -6481,9 +6484,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.38.4"
+version = "0.39.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
 dependencies = [
  "libc",
  "memchr",
@@ -6749,7 +6752,7 @@ dependencies = [
 [[package]]
 name = "tokio-postgres"
 version = "0.7.18"
-source = "git+https://github.com/iambriccardo/rust-postgres?rev=fa49356fc16f2442a9924963baee9d9d9085c073#fa49356fc16f2442a9924963baee9d9d9085c073"
+source = "git+https://github.com/supabase/rust-postgres?rev=8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e#8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -7951,14 +7954,17 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "etl-api",
  "etl-config",
  "k8s-openapi",
  "kube",
  "pg_escape",
+ "rand 0.9.4",
  "reqwest",
  "schemars 0.8.22",
+ "secrecy",
  "serde",
  "serde_json",
  "sqlx",

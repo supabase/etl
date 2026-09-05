@@ -171,9 +171,9 @@ async fn wait_for_apply_disconnect(
 
 /// Waits until the finished table sync worker's replication slot is removed.
 ///
-/// The users table becomes `Ready` while the table sync worker can still be
-/// deleting its progress row and replication slot. Slot removal is the last
-/// cleanup step, so its absence means table sync work has stopped.
+/// Slot cleanup is allowed at [`TableStateType::SyncDone`] or
+/// [`TableStateType::Ready`]. Its absence means table-sync work has stopped,
+/// not that apply has already marked the table ready.
 async fn wait_for_sync_slot_removal(
     database: &PgDatabase<Client>,
     sync_slot_name: &str,
@@ -371,9 +371,9 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
         |error| TestCaseError::fail(format!("failed to wait for table sync completion: {error}")),
     )?;
 
-    // Table sync completes before the worker deletes its progress row and
-    // replication slot. Wait for slot removal so the crash below hits a state
-    // where only the apply worker serves the users table.
+    // Table sync completes at `SyncDone` before the worker deletes its slot.
+    // Wait for slot removal so the crash cannot race a still-running copy
+    // worker. Apply may still promote the table to `Ready` later.
     wait_for_sync_slot_removal(&database, &sync_slot_name).await?;
 
     for user_number in 1..case.crash_after {
@@ -482,7 +482,7 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     prop_assert_eq!(
         TableStateType::from(&table_state),
         TableStateType::Ready,
-        "users table did not remain ready after restart"
+        "users table did not become ready after restart"
     );
     prop_assert_eq!(
         restarted_destination.write_table_rows_called().await,

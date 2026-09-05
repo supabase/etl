@@ -752,9 +752,9 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
         post_handoff_insert.replicated_table_schema.inner().snapshot_id,
         pending_relation.replicated_table_schema.inner().snapshot_id
     );
-    assert_ne!(
-        post_handoff_insert.replicated_table_schema.inner().snapshot_id,
-        table_sync_relation.replicated_table_schema.inner().snapshot_id
+    assert!(
+        post_handoff_insert.replicated_table_schema.inner().snapshot_id
+            > table_sync_relation.replicated_table_schema.inner().snapshot_id
     );
 
     // Only the snapshot changed. Since pgoutput sent no replacement protocol
@@ -932,13 +932,9 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
 
     // Advance the physical schema while both logical connections are alive,
     // but emit no DML that would make pgoutput send a new Relation. The DDL
-    // event trigger emits a transactional logical message, so its transaction
-    // has a commit event on every supported PostgreSQL version. Keep the
-    // table-sync worker paused until the apply worker has passed that commit,
-    // so its later catchup target must include the DDL.
-    let apply_commit_notify =
-        destination.wait_for_events(vec![EventCondition::AnyCount(EventType::Commit, 1)]).await;
-    let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
+    // event trigger emits a transactional logical message. Keep the table-sync
+    // pause armed until the apply slot confirms a WAL frontier after that
+    // transaction, so the later catchup target must include the DDL.
     database
         .run_sql(&format!(
             "alter table {} add column handover_value integer not null default 0",
@@ -946,12 +942,12 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         ))
         .await
         .unwrap();
-    apply_commit_notify.notified().await;
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-    schema_stored_notify.notified().await;
     errored_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();

@@ -1,11 +1,11 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf};
+use std::{fmt, path::PathBuf};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
     Config,
     shared::{
-        DestinationKind, DuckLakeCopyBufferConfig, PgConnectionConfig, SentryConfig, TlsConfig,
-        Validate, ValidationError,
+        DuckLakeCopyBufferConfig, PgConnectionConfig, SentryConfig, TlsConfig, Validate,
+        ValidationError,
     },
 };
 use serde::{
@@ -121,36 +121,42 @@ pub struct K8sConfig {
     /// Tolerations applied to every replicator pod.
     #[serde(default)]
     pub replicator_tolerations: Vec<TolerationConfig>,
-    /// Default request sizing for replicator workloads.
+    /// API-wide startup request defaults for replicator workloads.
     ///
     /// This key remains `replicator_resources` in API configuration files. It
-    /// provides the mandatory baseline CPU and memory requests used for every
-    /// replicator pod unless a destination-kind default or pipeline-level
-    /// override supplies one of those request values.
-    pub replicator_resources: DefaultReplicatorResourcesConfig,
-    /// CPU and memory bounds shared by generated VPAs and StatefulSets.
+    /// provides the mandatory baseline CPU and memory requests written to each
+    /// replicator pod template unless a pipeline-level override supplies one
+    /// of those request values.
+    pub replicator_resources: ReplicatorResourceDefaultsConfig,
+    /// Optional API-wide VPA interval for replicator CPU and memory.
+    ///
+    /// A pipeline request override fixes the corresponding resource's VPA
+    /// bounds to that request. For resources without an override, omission
+    /// fixes the bounds to the resolved startup request, while a configured
+    /// interval defines the allowed recommendation range independently of the
+    /// startup request.
     #[serde(default)]
-    pub replicator_autoscaling: ReplicatorAutoscalingConfig,
+    pub replicator_autoscaling: Option<ReplicatorResourceAutoscalingConfig>,
     /// Vector image used by the logging sidecar.
     #[serde(default = "default_vector_image")]
     pub vector_image: String,
-    /// Default request sizing for the Vector sidecar.
-    pub vector_resources: DefaultVectorResourcesConfig,
+    /// API-wide request defaults for the Vector sidecar.
+    pub vector_resources: VectorResourceDefaultsConfig,
 }
 
-/// Resource bounds enforced for autoscaled replicator containers.
+/// API-wide VPA recommendation interval for replicator resources.
 ///
-/// The API applies these bounds both to the initial StatefulSet allocation and
-/// to the per-pipeline VPA policy, keeping the VPA object as the source of
-/// truth for the workload's operating envelope. Global replicator resources
-/// should normally match the maximum bounds: fresh pipelines intentionally
-/// start oversized for initial-copy throughput and burst safety, then VPA
-/// converges them toward their steady-state usage.
+/// These bounds configure generated VPAs and are independent of the startup
+/// requests in [`ReplicatorResourceDefaultsConfig`]. The API-wide startup
+/// requests are expected to lie within this interval, but the API does not
+/// validate or clamp that relationship. Once VPA actuation begins, an
+/// out-of-range request may be moved inside these bounds. A pipeline request
+/// override replaces the corresponding interval with a fixed bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-pub struct ReplicatorAutoscalingConfig {
+pub struct ReplicatorResourceAutoscalingConfig {
     /// Update mode assigned when a per-pipeline VPA is first created.
     #[serde(default)]
-    pub initial_update_mode: ReplicatorAutoscalingUpdateMode,
+    pub initial_update_mode: ReplicatorResourceAutoscalingUpdateMode,
     /// Minimum replicator memory allocation, in Mi.
     pub min_memory_mib: i32,
     /// Maximum replicator memory allocation, in Mi.
@@ -161,10 +167,15 @@ pub struct ReplicatorAutoscalingConfig {
     pub max_cpu_millicores: i32,
 }
 
-/// Kubernetes VPA update mode used for a newly created autoscaler.
+/// Initial Kubernetes VPA update mode for a replicator workload.
+///
+/// The API creates a VPA for every replicator. [`Self::Off`] keeps that VPA in
+/// recommendation-only mode; every other mode allows it to apply resource
+/// recommendations. Reconciliation preserves the update mode already present
+/// on a live VPA, so this setting only chooses the mode at creation time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ReplicatorAutoscalingUpdateMode {
+pub enum ReplicatorResourceAutoscalingUpdateMode {
     /// Publish recommendations without changing Pod resources.
     #[default]
     Off,
@@ -178,7 +189,7 @@ pub enum ReplicatorAutoscalingUpdateMode {
     InPlace,
 }
 
-impl ReplicatorAutoscalingUpdateMode {
+impl ReplicatorResourceAutoscalingUpdateMode {
     /// Returns the value expected by the Kubernetes VPA API.
     pub const fn as_k8s_value(self) -> &'static str {
         match self {
@@ -187,18 +198,6 @@ impl ReplicatorAutoscalingUpdateMode {
             Self::Recreate => "Recreate",
             Self::InPlaceOrRecreate => "InPlaceOrRecreate",
             Self::InPlace => "InPlace",
-        }
-    }
-}
-
-impl Default for ReplicatorAutoscalingConfig {
-    fn default() -> Self {
-        Self {
-            initial_update_mode: ReplicatorAutoscalingUpdateMode::Off,
-            min_memory_mib: 768,
-            max_memory_mib: 8 * 1024,
-            min_cpu_millicores: 250,
-            max_cpu_millicores: 2_000,
         }
     }
 }
@@ -235,53 +234,27 @@ pub struct TolerationConfig {
     pub effect: String,
 }
 
-/// Mandatory default request sizing for replicator workloads.
+/// API-wide startup request defaults for replicator workloads.
 ///
-/// These values are part of the ETL API service configuration, not the
-/// customer-facing pipeline configuration. They define the baseline Kubernetes
-/// requests for replicator containers. Destination-kind defaults may override
-/// these values. Resource limits are not configurable here; the ETL API sets
-/// them equal to requests unless a pipeline-level override provides explicit
-/// limits.
+/// The mandatory CPU and memory values apply to every destination.
+/// Pipeline-level overrides are applied later. A configured autoscaling
+/// interval supplies VPA bounds for resources without an override; otherwise
+/// these defaults are used as fixed bounds.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct DefaultReplicatorResourcesConfig {
-    /// Replicator memory request, in Mi.
+pub struct ReplicatorResourceDefaultsConfig {
+    /// Replicator startup memory request, in Mi.
     pub memory_request_mib: i32,
-    /// Replicator CPU request, in millicores.
+    /// Replicator startup CPU request, in millicores.
     pub cpu_request_millicores: i32,
-    /// Partial default request overrides keyed by destination kind.
-    #[serde(default)]
-    pub destinations: BTreeMap<DestinationKind, DefaultReplicatorResourcesOverrideConfig>,
 }
 
-/// Partial default request sizing for one destination kind.
-///
-/// Omitted fields inherit their values from the global
-/// [`DefaultReplicatorResourcesConfig`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-pub struct DefaultReplicatorResourcesOverrideConfig {
-    /// Optional replicator memory request, in Mi.
-    pub memory_request_mib: Option<i32>,
-    /// Optional replicator CPU request, in millicores.
-    pub cpu_request_millicores: Option<i32>,
-}
-
-/// Fully resolved default request sizing for one replicator workload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ResolvedReplicatorResourcesConfig {
-    /// Replicator memory request, in Mi.
-    pub(crate) memory_request_mib: i32,
-    /// Replicator CPU request, in millicores.
-    pub(crate) cpu_request_millicores: i32,
-}
-
-/// Mandatory default request sizing for Vector sidecars.
+/// API-wide request defaults for Vector sidecars.
 ///
 /// These values are part of the ETL API service configuration and provide the
 /// baseline Kubernetes requests for Vector containers. Resource limits match
 /// these requests.
 #[derive(Debug, Clone, Deserialize)]
-pub struct DefaultVectorResourcesConfig {
+pub struct VectorResourceDefaultsConfig {
     /// Vector memory request, in Mi.
     pub memory_request_mib: i32,
     /// Vector CPU request, in millicores.
@@ -292,7 +265,9 @@ impl ApiConfig {
     /// Validates API service configuration.
     pub fn validate(&self) -> Result<(), ApiConfigValidationError> {
         self.k8s.replicator_resources.validate()?;
-        self.k8s.replicator_autoscaling.validate()?;
+        if let Some(replicator_autoscaling) = &self.k8s.replicator_autoscaling {
+            replicator_autoscaling.validate()?;
+        }
         self.k8s.vector_resources.validate()?;
         self.replicator.destination_defaults.ducklake.copy_buffer.validate()?;
 
@@ -305,7 +280,7 @@ impl ApiConfig {
     }
 }
 
-impl ReplicatorAutoscalingConfig {
+impl ReplicatorResourceAutoscalingConfig {
     /// Validates that autoscaling bounds are positive and ordered.
     pub fn validate(&self) -> Result<(), String> {
         validate_positive_request("K8s autoscaling minimum memory", self.min_memory_mib)?;
@@ -324,61 +299,17 @@ impl ReplicatorAutoscalingConfig {
     }
 }
 
-impl K8sConfig {
-    /// Resolves default replicator requests for a destination kind.
-    pub(crate) fn replicator_resources_for(
-        &self,
-        destination_kind: DestinationKind,
-    ) -> ResolvedReplicatorResourcesConfig {
-        let resources = self.replicator_resources.destinations.get(&destination_kind);
-
-        ResolvedReplicatorResourcesConfig {
-            memory_request_mib: resources
-                .and_then(|resources| resources.memory_request_mib)
-                .unwrap_or(self.replicator_resources.memory_request_mib),
-            cpu_request_millicores: resources
-                .and_then(|resources| resources.cpu_request_millicores)
-                .unwrap_or(self.replicator_resources.cpu_request_millicores),
-        }
-    }
-}
-
-impl DefaultReplicatorResourcesConfig {
+impl ReplicatorResourceDefaultsConfig {
     /// Validates that configured request values are positive.
     pub fn validate(&self) -> Result<(), String> {
         validate_positive_request("K8s replicator memory request", self.memory_request_mib)?;
         validate_positive_request("K8s replicator cpu request", self.cpu_request_millicores)?;
-        for (destination_kind, resources) in &self.destinations {
-            resources.validate(*destination_kind)?;
-        }
 
         Ok(())
     }
 }
 
-impl DefaultReplicatorResourcesOverrideConfig {
-    /// Validates that configured request overrides are positive.
-    fn validate(&self, destination_kind: DestinationKind) -> Result<(), String> {
-        let destination_kind = destination_kind.as_str();
-
-        if let Some(memory_request_mib) = self.memory_request_mib {
-            validate_positive_request(
-                &format!("K8s {destination_kind} replicator memory request"),
-                memory_request_mib,
-            )?;
-        }
-        if let Some(cpu_request_millicores) = self.cpu_request_millicores {
-            validate_positive_request(
-                &format!("K8s {destination_kind} replicator cpu request"),
-                cpu_request_millicores,
-            )?;
-        }
-
-        Ok(())
-    }
-}
-
-impl DefaultVectorResourcesConfig {
+impl VectorResourceDefaultsConfig {
     /// Validates that configured request values are positive.
     pub fn validate(&self) -> Result<(), String> {
         validate_positive_request("K8s Vector memory request", self.memory_request_mib)?;
@@ -598,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_replicator_resources_override_selected_global_fields() {
+    fn removed_destination_replicator_defaults_are_ignored() {
         let config: K8sConfig = serde_json::from_value(json!({
             "replicator_resources": {
                 "memory_request_mib": 2000,
@@ -616,45 +547,9 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(
-            config.replicator_resources_for(DestinationKind::Ducklake),
-            ResolvedReplicatorResourcesConfig {
-                memory_request_mib: 4000,
-                cpu_request_millicores: 500,
-            }
-        );
-        assert_eq!(
-            config.replicator_resources_for(DestinationKind::BigQuery),
-            ResolvedReplicatorResourcesConfig {
-                memory_request_mib: 2000,
-                cpu_request_millicores: 500,
-            }
-        );
-    }
-
-    #[test]
-    fn destination_replicator_resources_are_optional() {
-        let config: K8sConfig = serde_json::from_value(json!({
-            "replicator_resources": {
-                "memory_request_mib": 2000,
-                "cpu_request_millicores": 500
-            },
-            "vector_resources": {
-                "memory_request_mib": 192,
-                "cpu_request_millicores": 75
-            }
-        }))
-        .unwrap();
-
-        assert!(config.replicator_resources.destinations.is_empty());
-        assert_eq!(
-            config.replicator_resources_for(DestinationKind::Ducklake),
-            ResolvedReplicatorResourcesConfig {
-                memory_request_mib: 2000,
-                cpu_request_millicores: 500,
-            }
-        );
-        assert_eq!(config.replicator_autoscaling, ReplicatorAutoscalingConfig::default());
+        assert_eq!(config.replicator_resources.memory_request_mib, 2000);
+        assert_eq!(config.replicator_resources.cpu_request_millicores, 500);
+        assert_eq!(config.replicator_autoscaling, None);
     }
 
     #[test]
@@ -698,8 +593,8 @@ mod tests {
 
     #[test]
     fn replicator_autoscaling_bounds_must_be_positive_and_ordered() {
-        let invalid = ReplicatorAutoscalingConfig {
-            initial_update_mode: ReplicatorAutoscalingUpdateMode::Off,
+        let invalid = ReplicatorResourceAutoscalingConfig {
+            initial_update_mode: ReplicatorResourceAutoscalingUpdateMode::Off,
             min_memory_mib: 1024,
             max_memory_mib: 512,
             min_cpu_millicores: 300,
@@ -708,26 +603,32 @@ mod tests {
 
         assert!(invalid.validate().unwrap_err().contains("minimum memory"));
 
-        let invalid = ReplicatorAutoscalingConfig { min_memory_mib: 0, ..Default::default() };
+        let invalid = ReplicatorResourceAutoscalingConfig {
+            initial_update_mode: ReplicatorResourceAutoscalingUpdateMode::Off,
+            min_memory_mib: 0,
+            max_memory_mib: 8_192,
+            min_cpu_millicores: 250,
+            max_cpu_millicores: 2_000,
+        };
         assert!(invalid.validate().unwrap_err().contains("must be greater than 0"));
     }
 
     #[test]
     fn replicator_autoscaling_initial_update_mode_is_configurable() {
         let modes = [
-            ("off", ReplicatorAutoscalingUpdateMode::Off, "Off"),
-            ("initial", ReplicatorAutoscalingUpdateMode::Initial, "Initial"),
-            ("recreate", ReplicatorAutoscalingUpdateMode::Recreate, "Recreate"),
+            ("off", ReplicatorResourceAutoscalingUpdateMode::Off, "Off"),
+            ("initial", ReplicatorResourceAutoscalingUpdateMode::Initial, "Initial"),
+            ("recreate", ReplicatorResourceAutoscalingUpdateMode::Recreate, "Recreate"),
             (
                 "in_place_or_recreate",
-                ReplicatorAutoscalingUpdateMode::InPlaceOrRecreate,
+                ReplicatorResourceAutoscalingUpdateMode::InPlaceOrRecreate,
                 "InPlaceOrRecreate",
             ),
-            ("in_place", ReplicatorAutoscalingUpdateMode::InPlace, "InPlace"),
+            ("in_place", ReplicatorResourceAutoscalingUpdateMode::InPlace, "InPlace"),
         ];
 
         for (configured_mode, expected_mode, k8s_mode) in modes {
-            let config: ReplicatorAutoscalingConfig = serde_json::from_value(json!({
+            let config: ReplicatorResourceAutoscalingConfig = serde_json::from_value(json!({
                 "initial_update_mode": configured_mode,
                 "min_memory_mib": 768,
                 "max_memory_mib": 8192,
@@ -797,18 +698,5 @@ mod tests {
         assert_eq!(configured.replicator_tolerations[0].value, "analytics");
         assert_eq!(configured.replicator_tolerations[0].effect, "CustomEffect");
         assert_eq!(configured.vector_image, "example.com/vector:custom");
-    }
-
-    #[test]
-    fn destination_replicator_resource_overrides_must_be_positive() {
-        let resources = DefaultReplicatorResourcesOverrideConfig {
-            memory_request_mib: Some(0),
-            cpu_request_millicores: None,
-        };
-
-        assert_eq!(
-            resources.validate(DestinationKind::Ducklake),
-            Err("K8s ducklake replicator memory request must be greater than 0".to_owned())
-        );
     }
 }

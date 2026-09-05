@@ -24,6 +24,9 @@ use crate::{
     version::POSTGRES_15,
 };
 
+/// Maximum time to wait for a replication slot to become inactive in tests.
+const WAIT_FOR_SLOT_INACTIVE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Table modification operations for ALTER TABLE statements.
 pub enum TableModification<'a> {
     /// Add a new column with specified name and data type.
@@ -488,13 +491,27 @@ impl<G: GenericClient> PgDatabase<G> {
     /// invalidated, or no longer exists. This is useful in tests after
     /// shutting down a pipeline to ensure the slot is released before
     /// performing operations on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the slot remains active after
+    /// [`WAIT_FOR_SLOT_INACTIVE_TIMEOUT`].
     pub async fn wait_for_slot_inactive(&self, slot_name: &str) {
-        while matches!(
-            self.get_replication_slot_state(slot_name).await,
-            Ok(Some(ReplicationSlotState::Active))
-        ) {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        tokio::time::timeout(WAIT_FOR_SLOT_INACTIVE_TIMEOUT, async {
+            while matches!(
+                self.get_replication_slot_state(slot_name).await,
+                Ok(Some(ReplicationSlotState::Active))
+            ) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "Timed out waiting for replication slot {slot_name} to become inactive after \
+                 {WAIT_FOR_SLOT_INACTIVE_TIMEOUT:?}"
+            )
+        });
     }
 
     /// Executes arbitrary SQL on the database.

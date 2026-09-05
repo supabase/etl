@@ -150,7 +150,7 @@ pub struct PipelineTuningArgs {
     /// Maximum batch fill time in milliseconds.
     #[arg(long, default_value_t = BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS)]
     pub batch_max_fill_ms: u64,
-    /// Ratio of process memory reserved for stream batch bytes.
+    /// Maximum ratio of detected memory targeted for decoded batches.
     #[arg(long, default_value_t = BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO)]
     pub memory_budget_ratio: f32,
     /// Maximum number of table sync workers.
@@ -491,10 +491,6 @@ impl Destination for NullDestination {
 }
 
 /// Benchmark destination variants.
-#[cfg_attr(
-    any(feature = "bigquery", feature = "clickhouse", feature = "ducklake"),
-    expect(clippy::large_enum_variant)
-)]
 #[derive(Clone)]
 pub enum BenchDestination {
     /// Null destination variant.

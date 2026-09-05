@@ -4,12 +4,13 @@ use sqlx::FromRow;
 
 use super::super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
-/// Validates the connected source role profile for ETL.
+/// Validates the connected source role profile for a pipeline.
 #[derive(Debug)]
 pub(crate) struct SourceValidator;
 
 #[derive(Debug, FromRow)]
 struct SourceRoleAudit {
+    current_user: String,
     rolcanlogin: bool,
     rolreplication: bool,
     rolbypassrls: bool,
@@ -37,27 +38,15 @@ impl Validator for SourceValidator {
         let source_pool =
             ctx.source_pool.as_ref().expect("source pool required for source validation");
 
-        let current_user: String =
-            sqlx::query_scalar("select current_user").fetch_one(source_pool).await?;
-
-        if current_user != *expected_username {
-            return Ok(vec![ValidationFailure::critical(
-                "Invalid Source Username",
-                "The source connection is not using the ETL account authorized for this \
-                 deployment.\n\nUpdate the source credentials to use the authorized ETL account, \
-                 or ask the ETL API operator to review the account configured for this source.",
-            )]);
-        }
-
         // This validation is best effort: it relies on catalog metadata and
         // privilege checks to confirm the trusted role profile without running
         // invasive probes against the customer database.
         let audit = sqlx::query_as::<_, SourceRoleAudit>(
             r#"
             with target as (
-              -- Load the direct role attributes for the trusted ETL user.
+              -- Load the direct role attributes for the connected pipeline role.
               select
-                oid,
+                current_user::text as current_user,
                 rolcanlogin,
                 rolreplication,
                 rolbypassrls,
@@ -66,13 +55,13 @@ impl Validator for SourceValidator {
                 rolinherit,
                 rolvaliduntil is null as rolvaliduntil_is_null
               from pg_roles
-              where rolname = $1
+              where rolname = current_user
             ),
             etl_schema as (
               -- Check whether the etl schema already exists.
               select oid
               from pg_namespace
-              where nspname = $2
+              where nspname = $1
             ),
             etl_tables as (
               -- List the existing tables in the etl schema, if present.
@@ -81,18 +70,9 @@ impl Validator for SourceValidator {
               from pg_class c
               join etl_schema s on s.oid = c.relnamespace
               where c.relkind in ('r', 'p')
-            ),
-            etl_table_ownership as (
-              -- Determine whether the trusted role controls every existing ETL table.
-              -- pg_has_role(..., 'USAGE') means the owning role's privileges are
-              -- immediately available without requiring SET ROLE, which matches
-              -- how ETL connects and operates.
-              select
-                coalesce(bool_and(pg_has_role($1, relowner, 'USAGE')), true)
-                  as controls_all_existing_etl_tables
-              from etl_tables
             )
             select
+              t.current_user,
               t.rolcanlogin,
               t.rolreplication,
               t.rolbypassrls,
@@ -103,41 +83,46 @@ impl Validator for SourceValidator {
               exists(select 1 from etl_schema) as etl_schema_exists,
               case
                 when exists(select 1 from etl_schema)
-                then has_schema_privilege($1, $2, 'USAGE')
+                then has_schema_privilege(current_user, $1, 'USAGE')
                 else null
               end as etl_schema_usage,
               case
                 when exists(select 1 from etl_schema)
-                then has_schema_privilege($1, $2, 'CREATE')
+                then has_schema_privilege(current_user, $1, 'CREATE')
                 else null
               end as etl_schema_create,
               case
                 when exists(select 1 from etl_schema)
-                then (select controls_all_existing_etl_tables from etl_table_ownership)
+                -- pg_has_role(..., 'USAGE') means the owning role's privileges
+                -- are immediately available without requiring SET ROLE, which
+                -- matches how the pipeline connects and operates.
+                then not exists (
+                  select 1
+                  from etl_tables
+                  where not pg_has_role(current_user, relowner, 'USAGE')
+                )
                 else null
               end as controls_all_existing_etl_tables,
               case
                 when not exists(select 1 from etl_schema)
-                then has_database_privilege($1, current_database(), 'CREATE')
+                then has_database_privilege(current_user, current_database(), 'CREATE')
                 else null
               end as can_create_schema_if_missing
             from target t
             "#,
         )
-        .bind(expected_username)
         .bind(ETL_SCHEMA_NAME)
-        .fetch_optional(source_pool)
+        .fetch_one(source_pool)
         .await?;
 
-        let Some(audit) = audit else {
+        if audit.current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
-                "Invalid Source Role Attributes",
-                "The ETL account authorized for this deployment is not available in the source \
-                 database.\n\nAsk the database administrator and ETL API operator to review the \
-                 source account configuration, or update the source credentials to use an \
-                 authorized ETL account.",
+                "Invalid Source Username",
+                "The source connection is not using the database account configured for this \
+                 pipeline.\n\nUpdate the source credentials to use the configured account, or ask \
+                 the deployment operator to review the account configured for this source.",
             )]);
-        };
+        }
 
         let has_required_role_attributes = audit.rolcanlogin
             && audit.rolreplication
@@ -151,10 +136,10 @@ impl Validator for SourceValidator {
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
                 "Invalid Source Role Attributes",
-                "The authorized ETL account does not have sufficient access to use this source \
-                 database.\n\nAsk a database administrator to grant the account the access \
-                 required for ETL, or update the source connection to use an appropriately \
-                 configured ETL account.",
+                "The account configured for this pipeline does not have sufficient access to use \
+                 this source database.\n\nAsk a database administrator to grant the required \
+                 access, or update the source connection to use an appropriately configured \
+                 account.",
             ));
         }
 
@@ -168,11 +153,11 @@ impl Validator for SourceValidator {
 
         if !has_required_etl_schema_permissions {
             failures.push(ValidationFailure::critical(
-                "Invalid Source ETL Schema Permissions",
-                "The authorized ETL account does not have sufficient access to initialize or \
-                 manage ETL metadata in the source database.\n\nAsk a database administrator to \
-                 grant the account the required ETL access, or update the source connection to \
-                 use an appropriately configured ETL account.",
+                "Invalid Source Pipeline Metadata Permissions",
+                "The account configured for this pipeline does not have sufficient access to \
+                 initialize or manage pipeline metadata in the source database.\n\nAsk a database \
+                 administrator to grant the required access, or update the source connection to \
+                 use an appropriately configured account.",
             ));
         }
 

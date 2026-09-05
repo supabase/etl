@@ -45,7 +45,8 @@ pub(super) const ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL: &str =
 pub(super) const ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL: &str = "etl_clickhouse_insert_errors_total";
 
 /// Number of INSERT statements committed for a single logical write batch.
-/// Goes above 1 when [`ClickHouseInserterConfig::max_bytes_per_insert`] forces
+/// Goes above 1 when
+/// [`crate::clickhouse::ClickHouseInserterConfig::max_bytes_per_insert`] forces
 /// a mid-batch flush. Labels: `replication_path` (`copy`, `cdc`).
 pub(super) const ETL_CLICKHOUSE_STATEMENTS_PER_BATCH: &str = "etl_clickhouse_statements_per_batch";
 

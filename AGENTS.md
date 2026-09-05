@@ -1,373 +1,313 @@
 # Repository Guidelines
 
-## Workspace Layout
-- Rust workspace crates live under `crates/`:
-  - `crates/etl/`: core replication library.
-  - `crates/etl-api/`: HTTP API service.
-  - `crates/etl-replicator/`: standalone replicator binary.
-  - `crates/etl-postgres/`: Postgres integration.
-  - `crates/etl-destinations/`: destination implementations.
-  - `crates/etl-config/`: configuration types and loading.
-  - `crates/etl-telemetry/`: tracing and Prometheus setup.
-  - `crates/etl-examples/`: examples.
-  - `crates/etl-benchmarks/`: benchmarks.
-  - `crates/xtask/`: workspace automation commands.
-- The Next.js/Fumadocs website lives in `site/`; its documentation content lives in `site/content/docs/`.
-- Local development and ops tooling live in `crates/xtask/` (run via `cargo x`) and `DEVELOPMENT.md`.
-- Tests live next to code in `src/` or `tests/`.
+Postgres logical-replication engine. `etl` is the library, `etl-replicator` is
+the standalone binary, and `etl-destinations` holds built-in destinations.
+`etl-api` is an optional Kubernetes control plane; you do not need it to run
+ETL. Product docs: https://supabase.github.io/etl/. Human walkthrough:
+[DEVELOPMENT.md](DEVELOPMENT.md).
+
+This file is for agents. Read it before changing code. Use it to **set up** the
+repo, not only to implement in it.
+
+## First-time setup
+
+Do this on a fresh clone before tests, examples, or local services.
+
+1. Toolchain: Rust **1.95.0** from `rust-toolchain.toml` (rustup uses it
+   automatically), `psql`, Docker Compose, and [cargo-nextest](https://nexte.st).
+2. SQLx CLI (migrations; `cargo x init` and `cargo x setup api` need it):
+
+   ```bash
+   cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked
+   ```
+
+3. Start the local data plane (Postgres, ClickHouse, Iceberg catalog, migrations).
+   This does **not** write app config or apply Kubernetes:
+
+   ```bash
+   cargo x init
+   ```
+
+4. Then configure only the service you need:
+
+   ```bash
+   cargo x setup replicator && cargo x seed && cargo x run replicator
+   cargo x setup api && cargo x run api
+   ```
+
+5. Generated files in `crates/etl-api/configuration/` and
+   `crates/etl-replicator/configuration/` are gitignored. Re-run with `--force`
+   to replace them. Do not commit them or put real secrets in tracked files.
+
+| Need | Do |
+| --- | --- |
+| API / OrbStack k8s | `kubectl` plus [OrbStack](https://orbstack.dev) Kubernetes; `cargo x setup api` applies `scripts/k8s/local/` |
+| Existing Postgres, no Docker | `SKIP_DOCKER=1` and `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` |
+| Test clusters only | `cargo xtask postgres start` (or `create`) |
+| Ports and destination env | [DEVELOPMENT.md](DEVELOPMENT.md) |
+
+Default stack: Postgres `localhost:5430` (`postgres`/`postgres`), replica
+`6430`, ClickHouse `http://localhost:8123` (`etl`/`etl`).
 
 ## Commands
-- Build everything:
-  - `cargo build --workspace --all-targets --all-features`
-- Format:
-  - `cargo x fmt`
-- Check formatting:
-  - `cargo x fmt --check`
-- Lint:
-  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- Run unit tests (no Postgres required):
-  - `cargo nextest run --workspace --all-features --lib`
-- Run tests for one crate:
-  - `cargo nextest run -p etl-config --all-features`
-- Run doctests (nextest does not support doctests):
-  - `cargo test --doc --workspace --all-features`
-- List tests:
-  - `cargo nextest list --workspace --all-features`
-- Run full test suite (requires Postgres clusters via `cargo xtask postgres start`):
-  - `cargo xtask nextest run`
 
-## Agent Workflow
-- Keep changes focused on the issue being solved.
-- Prefer small diffs unless a broader refactor is clearly justified.
-- Before adding new patterns, inspect nearby code and follow the local style first.
-- Do not add dependencies unless they are justified by the task.
-- If you change workflow assumptions, build or test the smallest relevant target and report what actually ran.
-- Never create commits, push branches, open pull requests, or perform other git write actions unless the user explicitly instructs you to do so.
-- Migration files already present in `main` are immutable. Never change their
-  SQL, comments, whitespace, filenames, or any other content; add a new
-  migration instead.
-- Never modify a migration that is not yet in `main` unless the user explicitly
-  asks for a migration change. This includes changing comments or other
-  non-executable text inside migration files.
-- Keep the workspace on the stable toolchain from `rust-toolchain.toml` for build, lint, and test commands; use the pinned nightly formatter only through `cargo x fmt` and `cargo x fmt --check`.
-- Treat `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics as the source of truth for enforceable style and correctness rules. Prefer adding or tightening static checks over adding prose rules here.
-- Run Clippy, builds, and tests intentionally when they are relevant: for example
-  after changing Rust code, when compiler/lint diagnostics indicate a problem,
-  when workflow assumptions changed, or when the user asks for verification. Do
-  not run expensive checks reflexively for unrelated documentation, YAML-only, or
-  similarly low-risk edits; in those cases, run the smallest relevant validation
-  instead and report what actually ran.
-- Put predictive source-to-destination compatibility checks in the ETL API
-  preflight layer. Report value- or event-contingent incompatibilities as
-  non-blocking warnings using stable destination capabilities. Do not reject a
-  runtime schema merely because it permits a value or event shape that the
-  destination might not preserve; if that value or event never occurs,
-  replication should continue.
-- Do not add destination runtime value-domain validation merely to predict
-  whether the destination will reject, coerce, round, truncate, clamp, or
-  otherwise reinterpret a value. If ETL can faithfully construct the
-  destination request or wire representation, send the value and rely on the
-  destination's native behavior and errors.
-- Return a typed local error only when ETL cannot construct the destination
-  request or wire representation faithfully, or when a structural or state
-  invariant is violated. Keep wire-representation checks at the encoding point
-  and apply the same path to initial copy, inserts, and updates.
+`cargo x` is the workspace task runner (`cargo x --help`). Stable toolchain for
+build/lint/test; nightly formatter only via `cargo x fmt`.
+
+```bash
+cargo build --workspace --all-targets --all-features
+cargo x fmt
+cargo x fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo nextest run --workspace --all-features --lib          # unit tests, no Postgres
+cargo nextest run -p etl-config --all-features              # one crate
+cargo nextest list --workspace --all-features
+cargo test --doc --workspace --all-features                 # nextest has no doctests
+cargo xtask nextest run                                     # full sharded suite (needs Postgres)
+```
+
+After Rust changes, when diagnostics fail, when workflow assumptions change, or
+when the user asks: run the **smallest** relevant build/clippy/test and report
+what ran. Skip expensive workspace checks for docs-only or YAML-only edits.
+
+## Layout
+
+| Path | Owns |
+| --- | --- |
+| `crates/etl/` | Replication behavior and replication-specific types |
+| `crates/etl-postgres/` | Reusable Postgres primitives, source helpers, slots, ETL metadata SQL |
+| `crates/etl-destinations/` | Destination implementations |
+| `crates/etl-config/` | Config types and loading |
+| `crates/etl-api/` | HTTP control plane |
+| `crates/etl-replicator/` | Standalone replicator binary |
+| `crates/etl-telemetry/` | Tracing and Prometheus |
+| `crates/etl-examples/`, `crates/etl-benchmarks/` | Examples and benches |
+| `crates/xtask/` | `cargo x` automation |
+| `site/` | Next.js/Fumadocs site; docs in `site/content/docs/` |
+| `scripts/docker/`, `scripts/k8s/local/` | Compose stack and API k8s manifests |
+| `src/` / `tests/` | Tests next to code; crate integration tests in `tests/main.rs` |
+
+Crate boundaries are for reuse across crates, not for organizing one domain.
+Keep code in its owning crate unless another crate has a real dependency.
+Module names should be domain concepts (`schema`, `data`, `event`, `store`,
+`source`, `slots`), not `types`/`utils`/`common`.
+
+From `etl`, expose the smallest useful setup surface: pipeline
+config/building, destination and store traits, ETL schema/data/event types, and
+dependency types callers must use to implement those traits. Keep worker
+orchestration, Postgres codec internals, runtime plumbing, and store
+implementation details private.
+
+## Working here
+
+- Keep diffs focused. Prefer small changes unless a broader refactor is
+  justified. Match nearby code before adding a new pattern. Do not add
+  dependencies unless the task needs them.
+- Never commit, push, open PRs, or perform other git writes unless the user
+  explicitly asks.
+- `Cargo.toml` workspace lints, `rustfmt.toml`, and compiler diagnostics are
+  the enforceable style source of truth. Prefer tightening static checks over
+  adding prose rules here.
+- Migrations already on `main` are immutable (SQL, comments, whitespace,
+  filenames). Add a new file. Do not edit a migration that is not yet on `main`
+  unless the user asks, including comments.
+
+### Destination compatibility
+
+| Situation | Do |
+| --- | --- |
+| Schema *permits* a value/event the destination might not preserve | API preflight **warning** via stable destination capabilities; do not reject the schema |
+| ETL can faithfully build the destination request/wire form | Send it; rely on the destination’s native behavior and errors |
+| ETL cannot build that form, or a structural/state invariant is broken | Typed local error at the encoding point; same path for copy, insert, and update |
+
+Do not add destination runtime value-domain checks merely to predict reject,
+coerce, round, truncate, clamp, or reinterpret.
 
 ## Migrations
-- Treat each committed migration as a durable deployment boundary. Prefer one
-  transactional migration for correlated schema changes, data backfills, and
-  cleanup that together form one semantic transition, so the whole transition
-  succeeds or fails together. Do not split migrations merely to make each file
-  or statement smaller.
-- Split correlated changes only when PostgreSQL or another real deployment
-  constraint prevents them from running safely in one transaction, such as a
-  database operation that must commit before its result can be used, an online
-  expand/backfill/contract rollout, compatibility with multiple application
-  versions, or a backfill whose locking or runtime must be managed separately.
-  Document the limitation and why the commit boundary exists.
-- Every intermediate state created by a split migration sequence must be valid,
-  restart-safe, and compatible with the deployment procedure. Make ordering and
-  dependencies explicit, and ensure a failure can be retried without leaving
-  ambiguous or partially classified data.
-- Include concise comments in migrations that provide enough context to review
-  and operate them later. As applicable, explain what changes, why it is needed,
-  how existing rows are handled, and any non-obvious impact on locking,
-  performance, compatibility, failure recovery, or rollback. No fixed comment
-  template is required, and comments should explain intent and consequences
-  rather than restating the SQL.
-- For reversible migrations, order down migrations so dependent data is made
-  compatible before removing the schema it depends on. Add focused migration
-  tests when classification, backfill, retry, or rollback behavior is not
-  obvious from the SQL alone.
 
-## Public Repo Secret Safety
-- Treat this repository, every branch, every commit, every PR, and every review
-  comment as public by default. Assume anything written to tracked files, commit
-  metadata, terminal output quoted in a PR, screenshots, logs, comments, and
-  generated artifacts can become permanently visible.
-- Never include real secrets, credentials, tokens, API keys, service keys,
-  passwords, private URLs, private hostnames, customer data, personal data, raw
-  production payloads, internal incident details, or proprietary configuration
-  values in code, tests, docs, comments, examples, commit messages, branch
-  names, PR titles, PR descriptions, review comments, issue comments, logs, or
-  generated files.
-- Before writing or modifying files, scan the relevant context for suspicious
-  values. Before any git write action that the user explicitly requested, review
-  the staged diff, commit message, branch name, PR title, PR body, and any
-  comments for possible sensitive information.
-- If a value looks real, came from the user's environment, appeared in local
-  config, came from command output, or was copied from any non-public source, do
-  not commit it or repeat it in comments or PR text. Stop and ask the user
-  before proceeding, explaining the specific risk without quoting the sensitive
-  value back.
-- Use invented, clearly fake placeholders for examples and tests, such as
-  `example.com`, `127.0.0.1`, `placeholder-token`, `fake-api-key`, or
-  documented test credentials already present in the repository. Prefer
-  redacted forms such as `<redacted>` when discussing an existing sensitive
-  value.
-- Keep secrets out of source control entirely. Use environment variables,
-  ignored local files, secret managers, CI secret storage, or documented local
-  setup steps instead of tracked files.
-- Do not add secret-like material to rustdoc, inline comments, snapshots,
-  fixtures, golden files, debug output, telemetry, panic messages, error
-  details, or assertion messages. This applies even when the value is only used
-  in tests.
-- When reviewing code, explicitly flag suspected secret exposure or unsafe
-  handling of sensitive values as a high-priority finding. Include the file and
-  line location, but do not reproduce the full secret in the review text.
-- If a secret appears to have been committed or exposed, stop normal work and
-  warn the user immediately. Recommend rotation or revocation of the affected
-  credential and avoid commands that would further spread the value, such as
-  pushing, opening a PR, or pasting the diff into chat.
-- Keep user-facing updates transparent while working on sensitive areas: mention
-  when you are checking diffs, commit metadata, PR text, logs, fixtures, or
-  generated artifacts for leaks, and report what was checked.
+Treat each committed migration as a durable deployment boundary. Prefer **one
+transactional migration** for one semantic transition (schema, backfill, and
+cleanup together). Split only when PostgreSQL or a real deployment constraint
+requires a commit boundary (operation must commit before its result can be
+used, expand/backfill/contract, multi-version compatibility, or a backfill
+whose locking/runtime must be separate). Document that limitation.
 
-## Rust Style
-- This section is only for project-specific judgment that is not already covered by rustfmt, rustc, or Clippy.
-- Prefer absolute crate imports for shared module items, for example `use crate::metrics::{PIPELINE_ID_LABEL, APP_TYPE_LABEL};`, instead of `use super::{...};`.
-- Write SQL queries with lowercase SQL keywords and identifiers, unless quoting or an external API requires specific casing.
-- When multiple files share constants, helpers, or a single entrypoint, prefer a module directory with `mod.rs`.
-- Use crate boundaries for reuse across crates, not for organizing code inside
-  one domain. Keep code in its owning crate unless another crate has a real
-  dependency on that API.
-- Use module boundaries for domain concepts. Prefer names such as `schema`,
-  `data`, `event`, `store`, `source`, or `slots` over generic buckets like
-  `types`, `utils`, or `common`.
-- Keep replication behavior and replication-specific domain types in `etl`.
-  Keep reusable Postgres primitives, source database helpers, slot helpers, and
-  SQL access to ETL-owned Postgres metadata tables in `etl-postgres`.
-- Prefer flat module files such as `schema.rs` or `event.rs` when the module
-  has no child modules. Use a directory with `mod.rs` only when the module owns
-  multiple child modules or needs a clear grouped entrypoint.
-- Avoid compatibility facades and wildcard re-exports during structural
-  refactors unless the facade is an intentional public API. Public re-exports
-  should live in domain modules and represent the API callers should actually
-  use.
-- For external crate ergonomics, expose the smallest useful setup surface from
-  `etl`: pipeline configuration/building, destination and store traits, ETL
-  schema/data/event types, and dependency types that callers must use to
-  implement those traits. Keep worker orchestration, Postgres codec internals,
-  runtime plumbing, and store implementation details private or crate-private.
-- Keep top-level binaries focused on orchestration; move implementation detail into helpers or modules.
-- Prefer clear, boring code over clever abstractions.
-- In compound identifiers, use singular nouns as attributive modifiers, such
-  as `EventBatchMetadata`, `event_batch`, `event_count`, and `row_count`, not
-  `EventsBatchMetadata`, `events_batch`, `events_count`, or `rows_count`. Keep
-  plurals when the noun is the semantic head or a verb's direct object, such as
-  `table_rows`, `syncing_tables`, and `write_events`, and preserve established
-  external names.
-- Prefer existing workspace patterns over introducing new local conventions.
-- Keep item order local and readable: place supporting helpers and types before
-  their use when practical, and group type-centered code as `struct`, inherent
-  `impl`, then trait impls. Within inherent impls, put constructors first,
-  externally visible methods next, and private helpers last.
-- Do not add `#[must_use]` attributes unless the user explicitly asks for one.
-- Put rustdoc comments above all attributes on the item they document,
-  including `#[derive(...)]`, `#[serde(...)]`, `#[cfg_attr(...)]`, and macro
-  attributes such as `#[macro_export]`.
-- Default to private visibility and only widen when a real caller requires it.
-- Prefer the narrowest working visibility in this order: private, `pub(super)`, `pub(crate)`, then `pub`.
-- Use `pub` only for intentional crate APIs consumed by other crates, integration tests, examples, or documented user-facing entrypoints.
-- Keep struct fields private by default; prefer constructors, accessors, and focused helper methods over exposing mutable fields.
-- When a module is internal, tighten the module itself before leaving deep items `pub`.
-- In `mod.rs` and other module roots, prefer private child modules plus selective `pub use` lists over `pub mod` or `pub use child::*` when building a facade API.
-- Treat `pub use` as part of the public API contract: re-export only items you intentionally want callers to depend on, and avoid wildcard re-exports from internal modules.
-- When a crate re-exports dependency types through an intentional domain module,
-  prefer referring to them via that domain module (for example
-  `crate::schema::SchemaError`) inside that crate unless you are working at an
-  explicit integration boundary or the item is not re-exported.
-- After visibility changes, verify with `cargo rustc -p <crate> --all-features -- -W unreachable_pub` for the relevant target and then rerun the smallest relevant checks/tests.
-- Keep log message prose lowercase; SQL fragments, identifiers, and external product names may keep their required casing.
-- Prefer `From`/`TryFrom` numeric conversions over `as` casts when the trait
-  conversion exists or a value was explicitly range-checked. Use `as` for
-  intentionally lossy conversions or conversions that Rust does not expose via
-  `From`, such as `u64` to `f64` metric values.
-- Use `From` for value-to-value conversions only when the mapping is
-  infallible, lossless in the semantic sense, value-preserving, and obvious.
-- Model patch-style API updates so omitted fields preserve stored values,
-  explicit `null` clears optional values or resets defaulted values, and
-  non-null values replace stored values. When converting a non-patch API config
-  into an update config, use an explicit helper such as `from_api_config`, not
-  `From`, because absent optional fields become `Clear`, not `Preserve`.
+Every intermediate state must be valid, restart-safe, and retryable. Make
+ordering explicit. Comments should explain what changes, why, how existing rows
+are handled, and non-obvious locking, performance, compatibility, recovery, or
+rollback impact — not restate the SQL. For reversible migrations, make
+dependent data compatible in `down` before dropping the schema it needs. Add
+focused tests when classification, backfill, retry, or rollback is not obvious
+from the SQL.
 
-## Error Handling And Panics
-- Use typed errors and `Result` for recoverable failures.
-- Propagate errors with context instead of flattening to strings. When wrapping
-  a real error, attach it with `source: error` or
-  `.with_source(error)` instead of embedding `{error}`, `error.to_string()`, or
-  `format!("{error}")` into the message or detail. Keep detail fields for
-  contextual data we own, such as operation names, table names, IDs, counts, or
-  SQL statements.
-- Prefer preserving lower-level failures in the error source chain so display,
-  logging, and Sentry formatting can decide how much of the chain to show. Only
-  copy an underlying error message into a description or detail when that is
-  intentionally safer or clearer, such as replacing a sensitive internal error
-  with a sanitized customer-facing explanation.
-- Do not leak Postgres, SQLx, or other database errors from `etl-api` HTTP
-  responses. Keep the original error in the internal chain and logs, but return
-  a generic customer-facing message for database failures.
-- Keep ETL Postgres and DuckDB errors useful for internal debugging by
-  preserving the source chain and owned context, while still avoiding highly
+## Secrets
+
+Treat the repo, every branch, commit, PR, and review comment as **public**.
+Never put real secrets, credentials, tokens, private URLs/hostnames, customer
+data, or production payloads in code, tests, docs, comments, examples, commits,
+PR text, logs, or generated files.
+
+- **Do** use fake placeholders (`example.com`, `127.0.0.1`, `placeholder-token`)
+  or `<redacted>`. Keep secrets in env vars, ignored files, or secret managers.
+- **Do not** add secret-like values to rustdoc, snapshots, fixtures, panics,
+  errors, or assertions, even in tests.
+- If a value looks real (env, local config, command output, non-public source):
+  do not commit or quote it; stop and ask, without repeating the secret.
+- Before a requested git write, scan the staged diff, message, branch, and PR
+  text. On review, flag suspected secrets with file:line and do not reproduce
+  the full value. If something is already exposed: stop, recommend rotation,
+  and do not push or paste the diff. Say what you checked for leaks.
+
+## Rust
+
+Project-specific judgment only; rustfmt/clippy already own formatting and most
+lints.
+
+- Absolute crate imports for shared items (`use crate::metrics::{...}`), not
+  `use super::{...}`.
+- SQL keywords and identifiers lowercase unless quoting or an API requires
+  casing.
+- Flat `schema.rs` when the module has no children; `mod.rs` only when it owns
+  children or a grouped entrypoint. Prefer a module directory when several
+  files share constants, helpers, or one entrypoint.
+- No compatibility facades or wildcard re-exports during refactors unless the
+  facade is an intentional public API. Re-export from domain modules; `pub use`
+  is the public contract (no `pub use child::*`).
+- Binaries orchestrate; implementation lives in helpers/modules. Prefer clear,
+  boring code. Prefer existing workspace patterns.
+- Compound names: singular attributive modifiers (`event_batch`,
+  `EventBatchMetadata`), not `events_batch`. Keep plurals when the noun is the
+  head (`table_rows`, `write_events`). Preserve established external names.
+- Item order: helpers before use; `struct`, inherent `impl`, then trait impls.
+  In inherent impls: constructors, public methods, private helpers.
+- Do not add `#[must_use]` unless the user asks. Rustdoc goes **above** all
+  attributes on the item (`#[derive]`, `#[serde]`, `#[cfg_attr]`, macros).
+- Visibility: private by default, then `pub(super)`, `pub(crate)`, `pub`. `pub`
+  only for crate APIs, integration tests, examples, or user-facing entrypoints.
+  Fields private; constructors/accessors over mutable public fields. Tighten an
+  internal module before leaving deep items `pub`. Prefer private children plus
+  selective `pub use` in `mod.rs`. Inside a crate, refer to re-exported
+  dependency types via the domain module (`crate::schema::SchemaError`) unless
+  you are at an integration boundary. After visibility changes: `cargo rustc -p
+  <crate> --all-features -- -W unreachable_pub`, then the smallest relevant
+  checks.
+- Log message prose lowercase; SQL, identifiers, and product names may keep
+  required casing.
+- Prefer `From`/`TryFrom` over `as` when the conversion exists or was
+  range-checked. Use `as` for intentionally lossy conversions or ones Rust does
+  not expose (`u64` → `f64` metrics). `From` only when the mapping is
+  infallible, semantically lossless, value-preserving, and obvious.
+- Patch-style API updates: omitted fields preserve stored values, explicit
+  `null` clears or resets defaults, non-null replaces. Converting a non-patch
+  API config into an update config needs an explicit helper such as
+  `from_api_config`, not `From` (absent optionals would become `Clear`).
+
+## Errors, panics, parsers
+
+Typed `Result` for recoverable failures. Wrap with `source: error` or
+`.with_source(error)`; do not embed `{error}` or `error.to_string()` in the
+message. Detail fields are owned context (operations, tables, IDs, SQL).
+Preserve the source chain. Error text is sentence case and starts with an
+uppercase letter (`thiserror` included).
+
+- `etl-api` HTTP responses: never leak Postgres/SQLx/database errors; generic
+  customer message, original error in the internal chain and logs.
+- ETL Postgres and DuckDB: keep the chain for debugging, still avoid highly
   critical data.
-- Error messages should use normal sentence casing and start with an uppercase
-  letter. This applies to static error text, including `thiserror` messages.
-- Reserve panics for programmer errors or violated invariants.
-- Use `debug_assert!` and `unreachable!` where they make internal invariants explicit, but prefer typed errors for runtime failures that can be triggered by external input or system state.
-- Only document `# Panics` when a function can actually panic.
+- Panics only for programmer errors or broken invariants. `debug_assert!` /
+  `unreachable!` for internal invariants; typed errors for external input or
+  system state. Document `# Panics` only when the function can panic.
 
-### Parser Safety
-- Parser entrypoints and helpers that consume external input should not panic
-  for malformed input. Return a typed parse error, `EtlError`, `Option::None`,
-  or another explicit failure value that matches the surrounding API.
-- Treat unexpected end of input, malformed tokens, invalid byte sequences,
-  invalid numeric or temporal ranges, and unsupported syntax as recoverable
-  parser failures, not internal invariants.
-- Prefer checked access such as `slice.get(index)`, `str::get(range)`,
-  iterator methods, or byte-slice parsing when input controls indexes or
-  ranges. Convert `None` into the parser's error type.
-- Direct indexing with `[]` is acceptable only when the invariant is local and
-  obvious, such as `bytes[index]` inside `while index < bytes.len()` or fixed
-  chunk indexes after `chunks_exact`. Use bytes rather than `str` byte ranges
-  when parsing ASCII protocols so non-ASCII malformed input cannot panic on a
-  UTF-8 boundary.
-- `expect`, `panic!`, and `unreachable!` in parser internals are reserved for
-  broken programmer invariants that prior code has guaranteed. The message
-  should state the invariant, for example `expect("validated token index should
-  be in bounds")`.
-- Add regression tests for malformed inputs that exercise boundary cases:
-  empty input, unterminated quotes or escapes, invalid UTF-8-adjacent text,
-  non-ASCII bytes in ASCII formats, overflow, underflow, and unsupported
-  syntax.
+Parser entrypoints must not panic on malformed input: typed parse error,
+`EtlError`, `None`, or an explicit failure. Unexpected EOF, bad tokens, invalid
+bytes/ranges, and unsupported syntax are recoverable. Prefer `slice.get`,
+`str::get`, iterators, or byte-slice parsing; convert `None` to the parser
+error. `[]` only when the invariant is local (`bytes[index]` while
+`index < bytes.len()`, or `chunks_exact`). Parse ASCII protocols as bytes so
+non-ASCII cannot panic on a UTF-8 boundary. `expect`/`panic!`/`unreachable!` in
+parsers only for programmer invariants already guaranteed; the message must
+state that invariant. Add malformed-input tests: empty, unterminated
+quotes/escapes, invalid UTF-8-adjacent text, non-ASCII in ASCII formats,
+overflow/underflow, unsupported syntax.
 
-## Unsafe And Concurrency
-- Avoid `unsafe` unless it is necessary.
-- Every `unsafe` block should have a preceding `// SAFETY:` comment explaining why it is sound.
-- Prefer explicit ownership and borrowing over unnecessary cloning or interior mutability.
-- In async code, keep long-running background work behind named tasks or helpers.
-- Be intentional about Tokio task shutdown semantics. Dropping a
-  `JoinHandle` detaches the task; call `abort()` for best-effort background
-  tasks such as metrics reporters when they should stop immediately.
-- Dropping a Tokio `JoinSet` aborts all tasks in the set. Do not call
-  `abort_all()` before returning from a scope that owns the `JoinSet`; use
-  `abort_all()` only when the set is retained and tasks must be stopped while
-  the set remains alive.
-- Prefer graceful shutdown signaling and joining only when tasks own state that
-  must be completed or unwound deliberately, such as database transactions,
-  destination flushes, or retry-sensitive replication work.
-- Avoid elaborate shutdown channels for timer, polling, or telemetry tasks
-  whose state can be safely discarded.
+## Unsafe and concurrency
 
-## Documentation
-- Document all items, public and private, using concise stdlib-style prose.
-- Link types and methods as [`Type`] and [`Type::method`].
-- In public or module-level docs, prefer fully qualified rustdoc links such as
-  [`crate::store::PipelineStore`] when referencing items outside the current
-  module.
-- In item docs where the type is already imported and central to the code,
-  short rustdoc links such as [`StateStore`] are fine.
-- Do not add imports solely to make rustdoc links shorter.
-- Keep comments and docs precise, short, and punctuated.
-- Normal comments should always end with `.`.
-- Prefer normal comments on the line above the code they explain instead of
-  trailing comments at the end of a code line.
-- Do not add code examples in rustdoc for this repository.
+Avoid `unsafe` unless necessary. Every `unsafe` block needs a preceding
+`// SAFETY:` comment. Prefer ownership/borrowing over extra clones or interior
+mutability. Name long-running async work. Dropping a `JoinHandle` detaches:
+`abort()` best-effort background tasks (metrics reporters) when they should
+stop now. Dropping a `JoinSet` aborts its tasks; do not `abort_all()` before
+returning from a scope that owns the set — only while the set is retained.
+Graceful shutdown and join only when tasks own state that must finish (DB
+transactions, destination flushes, retry-sensitive replication). Do not build
+elaborate shutdown channels for timer/poll/telemetry tasks whose state can be
+discarded.
 
-## Metrics And Observability
-- Define metric names and label keys as constants instead of inlining string literals at call sites.
-- Centralize shared metric labels or tag values in the parent metrics module when multiple metric files use them.
-- Register metric descriptions once using `std::sync::Once` or another one-time initialization pattern.
-- For background metric polling, prefer one `spawn_*_metrics_task` helper per source and one orchestration helper that starts them.
-- Prefer low-cardinality labels unless higher-cardinality labels are operationally necessary.
-- Do not log highly critical sensitive information: passwords, secrets, tokens,
-  request or response bodies for sensitive API endpoints, or source row/cell
-  values. Prefer metadata that helps debugging without exposing values, such as
-  table and column names, type names, counts, lengths, LSNs, IDs, and operation
-  names.
-- When adding logs, metrics, traces, Sentry context, panic messages, or other
-  observability output, be extra careful not to leak customer data or detailed
-  table contents. Higher-level structural metadata, such as table names, column
-  names, type names, counts, lengths, IDs, and operation names, can be included
-  when useful for debugging; do not include cell values, row payloads, request
-  or response bodies, credentials, tokens, or secrets.
-- In production logs, key errors as `error = %err` or `error = %error`
-  regardless of the local variable name. Do not use `err =`, `source =`, or
-  debug formatting for the primary error field.
-- Prefer `Display` formatting (`%`) or explicit structured fields over
-  `Debug` formatting (`?`) for structs in logs, unless the type is known not to
-  contain sensitive values.
-- For table state logs, always use `table_state_type` for one state and
-  `table_state_types` for lists.
-- For Sentry, wrap sensitive API route groups with the sensitive Sentry scope
-  marker and scrub request/response body capture from marked events. Do not
-  duplicate route sensitivity with separate path matchers in the scrubber.
+## Docs, metrics, logs
 
-## Testing
-- Tests run via `cargo-nextest` (process-per-test). Use `cargo xtask nextest run` for the full sharded suite, or `cargo nextest run` for single-crate runs.
-- Integration tests are consolidated into `tests/main.rs` per crate. Address individual modules with `-- module_name::`.
-- Doctests use `cargo test --doc` (nextest does not support them).
-- If test output shows `0 passed; 0 failed; 0 ignored; n filtered out`, treat that as a failure to run tests.
-- Verify that expected tests actually ran, not just that Cargo exited successfully.
-- In tests, prefer `unwrap()` and `unwrap_err()` over `expect()` and
-  `expect_err()`. Use an `expect` message only when it adds diagnostic context
-  that is not already clear from the expression and surrounding test. Put
-  non-obvious test intent in a preceding comment instead of a panic message.
-- Prefer assertions without custom messages. Avoid messages that merely restate
-  the condition or duplicate values already reported by the assertion macro.
-  Explain non-obvious test intent with a preceding comment. Use a concise
-  message only when it supplies non-sensitive runtime context that the default
-  failure output cannot provide, such as a case identifier in table-driven
-  tests, loops, or shared assertion helpers.
-- Prefer running `cargo nextest list` before using filters or crate-specific commands if there is any doubt.
-- When fixing a specific crate, run the narrowest relevant tests first, then broaden if needed.
-- When a test failure needs deeper debugging, rerun the targeted test with
-  `ENABLE_TRACING=1`; set a focused `RUST_LOG` filter when needed, such as
-  `RUST_LOG=etl::replication::apply=debug,etl_destinations::bigquery=debug`,
-  to make the relevant pipeline or destination logs visible.
-- Add or update tests when behavior changes, regressions are possible, or new logic is introduced.
-- Prefer existing test utilities and fixtures over custom test plumbing. Before adding bespoke
-  setup, waits, assertions, or database helpers, check nearby tests and `crates/etl/src/test_utils/` for
-  an existing helper and reuse it when it fits.
-- Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*` handles before the producer can fire. These helpers only arm on updates that arrive *after* registration, so register the notifier first, then start the producer.
-- If your tests need `TESTS_DATABASE_HOST` to be set or a test instance of PostgreSQL you can use `cargo xtask postgres create` command to spawn a postgres instance
+Document every item (public and private), stdlib-style, punctuated. Link
+[`Type`] and [`Type::method`]. Public/module docs: fully qualified links
+outside the module (`[`crate::store::PipelineStore`]`). Item docs may use short
+links when the type is imported and central. Do not add imports only to shorten
+links. No rustdoc examples in this repo. Comments explain why, live on the line
+above, and end with `.`.
 
-  ```rust
-  let ready = store.notify_on_table_state_type(id, Ready).await;
-  pipeline.start().await.unwrap();
-  ready.notified().await;
-  ```
+Metric names and label keys are constants. Share labels in the parent metrics
+module. Register descriptions once (`Once` or equivalent). One
+`spawn_*_metrics_task` per source plus one orchestration helper. Low-cardinality
+labels unless high cardinality is operationally required.
 
-### Integration Test Style
-- Prefer one-way integration tests: perform the source-side writes first, wait for the expected notifications, then call `shutdown_and_wait()` immediately before assertions.
-- Avoid asserting destination state while the pipeline is still running unless the test is specifically about in-flight behavior or recovery during active replication.
-- For `TestDestinationWrapper`, prefer asserting against the cumulative event history from `get_events()`. Use `clear_events()` only when restarting the pipeline or when a test intentionally needs to discard earlier history and assert on a new phase in isolation.
-- When asserting CDC event shapes, only expect combinations that PostgreSQL can actually emit for the table's replica identity mode. In particular, distinguish between `FULL`, primary-key identity, and `USING INDEX`, and remember that partial update rows only occur for update new-tuples.
+Do not log passwords, secrets, tokens, sensitive request/response bodies, or
+source cell/row values. Structural metadata is fine (table/column/type names,
+counts, lengths, LSNs, IDs, operations). Production errors: `error = %err` or
+`error = %error` (not `err =`, `source =`, or debug for the primary error).
+Prefer `Display` (`%`) over `Debug` (`?`) unless the type is known not to
+contain sensitive values. Table state: `table_state_type` (one) and
+`table_state_types` (list). Sentry: wrap sensitive API route groups with the
+sensitive scope marker and scrub bodies on marked events; do not duplicate path
+matchers in the scrubber.
 
-## Review Checklist
-- Code compiles for the changed target or workspace as appropriate.
-- Code is formatted.
-- Clippy passes for the changed target or workspace as appropriate, using the workspace lint configuration as the source of truth for enforceable style and correctness rules.
-- Tests pass for the changed target or workspace as appropriate.
-- Doctests pass for the changed target or workspace as appropriate.
-- Docs and comments match the final behavior.
-- New metrics, logs, and labels follow existing naming patterns.
+## Tests
+
+Process-per-test via cargo-nextest. Full sharded suite: `cargo xtask nextest
+run`. Single crate: `cargo nextest run`. Integration tests live in
+`tests/main.rs`; filter with `-- module_name::`. Doctests: `cargo test --doc`.
+
+`0 passed; 0 failed; 0 ignored; n filtered out` is a **failure** (nothing ran).
+Confirm expected tests actually ran. Prefer `cargo nextest list` before filters
+if unsure. Fix one crate with the narrowest tests first, then broaden.
+
+In tests, prefer `unwrap()`/`unwrap_err()` over `expect()`. Use `expect` only
+when it adds diagnostics the expression does not already give; put non-obvious
+intent in a preceding comment. Prefer assertions without custom messages. A
+message is justified only for non-sensitive runtime context the default output
+lacks (table-driven case ids). Add or update tests when behavior changes.
+Reuse `crates/etl/src/test_utils/` and nearby helpers before inventing setup.
+
+Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*`
+**before** the producer can fire (they only arm on later updates):
+
+```rust
+let ready = store.notify_on_table_state_type(id, Ready).await;
+pipeline.start().await.unwrap();
+ready.notified().await;
+```
+
+Need Postgres? `cargo xtask postgres create` (or `cargo x init`) and
+`TESTS_DATABASE_HOST`. Debug with `ENABLE_TRACING=1` and a focused `RUST_LOG`,
+for example
+`RUST_LOG=etl::replication::apply=debug,etl_destinations::bigquery=debug`.
+
+Integration tests: source writes first, wait for notifications, then
+`shutdown_and_wait()` before assertions. Do not assert destination state while
+the pipeline is running unless the test is about in-flight or recovery
+behavior. For `TestDestinationWrapper`, assert cumulative `get_events()`;
+`clear_events()` only on restart or a new isolated phase. CDC shapes must be
+ones PostgreSQL can emit for that replica identity (`FULL`, PK, `USING INDEX`);
+partial update rows only occur for update new-tuples.
+
+## Before you finish
+
+Changed target or workspace, as appropriate: compiles, `cargo x fmt`, Clippy
+with workspace lints, tests, doctests. Docs and comments match behavior. New
+metrics, logs, and labels follow existing naming.

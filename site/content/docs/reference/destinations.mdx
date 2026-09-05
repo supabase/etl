@@ -6,21 +6,23 @@ icon: DatabaseZap
 
 Supabase ETL ships official destination implementations in the
 `etl-destinations` crate. Enable only the destination feature you need when
-embedding ETL or building the standalone replicator. **BigQuery is the stable,
-recommended default.**
+embedding ETL or building the standalone replicator. **ClickHouse is the
+easiest destination to start with locally:** `cargo x init` starts it, and
+`cargo x setup replicator` configures it by default. **BigQuery is the most
+mature cloud destination.**
 
-| Feature      | Destination     | Status      | Guidance                       |
-| ------------ | --------------- | ----------- | ------------------------------ |
-| `bigquery`   | Google BigQuery | Stable      | Recommended default            |
-| `clickhouse` | ClickHouse      | In progress | Evaluate for your workload     |
-| `ducklake`   | DuckLake        | In progress | Evaluate for your workload     |
-| `snowflake`  | Snowflake       | In progress | Evaluate for your workload     |
-| `iceberg`    | Apache Iceberg  | Deprecated  | Do not use for new deployments |
+| Feature      | Destination     | Status      | Guidance                                  |
+| ------------ | --------------- | ----------- | ----------------------------------------- |
+| `clickhouse` | ClickHouse      | In progress | Recommended local getting-started path    |
+| `bigquery`   | Google BigQuery | Stable      | Most mature cloud destination             |
+| `ducklake`   | DuckLake        | In progress | Evaluate for your workload                |
+| `snowflake`  | Snowflake       | In progress | Evaluate for your workload                |
+| `iceberg`    | Apache Iceberg  | Deprecated  | Do not use for new deployments            |
 
 ## Status definitions
 
-- **Stable:** The most mature built-in destination and the recommended default.
-  Review its limitations and validate it against your production workload.
+- **Stable:** The most mature built-in destination. Review its limitations and
+  validate it against your production workload.
 - **In progress:** Functional, but behavior, configuration, schema support, and
   operational requirements may still change. Test recovery and schema changes
   before production use.
@@ -38,22 +40,17 @@ behavior. These semantics apply consistently to initial copy, inserts, and
 updates.
 
 ETL returns a local error only when it cannot construct a faithful wire
-representation. The ETL API may also emit non-blocking preflight warnings for
-known destination differences, but those warnings do not add per-cell runtime
+representation. Known destination differences do not add per-cell runtime
 validation. Test destination-specific value semantics that matter to your
 workload.
 
 ## Publication column additions
 
 An existing column newly exposed by a publication is added as nullable so old
-destination rows remain `NULL`; future row events carry the real PostgreSQL
-value. Defaults are installed only when they cannot affect old rows. BigQuery
-supports that future-only behavior, while ClickHouse, DuckLake, and Snowflake
-omit the default. BigQuery and ClickHouse reject publication-added arrays
-because they cannot represent the unknown historical value as `NULL`.
-
-See [Publication column changes](/explanation/schema-changes/#publication-column-changes)
-for the complete policy.
+destination rows remain `NULL`. Defaults and array handling differ by
+destination. See [Publication column
+changes](/explanation/schema-changes/#publication-column-changes) for the
+complete policy.
 
 ## Destination ownership
 
@@ -76,8 +73,8 @@ not restored automatically.
 <DestinationStatus status="stable" />
 
 BigQuery uses the BigQuery Storage Write API and BigQuery change data capture
-to maintain destination tables. The standalone replicator guide uses BigQuery
-as its default example.
+to maintain destination tables. Use it when you already have a Google Cloud
+project. For a local first pipeline, prefer [ClickHouse](#clickhouse).
 
 ### Table partitioning and clustering
 
@@ -87,9 +84,8 @@ when a table is created or recreated, never to a table that already exists.
 Restarting a pipeline does not modify an existing table, and changing either
 setting has no effect until the table is created again. A table is created,
 and so picks up the current settings, when it is replicated for the first
-time, when its replication state is reset (for example from the dashboard
-or the pipeline resync API), or when a source truncate makes ETL create a
-new physical table.
+time, when its replication state is reset, or when a source truncate makes
+ETL create a new physical table.
 
 ```yaml
 destination:
@@ -178,6 +174,13 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 ## ClickHouse
 
 <DestinationStatus status="in-progress" />
+
+ClickHouse is the local default destination. `cargo x init` starts ClickHouse
+on `http://localhost:8123` (`etl` / `etl`), and `cargo x setup replicator`
+writes config for that service. No cloud account is required.
+
+The [Standalone Replicator](/guides/standalone-replicator/) guide uses
+ClickHouse as its default example.
 
 ClickHouse supports a current-state layout with `ReplacingMergeTree` and an
 append-only event-log layout with `MergeTree`.

@@ -146,6 +146,12 @@ mod clickhouse {
     use super::super::{ReplicatorStore, pipeline};
     use crate::error::ReplicatorResult;
 
+    /// Returns whether a ClickHouse configuration requires public HTTPS
+    /// enforcement.
+    fn requires_public_network_policy(is_managed: bool, scheme: &str) -> bool {
+        is_managed || scheme == "https"
+    }
+
     /// Starts the ClickHouse destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
@@ -157,19 +163,54 @@ mod clickhouse {
             unreachable!("Destination kind should match ClickHouse config");
         };
 
-        let destination = ClickHouseDestination::new(
-            url.clone(),
-            user,
-            password.as_ref().map(|p| p.expose_secret().to_owned()),
-            database,
-            ClickHouseInserterConfig { engine: *engine, ..Default::default() },
-            ClickHouseClientConfig::default(),
-            store.clone(),
-        )?;
+        let password = password.as_ref().map(|password| password.expose_secret().to_owned());
+        let inserter_config = ClickHouseInserterConfig { engine: *engine, ..Default::default() };
+        let client_config = ClickHouseClientConfig::default();
+
+        // Managed configurations must use public HTTPS. Standalone HTTPS also
+        // uses the guard, while trusted standalone HTTP remains available for
+        // local development.
+        let enforce_public_network_policy =
+            requires_public_network_policy(replicator_config.supabase.is_some(), url.scheme());
+        let destination = if enforce_public_network_policy {
+            ClickHouseDestination::new_public(
+                url.clone(),
+                user,
+                password,
+                database,
+                inserter_config,
+                client_config,
+                store.clone(),
+            )
+            .await?
+        } else {
+            ClickHouseDestination::new(
+                url.clone(),
+                user,
+                password,
+                database,
+                inserter_config,
+                client_config,
+                store.clone(),
+            )?
+        };
         destination.validate_engine_support().await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
         pipeline::start(pipeline).await
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn selects_public_network_policy_for_managed_and_https_configs() {
+            assert!(requires_public_network_policy(true, "http"));
+            assert!(requires_public_network_policy(true, "https"));
+            assert!(requires_public_network_policy(false, "https"));
+            assert!(!requires_public_network_policy(false, "http"));
+        }
     }
 }
 

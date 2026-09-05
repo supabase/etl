@@ -184,6 +184,36 @@ async fn validate_destination_fails_when_bigquery_source_table_has_no_primary_ke
 }
 
 #[tokio::test]
+async fn validate_destination_requires_primary_key_on_inheritance_child() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute("create table inherited_parent (id bigint primary key, payload text)")
+        .await
+        .unwrap();
+    pool.execute("create table inherited_child (extra text) inherits (inherited_parent)")
+        .await
+        .unwrap();
+    pool.execute(
+        "create publication inherited_pub for table inherited_parent with (publish = 'insert')",
+    )
+    .await
+    .unwrap();
+
+    let pipeline_config = create_pipeline_config("inherited_pub");
+    let failures = validate_destination(&ctx, &create_bigquery_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+
+    let failure =
+        failures.iter().find(|failure| failure.name == "Source Primary Keys Required").unwrap();
+    assert_eq!(failure.failure_type, FailureType::Critical);
+    assert!(failure.reason.contains("public.inherited_child"));
+    assert!(!failure.reason.contains("public.inherited_parent`"));
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
 async fn validate_destination_fails_when_clickhouse_replacing_merge_tree_table_has_no_primary_key()
 {
     let (ctx, pool, config) = create_validation_context_with_source().await;

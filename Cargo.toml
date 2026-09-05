@@ -87,9 +87,11 @@ etl-postgres = { path = "crates/etl-postgres", default-features = false }
 etl-telemetry = { path = "crates/etl-telemetry", default-features = false }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
-gcp-bigquery-client = { git = "https://github.com/iambriccardo/gcp-bigquery-client", rev = "7da9cd7f140f4a5e6dff8c8593ba8fee4bc20904", default-features = false }
+gcp-bigquery-client = { git = "https://github.com/supabase/gcp-bigquery-client", rev = "8035bcd1a7c3f08f8679326c40200b11901e38ed", default-features = false }
 hex = { version = "0.4", default-features = false }
 humantime = { version = "2.3.0", default-features = false }
+hyper-rustls = { version = "0.27.9", default-features = false }
+hyper-util = { version = "0.1.20", default-features = false }
 iceberg = { version = "0.8.0", default-features = false }
 iceberg-catalog-rest = { version = "0.8.0", default-features = false }
 insta = { version = "1.43.1", default-features = false }
@@ -107,7 +109,7 @@ parse-size = { version = "1.1.0", default-features = false }
 pg_escape = { version = "0.1.1", default-features = false }
 pin-project-lite = { version = "0.2.16", default-features = false }
 pkcs8 = { version = "0.11", default-features = false, features = ["pem", "encryption"] }
-postgres-replication = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "fa49356fc16f2442a9924963baee9d9d9085c073" }
+postgres-replication = { git = "https://github.com/supabase/rust-postgres", default-features = false, rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e" }
 proptest = { version = "1.7.0", default-features = false, features = ["std"] }
 prost = { version = "0.14.1", default-features = false }
 r2d2 = { version = "0.8", default-features = false }
@@ -123,18 +125,19 @@ serde_json = { version = "1.0.141", default-features = false }
 sha2 = { version = "0.11", default-features = false }
 simdutf8 = { version = "0.1.5" }
 sqlx = { version = "0.9.0", default-features = false }
-sysinfo = { version = "0.38.2", default-features = false }
+sysinfo = { version = "0.39.6", default-features = false }
 tempfile = { version = "3.23.0", default-features = false }
 thiserror = "2.0.12"
 tikv-jemalloc-ctl = { version = "0.6.0", default-features = false, features = ["stats"] }
 tikv-jemallocator = { version = "0.6.1", default-features = false, features = ["background_threads_runtime_support", "unprefixed_malloc_on_supported_platforms"] }
 tokio = { version = "1.47.0", default-features = false }
-tokio-postgres = { git = "https://github.com/iambriccardo/rust-postgres", default-features = false, rev = "fa49356fc16f2442a9924963baee9d9d9085c073" }
+tokio-postgres = { git = "https://github.com/supabase/rust-postgres", default-features = false, rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e" }
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tonic = { version = "0.14.2", default-features = false }
 tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.6.8", default-features = false }
+tower-service = { version = "0.3.3", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
 tracing-log = { version = "0.2.0", default-features = false }

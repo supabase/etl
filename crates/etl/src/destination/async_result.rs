@@ -127,7 +127,7 @@ pub(crate) type CompletedWriteEventsResult<T = DestinationWriteStatus> =
     CompletedAsyncResult<T, ApplyLoopAsyncResultMetadata>;
 
 /// Metadata carried by apply-loop event write completions.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// Commit end LSN associated with the dispatched batch, if any.
     ///

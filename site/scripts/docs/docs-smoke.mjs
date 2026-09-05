@@ -762,9 +762,12 @@ async function checkDesktop(page) {
       (await page.locator('.etl-destination-status[data-status="deprecated"] svg').count()) === 1,
     'Destination maturity badges are missing their status icons.',
   );
+  const destinationsCopy = await page.locator('#nd-page').innerText();
   assert(
-    (await page.locator('#nd-page').innerText()).includes('BigQuery is the stable, recommended default.'),
-    'The Destinations reference does not identify BigQuery as the default.',
+    destinationsCopy.includes('ClickHouse is the easiest destination to start with locally') &&
+      destinationsCopy.includes('cargo x setup replicator') &&
+      destinationsCopy.includes('BigQuery is the most mature cloud destination.'),
+    'The Destinations reference does not identify ClickHouse as the local default.',
   );
   await page.route(`${baseUrl}/reference/destinations.md`, (route) =>
     route.fulfill({ status: 404, contentType: 'text/html', body: '<!doctype html><title>Missing</title>' }),
