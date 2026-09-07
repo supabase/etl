@@ -21,7 +21,7 @@ use etl_config::shared::{
     BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig,
     ReplicationSlotConfig, TableSyncCopyConfig,
 };
-use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_postgres::{sqlx::test_utils::drop_pg_database, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use reqwest::StatusCode;
@@ -134,13 +134,9 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     // We run the migrations to create all the tables used by `etl`.
     run_etl_migrations_on_source_database(&source_db_config).await;
 
-    // Match the default pipeline publication and include test tables as they are
-    // created.
+    // Match the default pipeline publication; tests add their tables explicitly.
     source_db_pool.execute("create schema test").await.unwrap();
-    source_db_pool
-        .execute("create publication publication for tables in schema test")
-        .await
-        .unwrap();
+    source_db_pool.execute("create publication publication").await.unwrap();
 
     (app, tenant_id, pipeline_id, source_db_pool, source_db_config)
 }
@@ -153,7 +149,7 @@ async fn create_table_with_state_chain(
     table_name: &str,
     state_chain: &[(&str, &str)],
 ) -> Oid {
-    let table_oid = create_test_table(source_db_pool, table_name).await;
+    let table_oid = create_published_test_table(source_db_pool, table_name).await;
 
     let mut prev_id: Option<i64> = None;
     for (i, (state, metadata)) in state_chain.iter().enumerate() {
@@ -189,7 +185,7 @@ async fn create_tables_with_states(
     let mut results = Vec::new();
 
     for (table_name, state, metadata) in tables {
-        let table_oid = create_test_table(source_db_pool, table_name).await;
+        let table_oid = create_published_test_table(source_db_pool, table_name).await;
 
         sqlx::query(
             "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, \
@@ -236,6 +232,20 @@ async fn test_rollback(
     if expected_status.is_success() { Some(response.json().await.unwrap()) } else { None }
 }
 
+/// Creates a table and explicitly adds it to the pipeline publication.
+async fn create_published_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
+    let table_oid = create_test_table(source_db_pool, table_name).await;
+    sqlx::query(AssertSqlSafe(format!(
+        "alter publication publication add table test.{}",
+        quote_identifier(table_name)
+    )))
+    .execute(source_db_pool)
+    .await
+    .unwrap();
+    table_oid
+}
+
+/// Creates a table without changing publication membership.
 async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
     sqlx::query("create schema if not exists test").execute(source_db_pool).await.unwrap();
 
@@ -1632,12 +1642,27 @@ async fn restarting_pipeline_resets_vpa_for_a_new_table_in_a_published_schema() 
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
+    let server_version_num: i32 =
+        sqlx::query_scalar("select current_setting('server_version_num')::int")
+            .fetch_one(&source_db_pool)
+            .await
+            .unwrap();
+    if server_version_num < POSTGRES_15 {
+        drop_pg_database(&source_db_config).await;
+        return;
+    }
+
     create_tables_with_states(
         &source_db_pool,
         pipeline_id,
         &[("test_users", "ready", r#"{"type": "ready"}"#)],
     )
     .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool
+        .execute("create publication publication for tables in schema test")
+        .await
+        .unwrap();
     create_test_table(&source_db_pool, "test_events").await;
 
     let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
@@ -1682,7 +1707,7 @@ async fn restarting_pipeline_resets_vpa_for_published_tables_without_any_state()
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
-    create_test_table(&source_db_pool, "test_users").await;
+    create_published_test_table(&source_db_pool, "test_users").await;
 
     let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
 
@@ -1763,7 +1788,7 @@ async fn restarting_pipeline_resets_vpa_when_a_published_table_is_recreated() {
     )
     .await;
     source_db_pool.execute("drop table test.test_users").await.unwrap();
-    let new_table_id = create_test_table(&source_db_pool, "test_users").await;
+    let new_table_id = create_published_test_table(&source_db_pool, "test_users").await;
     assert_ne!(tables[0].0, new_table_id);
 
     let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
@@ -1829,7 +1854,7 @@ async fn restarting_pipeline_respects_table_copy_selection() {
         &[("test_users", "ready", r#"{"type": "ready"}"#)],
     )
     .await;
-    let new_table_id = create_test_table(&source_db_pool, "test_events").await;
+    let new_table_id = create_published_test_table(&source_db_pool, "test_events").await;
     let pipeline = app.read_pipeline(&tenant_id, pipeline_id).await;
     let pipeline: ReadPipelineResponse = pipeline.json().await.unwrap();
 
@@ -1896,7 +1921,7 @@ async fn restarting_pipeline_preserves_vpa_when_source_lock_times_out() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
-    create_test_table(&source_db_pool, "test_users").await;
+    create_published_test_table(&source_db_pool, "test_users").await;
 
     // Hold the lock until the source connection's lock timeout cancels inspection.
     let mut transaction = source_db_pool.begin().await.unwrap();
