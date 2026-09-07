@@ -64,7 +64,7 @@ on the command line.
 
 GitHub Actions uses the same one-var contract:
 
-- `TESTS_SNOWFLAKE_CONNECTION` for `.github/workflows/snowflake-ci.yml`.
+- `TESTS_SNOWFLAKE_CONNECTION` for `.github/workflows/snowflake-daily.yml`.
 - `BENCH_SNOWFLAKE_CONNECTION` for manual Snowflake benchmark workflow runs.
 
 Both repository secrets use the same JSON shape shown above. The workflows pass the JSON only
