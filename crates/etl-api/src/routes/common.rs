@@ -1,11 +1,14 @@
-use etl::store::TableState;
-use etl_postgres::store::table_state;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{
     config::ApiConfig,
-    configs::{encryption::EncryptionKeyring, source::StoredSourceConfig},
-    data::{pipelines::read_pipeline_components, source_database},
+    configs::{
+        encryption::EncryptionKeyring, pipeline::StoredPipelineConfig, source::StoredSourceConfig,
+    },
+    data::{
+        pipelines::{read_pipeline_components, read_pipeline_tables_to_copy},
+        source_database,
+    },
     k8s::{
         K8sClient, SourceTlsConfig,
         core::{
@@ -17,12 +20,63 @@ use crate::{
     validation::{self, ValidationContext, ValidationError, ValidationFailure},
 };
 
+/// Checks whether published tables would copy data, preserving VPA on
+/// uncertainty.
+///
+/// Uses the current API pipeline and source configuration supplied by the
+/// caller, which must also be used to materialize the replacement. These
+/// values may differ from the running Pod's configuration after an API update.
+/// Inspection uses the source connection's statement and lock timeouts.
+async fn restart_would_copy_tables(
+    pipeline_id: i64,
+    pipeline_config: &StoredPipelineConfig,
+    source_id: i64,
+    source_config: &StoredSourceConfig,
+    source_tls_config: &SourceTlsConfig,
+) -> bool {
+    let inspection = async {
+        let connection_config =
+            source_config.clone().into_connection_config(source_tls_config.get_tls_config());
+        let source_pool = source_database::connect(&connection_config).await?;
+        read_pipeline_tables_to_copy(
+            &source_pool,
+            pipeline_id,
+            &pipeline_config.publication_name,
+            &pipeline_config.table_sync_copy,
+        )
+        .await
+    };
+
+    match inspection.await {
+        Ok(tables_to_copy) => {
+            info!(
+                pipeline_id,
+                source_id,
+                table_count = tables_to_copy.len(),
+                "determined tables to copy on pipeline restart",
+            );
+            !tables_to_copy.is_empty()
+        }
+        Err(error) => {
+            warn!(
+                pipeline_id,
+                source_id,
+                error = %error,
+                "failed to determine tables to copy on pipeline restart, preserving vertical pod autoscaler",
+            );
+            false
+        }
+    }
+}
+
 /// Reconciles and restarts the running replicator for a pipeline.
 ///
 /// Update endpoints that can change source, destination, pipeline, image, or
-/// runtime resource configuration should call this after persisting the new API
-/// state. The helper materializes the latest Kubernetes resources and relies on
-/// the StatefulSet materialization to change the pod template restart
+/// runtime resource configuration should call this after writing the new API
+/// state through the supplied connection, including within an uncommitted
+/// transaction. The helper reads that state once and uses the same loaded
+/// pipeline and source configuration for both copy preflight and Kubernetes
+/// materialization. Updating the StatefulSet changes the pod template restart
 /// annotation.
 ///
 /// This forced recreation is part of the contract. The replicator loads its
@@ -30,13 +84,14 @@ use crate::{
 /// running pod must be restarted after config materialization in order to pick
 /// up those changes.
 ///
-/// Before reconciliation, this best-effort checks durable pipeline state in the
-/// database. If initial sync would repeat while copying existing tables, it
-/// deletes the VPA so
-/// reconciliation recreates it from the configured bounds and initial update
-/// mode. The upstream recommender may retain in-memory usage aggregates after
-/// the VPA is deleted. Source inspection failures preserve the existing VPA
-/// and do not block restart.
+/// Before reconciliation, this best-effort checks current publication
+/// membership, durable pipeline state, and table-copy settings in the database.
+/// If any table would copy data, including newly published tables, it deletes
+/// the VPA so reconciliation recreates it in the configured initial update
+/// mode. With `Off`, the replacement Pod starts at the configured startup
+/// allocation and the VPA gets a fresh observation period. The upstream
+/// recommender may retain usage history after deletion. Inspection failures and
+/// timeouts preserve the existing VPA and do not block restart.
 ///
 /// Kubelet container restarts and Kubernetes-initiated Pod replacements do not
 /// call this helper or delete the VPA. A replacement Pod may therefore receive
@@ -63,8 +118,14 @@ pub(crate) async fn restart_replicator_if_running(
         return Ok(false);
     }
 
-    if restart_would_perform_table_sync(pipeline_id, source.id, &source.config, source_tls_config)
-        .await
+    if restart_would_copy_tables(
+        pipeline_id,
+        &pipeline.config,
+        source.id,
+        &source.config,
+        source_tls_config,
+    )
+    .await
     {
         let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
         k8s_client.delete_replicator_vertical_pod_autoscaler(&resource_prefix).await?;
@@ -85,47 +146,6 @@ pub(crate) async fn restart_replicator_if_running(
     .await?;
 
     Ok(true)
-}
-
-async fn restart_would_perform_table_sync(
-    pipeline_id: i64,
-    source_id: i64,
-    source_config: &StoredSourceConfig,
-    source_tls_config: &SourceTlsConfig,
-) -> bool {
-    let result = async {
-        let connection_config =
-            source_config.clone().into_connection_config(source_tls_config.get_tls_config());
-        let source_pool = source_database::connect(&connection_config).await?;
-        let state_rows = table_state::get_table_state_rows(&source_pool, pipeline_id).await?;
-        let mut would_perform_table_sync = false;
-
-        for state_row in state_rows {
-            let Some(metadata) = state_row.metadata else {
-                return Err(PipelineError::MissingTableState);
-            };
-            let state: TableState =
-                serde_json::from_value(metadata).map_err(PipelineError::InvalidTableState)?;
-
-            would_perform_table_sync |= state.as_type().would_perform_table_sync();
-        }
-
-        Ok(would_perform_table_sync)
-    }
-    .await;
-
-    match result {
-        Ok(will_repeat_sync) => will_repeat_sync,
-        Err(error) => {
-            warn!(
-                pipeline_id,
-                source_id,
-                error = %error,
-                "failed to determine whether pipeline restart will repeat table sync, preserving vertical pod autoscaler",
-            );
-            false
-        }
-    }
 }
 
 /// Validates a source config against the trusted source profile, when enabled.

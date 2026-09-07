@@ -2,6 +2,7 @@ use std::{fmt, num::NonZeroI32, sync::Arc, time::Duration};
 
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
+    publications::publication_table_ids_query,
     source::extract_server_version,
     tokio::tls::MakeRustlsConnect,
     version::POSTGRES_17,
@@ -644,14 +645,7 @@ impl PgReplicationClient {
         &self,
         publication_name: &str,
     ) -> EtlResult<Vec<TableId>> {
-        let query = format!(
-            r#"
-            select distinct gpt.relid::oid as oid
-            from pg_get_publication_tables({pub}) gpt
-            order by oid;
-            "#,
-            pub = quote_literal(publication_name)
-        );
+        let query = publication_table_ids_query(publication_name);
 
         let mut table_ids = vec![];
         for row in self.client.simple_query(&query).await? {

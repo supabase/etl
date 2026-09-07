@@ -15,7 +15,7 @@ use k8s_openapi::{
 };
 use kube::{
     Client,
-    api::{Api, DeleteParams, ListParams, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams},
     core::{ApiResource, DynamicObject, GroupVersionKind},
 };
 use serde_json::json;
@@ -41,7 +41,7 @@ use crate::{
     },
 };
 
-/// Server-side apply field manager for resources owned by the API service.
+/// Kubernetes field manager for resources owned by the API service.
 const FIELD_MANAGER: &str = "etl-api";
 /// Secret name suffix for the BigQuery service account key.
 const BQ_SECRET_NAME_SUFFIX: &str = "bq-service-account-key";
@@ -821,33 +821,57 @@ impl K8sClient for HttpK8sClient {
                 config.initial_update_mode
             })
             .as_k8s_value();
-        let existing_vertical_pod_autoscaler =
-            self.vertical_pod_autoscalers_api.get_opt(&name).await?;
-        let update_mode = existing_vertical_pod_autoscaler
-            .as_ref()
-            .and_then(vpa_update_mode)
-            .unwrap_or(initial_update_mode);
-
-        debug!(vpa = %name, update_mode, "creating or updating vertical pod autoscaler");
+        debug!(vpa = %name, "creating or updating vertical pod autoscaler");
 
         let vertical_pod_autoscaler = create_replicator_vertical_pod_autoscaler_json(
             &self.k8s_config,
             resource_prefix,
             identity,
             &name,
-            update_mode,
+            None,
             workload_config.replicator_resource_override.as_ref(),
         )?;
 
-        // We are forcing the update since we are the field manager that should own the
-        // fields. If there is an override (likely during an incident or SREs
-        // intervention), we want to override their changes.
-        let pp = PatchParams::apply(FIELD_MANAGER).force();
-        self.vertical_pod_autoscalers_api
-            .patch(&name, &pp, &Patch::Apply(vertical_pod_autoscaler))
-            .await?;
+        // Merge leaves the mode untouched, including a concurrent controller promotion.
+        // Omitting it from server-side apply could delete a mode previously owned by
+        // us.
+        let pp =
+            PatchParams { field_manager: Some(FIELD_MANAGER.to_owned()), ..Default::default() };
+        match self
+            .vertical_pod_autoscalers_api
+            .patch(&name, &pp, &Patch::Merge(&vertical_pod_autoscaler))
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(kube::Error::Api(error)) if error.code == 404 => {}
+            Err(error) => return Err(error.into()),
+        }
 
-        Ok(())
+        let new_vertical_pod_autoscaler = create_replicator_vertical_pod_autoscaler_json(
+            &self.k8s_config,
+            resource_prefix,
+            identity,
+            &name,
+            Some(initial_update_mode),
+            workload_config.replicator_resource_override.as_ref(),
+        )?;
+        let post_params =
+            PostParams { field_manager: Some(FIELD_MANAGER.to_owned()), ..Default::default() };
+        match self
+            .vertical_pod_autoscalers_api
+            .create(&post_params, &new_vertical_pod_autoscaler)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(error)) if error.code == 409 => {
+                // Another request created it first; preserve that object's mode too.
+                self.vertical_pod_autoscalers_api
+                    .patch(&name, &pp, &Patch::Merge(&vertical_pod_autoscaler))
+                    .await?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn delete_replicator_stateful_set(&self, resource_prefix: &str) -> Result<(), K8sError> {
@@ -1815,18 +1839,26 @@ fn create_replicator_stateful_set_json(
     })
 }
 
+/// Builds a VPA creation document or a merge patch that preserves its mode.
+///
+/// Supply the initial mode only for creation. An update must omit it entirely
+/// so the API cannot overwrite an observation-period promotion.
 fn create_replicator_vertical_pod_autoscaler_json(
     k8s_config: &K8sConfig,
     prefix: &str,
     identity: &PipelineRuntimeIdentity,
     stateful_set_name: &str,
-    update_mode: &str,
+    update_mode: Option<&str>,
     pipeline_resource_override: Option<&PipelineReplicatorResourceOverrideConfig>,
 ) -> Result<DynamicObject, serde_json::Error> {
     let replicator_app_name = create_replicator_app_name(prefix);
     let replicator_container_name = create_replicator_container_name(prefix);
     let identity_labels = create_replicator_identity_labels(&replicator_app_name, identity);
     let policy = ReplicatorVpaResourcePolicy::resolve(k8s_config, pipeline_resource_override);
+    let update_policy = match update_mode {
+        Some(update_mode) => json!({ "updateMode": update_mode, "minReplicas": 1 }),
+        None => json!({ "minReplicas": 1 }),
+    };
 
     serde_json::from_value(json!({
       "apiVersion": format!("{VERTICAL_POD_AUTOSCALER_GROUP}/{VERTICAL_POD_AUTOSCALER_VERSION}"),
@@ -1842,10 +1874,7 @@ fn create_replicator_vertical_pod_autoscaler_json(
           "kind": "StatefulSet",
           "name": stateful_set_name
         },
-        "updatePolicy": {
-          "updateMode": update_mode,
-          "minReplicas": 1
-        },
+        "updatePolicy": update_policy,
         "resourcePolicy": {
           "containerPolicies": [
             {
@@ -1870,11 +1899,6 @@ fn create_replicator_vertical_pod_autoscaler_json(
         }
       }
     }))
-}
-
-/// Reads the update mode that API reconciliation must preserve.
-fn vpa_update_mode(vpa: &DynamicObject) -> Option<&str> {
-    vpa.data.pointer("/spec/updatePolicy/updateMode")?.as_str()
 }
 
 fn get_restarted_at_annotation_value() -> String {
@@ -2251,7 +2275,7 @@ mod tests {
                         &prefix,
                         &identity,
                         &stateful_set_name,
-                        ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+                        Some(ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value()),
                         None,
                     )
                     .unwrap(),
@@ -3051,7 +3075,7 @@ mod tests {
             "tenant-1-42",
             &identity,
             "tenant-1-42-replicator",
-            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+            Some(ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value()),
             None,
         )
         .unwrap();
@@ -3098,7 +3122,7 @@ mod tests {
             "tenant-1-42",
             &identity,
             "tenant-1-42-replicator",
-            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+            Some(ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value()),
             None,
         )
         .unwrap();
@@ -3126,7 +3150,7 @@ mod tests {
             "tenant-1-42",
             &identity,
             "tenant-1-42-replicator",
-            ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value(),
+            Some(ReplicatorResourceAutoscalingUpdateMode::Off.as_k8s_value()),
             Some(&overrides),
         )
         .unwrap();
@@ -3142,32 +3166,161 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replicator_vertical_pod_autoscaler_updates_preserve_live_mode() {
-        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
-        let live: DynamicObject = serde_json::from_value(json!({
-            "apiVersion": "autoscaling.k8s.io/v1",
-            "kind": "VerticalPodAutoscaler",
-            "metadata": {"name": "tenant-1-42-replicator"},
-            "spec": {"updatePolicy": {"updateMode": "InPlaceOrRecreate"}}
-        }))
-        .unwrap();
-        let autoscaler = create_replicator_vertical_pod_autoscaler_json(
-            &default_k8s_config(),
-            "tenant-1-42",
-            &identity,
-            "tenant-1-42-replicator",
-            vpa_update_mode(&live).unwrap(),
-            None,
-        )
-        .unwrap();
-        let autoscaler = serde_json::to_value(autoscaler).unwrap();
+    /// Runs VPA reconciliation against a scripted Kubernetes HTTP service.
+    async fn reconcile_vpa_with_responses(
+        statuses: Vec<axum::http::StatusCode>,
+        initial_mode: ReplicatorResourceAutoscalingUpdateMode,
+    ) -> (Result<(), K8sError>, Vec<(axum::http::Method, serde_json::Value)>) {
+        use std::{
+            collections::VecDeque,
+            convert::Infallible,
+            sync::{Arc, Mutex},
+        };
 
+        use axum::{
+            body::Body,
+            http::{Method, Request, Response},
+        };
+
+        let statuses = Arc::new(Mutex::new(VecDeque::from(statuses)));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let service = tower::service_fn({
+            let statuses = Arc::clone(&statuses);
+            let requests = Arc::clone(&requests);
+            move |request: Request<kube::client::Body>| {
+                let statuses = Arc::clone(&statuses);
+                let requests = Arc::clone(&requests);
+                async move {
+                    let method = request.method().clone();
+                    if method == Method::PATCH {
+                        assert_eq!(
+                            request.headers()["content-type"],
+                            "application/merge-patch+json"
+                        );
+                    }
+                    let body: serde_json::Value =
+                        serde_json::from_slice(&request.into_body().collect_bytes().await.unwrap())
+                            .unwrap();
+                    requests.lock().unwrap().push((method, body.clone()));
+                    let status = statuses.lock().unwrap().pop_front().unwrap();
+                    let response = if status.is_success() {
+                        // Model a live VPA that the controller already promoted.
+                        let mut live = body;
+                        live["spec"]["updatePolicy"]["updateMode"] = json!("InPlaceOrRecreate");
+                        live
+                    } else {
+                        json!({
+                            "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                            "message": "Simulated Kubernetes response",
+                            "reason": status.canonical_reason().unwrap(), "code": status.as_u16()
+                        })
+                    };
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", "application/json")
+                            .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                            .unwrap(),
+                    )
+                }
+            }
+        });
+        let mut config = default_k8s_config();
+        config.replicator_autoscaling.as_mut().unwrap().initial_update_mode = initial_mode;
+        let client = HttpK8sClient::new(Client::new(service, "etl-data-plane"), config).unwrap();
+        let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
+        let result = client
+            .create_or_update_replicator_vertical_pod_autoscaler(
+                "tenant-1-42",
+                &identity,
+                &ReplicatorWorkloadConfig {
+                    replicator_image: "etl-replicator:test".to_owned(),
+                    replicator_resource_override: Some(PipelineReplicatorResourceOverrideConfig {
+                        cpu_request_millicores: Some(900),
+                        memory_request_mib: None,
+                    }),
+                    destination_type: DestinationType::ClickHouse {
+                        password_secret_required: false,
+                    },
+                    ducklake_maintenance: None,
+                    log_level: Default::default(),
+                },
+            )
+            .await;
+        assert!(statuses.lock().unwrap().is_empty());
+        let requests = requests.lock().unwrap().clone();
+        (result, requests)
+    }
+
+    #[tokio::test]
+    async fn replicator_vertical_pod_autoscaler_updates_preserve_live_mode() {
+        let (result, requests) = reconcile_vpa_with_responses(
+            vec![axum::http::StatusCode::OK],
+            ReplicatorResourceAutoscalingUpdateMode::Off,
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, axum::http::Method::PATCH);
+        let patch = &requests[0].1;
+        assert!(patch.pointer("/spec/updatePolicy/updateMode").is_none());
+        assert_eq!(patch.pointer("/spec/updatePolicy/minReplicas"), Some(&json!(1)));
         assert_eq!(
-            autoscaler.pointer("/spec/updatePolicy/updateMode"),
-            Some(&json!("InPlaceOrRecreate"))
+            patch.pointer("/spec/resourcePolicy/containerPolicies/0/minAllowed/cpu"),
+            Some(&json!("900m")),
         );
-        assert_eq!(autoscaler.pointer("/spec/updatePolicy/minReplicas"), Some(&json!(1)));
+        assert_eq!(patch.pointer("/spec/targetRef/name"), Some(&json!("tenant-1-42-replicator")),);
+        assert_eq!(
+            patch.pointer("/metadata/labels/etl.supabase.com~1tenant-id"),
+            Some(&json!("tenant-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn replicator_vertical_pod_autoscaler_creation_uses_configured_initial_mode() {
+        let (result, requests) = reconcile_vpa_with_responses(
+            vec![axum::http::StatusCode::NOT_FOUND, axum::http::StatusCode::CREATED],
+            ReplicatorResourceAutoscalingUpdateMode::Initial,
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, axum::http::Method::PATCH);
+        assert!(requests[0].1.pointer("/spec/updatePolicy/updateMode").is_none());
+        assert_eq!(requests[1].0, axum::http::Method::POST);
+        assert_eq!(requests[1].1.pointer("/spec/updatePolicy/updateMode"), Some(&json!("Initial")),);
+    }
+
+    #[tokio::test]
+    async fn replicator_vertical_pod_autoscaler_create_conflict_preserves_winner_mode() {
+        let (result, requests) = reconcile_vpa_with_responses(
+            vec![
+                axum::http::StatusCode::NOT_FOUND,
+                axum::http::StatusCode::CONFLICT,
+                axum::http::StatusCode::OK,
+            ],
+            ReplicatorResourceAutoscalingUpdateMode::Off,
+        )
+        .await;
+        result.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].0, axum::http::Method::POST);
+        assert_eq!(requests[1].1.pointer("/spec/updatePolicy/updateMode"), Some(&json!("Off")));
+        assert_eq!(requests[0], requests[2]);
+        assert_eq!(requests[2].0, axum::http::Method::PATCH);
+        assert!(requests[2].1.pointer("/spec/updatePolicy/updateMode").is_none());
+    }
+
+    #[tokio::test]
+    async fn replicator_vertical_pod_autoscaler_update_failure_does_not_attempt_creation() {
+        let (result, requests) = reconcile_vpa_with_responses(
+            vec![axum::http::StatusCode::FORBIDDEN],
+            ReplicatorResourceAutoscalingUpdateMode::Off,
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, axum::http::Method::PATCH);
     }
 
     #[test]

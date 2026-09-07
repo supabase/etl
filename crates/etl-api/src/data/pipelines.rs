@@ -1,10 +1,15 @@
 use std::ops::DerefMut;
 
+use etl::store::TableState;
+use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::{
+    publications::publication_table_ids_query,
     slots,
     store::{destination_table_metadata, health, schema, table_state},
 };
-use sqlx::{FromRow, PgConnection, PgExecutor, PgPool, PgTransaction};
+use sqlx::{
+    AssertSqlSafe, FromRow, PgConnection, PgExecutor, PgPool, PgTransaction, postgres::types::Oid,
+};
 use thiserror::Error;
 
 use crate::{
@@ -32,6 +37,67 @@ use crate::{
 /// area for breaking changes to the `etl` schema in the source database since
 /// only one pipeline will use it.
 pub const MAX_PIPELINES_PER_TENANT: i64 = 1;
+
+/// Returns published tables that would copy data when the pipeline starts.
+///
+/// Uses the same publication expansion as the replicator, including implicit
+/// schema membership and partition-root settings. Joining current pipeline
+/// state in one query detects new tables without including removed tables or
+/// reading table data. Tables without state start in [`TableState::Init`];
+/// existing states retain the replicator's restart semantics.
+///
+/// The caller must supply the publication name and copy selection from the
+/// current API configuration that will be materialized for this restart. This
+/// function does not read the running Pod's configuration or verify that it
+/// matches the API; copy eligibility assumes the replacement uses these values.
+///
+/// This is a preflight observation, not a lock on publication membership or
+/// replication progress. Either can change before the replicator starts.
+pub(crate) async fn read_pipeline_tables_to_copy(
+    pool: &PgPool,
+    pipeline_id: i64,
+    publication_name: &str,
+    table_sync_copy: &TableSyncCopyConfig,
+) -> Result<Vec<u32>, PipelineError> {
+    let query = format!(
+        r#"
+        with publication_tables as ({})
+        select publication_table.oid, state.id, state.metadata
+        from publication_tables publication_table
+        left join etl.replication_state state
+            on state.table_id = publication_table.oid
+            and state.pipeline_id = $1
+            and state.is_current = true
+        "#,
+        publication_table_ids_query(publication_name),
+    );
+    let rows =
+        sqlx::query_as::<_, (Oid, Option<i64>, Option<serde_json::Value>)>(AssertSqlSafe(query))
+            .bind(pipeline_id)
+            .fetch_all(pool)
+            .await?;
+
+    let mut tables_to_copy = Vec::new();
+    for (table_id, state_id, metadata) in rows {
+        if !table_sync_copy.should_copy_table(table_id.0) {
+            continue;
+        }
+
+        let state = if state_id.is_some() {
+            let metadata = metadata.ok_or(PipelineError::MissingTableState)?;
+            serde_json::from_value::<TableState>(metadata)
+                .map_err(PipelineError::InvalidTableState)?
+        } else {
+            TableState::Init
+        };
+
+        if state.as_type().would_perform_table_sync() {
+            tables_to_copy.push(table_id.0);
+        }
+    }
+
+    Ok(tables_to_copy)
+}
 
 #[derive(Debug, Clone)]
 pub struct Pipeline {

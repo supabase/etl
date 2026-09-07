@@ -134,6 +134,14 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     // We run the migrations to create all the tables used by `etl`.
     run_etl_migrations_on_source_database(&source_db_config).await;
 
+    // Match the default pipeline publication and include test tables as they are
+    // created.
+    source_db_pool.execute("create schema test").await.unwrap();
+    source_db_pool
+        .execute("create publication publication for tables in schema test")
+        .await
+        .unwrap();
+
     (app, tenant_id, pipeline_id, source_db_pool, source_db_config)
 }
 
@@ -1581,6 +1589,334 @@ async fn restarting_pipeline_preserves_vpa_when_no_table_copy_will_repeat() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
 
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_a_new_explicitly_published_table() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool
+        .execute("create publication publication for table test.test_users")
+        .await
+        .unwrap();
+
+    // An unrelated new table must not reset the VPA until it joins this
+    // publication.
+    create_test_table(&source_db_pool, "test_events").await;
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    source_db_pool
+        .execute("alter publication publication add table test.test_events")
+        .await
+        .unwrap();
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_a_new_table_in_a_published_schema() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    create_test_table(&source_db_pool, "test_events").await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_a_new_table_in_an_all_table_publication() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool.execute("create publication publication for all tables").await.unwrap();
+    sqlx::query(
+        "insert into etl.replication_state (pipeline_id, table_id, state, metadata) select $1, \
+         relid, 'ready', '{\"type\":\"ready\"}'::jsonb from \
+         pg_get_publication_tables('publication')",
+    )
+    .bind(pipeline_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    create_test_table(&source_db_pool, "test_users").await;
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_published_tables_without_any_state() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_test_table(&source_db_pool, "test_users").await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_for_copy_states_outside_the_publication() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[
+            ("test_users", "ready", r#"{"type": "ready"}"#),
+            ("test_events", "data_sync", r#"{"type": "data_sync"}"#),
+        ],
+    )
+    .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool
+        .execute("create publication publication for table test.test_users")
+        .await
+        .unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_uses_only_current_state_for_its_pipeline() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[("data_sync", r#"{"type": "data_sync"}"#), ("ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    // A different pipeline's completed copy cannot suppress this pipeline's copy.
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id + 1,
+        &[("test_events", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_when_a_published_table_is_recreated() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let tables = create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    source_db_pool.execute("drop table test.test_users").await.unwrap();
+    let new_table_id = create_test_table(&source_db_pool, "test_users").await;
+    assert_ne!(tables[0].0, new_table_id);
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_respects_partition_root_publication_settings() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    source_db_pool
+        .execute("create table test.test_events (id int primary key) partition by range (id)")
+        .await
+        .unwrap();
+    source_db_pool
+        .execute(
+            "create table test.test_events_1 partition of test.test_events for values from (0) to \
+             (100)",
+        )
+        .await
+        .unwrap();
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_events", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    source_db_pool
+        .execute("alter publication publication set (publish_via_partition_root = true)")
+        .await
+        .unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    // Publishing leaves exposes a table without state even though its root is
+    // ready.
+    source_db_pool
+        .execute("alter publication publication set (publish_via_partition_root = false)")
+        .await
+        .unwrap();
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_respects_table_copy_selection() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let ready_tables = create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    let new_table_id = create_test_table(&source_db_pool, "test_events").await;
+    let pipeline = app.read_pipeline(&tenant_id, pipeline_id).await;
+    let pipeline: ReadPipelineResponse = pipeline.json().await.unwrap();
+
+    for (table_sync_copy, copies_new_table) in [
+        (TableSyncCopyConfig::SkipAllTables, false),
+        (TableSyncCopyConfig::IncludeTables { table_ids: vec![ready_tables[0].0.0] }, false),
+        (TableSyncCopyConfig::SkipTables { table_ids: vec![new_table_id.0] }, false),
+        (TableSyncCopyConfig::IncludeTables { table_ids: vec![new_table_id.0] }, true),
+        (TableSyncCopyConfig::SkipTables { table_ids: vec![ready_tables[0].0.0] }, true),
+        (TableSyncCopyConfig::IncludeAllTables, true),
+    ] {
+        let response = app
+            .update_pipeline(
+                &tenant_id,
+                pipeline_id,
+                &UpdatePipelineRequest {
+                    source_id: pipeline.source_id,
+                    destination_id: pipeline.destination_id,
+                    config: UpdateApiPipelineConfig {
+                        table_sync_copy: UpdateField::Set(table_sync_copy),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let delete_calls_before = app.k8s_state.vpa_delete_calls();
+
+        let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            app.k8s_state.vpa_delete_calls() - delete_calls_before,
+            usize::from(copies_new_table),
+        );
+    }
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_when_publication_inspection_fails() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "data_sync", r#"{"type": "data_sync"}"#)],
+    )
+    .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_when_source_lock_times_out() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_test_table(&source_db_pool, "test_users").await;
+
+    // Hold the lock until the source connection's lock timeout cancels inspection.
+    let mut transaction = source_db_pool.begin().await.unwrap();
+    sqlx::query("lock table etl.replication_state in access exclusive mode")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let create_calls_before = app.k8s_state.create_calls();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        app.restart_pipeline(&tenant_id, pipeline_id),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(app.k8s_state.create_calls() > create_calls_before);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    transaction.rollback().await.unwrap();
     drop_pg_database(&source_db_config).await;
 }
 
