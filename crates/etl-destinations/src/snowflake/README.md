@@ -19,7 +19,7 @@ This requires local Postgres to already be running. Run `cargo x init` first if 
 
 GitHub Actions runs the credential-free tier for relevant pull request and `main` changes, retaining the `Snowflake Gate` check. Routine CI does not receive Snowflake credentials. The separate `Snowflake Daily Tests` workflow runs the credentialed API validator and destination integration tiers once daily at 04:17 UTC on the default branch, using the `TESTS_SNOWFLAKE_CONNECTION` repository secret. Scheduled runs begin after the workflow is merged and can be delayed by GitHub.
 
-Failures appear in the repository's Actions tab under `Snowflake Daily Tests`. To receive failure-only email, enable Email and **Only notify for failed workflows** in [GitHub Actions notification settings](https://docs.github.com/en/subscriptions-and-notifications/how-tos/managing-github-actions-notifications). [Scheduled workflow notifications](https://docs.github.com/en/actions/concepts/workflows-and-actions/notifications-for-workflow-runs) go to the workflow creator, the last user to change its cron schedule, or the user who re-enabled it; they do not automatically notify the whole team.
+Failures appear in the repository's Actions tab under `Snowflake Daily Tests`.
 
 To run a specific destination test directly:
 
