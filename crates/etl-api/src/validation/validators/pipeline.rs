@@ -53,10 +53,10 @@ impl Validator for PublicationExistsValidator {
             Ok(vec![ValidationFailure::critical(
                 "Publication Not Found",
                 format!(
-                    "Publication `{}` does not exist in your source database.\n\nCreate the \
-                     publication in the source database, or choose an existing publication for \
-                     this pipeline. A database owner or suitably privileged role can run `CREATE \
-                     PUBLICATION {} FOR TABLE <schema.table>, ...`.",
+                    "Publication `{}` does not exist in your database.\n\nCreate the publication \
+                     in your database, or choose an existing publication for this pipeline. A \
+                     database owner or suitably privileged role can run `CREATE PUBLICATION {} \
+                     FOR TABLE <schema.table>, ...`.",
                     self.publication_name, self.publication_name
                 ),
             )])
@@ -227,7 +227,7 @@ impl Validator for PublicationHasTablesValidator {
                 "Publication Empty",
                 format!(
                     "Publication `{}` exists, but it does not publish any tables.\n\nAdd tables \
-                     to the publication in the source database before starting the pipeline. For \
+                     to the publication in your database before starting the pipeline. For \
                      example, a publication owner can run `ALTER PUBLICATION {} ADD TABLE \
                      <schema.table>`.",
                     self.publication_name, self.publication_name
@@ -566,11 +566,11 @@ fn wal_level_failures(wal_level: &str) -> Vec<ValidationFailure> {
         vec![ValidationFailure::critical(
             "Invalid WAL Level",
             format!(
-                "Your source database has `wal_level` set to `{wal_level}`, but logical \
-                 replication requires `logical`.\n\nSet `wal_level = 'logical'` in the source \
-                 database's `postgresql.conf` (or its managed-service database parameter \
-                 settings), then restart PostgreSQL. A database administrator can use `ALTER \
-                 SYSTEM SET wal_level = 'logical'` on self-managed PostgreSQL."
+                "Your database has `wal_level` set to `{wal_level}`, but logical replication \
+                 requires `logical`.\n\nSet `wal_level = 'logical'` in your database's \
+                 `postgresql.conf` (or its managed-service database parameter settings), then \
+                 restart PostgreSQL. A database administrator can use `ALTER SYSTEM SET wal_level \
+                 = 'logical'` on self-managed PostgreSQL."
             ),
         )]
     }
@@ -583,9 +583,9 @@ fn replication_permission_failures(has_replication_permission: bool) -> Vec<Vali
     } else {
         vec![ValidationFailure::critical(
             "Missing Replication Permission",
-            "The source database account does not have sufficient access to start logical \
+            "The database account does not have sufficient access to start logical \
              replication.\n\nAsk a database administrator to grant the account the required \
-             replication access, or update the source connection to use an appropriately \
+             replication access, or update the database connection to use an appropriately \
              configured account.",
         )]
     }
@@ -606,15 +606,15 @@ fn replication_slot_failures(
         vec![ValidationFailure::critical(
             "Insufficient Replication Slots",
             format!(
-                "Your source database has {free_slots} free replication slots, but this pipeline \
-                 may need up to {required_slots} during the initial table copy \
+                "Your database has {free_slots} free replication slots, but this pipeline may \
+                 need up to {required_slots} during initial sync while copying existing tables \
                  ({used_replication_slots}/{max_replication_slots} slots are currently in \
                  use).\n\nThis includes 1 apply slot plus up to `max_table_sync_workers` table \
-                 sync slots. Increase `max_replication_slots` in the source database's \
+                 sync slots. Increase `max_replication_slots` in your database's \
                  `postgresql.conf` or managed-service parameter settings and restart PostgreSQL; \
                  alternatively, drop confirmed-unused slots with `pg_drop_replication_slot(...)` \
-                 or reduce `max_table_sync_workers`. After the initial copy, this pipeline only \
-                 uses 1 slot.",
+                 or reduce `max_table_sync_workers`. After initial sync, this pipeline only uses \
+                 1 slot.",
             ),
         )]
     }
@@ -635,13 +635,13 @@ fn wal_sender_failures(
         failures.push(ValidationFailure::critical(
             "Insufficient WAL Senders",
             format!(
-                "Your source database has {free_wal_senders} free WAL sender processes, but this \
-                 pipeline may need up to {required_wal_senders} during the initial table copy \
-                 ({active_wal_senders}/{max_wal_senders} WAL senders are currently \
-                 active).\n\nEach active replication slot needs a WAL sender connection. Increase \
-                 `max_wal_senders` in the source database's `postgresql.conf` or managed-service \
-                 parameter settings and restart PostgreSQL; alternatively, stop confirmed-unused \
-                 replication clients or reduce `max_table_sync_workers`."
+                "Your database has {free_wal_senders} free WAL sender processes, but this \
+                 pipeline may need up to {required_wal_senders} during initial sync while copying \
+                 existing tables ({active_wal_senders}/{max_wal_senders} WAL senders are \
+                 currently active).\n\nEach active replication slot needs a WAL sender \
+                 connection. Increase `max_wal_senders` in your database's `postgresql.conf` or \
+                 managed-service parameter settings and restart PostgreSQL; alternatively, stop \
+                 confirmed-unused replication clients or reduce `max_table_sync_workers`."
             ),
         ));
     }

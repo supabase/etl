@@ -25,7 +25,7 @@ pub fn source_database_error_status_code(error: &sqlx::Error) -> StatusCode {
 
 /// Returns the public error message for source database query failures.
 pub fn source_database_query_error_message() -> &'static str {
-    "Could not query your source database"
+    "Could not query your database"
 }
 
 /// Returns the public error message for a validation execution error.
@@ -42,14 +42,10 @@ pub fn validation_error_message(error: &ValidationError) -> &'static str {
 fn source_database_validation_error_message(error: &sqlx::Error) -> &'static str {
     match (error, source_database::classify_error(error)) {
         (sqlx::Error::PoolTimedOut, _) | (_, SourceDatabaseErrorKind::TimedOut) => {
-            "Could not reach your source database in time"
+            "Could not reach your database in time"
         }
-        (_, SourceDatabaseErrorKind::Unavailable) => {
-            "Your source database is currently unavailable"
-        }
-        (_, SourceDatabaseErrorKind::Failed) => {
-            "Could not validate your source database connection"
-        }
+        (_, SourceDatabaseErrorKind::Unavailable) => "Your database is currently unavailable",
+        (_, SourceDatabaseErrorKind::Failed) => "Could not validate your database connection",
     }
 }
 
@@ -69,10 +65,7 @@ mod tests {
         let error = ValidationError::from(sqlx::Error::PoolTimedOut);
 
         assert_eq!(validation_error_status_code(&error), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(
-            validation_error_message(&error),
-            "Could not reach your source database in time"
-        );
+        assert_eq!(validation_error_message(&error), "Could not reach your database in time");
         assert_eq!(error.to_string(), "Database query failed");
     }
 
@@ -84,10 +77,7 @@ mod tests {
         )));
 
         assert_eq!(validation_error_status_code(&error), StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(
-            validation_error_message(&error),
-            "Could not reach your source database in time"
-        );
+        assert_eq!(validation_error_message(&error), "Could not reach your database in time");
         assert_eq!(error.to_string(), "Database query failed");
     }
 

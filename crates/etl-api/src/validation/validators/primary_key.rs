@@ -125,13 +125,13 @@ impl Validator for PrimaryKeyValidator {
         let mut failures = Vec::new();
         if self.require_primary_key && !tables_without_pk.is_empty() {
             failures.push(ValidationFailure::critical(
-                "Source Primary Keys Required",
+                "Primary Keys Required",
                 format!(
                     "{} can only replicate these publication tables when they have a primary key: \
-                     {}.\n\nAdd a stable, unique primary key to each listed source table with \
-                     `ALTER TABLE <schema.table> ADD PRIMARY KEY (<column>, ...)`, or have the \
-                     publication owner remove the table with `ALTER PUBLICATION {} DROP TABLE \
-                     <schema.table>` before starting the pipeline. {}",
+                     {}.\n\nAdd a stable, unique primary key to each listed table in your \
+                     database with `ALTER TABLE <schema.table> ADD PRIMARY KEY (<column>, ...)`, \
+                     or have the publication owner remove the table with `ALTER PUBLICATION {} \
+                     DROP TABLE <schema.table>` before starting the pipeline. {}",
                     self.destination_name,
                     format_code_list(&tables_without_pk),
                     self.publication_name,
@@ -149,10 +149,10 @@ impl Validator for PrimaryKeyValidator {
                 .collect::<Vec<_>>()
                 .join(", ");
             failures.push(ValidationFailure::critical(
-                "Source Primary Key Columns Required",
+                "Primary Key Columns Missing From Publication",
                 format!(
-                    "{} can only replicate publication tables when every source primary-key \
-                     column is included in the publication column list. These tables omit \
+                    "{} can only replicate publication tables when every primary-key column from \
+                     your database is included in the publication column list. These tables omit \
                      primary-key columns: {}.\n\nAdd the listed columns to the publication column \
                      list by dropping and re-adding the table with `ALTER PUBLICATION {} DROP \
                      TABLE <schema.table>` followed by `ALTER PUBLICATION {} ADD TABLE \

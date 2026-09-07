@@ -641,7 +641,7 @@ pub struct ValidatePipelineRequest {
 pub struct ValidationFailureResponse {
     #[schema(example = "Publication Not Found")]
     pub name: String,
-    #[schema(example = "Publication 'my_publication' does not exist in your source database")]
+    #[schema(example = "Publication 'my_publication' does not exist in your database")]
     pub reason: String,
     #[schema(example = "critical")]
     pub failure_type: FailureType,
@@ -870,9 +870,9 @@ pub(crate) async fn update_pipeline(
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 409, description = "Pipeline is active", body = ErrorMessage),
         (status = 404, description = "Pipeline or source not found", body = ErrorMessage),
-        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
-        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
+        (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1041,7 +1041,7 @@ pub(crate) async fn start_pipeline(
     post,
     path = "/pipelines/{pipeline_id}/restart",
     summary = "Restart a pipeline",
-    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. Every replicator has a VPA; pipeline resource overrides fix the corresponding VPA bounds. When durable source state shows that the restart will repeat an initial table copy, the endpoint deletes and recreates the VPA from its configured bounds and initial update mode. Deletion does not guarantee that the upstream recommender forgets in-memory usage aggregates. If source state cannot be inspected, or all tables completed initial sync, the current VPA is preserved. Kubelet container restarts and Kubernetes-initiated replacement Pods do not use this endpoint or delete the VPA, so a replacement may receive an existing recommendation even when table copy will repeat.",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. Every replicator has a VPA; pipeline resource overrides fix the corresponding VPA bounds. When durable pipeline state in your database shows that the restart will repeat initial sync while copying existing tables, the endpoint deletes and recreates the VPA from its configured bounds and initial update mode. Deletion does not guarantee that the upstream recommender forgets in-memory usage aggregates. If that state cannot be inspected, or all tables completed initial sync, the current VPA is preserved. Kubelet container restarts and Kubernetes-initiated replacement Pods do not use this endpoint or delete the VPA, so a replacement may receive an existing recommendation even when initial sync repeats.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1276,9 +1276,9 @@ pub(crate) async fn get_pipeline_status(
         (status = 200, description = "Replication status retrieved successfully", body = GetPipelineReplicationStatusResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
-        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
-        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
+        (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1380,9 +1380,9 @@ pub(crate) async fn get_pipeline_replication_status(
         (status = 200, description = "Table state(s) rolled back successfully", body = RollbackTablesResponse),
         (status = 400, description = "Bad request: state not rollbackable", body = ErrorMessage),
         (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
-        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
-        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
+        (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1615,7 +1615,7 @@ pub(crate) async fn update_pipeline_version(
     post,
     path = "/pipelines/validate",
     summary = "Validate pipeline configuration",
-    description = "Validates pipeline prerequisites against your source database.",
+    description = "Validates pipeline prerequisites against your database.",
     request_body = ValidatePipelineRequest,
     params(
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1624,9 +1624,9 @@ pub(crate) async fn update_pipeline_version(
         (status = 200, description = "Validation completed", body = ValidatePipelineResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
-        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
+        (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"

@@ -34,7 +34,8 @@ const MIN_WAL_STATISTICS_SECONDS: u64 = 60 * 60;
 /// Largest value pipeline preflight automatically recommends, in mebibytes.
 const MAX_AUTOMATIC_RECOMMENDATION_MB: i64 = 1024 * MEBIBYTES_PER_GIBIBYTE;
 /// Emphasized disk-capacity reminder appended to retention failures.
-const DISK_SPACE_WARNING: &str = "**Make sure the source has enough free disk for retained WAL.**";
+const DISK_SPACE_WARNING: &str =
+    "**Make sure your database has enough free disk for retained WAL.**";
 
 /// Inputs used to recommend a bounded replication-slot WAL retention setting.
 #[derive(Debug, FromRow)]
@@ -65,14 +66,14 @@ impl RecommendationBasis {
     fn workload_context(self) -> &'static str {
         match self {
             Self::HistoricalWalRate => {
-                "The estimate uses the available historical average WAL rate for the source \
-                 Postgres instance but cannot predict activity during initial sync. If the source \
-                 remains idle, substantially less may be sufficient."
+                "The estimate uses the historical average WAL rate available from your database \
+                 but cannot predict activity during initial sync. If your database remains idle, \
+                 substantially less may be sufficient."
             }
             Self::TableSizeFallback => {
                 "The estimate uses a table-size fallback because usable WAL history is \
-                 unavailable. If the source remains idle during initial sync, substantially less \
-                 may be sufficient."
+                 unavailable. If your database remains idle during initial sync, substantially \
+                 less may be sufficient."
             }
         }
     }
@@ -202,10 +203,10 @@ pub(super) fn slot_wal_keep_size_failures(
             "Unlimited Slot WAL Retention",
             format!(
                 "`max_slot_wal_keep_size` is unlimited. A paused, disconnected, or stalled \
-                 pipeline can retain WAL until the source disk fills.\n\nSet a bounded value \
-                 sized for expected write volume, initial sync duration, and downtime. Change it \
-                 in `postgresql.conf` or the managed-service database parameter settings, then \
-                 reload Postgres.\n\n{DISK_SPACE_WARNING}"
+                 pipeline can retain WAL until your database runs out of disk space.\n\nSet a \
+                 bounded value sized for expected write volume, initial sync duration, and \
+                 downtime. Change it in `postgresql.conf` or the managed-service database \
+                 parameter settings, then reload Postgres.\n\n{DISK_SPACE_WARNING}"
             ),
         )],
         0 => vec![ValidationFailure::critical(
@@ -231,12 +232,12 @@ pub(super) fn slot_wal_keep_size_failures(
                     format!(
                         "`max_slot_wal_keep_size` is {configured_mb} MB, which is below the \
                          pipeline's general planning floor of {MIN_SLOT_WAL_KEEP_SIZE_MB} MB. No \
-                         source-specific estimate is available: required retention depends on WAL \
+                         tailored estimate is available: required retention depends on WAL \
                          generated during initial sync or other pipeline downtime. A smaller \
-                         value may work if the source stays idle, but active writes can exhaust \
-                         it quickly.\n\nReview expected write activity and available disk. If \
-                         needed, increase the setting in `postgresql.conf` or the managed-service \
-                         database parameter settings, then reload \
+                         value may work if your database stays idle, but active writes can \
+                         exhaust it quickly.\n\nReview expected write activity and available \
+                         disk. If needed, increase the setting in `postgresql.conf` or the \
+                         managed-service database parameter settings, then reload \
                          Postgres.\n\n{DISK_SPACE_WARNING}"
                     ),
                 )]
@@ -417,6 +418,7 @@ mod tests {
         assert!(!reason.contains("whole copy"));
         assert!(!reason.contains("copy starting point"));
         assert!(!reason.contains("copy duration"));
+        assert!(!reason.contains("source"));
         assert!(reason.ends_with(DISK_SPACE_WARNING));
     }
 
@@ -554,7 +556,7 @@ mod tests {
         assert!(below[0].reason.contains("public.events"));
         assert!(below[0].reason.contains("table-size fallback"));
         assert!(below[0].reason.contains("usable WAL history is unavailable"));
-        assert!(below[0].reason.contains("source remains idle during initial sync"));
+        assert!(below[0].reason.contains("your database remains idle during initial sync"));
         assert!(below[0].reason.contains("substantially less may be sufficient"));
         assert!(below[0].reason.contains("use this value as a conservative baseline"));
         assert!(below[0].reason.contains("copy existing rows"));
@@ -575,7 +577,9 @@ mod tests {
 
         assert_eq!(failures.len(), 1);
         assert!(failures[0].reason.contains("77 GiB"));
-        assert!(failures[0].reason.contains("historical average WAL rate for the source Postgres"));
+        assert!(
+            failures[0].reason.contains("historical average WAL rate available from your database")
+        );
         assert!(failures[0].reason.contains("cannot predict activity during initial sync"));
         assert!(failures[0].reason.contains("substantially less may be sufficient"));
         assert!(failures[0].reason.contains("use this value as a conservative baseline"));
@@ -637,7 +641,7 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].name, "Unlimited Slot WAL Retention");
         assert_eq!(failures[0].failure_type, FailureType::Warning);
-        assert!(failures[0].reason.contains("until the source disk fills"));
+        assert!(failures[0].reason.contains("until your database runs out of disk space"));
         assert_uses_initial_sync_terminology(&failures[0].reason);
     }
 
@@ -661,8 +665,8 @@ mod tests {
         assert_eq!(below[0].name, "Low Slot WAL Retention");
         assert_eq!(below[0].failure_type, FailureType::Warning);
         assert!(below[0].reason.contains("general planning floor"));
-        assert!(below[0].reason.contains("No source-specific estimate is available"));
-        assert!(below[0].reason.contains("smaller value may work if the source stays idle"));
+        assert!(below[0].reason.contains("No tailored estimate is available"));
+        assert!(below[0].reason.contains("smaller value may work if your database stays idle"));
         assert!(below[0].reason.contains("active writes can exhaust it quickly"));
         assert_uses_initial_sync_terminology(&below[0].reason);
         assert!(equal.is_empty());

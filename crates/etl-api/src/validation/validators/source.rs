@@ -117,10 +117,10 @@ impl Validator for SourceValidator {
 
         if audit.current_user != *expected_username {
             return Ok(vec![ValidationFailure::critical(
-                "Invalid Source Username",
-                "The source connection is not using the database account configured for this \
-                 pipeline.\n\nUpdate the source credentials to use the configured account, or ask \
-                 the deployment operator to review the account configured for this source.",
+                "Invalid Database Username",
+                "The database connection is not using the account configured for this \
+                 pipeline.\n\nUpdate the database credentials to use the configured account, or \
+                 ask the deployment operator to review the account configured for your database.",
             )]);
         }
 
@@ -135,11 +135,10 @@ impl Validator for SourceValidator {
         let mut failures = Vec::new();
         if !has_required_role_attributes {
             failures.push(ValidationFailure::critical(
-                "Invalid Source Role Attributes",
+                "Invalid Database Role Attributes",
                 "The account configured for this pipeline does not have sufficient access to use \
-                 this source database.\n\nAsk a database administrator to grant the required \
-                 access, or update the source connection to use an appropriately configured \
-                 account.",
+                 your database.\n\nAsk a database administrator to grant the required access, or \
+                 update the database connection to use an appropriately configured account.",
             ));
         }
 
@@ -153,10 +152,10 @@ impl Validator for SourceValidator {
 
         if !has_required_etl_schema_permissions {
             failures.push(ValidationFailure::critical(
-                "Invalid Source Pipeline Metadata Permissions",
+                "Invalid Pipeline Metadata Permissions",
                 "The account configured for this pipeline does not have sufficient access to \
-                 initialize or manage pipeline metadata in the source database.\n\nAsk a database \
-                 administrator to grant the required access, or update the source connection to \
+                 initialize or manage pipeline metadata in your database.\n\nAsk a database \
+                 administrator to grant the required access, or update the database connection to \
                  use an appropriately configured account.",
             ));
         }

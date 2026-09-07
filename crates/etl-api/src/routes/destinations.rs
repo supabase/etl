@@ -468,9 +468,9 @@ pub(crate) async fn read_all_destinations(
         (status = 200, description = "Validation completed", body = ValidateDestinationResponse),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
-        (status = 502, description = "Destination dependency or your source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Destination dependency or your source database is unavailable", body = ErrorMessage),
-        (status = 504, description = "Request to destination dependency or your source database timed out", body = ErrorMessage),
+        (status = 502, description = "Destination dependency or your database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Destination dependency or your database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to destination dependency or your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations"

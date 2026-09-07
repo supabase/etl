@@ -30,8 +30,9 @@ use crate::{
 /// running pod must be restarted after config materialization in order to pick
 /// up those changes.
 ///
-/// Before reconciliation, this best-effort checks durable source state. If the
-/// restart would repeat an initial table sync, it deletes the VPA so
+/// Before reconciliation, this best-effort checks durable pipeline state in the
+/// database. If initial sync would repeat while copying existing tables, it
+/// deletes the VPA so
 /// reconciliation recreates it from the configured bounds and initial update
 /// mode. The upstream recommender may retain in-memory usage aggregates after
 /// the VPA is deleted. Source inspection failures preserve the existing VPA
@@ -39,8 +40,8 @@ use crate::{
 ///
 /// Kubelet container restarts and Kubernetes-initiated Pod replacements do not
 /// call this helper or delete the VPA. A replacement Pod may therefore receive
-/// an existing recommendation even when table copy will repeat. This is a
-/// limitation of making the copy-aware decision at the API boundary; a future
+/// an existing recommendation even when initial sync will repeat. This is a
+/// limitation of making the sync-aware decision at the API boundary; a future
 /// controller with access to durable table state could own that lifecycle.
 ///
 /// If Kubernetes support is unavailable, or the pipeline has no active

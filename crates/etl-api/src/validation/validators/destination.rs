@@ -74,8 +74,8 @@ impl DestinationValidator {
             ApiDestinationConfig::BigQuery { .. } => Some(PrimaryKeyValidator::new(
                 publication_name,
                 "BigQuery",
-                "BigQuery uses the source primary key to match rows during initial loads, \
-                 upserts, deletes, and updates that change primary-key values.",
+                "BigQuery uses the primary key from your database to match rows during initial \
+                 sync, upserts, deletes, and updates that change primary-key values.",
                 true,
                 server_version_num,
             )),
@@ -85,8 +85,8 @@ impl DestinationValidator {
             } => Some(PrimaryKeyValidator::new(
                 publication_name,
                 "ClickHouse ReplacingMergeTree",
-                "ClickHouse ReplacingMergeTree uses the source primary key as the `ORDER BY` and \
-                 deduplication key.",
+                "ClickHouse ReplacingMergeTree uses the primary key from your database as the \
+                 `ORDER BY` and deduplication key.",
                 true,
                 server_version_num,
             )),
@@ -94,8 +94,8 @@ impl DestinationValidator {
                 Some(PrimaryKeyValidator::new(
                     publication_name,
                     "ClickHouse MergeTree",
-                    "ClickHouse uses replicated source primary-key columns to apply row-level \
-                     updates and deletes when a source primary key exists.",
+                    "ClickHouse uses replicated primary-key columns from your database to apply \
+                     row-level updates and deletes when a primary key exists.",
                     false,
                     server_version_num,
                 ))

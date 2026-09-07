@@ -314,9 +314,9 @@ pub(crate) async fn update_tenant(
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 409, description = "Tenant has active pipelines or pipelines still defined", body = ErrorMessage),
         (status = 404, description = "Tenant not found", body = ErrorMessage),
-        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
-        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
+        (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Tenants"

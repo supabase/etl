@@ -118,15 +118,16 @@ impl Validator for NullableArrayValidator {
             NullableArrayBehavior::CoercesToEmpty => format!(
                 "BigQuery stores top-level NULL values as empty arrays in these array columns: \
                  {columns}.\n\nThe pipeline can start, but NULL and empty arrays become \
-                 indistinguishable in BigQuery. Make the source column `NOT NULL` if that \
-                 distinction matters."
+                 indistinguishable in BigQuery. Make each affected column in your database `NOT \
+                 NULL` if that distinction matters."
             ),
             NullableArrayBehavior::CannotEncode => format!(
                 "ClickHouse RowBinary cannot encode top-level NULL values for these array \
                  columns: {columns}.\n\nThe pipeline can start because non-NULL arrays are \
                  supported, but replication fails if an affected column contains a top-level NULL \
-                 value. Ensure producers always write an array value, or make the source column \
-                 `NOT NULL` after replacing existing NULL values. Empty arrays remain supported."
+                 value. Ensure producers always write an array value, or make each affected \
+                 column in your database `NOT NULL` after replacing existing NULL values. Empty \
+                 arrays remain supported."
             ),
         };
 

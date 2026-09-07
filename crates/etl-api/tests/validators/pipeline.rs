@@ -35,7 +35,7 @@ async fn validate_source_with_trusted_username_mismatch() {
     let failures = validate_source(&ctx).await.unwrap();
 
     assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].name, "Invalid Source Username");
+    assert_eq!(failures[0].name, "Invalid Database Username");
     assert_eq!(failures[0].failure_type, FailureType::Critical);
 
     drop_pg_database(&config).await;
@@ -324,7 +324,7 @@ async fn validate_pipeline_allows_tables_without_primary_keys() {
     let pipeline_config = create_pipeline_config("pk_test_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let pk_failure = failures.iter().find(|f| f.name == "Source Primary Keys Required");
+    let pk_failure = failures.iter().find(|f| f.name == "Primary Keys Required");
     assert!(
         pk_failure.is_none(),
         "Pipeline validation should leave primary-key requirements to destination validation"
@@ -343,7 +343,7 @@ async fn validate_pipeline_tables_with_primary_keys_does_not_emit_destination_pk
     let pipeline_config = create_pipeline_config("pk_pass_pub");
     let failures = validate_pipeline(&ctx, &pipeline_config).await.unwrap();
 
-    let pk_failure = failures.iter().find(|f| f.name == "Source Primary Keys Required");
+    let pk_failure = failures.iter().find(|f| f.name == "Primary Keys Required");
     assert!(
         pk_failure.is_none(),
         "Pipeline validation should not emit destination primary-key warnings"
