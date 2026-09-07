@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use thiserror::Error;
@@ -9,7 +11,7 @@ use crate::configs::{
 };
 
 /// Maximum time to wait for a Kubernetes deletion operation to complete.
-pub(crate) const RESOURCE_DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const RESOURCE_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Errors from Kubernetes operations.
 ///

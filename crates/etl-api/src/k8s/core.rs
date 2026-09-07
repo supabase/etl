@@ -27,8 +27,8 @@ use crate::{
     },
     k8s::{
         DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer,
-        PipelineRuntimeIdentity, PodStatus, ReplicatorConfigMapFile, ReplicatorWorkloadConfig,
-        ducklake_maintenance_policy_from_config,
+        PipelineRuntimeIdentity, PodStatus, RESOURCE_DELETE_TIMEOUT, ReplicatorConfigMapFile,
+        ReplicatorWorkloadConfig, ducklake_maintenance_policy_from_config,
     },
 };
 
@@ -245,13 +245,13 @@ pub async fn delete_pipeline_runtime_in_k8s(
         Ok::<(), K8sCoreError>(())
     };
     if wait {
-        tokio::time::timeout(crate::k8s::base::RESOURCE_DELETE_TIMEOUT, deletion).await.map_err(
-            |_| K8sError::ResourceDeletionTimeout {
+        tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, deletion).await.map_err(|_| {
+            K8sError::ResourceDeletionTimeout {
                 kind: "PipelineRuntime",
                 name: resource_prefix.clone(),
-                timeout_seconds: crate::k8s::base::RESOURCE_DELETE_TIMEOUT.as_secs(),
-            },
-        )?
+                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
+            }
+        })?
     } else {
         deletion.await
     }
