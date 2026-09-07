@@ -15,7 +15,7 @@ use k8s_openapi::{
 };
 use kube::{
     Client,
-    api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, PropagationPolicy},
     core::{ApiResource, DynamicObject, GroupVersionKind},
 };
 use serde_json::json;
@@ -37,6 +37,7 @@ use crate::{
         DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError,
         PipelineRuntimeIdentity, PodPhase, PodStatus, ReplicatorConfigMapFile,
         ReplicatorWorkloadConfig,
+        base::RESOURCE_DELETE_TIMEOUT,
         resources::{ReplicatorStatefulSetResourceRequirements, ReplicatorVpaResourcePolicy},
     },
 };
@@ -132,8 +133,6 @@ const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
 /// DuckLake maintenance CRD kind.
 const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
-/// Maximum time to wait for a deleted Kubernetes resource to disappear.
-const RESOURCE_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Interval between checks for a deleted Kubernetes resource.
 const RESOURCE_DELETE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Vertical Pod Autoscaler CRD group.
@@ -180,6 +179,62 @@ fn test_resource_requirements(
 ) -> ReplicatorStatefulSetResourceRequirements {
     let k8s_config = test_k8s_config(environment);
     ReplicatorStatefulSetResourceRequirements::resolve(&k8s_config, None)
+}
+
+/// Deletes a resource, optionally waiting for its absence with a bounded
+/// timeout.
+///
+/// Foreground deletion ensures dependents are removed before their owner
+/// disappears.
+async fn delete_resource<K>(
+    api: &Api<K>,
+    name: &str,
+    kind: &'static str,
+    wait: bool,
+) -> Result<(), K8sError>
+where
+    K: Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+{
+    let params = DeleteParams {
+        propagation_policy: Some(PropagationPolicy::Foreground),
+        ..DeleteParams::default()
+    };
+
+    HttpK8sClient::handle_delete_with_404_ignore(api.delete(name, &params).await)?;
+
+    if !wait {
+        return Ok(());
+    }
+
+    wait_for_deletion(name, kind, async || Ok(api.get_opt(name).await?.is_none())).await
+}
+
+/// Polls the same bounded deletion barrier for resources and dependent Pods.
+async fn wait_for_deletion<F, Fut>(
+    name: &str,
+    kind: &'static str,
+    mut is_deleted: F,
+) -> Result<(), K8sError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, K8sError>>,
+{
+    match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
+        while !is_deleted().await? {
+            tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
+        }
+
+        Ok(())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(K8sError::ResourceDeletionTimeout {
+            kind,
+            name: name.to_owned(),
+            timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
+        }),
+    }
 }
 
 /// HTTP-based implementation of [`K8sClient`].
@@ -308,7 +363,7 @@ impl HttpK8sClient {
         match delete_result {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(err)) if err.code == 404 => Ok(()),
-            Err(e) => Err(e.into()),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -591,62 +646,69 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_postgres_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting postgres secret");
-
-        let postgres_secret_name = create_postgres_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&postgres_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_postgres_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_postgres_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
-    async fn delete_clickhouse_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting clickhouse secret");
-
-        let clickhouse_secret_name = create_clickhouse_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&clickhouse_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_clickhouse_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_clickhouse_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
-    async fn delete_bigquery_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting bq secret");
-
-        let bq_secret_name = create_bq_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
-
-        Ok(())
+    async fn delete_bigquery_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(&self.secrets_api, &create_bq_secret_name(resource_prefix), "Secret", wait)
+            .await
     }
 
-    async fn delete_iceberg_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting iceberg secret");
-
-        let iceberg_secret_name = create_iceberg_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&iceberg_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_iceberg_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_iceberg_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
-    async fn delete_ducklake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting ducklake secret");
-
-        let ducklake_secret_name = create_ducklake_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&ducklake_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_ducklake_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_ducklake_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
     async fn create_or_update_snowflake_secret(
@@ -679,16 +741,18 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_snowflake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting snowflake secret");
-
-        let snowflake_secret_name = create_snowflake_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&snowflake_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_snowflake_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_snowflake_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
     async fn create_or_update_replicator_config_map(
@@ -723,16 +787,18 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_replicator_config_map(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting config map");
-
-        let replicator_config_map_name = create_replicator_config_map_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.config_maps_api.delete(&replicator_config_map_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_replicator_config_map(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.config_maps_api,
+            &create_replicator_config_map_name(resource_prefix),
+            "ConfigMap",
+            wait,
+        )
+        .await
     }
 
     async fn create_or_update_replicator_stateful_set(
@@ -740,6 +806,7 @@ impl K8sClient for HttpK8sClient {
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
         workload_config: &ReplicatorWorkloadConfig,
+        wait: bool,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
@@ -752,10 +819,13 @@ impl K8sClient for HttpK8sClient {
         let stateful_set_name = create_stateful_set_name(resource_prefix);
         let legacy_stateful_set_name = create_legacy_stateful_set_name(resource_prefix);
         if legacy_stateful_set_name != stateful_set_name {
-            let dp = DeleteParams::default();
-            Self::handle_delete_with_404_ignore(
-                self.stateful_sets_api.delete(&legacy_stateful_set_name, &dp).await,
-            )?;
+            delete_resource(
+                &self.stateful_sets_api,
+                &legacy_stateful_set_name,
+                "StatefulSet",
+                wait,
+            )
+            .await?;
         }
 
         let environment = Environment::load().map_err(K8sError::Config)?;
@@ -874,47 +944,45 @@ impl K8sClient for HttpK8sClient {
         }
     }
 
-    async fn delete_replicator_stateful_set(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting stateful set");
-
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.stateful_sets_api.delete(&create_stateful_set_name(resource_prefix), &dp).await,
-        )?;
-
+    async fn delete_replicator_stateful_set(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        for name in [
+            create_stateful_set_name(resource_prefix),
+            create_legacy_stateful_set_name(resource_prefix),
+        ] {
+            delete_resource(&self.stateful_sets_api, &name, "StatefulSet", wait).await?;
+        }
+        if wait {
+            // Pods can outlive a StatefulSet deleted previously with background
+            // propagation.
+            wait_for_deletion(resource_prefix, "Pod", async || {
+                for name in pod_names_for_status(resource_prefix) {
+                    if self.pods_api.get_opt(&name).await?.is_some() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })
+            .await?;
+        }
         Ok(())
     }
 
     async fn delete_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,
+        wait: bool,
     ) -> Result<(), K8sError> {
-        debug!("deleting vertical pod autoscaler");
-
-        let name = create_stateful_set_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.vertical_pod_autoscalers_api.delete(&name, &dp).await,
-        )?;
-
-        match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
-            loop {
-                if self.vertical_pod_autoscalers_api.get_opt(&name).await?.is_none() {
-                    return Ok(());
-                }
-
-                tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
-            }
-        })
+        delete_resource(
+            &self.vertical_pod_autoscalers_api,
+            &create_stateful_set_name(resource_prefix),
+            "VerticalPodAutoscaler",
+            wait,
+        )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(K8sError::ResourceDeletionTimeout {
-                kind: VERTICAL_POD_AUTOSCALER_KIND,
-                name,
-                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
-            }),
-        }
     }
 
     async fn replicator_stateful_set_exists(
@@ -953,33 +1021,18 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_ducklake_maintenance(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting ducklake maintenance");
-
-        let name = create_ducklake_maintenance_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.ducklake_maintenance_api.delete(&name, &dp).await,
-        )?;
-
-        match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
-            loop {
-                if self.ducklake_maintenance_api.get_opt(&name).await?.is_none() {
-                    return Ok(());
-                }
-
-                tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
-            }
-        })
+    async fn delete_ducklake_maintenance(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.ducklake_maintenance_api,
+            &create_ducklake_maintenance_name(resource_prefix),
+            "DuckLakeMaintenance",
+            wait,
+        )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(K8sError::ResourceDeletionTimeout {
-                kind: DUCKLAKE_MAINTENANCE_KIND,
-                name,
-                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
-            }),
-        }
     }
 
     async fn get_replicator_pod_status(
@@ -3853,5 +3906,57 @@ mod tests {
             REPLICATOR_ID,
         );
         let _stateful_set: StatefulSet = serde_json::from_value(stateful_set_json).unwrap();
+    }
+}
+
+/// Tests the Kubernetes deletion completion contract.
+#[cfg(test)]
+mod deletion_tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use axum::{
+        body::Body,
+        http::{Method, Request, Response},
+    };
+    use k8s_openapi::api::core::v1::Secret;
+    use kube::{Api, Client};
+
+    use crate::k8s::http::delete_resource;
+
+    /// Waiting polls past an accepted deletion; non-waiting deletion never
+    /// polls.
+    #[tokio::test]
+    async fn deletion_waits_only_when_requested() {
+        for wait in [false, true] {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let service_reads = Arc::clone(&reads);
+            let service = tower::service_fn(move |request: Request<kube::client::Body>| {
+                let reads = Arc::clone(&service_reads);
+                async move {
+                    let (status, body) = if request.method() == Method::DELETE {
+                        (
+                            202,
+                            r#"{"apiVersion":"v1","kind":"Status","status":"Success","code":202}"#,
+                        )
+                    } else if reads.fetch_add(1, Ordering::Relaxed) == 0 {
+                        (200, r#"{"apiVersion":"v1","kind":"Secret","metadata":{"name":"test"}}"#)
+                    } else {
+                        (
+                            404,
+                            r#"{"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","message":"Not found","code":404}"#,
+                        )
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder().status(status).body(Body::from(body)).unwrap(),
+                    )
+                }
+            });
+            let api: Api<Secret> = Api::namespaced(Client::new(service, "default"), "default");
+            delete_resource(&api, "test", "Secret", wait).await.unwrap();
+            assert_eq!(reads.load(Ordering::Relaxed), if wait { 2 } else { 0 });
+        }
     }
 }

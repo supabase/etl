@@ -176,47 +176,6 @@ pub async fn rollback_table_state(
     Ok(None)
 }
 
-/// Resets table state to initial state.
-///
-/// Removes all existing state entries for the table (including history) and
-/// creates a new Init entry, effectively restarting replication from scratch.
-/// Destination table metadata and schemas are preserved for use on restart.
-pub async fn reset_table_state(
-    conn: &mut sqlx::PgConnection,
-    pipeline_id: i64,
-    table_id: TableId,
-) -> sqlx::Result<StoredTableStateRow> {
-    // Delete all existing entries for this pipeline and table
-    sqlx::query(
-        r#"
-        delete from etl.replication_state
-        where pipeline_id = $1 and table_id = $2
-        "#,
-    )
-    .bind(pipeline_id)
-    .bind(SqlxTableId(table_id.into_inner()))
-    .execute(&mut *conn)
-    .await?;
-
-    // Insert a new `Init` state entry and return it
-    let metadata = serde_json::json!({"type": "init"});
-    let row: StoredTableStateRow = sqlx::query_as(
-        r#"
-        insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
-        values ($1, $2, $3, $4, null, true)
-        returning id, pipeline_id, table_id, state, metadata, prev, is_current
-        "#,
-    )
-    .bind(pipeline_id)
-    .bind(SqlxTableId(table_id.into_inner()))
-    .bind(StoredTableStateType::Init)
-    .bind(metadata)
-    .fetch_one(&mut *conn)
-    .await?;
-
-    Ok(row)
-}
-
 /// Deletes all table state entries for a pipeline.
 ///
 /// Removes all table state records including historical entries

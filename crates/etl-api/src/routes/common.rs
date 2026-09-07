@@ -124,7 +124,7 @@ pub(crate) async fn restart_replicator_if_running(
     .await
     {
         let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-        k8s_client.delete_replicator_vertical_pod_autoscaler(&resource_prefix).await?;
+        k8s_client.delete_replicator_vertical_pod_autoscaler(&resource_prefix, true).await?;
     }
 
     create_or_update_pipeline_runtime_in_k8s(
@@ -138,6 +138,7 @@ pub(crate) async fn restart_replicator_if_running(
         api_config.supabase_api_url.as_deref(),
         api_config.replicator.destination_defaults.ducklake.copy_buffer,
         source_tls_config.get_tls_config(),
+        true,
     )
     .await?;
 

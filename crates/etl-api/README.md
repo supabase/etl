@@ -25,6 +25,40 @@ The API can:
 - OpenAPI descriptors generated from `utoipa` route macros
 - Integration with the core ETL system
 
+## Pipeline lifecycle
+
+Start creates the pipeline runtime. Configuration updates and version changes restart
+an active pipeline automatically; they leave a stopped pipeline stopped. Clients
+should not issue a second restart after an update. An unchanged version is a no-op.
+The explicit restart endpoint returns `202 Accepted`, or `409 Conflict` when the
+pipeline is stopped.
+
+Stop and stop-all return `202 Accepted` after Kubernetes accepts the deletion
+requests. Resources can still be terminating; poll pipeline status before assuming
+shutdown has completed.
+
+`POST /v1/pipelines/{pipeline_id}/rollback-tables` restarts replication from scratch
+for a single table, all errored tables, or all tables. The request contains only
+`target`; legacy extra fields are ignored. Any table state can be targeted manually.
+The API validates the target, stops the runtime, waits for its resources and Pods to
+disappear, and appends the initial table state while retaining state history,
+schemas, and destination metadata. It then recreates a previously active runtime.
+Stopped pipelines remain stopped and require an explicit start. Initial sync still
+respects the pipeline's table-copy policy.
+
+The deletion phase has a shared 30-second deadline. If it expires, rollback returns
+`503 Service Unavailable` without changing table states or recreating the runtime.
+Kubernetes continues shutdown. Retry after shutdown completes; if the pipeline is
+then stopped, start it explicitly after the successful rollback. If recreation
+fails after the database commit, the table reset remains applied and the pipeline
+can be started explicitly. Clients must not send a follow-up start or restart after
+a successful rollback.
+
+Kubernetes deletion methods take an explicit `wait` boolean. `false` waits only for
+acceptance; `true` polls for absence with a bounded timeout. Runtime operations pass
+the same choice through their nested deletions. In create/update operations, this
+option controls prerequisite deletions, not readiness of the new Pods.
+
 ## Local development
 
 ```bash

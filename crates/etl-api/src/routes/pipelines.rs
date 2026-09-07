@@ -47,6 +47,7 @@ use crate::{
         core::{
             create_k8s_object_prefix, create_or_update_pipeline_runtime_in_k8s,
             delete_pipeline_runtime_in_k8s, is_replicator_active,
+            should_reconcile_pipeline_runtime,
         },
     },
     routes::{
@@ -195,6 +196,10 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
 impl PipelineError {
     fn to_message(&self) -> String {
         match self {
+            PipelineError::K8s(K8sError::ResourceDeletionTimeout { .. }) => {
+                "Pipeline resources are still stopping. Retry once the pipeline has stopped."
+                    .to_owned()
+            }
             // Do not expose internal details in error messages. These all map to 500 status
             // codes and the underlying causes (database, k8s, replicator/image plumbing,
             // missing config) are not actionable by the user.
@@ -233,6 +238,9 @@ impl PipelineError {
 impl IntoResponse for PipelineError {
     fn into_response(self) -> Response {
         let status_code = match &self {
+            PipelineError::K8s(K8sError::ResourceDeletionTimeout { .. }) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             PipelineError::InvalidConfig(_)
             | PipelineError::ReplicatorNotFound(_)
             | PipelineError::ImageNotFound(_)
@@ -548,29 +556,28 @@ pub struct GetPipelineReplicationStatusResponse {
     pub table_statuses: Vec<TableStatus>,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RollbackType {
-    Individual,
-    Full,
-}
-
+/// Selects tables in a pipeline to reset.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
 pub enum RollbackTablesTarget {
+    /// Reset one table from any state.
     SingleTable {
+        /// Identifier of the table to reset.
         #[schema(example = 1)]
         table_id: u32,
     },
+    /// Reset every currently errored table.
     AllErroredTables,
+    /// Reset every table from any state.
     AllTables,
 }
 
+/// Selects tables to reset for a fresh synchronization attempt.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct RollbackTablesRequest {
+    /// The table or group of tables to reset.
     pub target: RollbackTablesTarget,
-    pub rollback_type: RollbackType,
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -1030,6 +1037,7 @@ pub(crate) async fn start_pipeline(
         api_config.supabase_api_url.as_deref(),
         api_config.replicator.destination_defaults.ducklake.copy_buffer,
         tls_config,
+        true,
     )
     .await?;
     txn.commit().await?;
@@ -1096,7 +1104,7 @@ pub(crate) async fn restart_pipeline(
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "Pipeline stopped successfully"),
+        (status = 202, description = "Pipeline shutdown accepted; resources may still be terminating"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
@@ -1122,9 +1130,9 @@ pub(crate) async fn stop_pipeline(
             .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
     txn.commit().await?;
 
-    delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+    delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, false).await?;
 
-    Ok(StatusCode::OK)
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[utoipa::path(
@@ -1136,7 +1144,7 @@ pub(crate) async fn stop_pipeline(
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
     ),
     responses(
-        (status = 200, description = "All pipelines stopped successfully"),
+        (status = 202, description = "Pipeline shutdowns accepted; resources may still be terminating"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -1154,10 +1162,10 @@ pub(crate) async fn stop_all_pipelines(
     txn.commit().await?;
 
     for replicator in replicators {
-        delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, replicator).await?;
+        delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, false).await?;
     }
 
-    Ok(StatusCode::OK)
+    Ok(StatusCode::ACCEPTED)
 }
 
 #[utoipa::path(
@@ -1370,7 +1378,7 @@ pub(crate) async fn get_pipeline_replication_status(
     post,
     path = "/pipelines/{pipeline_id}/rollback-tables",
     summary = "Roll back tables",
-    description = "Rolls back the table state of tables in the pipeline. Supports rolling back a single table, all errored tables or all tables.",
+    description = "Resets a single table, all errored tables, or all tables to the initial state, regardless of their previous state. Preserves state history, schemas, and destination metadata. Waits for the existing runtime to terminate before resetting state, then recreates it if it was active. Stopped pipelines remain stopped.",
     request_body = RollbackTablesRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
@@ -1381,44 +1389,39 @@ pub(crate) async fn get_pipeline_replication_status(
         (status = 400, description = "Bad request: state not rollbackable", body = ErrorMessage),
         (status = 404, description = "Pipeline or table not found", body = ErrorMessage),
         (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Your database is unavailable", body = ErrorMessage),
+        (status = 503, description = "Your database is unavailable or pipeline shutdown has not completed", body = ErrorMessage),
         (status = 504, description = "Request to your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
 )]
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn rollback_tables(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
     Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     Extension(source_tls_config): Extension<Arc<SourceTlsConfig>>,
+    Extension(k8s_client): Extension<Arc<dyn K8sClient>>,
+    Extension(api_config): Extension<Arc<ApiConfig>>,
     pipeline_id: Path<i64>,
     rollback_request: Json<RollbackTablesRequest>,
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
-    let rollback_type = rollback_request.rollback_type;
 
     let mut txn = pool.begin().await?;
 
-    // Read the pipeline to ensure it exists and get the source configuration
-    let pipeline = data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
-        .await?
-        .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-
-    // Get the source configuration
-    let source =
-        data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
-            .await?
-            .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+    let (pipeline, replicator, image, source, destination) =
+        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     txn.commit().await?;
 
     // Connect to the source database to perform rollback
     let tls_config = source_tls_config.get_tls_config();
-    let source_pool = source_database::connect(&source.config.into_connection_config(tls_config))
-        .await
-        .map_err(PipelineError::SourceDatabase)?;
+    let source_pool =
+        source_database::connect(&source.config.clone().into_connection_config(tls_config))
+            .await
+            .map_err(PipelineError::SourceDatabase)?;
 
     // Start transaction for all source database operations
     let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
@@ -1436,85 +1439,77 @@ pub(crate) async fn rollback_tables(
         .await
         .map_err(PipelineError::SourceDatabase)?;
 
-    // Determine which tables to rollback based on target
-    let target_table_ids: Vec<u32> = match &rollback_request.target {
+    let target_table_ids: Vec<TableId> = match &rollback_request.target {
         RollbackTablesTarget::SingleTable { table_id } => {
-            // Single table mode, validate the table exists
             if !state_rows.iter().any(|row| row.table_id.0 == *table_id) {
                 return Err(PipelineError::MissingTableState);
             }
 
-            vec![*table_id]
+            vec![TableId::new(*table_id)]
         }
-        RollbackTablesTarget::AllErroredTables => {
-            // All errored tables mode, find all tables in errored state
-            let mut errored_table_ids = Vec::new();
-            for row in &state_rows {
-                if let Some(metadata) = &row.metadata
-                    && let Ok(state) = serde_json::from_value::<TableState>(metadata.clone())
-                    && state.is_errored()
-                {
-                    errored_table_ids.push(row.table_id.0);
-                }
-            }
-
-            if errored_table_ids.is_empty() {
-                return Err(PipelineError::NotRollbackable("No errored tables found".to_owned()));
-            }
-
-            errored_table_ids
-        }
+        RollbackTablesTarget::AllErroredTables => state_rows
+            .iter()
+            .filter(|row| row.state_type() == table_state::StoredTableStateType::Errored)
+            .map(|row| TableId::new(row.table_id.0))
+            .collect(),
         RollbackTablesTarget::AllTables => {
-            // All tables mode, collect all table IDs
-            let table_ids: Vec<u32> = state_rows.iter().map(|row| row.table_id.0).collect();
-
-            if table_ids.is_empty() {
-                return Err(PipelineError::NotRollbackable(
-                    "No tables found for this pipeline".to_owned(),
-                ));
-            }
-
-            table_ids
+            state_rows.iter().map(|row| TableId::new(row.table_id.0)).collect()
         }
     };
 
+    if target_table_ids.is_empty() {
+        return Err(PipelineError::NotRollbackable(
+            "No tables matched the rollback target".to_owned(),
+        ));
+    }
+
+    // Release the source transaction before waiting for workers to finish their
+    // writes.
+    source_txn.commit().await.map_err(PipelineError::SourceDatabase)?;
+    let resume =
+        should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await?;
+    delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, true).await?;
+    let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
+
+    let initial_state = TableState::Init;
+    let metadata =
+        serde_json::to_value(&initial_state).map_err(PipelineError::InvalidTableState)?;
     let mut rolled_back_tables = Vec::with_capacity(target_table_ids.len());
     for table_id in target_table_ids {
-        let new_state_row = match rollback_type {
-            RollbackType::Individual => {
-                let Some(new_state_row) = table_state::rollback_table_state(
-                    source_txn.deref_mut(),
-                    pipeline_id,
-                    TableId::new(table_id),
-                )
-                .await
-                .map_err(PipelineError::SourceDatabase)?
-                else {
-                    return Err(PipelineError::NotRollbackable(format!(
-                        "No previous state to rollback to for table {table_id}",
-                    )));
-                };
+        table_state::update_table_state_raw(
+            source_txn.deref_mut(),
+            pipeline_id,
+            table_id,
+            table_state::StoredTableStateType::Init,
+            metadata.clone(),
+        )
+        .await
+        .map_err(PipelineError::SourceDatabase)?;
 
-                new_state_row
-            }
-            RollbackType::Full => table_state::reset_table_state(
-                source_txn.deref_mut(),
-                pipeline_id,
-                TableId::new(table_id),
-            )
-            .await
-            .map_err(PipelineError::SourceDatabase)?,
-        };
-
-        let new_state: TableState = new_state_row
-            .metadata
-            .ok_or(PipelineError::MissingTableState)
-            .and_then(|m| serde_json::from_value(m).map_err(PipelineError::InvalidTableState))?;
-
-        rolled_back_tables.push(RolledBackTable { table_id, new_state: new_state.into() });
+        rolled_back_tables.push(RolledBackTable {
+            table_id: table_id.into_inner(),
+            new_state: initial_state.clone().into(),
+        });
     }
 
     source_txn.commit().await.map_err(PipelineError::SourceDatabase)?;
+
+    if resume {
+        create_or_update_pipeline_runtime_in_k8s(
+            k8s_client.as_ref(),
+            tenant_id,
+            pipeline,
+            replicator,
+            image,
+            source,
+            destination,
+            api_config.supabase_api_url.as_deref(),
+            api_config.replicator.destination_defaults.ducklake.copy_buffer,
+            source_tls_config.get_tls_config(),
+            true,
+        )
+        .await?;
+    }
 
     let response = RollbackTablesResponse { pipeline_id, tables: rolled_back_tables };
 
