@@ -224,27 +224,23 @@ fall back to it. Deployments that start with VPA `Off` may enable updates after
 their chosen observation policy has collected representative usage. Deployments
 that want immediate actuation may configure `in_place_or_recreate` instead.
 
-Before restarting a running replicator, the API uses durable table state to
-predict whether the restart will repeat an initial table copy. If any table is
-before `SyncDone` and is not stopped in an error state, the API deletes the VPA
-before reconciling the pipeline. Reconciliation recreates the VPA from the
-current pipeline overrides, autoscaling configuration, and initial update mode.
-Deleting the VPA resource does not guarantee that a running upstream recommender
-forgets its in-memory usage aggregates. `SyncDone` and `Ready` tables keep their
-destination data across restart and therefore preserve the existing VPA and its
-live update mode. This applies to explicit restarts and configuration updates
-that restart a running replicator. Source connection, query, or state-decoding
-failures preserve the VPA rather than making the restart less reliable.
+Before restarting a running replicator, the API checks current publication
+membership and durable table state in your database. If any published table
+needs initial sync, including a newly published table, it deletes the VPA.
+Reconciliation restores the configured bounds and initial update mode. This
+covers the table sync phase, including when copying existing rows is skipped.
+`SyncDone`, `Ready`, and errored tables do not trigger a reset. Inspection
+failures preserve the VPA and allow restart. This applies to explicit restarts
+and configuration updates that restart a running replicator.
 
-Kubelet container restarts and Kubernetes- or controller-initiated Pod
-replacements do not pass through the API restart path, so they do not delete the
-VPA. A container restarted within the same Pod keeps that Pod's current
-resources. A replacement Pod is created from the StatefulSet template, but VPA
-admission may replace those resources with the existing recommendation. If a
-replacement happens while table copy will repeat, the API cannot reset the VPA
-to the initial configuration first. This is a known limitation of keeping the
-copy-aware decision at the API boundary. A future Kubernetes controller with
-access to durable table state could own this lifecycle.
+This is a best-effort reset, not a guarantee that memory stays at the startup
+allocation throughout initial sync. State or publication membership can change
+after inspection. Internal pipeline retries that start new table syncs,
+container restarts, and Kubernetes Pod replacements bypass this API check and
+do not reset the VPA, even during initial sync. The current Pod retains its
+resources; a replacement may receive an existing VPA recommendation. Kubernetes
+and the VPA's live policy govern those allocations. Deleting the VPA also does
+not guarantee that the recommender forgets usage history.
 
 Stopping and starting a pipeline still deletes the autoscaler resource: stop
 deletes the StatefulSet and VPA, and start always recreates both resources.

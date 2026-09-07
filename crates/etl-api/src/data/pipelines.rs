@@ -1,7 +1,6 @@
 use std::ops::DerefMut;
 
 use etl::store::TableState;
-use etl_config::shared::TableSyncCopyConfig;
 use etl_postgres::{
     publications::publication_table_ids_query,
     slots,
@@ -38,26 +37,20 @@ use crate::{
 /// only one pipeline will use it.
 pub const MAX_PIPELINES_PER_TENANT: i64 = 1;
 
-/// Returns published tables that would copy data when the pipeline starts.
+/// Returns published tables that would perform initial sync on restart.
 ///
-/// Uses the same publication expansion as the replicator, including implicit
-/// schema membership and partition-root settings. Joining current pipeline
-/// state in one query detects new tables without including removed tables or
-/// reading table data. Tables without state start in [`TableState::Init`];
-/// existing states retain the replicator's restart semantics.
+/// Expands publication membership using the replicator's schema and partition
+/// rules, then joins current state for this pipeline. New tables start in
+/// [`TableState::Init`]. Copy selection does not affect this decision: skipping
+/// existing rows still requires table sync.
 ///
-/// The caller must supply the publication name and copy selection from the
-/// current API configuration that will be materialized for this restart. This
-/// function does not read the running Pod's configuration or verify that it
-/// matches the API; copy eligibility assumes the replacement uses these values.
-///
-/// This is a preflight observation, not a lock on publication membership or
-/// replication progress. Either can change before the replicator starts.
-pub(crate) async fn read_pipeline_tables_to_copy(
+/// The publication must come from the configuration used for the replacement.
+/// This observation does not lock membership or replication progress; either
+/// can change before the replicator starts.
+pub(crate) async fn read_pipeline_tables_to_sync(
     pool: &PgPool,
     pipeline_id: i64,
     publication_name: &str,
-    table_sync_copy: &TableSyncCopyConfig,
 ) -> Result<Vec<u32>, PipelineError> {
     let query = format!(
         r#"
@@ -77,26 +70,24 @@ pub(crate) async fn read_pipeline_tables_to_copy(
             .fetch_all(pool)
             .await?;
 
-    let mut tables_to_copy = Vec::new();
+    let mut tables_to_sync = Vec::new();
     for (table_id, state_id, metadata) in rows {
-        if !table_sync_copy.should_copy_table(table_id.0) {
-            continue;
-        }
-
         let state = if state_id.is_some() {
             let metadata = metadata.ok_or(PipelineError::MissingTableState)?;
             serde_json::from_value::<TableState>(metadata)
                 .map_err(PipelineError::InvalidTableState)?
         } else {
+            // A newly published table has no stored state yet. Treat it as Init so
+            // its first initial sync triggers a VPA reset before the worker starts.
             TableState::Init
         };
 
         if state.as_type().would_perform_table_sync() {
-            tables_to_copy.push(table_id.0);
+            tables_to_sync.push(table_id.0);
         }
     }
 
-    Ok(tables_to_copy)
+    Ok(tables_to_sync)
 }
 
 #[derive(Debug, Clone)]

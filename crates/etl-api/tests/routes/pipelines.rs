@@ -894,7 +894,7 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn updating_a_running_pipeline_resets_vpa_when_table_copy_will_repeat() {
+async fn updating_a_running_pipeline_resets_vpa_when_table_sync_will_repeat() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1555,27 +1555,41 @@ async fn a_running_pipeline_can_be_restarted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restarting_pipeline_resets_vpa_when_table_copy_will_repeat() {
+async fn restarting_pipeline_resets_vpa_when_table_sync_will_repeat() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
     create_tables_with_states(
         &source_db_pool,
         pipeline_id,
-        &[("test_users", "data_sync", r#"{"type": "data_sync"}"#)],
+        &[("test_users", "init", r#"{"type": "init"}"#)],
     )
     .await;
 
-    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    // Finishing the copy does not complete initial sync; catchup must also finish.
+    for state in ["init", "data_sync", "finished_copy"] {
+        sqlx::query(
+            "update etl.replication_state set state = $1::text::etl.table_state, metadata = \
+             jsonb_build_object('type', $1::text) where pipeline_id = $2",
+        )
+        .bind(state)
+        .bind(pipeline_id)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+        let delete_calls_before = app.k8s_state.vpa_delete_calls();
 
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+        let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(app.k8s_state.vpa_delete_calls() - delete_calls_before, 1);
+    }
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restarting_pipeline_preserves_vpa_when_no_table_copy_will_repeat() {
+async fn restarting_pipeline_preserves_vpa_when_no_table_sync_will_repeat() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1718,7 +1732,7 @@ async fn restarting_pipeline_resets_vpa_for_published_tables_without_any_state()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restarting_pipeline_preserves_vpa_for_copy_states_outside_the_publication() {
+async fn restarting_pipeline_preserves_vpa_for_sync_states_outside_the_publication() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1762,7 +1776,7 @@ async fn restarting_pipeline_uses_only_current_state_for_its_pipeline() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
 
-    // A different pipeline's completed copy cannot suppress this pipeline's copy.
+    // A different pipeline's completed sync cannot suppress this pipeline's sync.
     create_tables_with_states(
         &source_db_pool,
         pipeline_id + 1,
@@ -1844,11 +1858,11 @@ async fn restarting_pipeline_respects_partition_root_publication_settings() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restarting_pipeline_respects_table_copy_selection() {
+async fn restarting_pipeline_resets_vpa_even_when_table_copy_is_skipped() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
-    let ready_tables = create_tables_with_states(
+    create_tables_with_states(
         &source_db_pool,
         pipeline_id,
         &[("test_users", "ready", r#"{"type": "ready"}"#)],
@@ -1858,13 +1872,10 @@ async fn restarting_pipeline_respects_table_copy_selection() {
     let pipeline = app.read_pipeline(&tenant_id, pipeline_id).await;
     let pipeline: ReadPipelineResponse = pipeline.json().await.unwrap();
 
-    for (table_sync_copy, copies_new_table) in [
-        (TableSyncCopyConfig::SkipAllTables, false),
-        (TableSyncCopyConfig::IncludeTables { table_ids: vec![ready_tables[0].0.0] }, false),
-        (TableSyncCopyConfig::SkipTables { table_ids: vec![new_table_id.0] }, false),
-        (TableSyncCopyConfig::IncludeTables { table_ids: vec![new_table_id.0] }, true),
-        (TableSyncCopyConfig::SkipTables { table_ids: vec![ready_tables[0].0.0] }, true),
-        (TableSyncCopyConfig::IncludeAllTables, true),
+    // Both global and per-table copy exclusions still require initial sync.
+    for table_sync_copy in [
+        TableSyncCopyConfig::SkipAllTables,
+        TableSyncCopyConfig::SkipTables { table_ids: vec![new_table_id.0] },
     ] {
         let response = app
             .update_pipeline(
@@ -1886,10 +1897,7 @@ async fn restarting_pipeline_respects_table_copy_selection() {
         let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
 
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        assert_eq!(
-            app.k8s_state.vpa_delete_calls() - delete_calls_before,
-            usize::from(copies_new_table),
-        );
+        assert_eq!(app.k8s_state.vpa_delete_calls() - delete_calls_before, 1);
     }
 
     drop_pg_database(&source_db_config).await;

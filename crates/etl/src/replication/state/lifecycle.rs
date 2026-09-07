@@ -703,18 +703,20 @@ mod tests {
         let completed_states = [TableStateType::SyncDone, TableStateType::Ready];
         assert!(completed_states.iter().all(TableStateType::has_completed_table_sync));
 
-        let states_that_repeat_copy = [
+        let states_that_repeat_sync = [
             TableStateType::Init,
             TableStateType::DataSync,
             TableStateType::FinishedCopy,
             TableStateType::SyncWait,
             TableStateType::Catchup,
         ];
-        assert!(states_that_repeat_copy.iter().all(TableStateType::would_perform_table_sync));
+        assert!(states_that_repeat_sync.iter().all(TableStateType::would_perform_table_sync));
 
-        let states_that_preserve_copy =
+        let states_that_do_not_repeat_sync =
             [TableStateType::SyncDone, TableStateType::Ready, TableStateType::Errored];
-        assert!(states_that_preserve_copy.iter().all(|state| !state.would_perform_table_sync()));
+        assert!(
+            states_that_do_not_repeat_sync.iter().all(|state| !state.would_perform_table_sync())
+        );
     }
 
     #[test]
