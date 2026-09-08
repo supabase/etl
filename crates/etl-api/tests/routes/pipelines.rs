@@ -2170,10 +2170,32 @@ async fn rollback_tables_without_history_resets_no_retry_error() {
     drop_pg_database(&source_db_config).await;
 }
 
-/// Reset appends the initial state without deleting history or destination
-/// identity.
+/// Reset reports a missing target before stopping the pipeline runtime.
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_tables_preserves_history_schemas_and_metadata() {
+async fn rollback_tables_returns_not_found_for_missing_table_state() {
+    let (app, tenant_id, pipeline_id, _source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let delete_calls_before = app.k8s_state.vpa_delete_calls();
+
+    let response = app
+        .rollback_tables(
+            &tenant_id,
+            pipeline_id,
+            &RollbackTablesRequest {
+                target: RollbackTablesTarget::SingleTable { table_id: u32::MAX },
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), delete_calls_before);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+/// Reset replaces state history while preserving destination identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_replaces_history_and_preserves_schemas_and_metadata() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -2255,24 +2277,19 @@ async fn rollback_tables_preserves_history_schemas_and_metadata() {
     assert_eq!(response.tables[0].table_id, table_oid.0);
     assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
 
-    let rows: Vec<(i64, Option<i64>, bool, serde_json::Value)> = sqlx::query_as(
-        "select id, prev, is_current, metadata from etl.replication_state where pipeline_id = $1 \
-         and table_id = $2 order by id",
+    let rows: Vec<(Option<i64>, bool, serde_json::Value)> = sqlx::query_as(
+        "select prev, is_current, metadata from etl.replication_state where pipeline_id = $1 and \
+         table_id = $2 order by id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
     .fetch_all(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(rows.len(), 3);
-    assert!(!rows[0].2);
-    assert!(!rows[1].2);
-    assert!(rows[2].2);
-    assert_eq!(rows[1].1, Some(rows[0].0));
-    assert_eq!(rows[2].1, Some(rows[1].0));
-    assert_eq!(rows[0].3, serde_json::to_value(TableState::Ready).unwrap());
-    assert_eq!(rows[1].3["type"], "errored");
-    assert_eq!(rows[2].3, serde_json::to_value(TableState::Init).unwrap());
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, None);
+    assert!(rows[0].1);
+    assert_eq!(rows[0].2, serde_json::to_value(TableState::Init).unwrap());
 
     // Verify table schema was preserved (schemas are no longer deleted during
     // reset)
@@ -2690,28 +2707,16 @@ async fn rollback_tables_resets_non_errored_tables() {
         let response =
             test_rollback(&app, &tenant_id, pipeline_id, table_oid, StatusCode::OK).await.unwrap();
         assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
-        let stored: serde_json::Value = sqlx::query_scalar(
-            "select metadata from etl.replication_state where pipeline_id = $1 and table_id = $2 \
-             and is_current",
+        let state_rows: Vec<(Option<i64>, serde_json::Value)> = sqlx::query_as(
+            "select prev, metadata from etl.replication_state where pipeline_id = $1 and table_id \
+             = $2",
         )
         .bind(pipeline_id)
         .bind(table_oid)
-        .fetch_one(&source_db_pool)
+        .fetch_all(&source_db_pool)
         .await
         .unwrap();
-        assert_eq!(stored, serde_json::to_value(TableState::Init).unwrap());
-        let previous: serde_json::Value = sqlx::query_scalar(
-            "select history.metadata from etl.replication_state current_state join \
-             etl.replication_state history on history.id = current_state.prev where \
-             current_state.pipeline_id = $1 and current_state.table_id = $2 and \
-             current_state.is_current",
-        )
-        .bind(pipeline_id)
-        .bind(table_oid)
-        .fetch_one(&source_db_pool)
-        .await
-        .unwrap();
-        assert_eq!(previous, serde_json::to_value(state).unwrap());
+        assert_eq!(state_rows, vec![(None, serde_json::to_value(TableState::Init).unwrap())]);
     }
 
     drop_pg_database(&source_db_config).await;
@@ -2753,6 +2758,82 @@ async fn rollback_tables_all_tables_succeeds() {
     .await
     .unwrap();
     assert_eq!(reset_count, 3);
+    drop_pg_database(&source_db_config).await;
+}
+
+/// Batch reset rolls back every state replacement when one replacement fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_all_tables_is_transactional() {
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[
+            ("test_users", "ready", r#"{"type":"ready"}"#),
+            (
+                "test_products",
+                "errored",
+                r#"{"type":"errored","reason":"connection failed","retry_policy":{"type":"manual_retry"}}"#,
+            ),
+        ],
+    )
+    .await;
+
+    sqlx::query(
+        r#"
+        create function fail_second_table_reset() returns trigger
+        language plpgsql
+        as $$
+        begin
+            if new.state = 'init'
+                and (
+                    select count(*)
+                    from etl.replication_state
+                    where pipeline_id = new.pipeline_id and state = 'init' and is_current
+                ) > 0
+            then
+                raise exception 'forced reset failure';
+            end if;
+            return new;
+        end;
+        $$
+        "#,
+    )
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        create trigger fail_second_table_reset
+        before insert on etl.replication_state
+        for each row execute function fail_second_table_reset()
+        "#,
+    )
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
+
+    let response = app
+        .rollback_tables(
+            &tenant_id,
+            pipeline_id,
+            &RollbackTablesRequest { target: RollbackTablesTarget::AllTables },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    let mut states: Vec<String> = sqlx::query_scalar(
+        "select state::text from etl.replication_state where pipeline_id = $1 and is_current",
+    )
+    .bind(pipeline_id)
+    .fetch_all(&source_db_pool)
+    .await
+    .unwrap();
+    states.sort();
+    assert_eq!(states, vec!["errored", "ready"]);
+
     drop_pg_database(&source_db_config).await;
 }
 

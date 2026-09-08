@@ -17,7 +17,7 @@ use etl_postgres::{
     store::{health, table_state},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
 use utoipa::ToSchema;
 
@@ -91,8 +91,14 @@ pub enum PipelineError {
     #[error("The table state is not present")]
     MissingTableState,
 
+    #[error("The table with id {0} does not have replication state")]
+    RollbackTableNotFound(u32),
+
     #[error("The table state is not valid: {0}")]
     InvalidTableState(serde_json::Error),
+
+    #[error("The table state could not be encoded")]
+    TableStateEncoding(#[source] etl::error::EtlError),
 
     #[error("Table cannot be rolled back: {0}")]
     NotRollbackable(String),
@@ -218,6 +224,7 @@ impl PipelineError {
             | PipelineError::MissingEnvironment
             | PipelineError::MissingTableState
             | PipelineError::InvalidTableState(_)
+            | PipelineError::TableStateEncoding(_)
             | PipelineError::Validation(ValidationError::Environment(_)) => {
                 "Internal server error".to_owned()
             }
@@ -254,6 +261,7 @@ impl IntoResponse for PipelineError {
             | PipelineError::MaintenanceMaterialization(_)
             | PipelineError::Database(_)
             | PipelineError::InvalidTableState(_)
+            | PipelineError::TableStateEncoding(_)
             | PipelineError::MissingEnvironment
             | PipelineError::MissingTableState => StatusCode::INTERNAL_SERVER_ERROR,
             PipelineError::SourceDatabase(error) => {
@@ -276,6 +284,7 @@ impl IntoResponse for PipelineError {
             | PipelineError::InactivePipeline(_)
             | PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineNotFound(_)
+            | PipelineError::RollbackTableNotFound(_)
             | PipelineError::EtlStateNotInitialized
             | PipelineError::ImageIdNotFound(_)
             | PipelineError::ImageIdNotDefault(_)
@@ -1374,11 +1383,28 @@ pub(crate) async fn get_pipeline_replication_status(
     Ok(Json(response))
 }
 
+/// Replaces a table's state history with one canonical initial state.
+async fn reset_table_state(
+    txn: &mut Transaction<'_, Postgres>,
+    pipeline_id: i64,
+    table_id: TableId,
+) -> Result<TableState, PipelineError> {
+    let initial_state = TableState::Init;
+    let (state_type, metadata) =
+        initial_state.to_storage_format().map_err(PipelineError::TableStateEncoding)?;
+
+    table_state::replace_table_state_raw(txn, pipeline_id, table_id, state_type, metadata)
+        .await
+        .map_err(PipelineError::SourceDatabase)?;
+
+    Ok(initial_state)
+}
+
 #[utoipa::path(
     post,
     path = "/pipelines/{pipeline_id}/rollback-tables",
     summary = "Roll back tables",
-    description = "Resets a single table, all errored tables, or all tables to the initial state, regardless of their previous state. Preserves state history, schemas, and destination metadata. Waits for the existing runtime to terminate before resetting state, then recreates it if it was active. Stopped pipelines remain stopped.",
+    description = "Resets a single table, all errored tables, or all tables to a fresh initial state, regardless of their previous state. Deletes previous state history while preserving schemas and destination metadata for destination cleanup. Waits for the existing runtime to terminate before resetting state, then recreates it if it was active. Stopped pipelines remain stopped.",
     request_body = RollbackTablesRequest,
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
@@ -1442,7 +1468,7 @@ pub(crate) async fn rollback_tables(
     let target_table_ids: Vec<TableId> = match &rollback_request.target {
         RollbackTablesTarget::SingleTable { table_id } => {
             if !state_rows.iter().any(|row| row.table_id.0 == *table_id) {
-                return Err(PipelineError::MissingTableState);
+                return Err(PipelineError::RollbackTableNotFound(*table_id));
             }
 
             vec![TableId::new(*table_id)]
@@ -1471,24 +1497,15 @@ pub(crate) async fn rollback_tables(
     delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, true).await?;
     let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
 
-    let initial_state = TableState::Init;
-    let metadata =
-        serde_json::to_value(&initial_state).map_err(PipelineError::InvalidTableState)?;
+    // Replace every selected state in one transaction so the reset never
+    // commits a partially updated table set.
     let mut rolled_back_tables = Vec::with_capacity(target_table_ids.len());
     for table_id in target_table_ids {
-        table_state::update_table_state_raw(
-            source_txn.deref_mut(),
-            pipeline_id,
-            table_id,
-            table_state::StoredTableStateType::Init,
-            metadata.clone(),
-        )
-        .await
-        .map_err(PipelineError::SourceDatabase)?;
+        let initial_state = reset_table_state(&mut source_txn, pipeline_id, table_id).await?;
 
         rolled_back_tables.push(RolledBackTable {
             table_id: table_id.into_inner(),
-            new_state: initial_state.clone().into(),
+            new_state: initial_state.into(),
         });
     }
 

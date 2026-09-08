@@ -260,7 +260,7 @@ impl TableState {
     /// Returns the state type enum and serialized JSON metadata for persisting
     /// to the state store. Returns an error for in-memory-only states that
     /// cannot be persisted.
-    pub(crate) fn to_storage_format(&self) -> EtlResult<(StoredTableStateType, serde_json::Value)> {
+    pub fn to_storage_format(&self) -> EtlResult<(StoredTableStateType, serde_json::Value)> {
         let state_type = self.as_type();
         if !state_type.should_store() {
             bail!(

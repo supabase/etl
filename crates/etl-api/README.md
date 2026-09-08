@@ -41,8 +41,10 @@ shutdown has completed.
 for a single table, all errored tables, or all tables. The request contains only
 `target`; legacy extra fields are ignored. Any table state can be targeted manually.
 The API validates the target, stops the runtime, waits for its resources and Pods to
-disappear, and appends the initial table state while retaining state history,
-schemas, and destination metadata. It then recreates a previously active runtime.
+disappear, then atomically deletes the selected tables' previous state history and
+inserts one fresh initial state for each table. It preserves schemas and destination
+metadata so the table-sync worker can delete the existing destination object safely
+before copying. It then recreates a previously active runtime.
 Stopped pipelines remain stopped and require an explicit start. Initial sync still
 respects the pipeline's table-copy policy.
 
