@@ -350,14 +350,13 @@ pub trait K8sClient: Send + Sync {
     /// methods. Applying this resource intentionally changes the pod template
     /// restart annotation so the StatefulSet recreates its pods. This ensures
     /// the replicator process observes newly materialized mounted config and
-    /// secret-backed environment values. `wait` controls deletion of the legacy
-    /// workload; it does not wait for readiness of the replacement.
+    /// secret-backed environment values. This does not wait for readiness of
+    /// the replacement.
     async fn create_or_update_replicator_stateful_set(
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
         workload_config: &ReplicatorWorkloadConfig,
-        wait: bool,
     ) -> Result<(), K8sError>;
 
     /// Creates or updates the Vertical Pod Autoscaler for the replicator

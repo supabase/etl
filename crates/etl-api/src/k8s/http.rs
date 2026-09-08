@@ -84,8 +84,6 @@ const POSTGRES_PASSWORD_NAME: &str = "password";
 const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
 /// StatefulSet name suffix for the replicator workload.
 const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator";
-/// Previous StatefulSet suffix kept for existing pipeline cleanup/status.
-const LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
 /// Application label suffix used to group resources.
 const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
 /// Container name suffix for the replicator container.
@@ -806,7 +804,6 @@ impl K8sClient for HttpK8sClient {
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
         workload_config: &ReplicatorWorkloadConfig,
-        wait: bool,
     ) -> Result<(), K8sError> {
         debug!("patching stateful set");
 
@@ -817,17 +814,6 @@ impl K8sClient for HttpK8sClient {
         );
 
         let stateful_set_name = create_stateful_set_name(resource_prefix);
-        let legacy_stateful_set_name = create_legacy_stateful_set_name(resource_prefix);
-        if legacy_stateful_set_name != stateful_set_name {
-            delete_resource(
-                &self.stateful_sets_api,
-                &legacy_stateful_set_name,
-                "StatefulSet",
-                wait,
-            )
-            .await?;
-        }
-
         let environment = Environment::load().map_err(K8sError::Config)?;
         let container_environment = create_container_environment_json(
             &self.k8s_config,
@@ -949,22 +935,18 @@ impl K8sClient for HttpK8sClient {
         resource_prefix: &str,
         wait: bool,
     ) -> Result<(), K8sError> {
-        for name in [
-            create_stateful_set_name(resource_prefix),
-            create_legacy_stateful_set_name(resource_prefix),
-        ] {
-            delete_resource(&self.stateful_sets_api, &name, "StatefulSet", wait).await?;
-        }
+        delete_resource(
+            &self.stateful_sets_api,
+            &create_stateful_set_name(resource_prefix),
+            "StatefulSet",
+            wait,
+        )
+        .await?;
         if wait {
             // Pods can outlive a StatefulSet deleted previously with background
             // propagation.
             wait_for_deletion(resource_prefix, "Pod", async || {
-                for name in pod_names_for_status(resource_prefix) {
-                    if self.pods_api.get_opt(&name).await?.is_some() {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
+                Ok(self.pods_api.get_opt(&create_pod_name(resource_prefix)).await?.is_none())
             })
             .await?;
         }
@@ -1041,18 +1023,7 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
-        let mut pod = None;
-        for pod_name in pod_names_for_status(resource_prefix) {
-            match self.pods_api.get(&pod_name).await {
-                Ok(found_pod) => {
-                    pod = Some(found_pod);
-                    break;
-                }
-                Err(kube::Error::Api(err)) if err.code == 404 => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        let Some(pod) = pod else {
+        let Some(pod) = self.pods_api.get_opt(&create_pod_name(resource_prefix)).await? else {
             return Ok(PodStatus::Stopped);
         };
 
@@ -1120,24 +1091,8 @@ fn create_stateful_set_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}")
 }
 
-fn create_legacy_stateful_set_name(prefix: &str) -> String {
-    format!("{prefix}-{LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX}")
-}
-
 fn create_pod_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0")
-}
-
-fn create_legacy_pod_name(prefix: &str) -> String {
-    format!("{prefix}-{LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX}-0")
-}
-
-fn unique_current_and_legacy_names(current: String, legacy: String) -> Vec<String> {
-    if current == legacy { vec![current] } else { vec![current, legacy] }
-}
-
-fn pod_names_for_status(prefix: &str) -> Vec<String> {
-    unique_current_and_legacy_names(create_pod_name(prefix), create_legacy_pod_name(prefix))
 }
 
 fn create_replicator_app_name(prefix: &str) -> String {
@@ -2503,18 +2458,11 @@ mod tests {
     }
 
     #[test]
-    fn replicator_workload_names_use_short_suffix_and_keep_legacy_pod_lookup() {
+    fn replicator_workload_names_use_short_suffix() {
         let prefix = create_k8s_object_prefix("tenant-1", 42);
 
         assert_eq!(create_stateful_set_name(&prefix), "tenant-1-42-replicator");
-        assert_eq!(create_legacy_stateful_set_name(&prefix), "tenant-1-42-replicator-stateful-set");
-        assert_eq!(
-            pod_names_for_status(&prefix),
-            vec![
-                "tenant-1-42-replicator-0".to_owned(),
-                "tenant-1-42-replicator-stateful-set-0".to_owned(),
-            ]
-        );
+        assert_eq!(create_pod_name(&prefix), "tenant-1-42-replicator-0");
     }
 
     #[test]

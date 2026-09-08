@@ -239,7 +239,6 @@ impl K8sClient for MockK8sClient {
         _resource_prefix: &str,
         _identity: &PipelineRuntimeIdentity,
         workload_config: &ReplicatorWorkloadConfig,
-        _wait: bool,
     ) -> Result<(), K8sError> {
         *self.state.last_replicator_image.write().await =
             Some(workload_config.replicator_image.clone());

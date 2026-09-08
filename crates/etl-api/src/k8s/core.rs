@@ -215,7 +215,6 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
             ducklake_maintenance: ducklake_maintenance_for_kubernetes,
             log_level,
         },
-        wait,
     )
     .await?;
 
@@ -572,10 +571,9 @@ async fn create_or_update_replicator_stateful_set(
     resource_prefix: &str,
     identity: &PipelineRuntimeIdentity,
     workload_config: &ReplicatorWorkloadConfig,
-    wait: bool,
 ) -> Result<(), K8sCoreError> {
     k8s_client
-        .create_or_update_replicator_stateful_set(resource_prefix, identity, workload_config, wait)
+        .create_or_update_replicator_stateful_set(resource_prefix, identity, workload_config)
         .await?;
 
     Ok(())
@@ -586,7 +584,6 @@ async fn create_or_update_replicator_workload(
     resource_prefix: &str,
     identity: &PipelineRuntimeIdentity,
     workload_config: ReplicatorWorkloadConfig,
-    wait: bool,
 ) -> Result<(), K8sCoreError> {
     // Apply the VPA first so newly admitted Pods observe its intended update mode
     // and bounds.
@@ -603,7 +600,6 @@ async fn create_or_update_replicator_workload(
         resource_prefix,
         identity,
         &workload_config,
-        wait,
     )
     .await
 }
@@ -1010,7 +1006,6 @@ mod tests {
             resource_prefix: &str,
             _identity: &PipelineRuntimeIdentity,
             _workload_config: &ReplicatorWorkloadConfig,
-            _wait: bool,
         ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("stateful-set:{resource_prefix}"));
             Ok(())
@@ -1140,7 +1135,6 @@ mod tests {
                 ducklake_maintenance: None,
                 log_level: Default::default(),
             },
-            true,
         )
         .await
         .unwrap();
@@ -1166,7 +1160,6 @@ mod tests {
                 ducklake_maintenance: None,
                 log_level: Default::default(),
             },
-            true,
         )
         .await
         .unwrap();
@@ -1191,7 +1184,6 @@ mod tests {
                 ducklake_maintenance: None,
                 log_level: Default::default(),
             },
-            true,
         )
         .await
         .unwrap();
