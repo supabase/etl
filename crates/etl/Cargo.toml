@@ -18,7 +18,7 @@ test-utils = ["etl-postgres/test-utils", "dep:proptest"]
 failpoints = ["fail/failpoints"]
 egress = []
 fuzzing = []
-hotpath = ["hotpath/hotpath", "hotpath/tokio"]
+hotpath = ["hotpath/hotpath", "hotpath/tokio", "etl-telemetry/hotpath"]
 
 [dependencies]
 

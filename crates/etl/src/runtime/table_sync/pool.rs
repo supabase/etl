@@ -4,10 +4,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use tokio::{
-    sync::{Mutex, RwLock},
-    task::JoinSet,
-};
+use hotpath::wrap::tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinSet;
 use tracing::{debug, warn};
 
 use crate::{
@@ -52,7 +50,6 @@ impl std::fmt::Display for TableSyncWorkerId {
 /// Locking order during spawn is: workers_join_set lock -> workers write lock.
 /// This ensures that [`Self::wait_all`] (which holds the workers_join_set lock)
 /// blocks any new spawns until all existing workers have completed.
-#[derive(Debug)]
 pub(crate) struct TableSyncWorkerPool {
     /// Monotonically increasing counter for generating unique run IDs.
     next_run_id: AtomicU64,
@@ -67,8 +64,14 @@ impl TableSyncWorkerPool {
     pub(crate) fn new() -> Self {
         Self {
             next_run_id: AtomicU64::new(0),
-            workers_join_set: Mutex::new(JoinSet::new()),
-            workers: RwLock::new(HashMap::new()),
+            workers_join_set: hotpath::mutex!(
+                tokio::sync::Mutex::new(JoinSet::new()),
+                label = "table_sync_worker_tasks"
+            ),
+            workers: hotpath::rw_lock!(
+                tokio::sync::RwLock::new(HashMap::new()),
+                label = "table_sync_worker_registry"
+            ),
         }
     }
 
@@ -221,5 +224,13 @@ impl TableSyncWorkerPool {
 impl Default for TableSyncWorkerPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Debug for TableSyncWorkerPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TableSyncWorkerPool")
+            .field("next_run_id", &self.next_run_id)
+            .finish_non_exhaustive()
     }
 }
