@@ -154,15 +154,16 @@ function rewriteAgentLinks(markdown: string) {
 
 function rewriteAgentCallouts(markdown: string) {
   return markdown.replace(
-    /<Callout\b[^>]*\btitle="([^"]+)"[^>]*>\s*([\s\S]*?)\s*<\/Callout>/g,
-    (_match, title: string, body: string) => {
+    /<Callout\b([^>]*)>\s*([\s\S]*?)\s*<\/Callout>/g,
+    (_match, attributes: string, body: string) => {
+      const title = attributes.match(/\btitle="([^"]+)"/)?.[1];
       const quotedBody = body
         .trim()
         .split('\n')
         .map((line) => (line.length > 0 ? `> ${line.trimStart()}` : '>'))
         .join('\n');
 
-      return `> **${title}**\n>\n${quotedBody}`;
+      return title ? `> **${title}**\n>\n${quotedBody}` : quotedBody;
     },
   );
 }

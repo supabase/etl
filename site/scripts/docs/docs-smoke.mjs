@@ -303,6 +303,14 @@ async function checkSeoEndpoints() {
     markdownTexts.every((text) => !text.includes('<Callout')),
     'Agent-readable Markdown contains presentation-only callout markup.',
   );
+  const benchmarksText = markdownTexts[markdownPaths.indexOf('/reference/benchmarks.md')];
+  assert(
+    /^> Performance differences/m.test(benchmarksText) &&
+      benchmarksText.replace(/^>\s?/gm, '').replace(/\s+/g, ' ').includes(
+        'Performance differences may also reflect configuration, workload, and deployment choices, rather than the CDC tools alone.',
+      ),
+    'The untitled benchmark callout is not preserved as a Markdown blockquote.',
+  );
   const destinationsText = markdownTexts[8];
   assert(
     destinationsText.includes('**Status: Stable**') &&
