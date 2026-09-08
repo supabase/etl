@@ -1569,9 +1569,9 @@ pub(crate) async fn rollback_tables(
             rolled_back_tables
         }
         Err(reset_error) => {
-            if let Some(Err(error)) = runtime_restore_result {
+            if let Some(Err(restore_error)) = runtime_restore_result {
                 error!(
-                    error = %error,
+                    error = %restore_error,
                     "failed to restore pipeline runtime after table reset failure"
                 );
             }
