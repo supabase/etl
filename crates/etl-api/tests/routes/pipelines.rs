@@ -925,6 +925,7 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     init_test_tracing();
     let k8s_state = MockK8sState::default();
     k8s_state.set_pod_status(PodStatus::Stopped).await;
+    k8s_state.set_stateful_set_active(false);
     let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
     create_default_image(&app).await;
     let tenant_id = &create_tenant(&app).await;
@@ -1396,6 +1397,7 @@ async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() 
     // Arrange
     let k8s_state = MockK8sState::default();
     k8s_state.set_pod_status(PodStatus::Stopped).await;
+    k8s_state.set_stateful_set_active(false);
     let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
     let tenant_id = create_tenant(&app).await;
     let source_id = create_source(&app, &tenant_id).await;
@@ -2001,6 +2003,7 @@ async fn a_stopped_pipeline_cannot_be_restarted() {
     init_test_tracing();
     let k8s_state = MockK8sState::default();
     k8s_state.set_pod_status(PodStatus::Stopped).await;
+    k8s_state.set_stateful_set_active(false);
     let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
     create_default_image(&app).await;
     let tenant_id = create_tenant(&app).await;
