@@ -153,6 +153,7 @@ async function checkSeoEndpoints() {
     '/explanation/architecture.md',
     '/explanation/schema-changes.md',
     '/reference/destinations.md',
+    '/reference/benchmarks.md',
     '/explanation/events.md',
     '/explanation/traits.md',
   ];
@@ -267,6 +268,7 @@ async function checkSeoEndpoints() {
     `${canonicalBaseUrl}/explanation/architecture/`,
     `${canonicalBaseUrl}/explanation/schema-changes/`,
     `${canonicalBaseUrl}/reference/destinations/`,
+    `${canonicalBaseUrl}/reference/benchmarks/`,
     `${canonicalBaseUrl}/explanation/events/`,
     `${canonicalBaseUrl}/explanation/traits/`,
   ];

@@ -1,0 +1,47 @@
+---
+title: Benchmarks
+description: Independent Supabase ETL performance results, tested versions, and plans for future benchmarks.
+icon: Gauge
+---
+
+## Independent benchmark
+
+In Hardbyte's [July 22, 2026 CDC comparison](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady),
+Supabase ETL recorded the **lowest steady-state tail latency and smallest
+measured runtime memory footprint among six tested configurations**:
+
+- **~33× lower tail latency than Debezium Server:** 26 ms vs. 848 ms.
+- **~125× lower measured runtime memory:** 13.0 MB vs. 1,629.3 MB for
+  Debezium Server.
+
+The single-run comparison delivered **200 source changes/s to four fast HTTP
+consumers** on PostgreSQL 18.3. Latency is the worst consumer's median rolling
+30-second p99. Memory sums sampled peaks (ETL process RSS and Debezium Docker
+memory), which need not coincide: four ETL pipelines in one Rust process versus
+four Debezium Server JVMs, excluding source Postgres and the harness. Debezium
+Server used [3.1.3.Final](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/cdc-20260722T021356Z-dfe217/manifest.json).
+
+The benchmark used a [custom `HttpDestination` implementation](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/etl-cdc-bench/src/main.rs)
+that sent changes to the benchmark's HTTP consumers, paired with **`MemoryStore`
+for in-memory state and checkpoint storage**. It did not use a built-in warehouse
+destination or `PostgresStore`.
+
+**Destination and store implementations affect end-to-end performance.**
+Destination encoding, batching, network latency, and durability behavior can
+change throughput, latency, and memory use. `MemoryStore` avoids the database
+round trips and persistent checkpoint writes required by `PostgresStore`.
+These results therefore describe the tested HTTP destination and in-memory
+store configuration; the same ratios should not be assumed for other
+destinations or stores.
+
+The benchmark [pinned ETL](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/etl-cdc-bench/Cargo.toml)
+to [commit `d206d66e`](https://github.com/supabase/etl/commit/d206d66eabaa3cfd15872eba761c5131e22a7f75),
+a July 2026 snapshot, with a 20 ms batch-fill timeout. Current development is
+newer.
+
+## Our own benchmarks
+
+We plan to run and publish our own benchmarks as Supabase ETL matures and
+product stability improves. Until then, the independent results above describe
+the tested July 2026 version and configuration; they do not measure the
+performance impact of subsequent improvements.
