@@ -1,4 +1,4 @@
-use std::{ops::DerefMut, sync::Arc};
+use std::{error::Error as StdError, ops::DerefMut, sync::Arc};
 
 use axum::{
     Extension, Json,
@@ -19,6 +19,8 @@ use etl_postgres::{
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
+use tracing::error;
+use tracing::log::warn;
 use utoipa::ToSchema;
 
 use crate::{
@@ -200,9 +202,31 @@ impl From<crate::k8s::core::K8sCoreError> for PipelineError {
 }
 
 impl PipelineError {
+    /// Returns whether this error was caused by a Kubernetes deletion timeout.
+    fn is_resource_deletion_timeout(&self) -> bool {
+        match self {
+            PipelineError::K8s(K8sError::ResourceDeletionTimeout { .. }) => true,
+            PipelineError::MaintenanceMaterialization(error) => {
+                let mut source = StdError::source(error);
+                while let Some(error) = source {
+                    if matches!(
+                        error.downcast_ref::<K8sError>(),
+                        Some(K8sError::ResourceDeletionTimeout { .. })
+                    ) {
+                        return true;
+                    }
+                    source = error.source();
+                }
+
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn to_message(&self) -> String {
         match self {
-            PipelineError::K8s(K8sError::ResourceDeletionTimeout { .. }) => {
+            error if error.is_resource_deletion_timeout() => {
                 "Pipeline resources are still stopping. Retry once the pipeline has stopped."
                     .to_owned()
             }
@@ -245,9 +269,7 @@ impl PipelineError {
 impl IntoResponse for PipelineError {
     fn into_response(self) -> Response {
         let status_code = match &self {
-            PipelineError::K8s(K8sError::ResourceDeletionTimeout { .. }) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            error if error.is_resource_deletion_timeout() => StatusCode::SERVICE_UNAVAILABLE,
             PipelineError::InvalidConfig(_)
             | PipelineError::ReplicatorNotFound(_)
             | PipelineError::ImageNotFound(_)
@@ -927,12 +949,12 @@ pub(crate) async fn delete_pipeline(
     .await
     {
         Ok(source_pool) => Some(source_pool),
-        Err(error) => {
-            tracing::warn!(
+        Err(err) => {
+            warn!(
                 tenant_id = %tenant_id,
                 pipeline_id = pipeline.id,
                 source_id = pipeline.source_id,
-                error = %error,
+                error = %err,
                 "failed to connect to source database during pipeline deletion, skipping source cleanup",
             );
 
@@ -1495,38 +1517,69 @@ pub(crate) async fn rollback_tables(
     let resume =
         should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await?;
     delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, true).await?;
-    let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
 
-    // Replace every selected state in one transaction so the reset never
-    // commits a partially updated table set.
-    let mut rolled_back_tables = Vec::with_capacity(target_table_ids.len());
-    for table_id in target_table_ids {
-        let initial_state = reset_table_state(&mut source_txn, pipeline_id, table_id).await?;
+    let reset_result: Result<Vec<RolledBackTable>, PipelineError> = async {
+        let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
 
-        rolled_back_tables.push(RolledBackTable {
-            table_id: table_id.into_inner(),
-            new_state: initial_state.into(),
-        });
+        // Replace every selected state in one transaction so the reset never
+        // commits a partially updated table set.
+        let mut rolled_back_tables = Vec::with_capacity(target_table_ids.len());
+        for table_id in target_table_ids {
+            let initial_state = reset_table_state(&mut source_txn, pipeline_id, table_id).await?;
+
+            rolled_back_tables.push(RolledBackTable {
+                table_id: table_id.into_inner(),
+                new_state: initial_state.into(),
+            });
+        }
+
+        source_txn.commit().await.map_err(PipelineError::SourceDatabase)?;
+
+        Ok(rolled_back_tables)
     }
+    .await;
 
-    source_txn.commit().await.map_err(PipelineError::SourceDatabase)?;
-
-    if resume {
-        create_or_update_pipeline_runtime_in_k8s(
-            k8s_client.as_ref(),
-            tenant_id,
-            pipeline,
-            replicator,
-            image,
-            source,
-            destination,
-            api_config.supabase_api_url.as_deref(),
-            api_config.replicator.destination_defaults.ducklake.copy_buffer,
-            source_tls_config.get_tls_config(),
-            true,
+    let runtime_restore_result = if resume {
+        Some(
+            create_or_update_pipeline_runtime_in_k8s(
+                k8s_client.as_ref(),
+                tenant_id,
+                pipeline,
+                replicator,
+                image,
+                source,
+                destination,
+                api_config.supabase_api_url.as_deref(),
+                api_config.replicator.destination_defaults.ducklake.copy_buffer,
+                source_tls_config.get_tls_config(),
+                true,
+            )
+            .await
+            .map_err(PipelineError::from),
         )
-        .await?;
-    }
+    } else {
+        None
+    };
+
+    let rolled_back_tables = match reset_result {
+        Ok(rolled_back_tables) => {
+            if let Some(result) = runtime_restore_result {
+                result?;
+            }
+
+            rolled_back_tables
+        }
+        Err(reset_error) => {
+            if let Some(Err(error)) = runtime_restore_result {
+                error!(
+                    error = %error,
+                    "failed to restore pipeline runtime after table reset failure"
+                );
+            }
+
+            return Err(reset_error);
+        }
+    };
 
     let response = RollbackTablesResponse { pipeline_id, tables: rolled_back_tables };
 
@@ -1672,4 +1725,31 @@ pub(crate) async fn validate_pipeline(
     };
 
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use etl_maintenance::MaintenanceMaterializationError;
+
+    use super::*;
+
+    /// Maintenance deletion timeouts retain their retryable API classification.
+    #[test]
+    fn maintenance_deletion_timeout_returns_service_unavailable() {
+        let error = || {
+            PipelineError::MaintenanceMaterialization(MaintenanceMaterializationError::kubernetes(
+                K8sError::ResourceDeletionTimeout {
+                    kind: "DuckLakeMaintenance",
+                    name: "example-pipeline".to_owned(),
+                    timeout_seconds: 30,
+                },
+            ))
+        };
+
+        assert_eq!(
+            error().to_message(),
+            "Pipeline resources are still stopping. Retry once the pipeline has stopped."
+        );
+        assert_eq!(error().into_response().status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

@@ -22,6 +22,7 @@ pub(crate) struct MockK8sState {
     vpa_delete_calls: Arc<AtomicUsize>,
     deletion_timeout: Arc<AtomicBool>,
     waited_for_deletion: Arc<AtomicBool>,
+    stateful_set_active: Arc<AtomicBool>,
     ducklake_maintenance_create_calls: Arc<AtomicUsize>,
     last_replicator_image: Arc<RwLock<Option<String>>>,
     last_replicator_resource_override:
@@ -36,6 +37,7 @@ impl Default for MockK8sState {
             vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
             deletion_timeout: Arc::new(AtomicBool::new(false)),
             waited_for_deletion: Arc::new(AtomicBool::new(false)),
+            stateful_set_active: Arc::new(AtomicBool::new(false)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
             last_replicator_image: Arc::new(RwLock::new(None)),
             last_replicator_resource_override: Arc::new(RwLock::new(None)),
@@ -56,6 +58,11 @@ impl MockK8sState {
 
     pub(crate) async fn set_pod_status(&self, pod_status: PodStatus) {
         *self.pod_status.write().await = pod_status;
+    }
+
+    /// Controls whether the StatefulSet represents active desired state.
+    pub(crate) fn set_stateful_set_active(&self, active: bool) {
+        self.stateful_set_active.store(active, Ordering::Relaxed);
     }
 
     pub(crate) fn create_calls(&self) -> usize {
@@ -285,11 +292,11 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn replicator_stateful_set_exists(
+    async fn replicator_stateful_set_is_active(
         &self,
         _resource_prefix: &str,
     ) -> Result<bool, K8sError> {
-        Ok(false)
+        Ok(self.state.stateful_set_active.load(Ordering::Relaxed))
     }
 
     async fn create_or_update_ducklake_maintenance(

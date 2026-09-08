@@ -2766,6 +2766,7 @@ async fn rollback_tables_all_tables_succeeds() {
 async fn rollback_tables_all_tables_is_transactional() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
+    app.k8s_state.set_pod_status(PodStatus::Started).await;
 
     create_tables_with_states(
         &source_db_pool,
@@ -2815,6 +2816,7 @@ async fn rollback_tables_all_tables_is_transactional() {
     .await
     .unwrap();
 
+    let creates_before = app.k8s_state.create_calls();
     let response = app
         .rollback_tables(
             &tenant_id,
@@ -2833,6 +2835,7 @@ async fn rollback_tables_all_tables_is_transactional() {
     .unwrap();
     states.sort();
     assert_eq!(states, vec!["errored", "ready"]);
+    assert!(app.k8s_state.create_calls() > creates_before);
 
     drop_pg_database(&source_db_config).await;
 }
@@ -2842,7 +2845,7 @@ async fn rollback_tables_all_tables_is_transactional() {
 #[tokio::test(flavor = "multi_thread")]
 async fn rollback_tables_recreates_only_active_pipelines() {
     init_test_tracing();
-    for status in [PodStatus::Started, PodStatus::Stopped] {
+    for status in [PodStatus::Started, PodStatus::Stopping, PodStatus::Stopped] {
         let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
             setup_pipeline_with_source_db().await;
         app.k8s_state.set_pod_status(status).await;

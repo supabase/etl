@@ -967,16 +967,17 @@ impl K8sClient for HttpK8sClient {
         .await
     }
 
-    async fn replicator_stateful_set_exists(
+    async fn replicator_stateful_set_is_active(
         &self,
         resource_prefix: &str,
     ) -> Result<bool, K8sError> {
-        debug!("checking stateful set existence");
+        debug!("checking whether stateful set is active");
 
         let stateful_set =
             self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?;
 
-        Ok(stateful_set.is_some())
+        Ok(stateful_set
+            .is_some_and(|stateful_set| stateful_set.metadata.deletion_timestamp.is_none()))
     }
 
     async fn create_or_update_ducklake_maintenance(

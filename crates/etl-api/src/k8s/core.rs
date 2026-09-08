@@ -271,9 +271,9 @@ pub async fn is_replicator_pod_stopped(
 /// Returns `true` if the existing Kubernetes pipeline runtime should be
 /// reconciled.
 ///
-/// A stopped pod normally means the pipeline is intentionally inactive. A
-/// StatefulSet without a pod means Kubernetes still has desired runtime state,
-/// so reconciliation should repair or migrate it.
+/// A stopped or stopping pod is reconciled only while its StatefulSet still
+/// represents active desired state. A StatefulSet without a pod is repaired,
+/// while a missing or terminating StatefulSet represents an intentional stop.
 pub async fn should_reconcile_pipeline_runtime(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
@@ -281,11 +281,11 @@ pub async fn should_reconcile_pipeline_runtime(
 ) -> Result<bool, K8sCoreError> {
     let resource_prefix = create_k8s_object_prefix(tenant_id, replicator_id);
     let pod_status = k8s_client.get_replicator_pod_status(&resource_prefix).await?;
-    if !matches!(pod_status, PodStatus::Stopped) {
+    if !matches!(pod_status, PodStatus::Stopped | PodStatus::Stopping) {
         return Ok(true);
     }
 
-    Ok(k8s_client.replicator_stateful_set_exists(&resource_prefix).await?)
+    Ok(k8s_client.replicator_stateful_set_is_active(&resource_prefix).await?)
 }
 
 /// Returns `true` when the replicator is active in Kubernetes.
@@ -690,7 +690,7 @@ mod tests {
     struct RecordingK8sClient {
         calls: Arc<Mutex<Vec<String>>>,
         pod_status: PodStatus,
-        stateful_set_exists: bool,
+        stateful_set_active: bool,
     }
 
     impl RecordingK8sClient {
@@ -704,7 +704,7 @@ mod tests {
             Self {
                 calls: Arc::default(),
                 pod_status: PodStatus::Stopped,
-                stateful_set_exists: false,
+                stateful_set_active: false,
             }
         }
     }
@@ -1038,11 +1038,11 @@ mod tests {
             Ok(())
         }
 
-        async fn replicator_stateful_set_exists(
+        async fn replicator_stateful_set_is_active(
             &self,
             _resource_prefix: &str,
         ) -> Result<bool, K8sError> {
-            Ok(self.stateful_set_exists)
+            Ok(self.stateful_set_active)
         }
 
         async fn create_or_update_ducklake_maintenance(
@@ -1205,10 +1205,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_pod_with_stateful_set_is_reconciled() {
+    async fn stopped_pod_with_active_stateful_set_is_reconciled() {
         let client = RecordingK8sClient {
             pod_status: PodStatus::Stopped,
-            stateful_set_exists: true,
+            stateful_set_active: true,
             ..Default::default()
         };
 
@@ -1219,10 +1219,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_pod_without_stateful_set_is_not_reconciled() {
+    async fn stopped_pod_without_active_stateful_set_is_not_reconciled() {
         let client = RecordingK8sClient {
             pod_status: PodStatus::Stopped,
-            stateful_set_exists: false,
+            stateful_set_active: false,
+            ..Default::default()
+        };
+
+        let should_reconcile =
+            should_reconcile_pipeline_runtime(&client, "tenant-42", 4).await.unwrap();
+
+        assert!(!should_reconcile);
+    }
+
+    #[tokio::test]
+    async fn stopping_pod_with_active_stateful_set_is_reconciled() {
+        let client = RecordingK8sClient {
+            pod_status: PodStatus::Stopping,
+            stateful_set_active: true,
+            ..Default::default()
+        };
+
+        let should_reconcile =
+            should_reconcile_pipeline_runtime(&client, "tenant-42", 4).await.unwrap();
+
+        assert!(should_reconcile);
+    }
+
+    #[tokio::test]
+    async fn stopping_pod_without_active_stateful_set_is_not_reconciled() {
+        let client = RecordingK8sClient {
+            pod_status: PodStatus::Stopping,
+            stateful_set_active: false,
             ..Default::default()
         };
 

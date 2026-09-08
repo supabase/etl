@@ -53,8 +53,9 @@ The deletion phase has a shared 30-second deadline. If it expires, rollback retu
 Kubernetes continues shutdown. Retry after shutdown completes; if the pipeline is
 then stopped, start it explicitly after the successful rollback. If recreation
 fails after the database commit, the table reset remains applied and the pipeline
-can be started explicitly. Clients must not send a follow-up start or restart after
-a successful rollback.
+can be started explicitly. If the state transaction fails after shutdown, the API
+attempts to restore a previously active runtime before returning the reset error.
+Clients must not send a follow-up start or restart after a successful rollback.
 
 Kubernetes deletion methods take an explicit `wait` boolean. `false` waits only for
 acceptance; `true` polls for absence with a bounded timeout. Runtime operations pass
