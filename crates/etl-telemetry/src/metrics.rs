@@ -7,6 +7,24 @@ use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandl
 use tokio::task::JoinHandle;
 use tracing::trace;
 
+/// Project identity attached to standalone service metrics.
+const PROJECT_LABEL: &str = "project";
+/// Pipeline identity attached to standalone service metrics.
+const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Destination kind attached to standalone service metrics.
+const DESTINATION_LABEL: &str = "destination";
+
+/// Errors starting the Prometheus recorder or listener.
+#[derive(Debug, thiserror::Error)]
+pub enum MetricsError {
+    /// Prometheus recorder or exporter initialization failed.
+    #[error("Failed to initialize Prometheus metrics")]
+    Prometheus(#[from] BuildError),
+    /// The metrics listener, runtime, or thread could not be created.
+    #[error("Failed to start the metrics listener")]
+    Io(#[from] std::io::Error),
+}
+
 // Global cache for the Prometheus handle used by [`init_metrics_handle`].
 //
 // A [`Mutex`] is used instead of [`Once`], [`OnceCell`], or [`OnceLock`]
@@ -99,24 +117,39 @@ pub fn init_metrics(
     project_ref: Option<&str>,
     pipeline_id: Option<u64>,
     destination: Option<&str>,
-) -> Result<(), BuildError> {
+) -> Result<(), MetricsError> {
     let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
         std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
         9000,
     ));
 
     if let Some(project_ref) = project_ref {
-        builder = builder.add_global_label("project", project_ref);
+        builder = builder.add_global_label(PROJECT_LABEL, project_ref);
     }
 
     if let Some(pipeline_id) = pipeline_id {
-        builder = builder.add_global_label("pipeline_id", pipeline_id.to_string());
+        builder = builder.add_global_label(PIPELINE_ID_LABEL, pipeline_id.to_string());
     }
 
     if let Some(destination) = destination {
-        builder = builder.add_global_label("destination", destination);
+        builder = builder.add_global_label(DESTINATION_LABEL, destination);
     }
 
+    #[cfg(feature = "hotpath")]
+    {
+        let mut labels = Vec::new();
+        if let Some(project_ref) = project_ref {
+            labels.push((PROJECT_LABEL, project_ref.to_owned()));
+        }
+        if let Some(pipeline_id) = pipeline_id {
+            labels.push((PIPELINE_ID_LABEL, pipeline_id.to_string()));
+        }
+        if let Some(destination) = destination {
+            labels.push((DESTINATION_LABEL, destination.to_owned()));
+        }
+        crate::profiling::install_metrics_listener(builder, labels)?;
+    }
+    #[cfg(not(feature = "hotpath"))]
     builder.install()?;
 
     Ok(())

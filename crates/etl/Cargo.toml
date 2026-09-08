@@ -18,6 +18,7 @@ test-utils = ["etl-postgres/test-utils", "dep:proptest"]
 failpoints = ["fail/failpoints"]
 egress = []
 fuzzing = []
+hotpath = ["hotpath/hotpath", "hotpath/tokio"]
 
 [dependencies]
 
@@ -27,6 +28,7 @@ etl-config = { workspace = true }
 etl-postgres = { workspace = true, features = ["tokio", "store"] }
 fail = { workspace = true }
 futures = { workspace = true }
+hotpath = { workspace = true, features = ["tokio"] }
 memchr = { workspace = true }
 metrics = { workspace = true }
 pg_escape = { workspace = true }

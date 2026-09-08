@@ -95,6 +95,9 @@ http://127.0.0.1:8010/health_check, Swagger at `/swagger-ui`. See
 
 ## Everyday commands
 
+For opt-in API, replication, and lock profiling through the existing Prometheus
+endpoints, see [Hotpath profiling](docs/hotpath.md).
+
 `cargo x` is the task runner. `cargo x --help` lists every command.
 
 ```bash

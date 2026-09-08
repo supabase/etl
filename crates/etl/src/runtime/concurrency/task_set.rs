@@ -73,6 +73,7 @@ impl TaskSet {
     /// synchronously while the registry is locked and should only construct the
     /// returned future. This keeps large task futures out of callers' async
     /// state while they wait for registration.
+    #[hotpath::measure]
     pub async fn spawn_with<F, Fut>(&self, task_factory: F)
     where
         F: FnOnce() -> Fut + Send,
@@ -115,6 +116,7 @@ impl TaskSet {
     ///
     /// If a tracked task panics, this method returns an error without a guard.
     /// Tasks not yet joined remain tracked and continue running.
+    #[hotpath::measure]
     pub async fn drain(&self) -> EtlResult<TaskSetDrainGuard> {
         let mut inner = Arc::clone(&self.inner).lock_owned().await;
 

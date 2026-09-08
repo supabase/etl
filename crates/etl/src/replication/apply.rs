@@ -2232,6 +2232,7 @@ where
     }
 
     /// Dispatches one streaming write through the shared async-result path.
+    #[hotpath::measure]
     async fn dispatch_write_events(
         &mut self,
         event_batch: EventBatch,
@@ -2666,6 +2667,7 @@ where
     ///
     /// Builds a replication mask from the relation message and stores it for
     /// use by DML handlers.
+    #[hotpath::measure]
     async fn handle_relation_message(
         &mut self,
         message: &protocol::RelationBody,
@@ -3446,6 +3448,7 @@ where
     ///
     /// Test failpoints deliberately return the candidate without writing it so
     /// recovery tests can model a lost checkpoint write.
+    #[hotpath::measure]
     async fn persist_replication_checkpoint(&self, checkpoint_lsn: PgLsn) -> EtlResult<PgLsn> {
         let worker_type = self.worker_context.worker_type();
 

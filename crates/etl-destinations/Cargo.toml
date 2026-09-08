@@ -14,6 +14,7 @@ doctest = false
 
 [features]
 default = ["tls-rustls-ring"]
+hotpath = ["etl/hotpath", "hotpath/hotpath"]
 tls-rustls-ring = [
     "etl/tls-rustls-ring",
     "etl-maintenance?/tls-rustls-ring",
@@ -118,6 +119,7 @@ etl-config = { workspace = true }
 etl-maintenance = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls", "aws-lc-rs"] }
+hotpath = { workspace = true, features = ["parking_lot"] }
 humantime = { workspace = true, optional = true }
 hyper-rustls = { workspace = true, optional = true, features = ["aws-lc-rs", "http1", "webpki-tokio"] }
 hyper-util = { workspace = true, optional = true, features = ["client-legacy", "http1", "tokio"] }
