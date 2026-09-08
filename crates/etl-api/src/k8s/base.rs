@@ -30,6 +30,21 @@ pub enum K8sError {
     /// server.
     #[error("An error occurred with kube when dealing with K8s: {0}")]
     Kube(#[from] kube::Error),
+    /// A StatefulSet restart could not be initiated before its deadline.
+    #[error("Timed out initiating restart of Kubernetes StatefulSet '{name}'")]
+    StatefulSetRestartTimeout {
+        /// StatefulSet name.
+        name: String,
+    },
+    /// A restart encountered missing identity metadata or an unexpected pod
+    /// owner.
+    #[error("Invalid Kubernetes {kind} resource '{name}' encountered during restart")]
+    InvalidRestartResource {
+        /// Kubernetes resource kind.
+        kind: &'static str,
+        /// Kubernetes resource name.
+        name: String,
+    },
     /// A Kubernetes resource remained present after deletion was requested.
     #[error(
         "Timed out waiting for Kubernetes {kind} resource '{name}' to be deleted after \

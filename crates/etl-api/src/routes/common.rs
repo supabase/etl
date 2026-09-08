@@ -72,7 +72,9 @@ async fn restart_would_perform_table_sync(
 /// transaction. The helper reads that state once and uses the same loaded
 /// pipeline and source configuration for both sync preflight and Kubernetes
 /// materialization. Updating the StatefulSet changes the pod template restart
-/// annotation.
+/// annotation and requests deletion of an outdated pod, including when an
+/// unready pod blocks the native rolling update. This does not wait for the
+/// replacement to become ready.
 ///
 /// This forced recreation is part of the contract. The replicator loads its
 /// mounted config and secret-backed environment when the process starts, so a
