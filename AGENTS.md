@@ -178,7 +178,9 @@ lints.
 - Compound names: singular attributive modifiers (`event_batch`,
   `EventBatchMetadata`), not `events_batch`. Keep plurals when the noun is the
   head (`table_rows`, `write_events`). Preserve established external names.
-- Item order: helpers before use; `struct`, inherent `impl`, then trait impls.
+- Item order: imports first, then module-level constants, then other items.
+  Never place constants above imports. Define helpers before the items that use
+  them; order related items as `struct`, inherent `impl`, then trait impls.
   In inherent impls: constructors, public methods, private helpers.
 - Do not add `#[must_use]` unless the user asks. Rustdoc goes **above** all
   attributes on the item (`#[derive]`, `#[serde]`, `#[cfg_attr]`, macros).

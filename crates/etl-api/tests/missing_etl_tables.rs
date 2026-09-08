@@ -1,6 +1,5 @@
 use etl_api::routes::pipelines::{
     CreatePipelineRequest, CreatePipelineResponse, RollbackTablesRequest, RollbackTablesTarget,
-    RollbackType,
 };
 use etl_config::shared::PgConnectionConfig;
 use etl_postgres::sqlx::test_utils::drop_pg_database;
@@ -67,10 +66,7 @@ async fn rollback_tables_fails_when_etl_tables_missing() {
     let (pipeline_id, _source_pool, source_db_config) =
         create_pipeline_with_unmigrated_source_db(&app, &tenant_id).await;
 
-    let req = RollbackTablesRequest {
-        target: RollbackTablesTarget::SingleTable { table_id: 1 },
-        rollback_type: RollbackType::Individual,
-    };
+    let req = RollbackTablesRequest { target: RollbackTablesTarget::SingleTable { table_id: 1 } };
     let response = app.rollback_tables(&tenant_id, pipeline_id, &req).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(

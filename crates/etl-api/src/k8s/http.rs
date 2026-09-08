@@ -15,7 +15,7 @@ use k8s_openapi::{
 };
 use kube::{
     Client,
-    api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, PropagationPolicy},
     core::{ApiResource, DynamicObject, GroupVersionKind},
 };
 use serde_json::json;
@@ -37,6 +37,7 @@ use crate::{
         DestinationType, DuckLakeMaintenanceResourceConfig, K8sClient, K8sError,
         PipelineRuntimeIdentity, PodPhase, PodStatus, ReplicatorConfigMapFile,
         ReplicatorWorkloadConfig,
+        base::RESOURCE_DELETE_TIMEOUT,
         resources::{ReplicatorStatefulSetResourceRequirements, ReplicatorVpaResourcePolicy},
     },
 };
@@ -83,8 +84,6 @@ const POSTGRES_PASSWORD_NAME: &str = "password";
 const REPLICATOR_CONFIG_MAP_NAME_SUFFIX: &str = "replicator-config";
 /// StatefulSet name suffix for the replicator workload.
 const REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator";
-/// Previous StatefulSet suffix kept for existing pipeline cleanup/status.
-const LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX: &str = "replicator-stateful-set";
 /// Application label suffix used to group resources.
 const REPLICATOR_APP_SUFFIX: &str = "replicator-app";
 /// Container name suffix for the replicator container.
@@ -132,8 +131,6 @@ const DUCKLAKE_MAINTENANCE_GROUP: &str = "etl.supabase.com";
 const DUCKLAKE_MAINTENANCE_VERSION: &str = "v1alpha1";
 /// DuckLake maintenance CRD kind.
 const DUCKLAKE_MAINTENANCE_KIND: &str = "DuckLakeMaintenance";
-/// Maximum time to wait for a deleted Kubernetes resource to disappear.
-const RESOURCE_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Interval between checks for a deleted Kubernetes resource.
 const RESOURCE_DELETE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Vertical Pod Autoscaler CRD group.
@@ -180,6 +177,62 @@ fn test_resource_requirements(
 ) -> ReplicatorStatefulSetResourceRequirements {
     let k8s_config = test_k8s_config(environment);
     ReplicatorStatefulSetResourceRequirements::resolve(&k8s_config, None)
+}
+
+/// Deletes a resource, optionally waiting for its absence with a bounded
+/// timeout.
+///
+/// Foreground deletion ensures dependents are removed before their owner
+/// disappears.
+async fn delete_resource<K>(
+    api: &Api<K>,
+    name: &str,
+    kind: &'static str,
+    wait: bool,
+) -> Result<(), K8sError>
+where
+    K: Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+{
+    let params = DeleteParams {
+        propagation_policy: Some(PropagationPolicy::Foreground),
+        ..DeleteParams::default()
+    };
+
+    HttpK8sClient::handle_delete_with_404_ignore(api.delete(name, &params).await)?;
+
+    if !wait {
+        return Ok(());
+    }
+
+    wait_for_deletion(name, kind, async || Ok(api.get_opt(name).await?.is_none())).await
+}
+
+/// Polls the same bounded deletion barrier for resources and dependent Pods.
+async fn wait_for_deletion<F, Fut>(
+    name: &str,
+    kind: &'static str,
+    mut is_deleted: F,
+) -> Result<(), K8sError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, K8sError>>,
+{
+    match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
+        while !is_deleted().await? {
+            tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
+        }
+
+        Ok(())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(K8sError::ResourceDeletionTimeout {
+            kind,
+            name: name.to_owned(),
+            timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
+        }),
+    }
 }
 
 /// HTTP-based implementation of [`K8sClient`].
@@ -308,7 +361,7 @@ impl HttpK8sClient {
         match delete_result {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(err)) if err.code == 404 => Ok(()),
-            Err(e) => Err(e.into()),
+            Err(err) => Err(err.into()),
         }
     }
 
@@ -361,6 +414,33 @@ impl HttpK8sClient {
         }
 
         false
+    }
+
+    /// Derives the externally visible replicator status from a Pod.
+    ///
+    /// Deletion intent takes precedence over container health because a
+    /// terminating Pod may retain a failed container status while Kubernetes
+    /// removes it.
+    fn derive_replicator_pod_status(pod: &Pod, replicator_container_name: &str) -> PodStatus {
+        if pod.metadata.deletion_timestamp.is_some() {
+            return PodStatus::Stopping;
+        }
+
+        if Self::has_replicator_container_error(pod, replicator_container_name) {
+            return PodStatus::Failed;
+        }
+
+        let phase = pod.status.as_ref().map_or(PodPhase::Unknown, |status| {
+            status.phase.as_deref().map_or(PodPhase::Unknown, PodPhase::from)
+        });
+
+        match phase {
+            PodPhase::Pending => PodStatus::Starting,
+            PodPhase::Running => PodStatus::Started,
+            PodPhase::Succeeded => PodStatus::Stopped,
+            PodPhase::Failed => PodStatus::Failed,
+            PodPhase::Unknown => PodStatus::Unknown,
+        }
     }
 }
 
@@ -591,62 +671,69 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_postgres_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting postgres secret");
-
-        let postgres_secret_name = create_postgres_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&postgres_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_postgres_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_postgres_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
-    async fn delete_clickhouse_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting clickhouse secret");
-
-        let clickhouse_secret_name = create_clickhouse_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&clickhouse_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_clickhouse_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_clickhouse_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
-    async fn delete_bigquery_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting bq secret");
-
-        let bq_secret_name = create_bq_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(self.secrets_api.delete(&bq_secret_name, &dp).await)?;
-
-        Ok(())
+    async fn delete_bigquery_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(&self.secrets_api, &create_bq_secret_name(resource_prefix), "Secret", wait)
+            .await
     }
 
-    async fn delete_iceberg_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting iceberg secret");
-
-        let iceberg_secret_name = create_iceberg_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&iceberg_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_iceberg_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_iceberg_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
-    async fn delete_ducklake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting ducklake secret");
-
-        let ducklake_secret_name = create_ducklake_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&ducklake_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_ducklake_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_ducklake_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
     async fn create_or_update_snowflake_secret(
@@ -679,16 +766,18 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_snowflake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting snowflake secret");
-
-        let snowflake_secret_name = create_snowflake_secret_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.secrets_api.delete(&snowflake_secret_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_snowflake_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.secrets_api,
+            &create_snowflake_secret_name(resource_prefix),
+            "Secret",
+            wait,
+        )
+        .await
     }
 
     async fn create_or_update_replicator_config_map(
@@ -723,16 +812,18 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_replicator_config_map(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting config map");
-
-        let replicator_config_map_name = create_replicator_config_map_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.config_maps_api.delete(&replicator_config_map_name, &dp).await,
-        )?;
-
-        Ok(())
+    async fn delete_replicator_config_map(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.config_maps_api,
+            &create_replicator_config_map_name(resource_prefix),
+            "ConfigMap",
+            wait,
+        )
+        .await
     }
 
     async fn create_or_update_replicator_stateful_set(
@@ -750,14 +841,6 @@ impl K8sClient for HttpK8sClient {
         );
 
         let stateful_set_name = create_stateful_set_name(resource_prefix);
-        let legacy_stateful_set_name = create_legacy_stateful_set_name(resource_prefix);
-        if legacy_stateful_set_name != stateful_set_name {
-            let dp = DeleteParams::default();
-            Self::handle_delete_with_404_ignore(
-                self.stateful_sets_api.delete(&legacy_stateful_set_name, &dp).await,
-            )?;
-        }
-
         let environment = Environment::load().map_err(K8sError::Config)?;
         let container_environment = create_container_environment_json(
             &self.k8s_config,
@@ -874,59 +957,54 @@ impl K8sClient for HttpK8sClient {
         }
     }
 
-    async fn delete_replicator_stateful_set(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting stateful set");
-
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.stateful_sets_api.delete(&create_stateful_set_name(resource_prefix), &dp).await,
-        )?;
-
+    async fn delete_replicator_stateful_set(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.stateful_sets_api,
+            &create_stateful_set_name(resource_prefix),
+            "StatefulSet",
+            wait,
+        )
+        .await?;
+        if wait {
+            // Pods can outlive a StatefulSet deleted previously with background
+            // propagation.
+            wait_for_deletion(resource_prefix, "Pod", async || {
+                Ok(self.pods_api.get_opt(&create_pod_name(resource_prefix)).await?.is_none())
+            })
+            .await?;
+        }
         Ok(())
     }
 
     async fn delete_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,
+        wait: bool,
     ) -> Result<(), K8sError> {
-        debug!("deleting vertical pod autoscaler");
-
-        let name = create_stateful_set_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.vertical_pod_autoscalers_api.delete(&name, &dp).await,
-        )?;
-
-        match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
-            loop {
-                if self.vertical_pod_autoscalers_api.get_opt(&name).await?.is_none() {
-                    return Ok(());
-                }
-
-                tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
-            }
-        })
+        delete_resource(
+            &self.vertical_pod_autoscalers_api,
+            &create_stateful_set_name(resource_prefix),
+            "VerticalPodAutoscaler",
+            wait,
+        )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(K8sError::ResourceDeletionTimeout {
-                kind: VERTICAL_POD_AUTOSCALER_KIND,
-                name,
-                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
-            }),
-        }
     }
 
-    async fn replicator_stateful_set_exists(
+    async fn replicator_stateful_set_is_active(
         &self,
         resource_prefix: &str,
     ) -> Result<bool, K8sError> {
-        debug!("checking stateful set existence");
+        debug!("checking whether stateful set is active");
 
         let stateful_set =
             self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?;
 
-        Ok(stateful_set.is_some())
+        Ok(stateful_set
+            .is_some_and(|stateful_set| stateful_set.metadata.deletion_timestamp.is_none()))
     }
 
     async fn create_or_update_ducklake_maintenance(
@@ -953,33 +1031,18 @@ impl K8sClient for HttpK8sClient {
         Ok(())
     }
 
-    async fn delete_ducklake_maintenance(&self, resource_prefix: &str) -> Result<(), K8sError> {
-        debug!("deleting ducklake maintenance");
-
-        let name = create_ducklake_maintenance_name(resource_prefix);
-        let dp = DeleteParams::default();
-        Self::handle_delete_with_404_ignore(
-            self.ducklake_maintenance_api.delete(&name, &dp).await,
-        )?;
-
-        match tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, async {
-            loop {
-                if self.ducklake_maintenance_api.get_opt(&name).await?.is_none() {
-                    return Ok(());
-                }
-
-                tokio::time::sleep(RESOURCE_DELETE_POLL_INTERVAL).await;
-            }
-        })
+    async fn delete_ducklake_maintenance(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        delete_resource(
+            &self.ducklake_maintenance_api,
+            &create_ducklake_maintenance_name(resource_prefix),
+            "DuckLakeMaintenance",
+            wait,
+        )
         .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(K8sError::ResourceDeletionTimeout {
-                kind: DUCKLAKE_MAINTENANCE_KIND,
-                name,
-                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
-            }),
-        }
     }
 
     async fn get_replicator_pod_status(
@@ -988,46 +1051,12 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
-        let mut pod = None;
-        for pod_name in pod_names_for_status(resource_prefix) {
-            match self.pods_api.get(&pod_name).await {
-                Ok(found_pod) => {
-                    pod = Some(found_pod);
-                    break;
-                }
-                Err(kube::Error::Api(err)) if err.code == 404 => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
-        let Some(pod) = pod else {
+        let Some(pod) = self.pods_api.get_opt(&create_pod_name(resource_prefix)).await? else {
             return Ok(PodStatus::Stopped);
         };
 
         let replicator_container_name = create_replicator_container_name(resource_prefix);
-
-        if Self::has_replicator_container_error(&pod, &replicator_container_name) {
-            return Ok(PodStatus::Failed);
-        }
-
-        if pod.metadata.deletion_timestamp.is_some() {
-            return Ok(PodStatus::Stopping);
-        }
-
-        let phase = pod.status.map_or(PodPhase::Unknown, |status| {
-            let phase: PodPhase = status.phase.map_or(PodPhase::Unknown, |phase| {
-                let phase: PodPhase = phase.as_str().into();
-                phase
-            });
-            phase
-        });
-
-        Ok(match phase {
-            PodPhase::Pending => PodStatus::Starting,
-            PodPhase::Running => PodStatus::Started,
-            PodPhase::Succeeded => PodStatus::Stopped,
-            PodPhase::Failed => PodStatus::Failed,
-            PodPhase::Unknown => PodStatus::Unknown,
-        })
+        Ok(Self::derive_replicator_pod_status(&pod, &replicator_container_name))
     }
 }
 
@@ -1067,24 +1096,8 @@ fn create_stateful_set_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}")
 }
 
-fn create_legacy_stateful_set_name(prefix: &str) -> String {
-    format!("{prefix}-{LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX}")
-}
-
 fn create_pod_name(prefix: &str) -> String {
     format!("{prefix}-{REPLICATOR_STATEFUL_SET_SUFFIX}-0")
-}
-
-fn create_legacy_pod_name(prefix: &str) -> String {
-    format!("{prefix}-{LEGACY_REPLICATOR_STATEFUL_SET_SUFFIX}-0")
-}
-
-fn unique_current_and_legacy_names(current: String, legacy: String) -> Vec<String> {
-    if current == legacy { vec![current] } else { vec![current, legacy] }
-}
-
-fn pod_names_for_status(prefix: &str) -> Vec<String> {
-    unique_current_and_legacy_names(create_pod_name(prefix), create_legacy_pod_name(prefix))
 }
 
 fn create_replicator_app_name(prefix: &str) -> String {
@@ -1917,6 +1930,13 @@ mod tests {
         TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::{assert_json_snapshot, assert_snapshot};
+    use k8s_openapi::{
+        api::core::v1::{
+            ContainerState, ContainerStateTerminated, ContainerStatus,
+            PodStatus as KubernetesPodStatus,
+        },
+        apimachinery::pkg::apis::meta::v1::Time,
+    };
 
     use super::*;
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
@@ -1939,8 +1959,57 @@ mod tests {
         replicator_identity_with(TENANT_ID, PIPELINE_ID, REPLICATOR_ID)
     }
 
+    fn failed_replicator_pod(deleting: bool) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                deletion_timestamp: deleting.then(|| Time(Utc::now())),
+                ..Default::default()
+            },
+            status: Some(KubernetesPodStatus {
+                phase: Some("Failed".to_owned()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: create_replicator_container_name("tenant-42"),
+                    state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code: 1,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     fn max_pipeline_runtime_identity() -> PipelineRuntimeIdentity {
         replicator_identity_with(MAX_TENANT_ID, MAX_BIGINT_ID, MAX_BIGINT_ID)
+    }
+
+    #[test]
+    fn deleting_replicator_pod_is_stopping_even_when_its_container_failed() {
+        let pod = failed_replicator_pod(true);
+
+        let status = HttpK8sClient::derive_replicator_pod_status(
+            &pod,
+            &create_replicator_container_name("tenant-42"),
+        );
+
+        assert_eq!(status, PodStatus::Stopping);
+    }
+
+    #[test]
+    fn failed_replicator_pod_is_failed_when_not_deleting() {
+        let pod = failed_replicator_pod(false);
+
+        let status = HttpK8sClient::derive_replicator_pod_status(
+            &pod,
+            &create_replicator_container_name("tenant-42"),
+        );
+
+        assert_eq!(status, PodStatus::Failed);
     }
 
     fn default_k8s_config() -> K8sConfig {
@@ -2450,18 +2519,11 @@ mod tests {
     }
 
     #[test]
-    fn replicator_workload_names_use_short_suffix_and_keep_legacy_pod_lookup() {
+    fn replicator_workload_names_use_short_suffix() {
         let prefix = create_k8s_object_prefix("tenant-1", 42);
 
         assert_eq!(create_stateful_set_name(&prefix), "tenant-1-42-replicator");
-        assert_eq!(create_legacy_stateful_set_name(&prefix), "tenant-1-42-replicator-stateful-set");
-        assert_eq!(
-            pod_names_for_status(&prefix),
-            vec![
-                "tenant-1-42-replicator-0".to_owned(),
-                "tenant-1-42-replicator-stateful-set-0".to_owned(),
-            ]
-        );
+        assert_eq!(create_pod_name(&prefix), "tenant-1-42-replicator-0");
     }
 
     #[test]
