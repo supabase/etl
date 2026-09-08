@@ -268,23 +268,21 @@ pub async fn is_replicator_pod_stopped(
     Ok(matches!(pod_status, PodStatus::Stopped))
 }
 
-/// Returns `true` if the existing Kubernetes pipeline runtime should be
-/// reconciled.
+/// Returns `true` if Kubernetes desired state says the pipeline runtime should
+/// be reconciled.
 ///
-/// A stopped or stopping pod is reconciled only while its StatefulSet still
-/// represents active desired state. A StatefulSet without a pod is repaired,
-/// while a missing or terminating StatefulSet represents an intentional stop.
+/// The StatefulSet is authoritative because it owns the replicator Pod and
+/// expresses whether Kubernetes should keep the runtime running. Pod status is
+/// observational and may lag during creation, replacement, or deletion. An
+/// existing non-terminating StatefulSet is reconciled even when its Pod is
+/// missing or failed; a missing or terminating StatefulSet is not reconciled
+/// even when its Pod is still running.
 pub async fn should_reconcile_pipeline_runtime(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator_id: i64,
 ) -> Result<bool, K8sCoreError> {
     let resource_prefix = create_k8s_object_prefix(tenant_id, replicator_id);
-    let pod_status = k8s_client.get_replicator_pod_status(&resource_prefix).await?;
-    if !matches!(pod_status, PodStatus::Stopped | PodStatus::Stopping) {
-        return Ok(true);
-    }
-
     Ok(k8s_client.replicator_stateful_set_is_active(&resource_prefix).await?)
 }
 
@@ -1205,7 +1203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_pod_with_active_stateful_set_is_reconciled() {
+    async fn active_stateful_set_is_reconciled_when_pod_is_stopped() {
         let client = RecordingK8sClient {
             pod_status: PodStatus::Stopped,
             stateful_set_active: true,
@@ -1219,9 +1217,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_pod_without_active_stateful_set_is_not_reconciled() {
+    async fn inactive_stateful_set_is_not_reconciled_when_pod_is_started() {
         let client = RecordingK8sClient {
-            pod_status: PodStatus::Stopped,
+            pod_status: PodStatus::Started,
             stateful_set_active: false,
             ..Default::default()
         };
@@ -1233,9 +1231,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopping_pod_with_active_stateful_set_is_reconciled() {
+    async fn active_stateful_set_is_reconciled_when_pod_has_failed() {
         let client = RecordingK8sClient {
-            pod_status: PodStatus::Stopping,
+            pod_status: PodStatus::Failed,
             stateful_set_active: true,
             ..Default::default()
         };
@@ -1247,9 +1245,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopping_pod_without_active_stateful_set_is_not_reconciled() {
+    async fn inactive_stateful_set_is_not_reconciled_when_pod_has_failed() {
         let client = RecordingK8sClient {
-            pod_status: PodStatus::Stopping,
+            pod_status: PodStatus::Failed,
             stateful_set_active: false,
             ..Default::default()
         };

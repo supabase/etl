@@ -19,8 +19,7 @@ use etl_postgres::{
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use thiserror::Error;
-use tracing::error;
-use tracing::log::warn;
+use tracing::{error, warn};
 use utoipa::ToSchema;
 
 use crate::{

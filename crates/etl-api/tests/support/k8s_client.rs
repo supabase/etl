@@ -37,7 +37,7 @@ impl Default for MockK8sState {
             vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
             deletion_timeout: Arc::new(AtomicBool::new(false)),
             waited_for_deletion: Arc::new(AtomicBool::new(false)),
-            stateful_set_active: Arc::new(AtomicBool::new(false)),
+            stateful_set_active: Arc::new(AtomicBool::new(true)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
             last_replicator_image: Arc::new(RwLock::new(None)),
             last_replicator_resource_override: Arc::new(RwLock::new(None)),

@@ -415,6 +415,33 @@ impl HttpK8sClient {
 
         false
     }
+
+    /// Derives the externally visible replicator status from a Pod.
+    ///
+    /// Deletion intent takes precedence over container health because a
+    /// terminating Pod may retain a failed container status while Kubernetes
+    /// removes it.
+    fn derive_replicator_pod_status(pod: &Pod, replicator_container_name: &str) -> PodStatus {
+        if pod.metadata.deletion_timestamp.is_some() {
+            return PodStatus::Stopping;
+        }
+
+        if Self::has_replicator_container_error(pod, replicator_container_name) {
+            return PodStatus::Failed;
+        }
+
+        let phase = pod.status.as_ref().map_or(PodPhase::Unknown, |status| {
+            status.phase.as_deref().map_or(PodPhase::Unknown, PodPhase::from)
+        });
+
+        match phase {
+            PodPhase::Pending => PodStatus::Starting,
+            PodPhase::Running => PodStatus::Started,
+            PodPhase::Succeeded => PodStatus::Stopped,
+            PodPhase::Failed => PodStatus::Failed,
+            PodPhase::Unknown => PodStatus::Unknown,
+        }
+    }
 }
 
 /// Errors found while checking Kubernetes prerequisites at startup.
@@ -1029,30 +1056,7 @@ impl K8sClient for HttpK8sClient {
         };
 
         let replicator_container_name = create_replicator_container_name(resource_prefix);
-
-        if Self::has_replicator_container_error(&pod, &replicator_container_name) {
-            return Ok(PodStatus::Failed);
-        }
-
-        if pod.metadata.deletion_timestamp.is_some() {
-            return Ok(PodStatus::Stopping);
-        }
-
-        let phase = pod.status.map_or(PodPhase::Unknown, |status| {
-            let phase: PodPhase = status.phase.map_or(PodPhase::Unknown, |phase| {
-                let phase: PodPhase = phase.as_str().into();
-                phase
-            });
-            phase
-        });
-
-        Ok(match phase {
-            PodPhase::Pending => PodStatus::Starting,
-            PodPhase::Running => PodStatus::Started,
-            PodPhase::Succeeded => PodStatus::Stopped,
-            PodPhase::Failed => PodStatus::Failed,
-            PodPhase::Unknown => PodStatus::Unknown,
-        })
+        Ok(Self::derive_replicator_pod_status(&pod, &replicator_container_name))
     }
 }
 
@@ -1926,6 +1930,13 @@ mod tests {
         TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::{assert_json_snapshot, assert_snapshot};
+    use k8s_openapi::{
+        api::core::v1::{
+            ContainerState, ContainerStateTerminated, ContainerStatus,
+            PodStatus as KubernetesPodStatus,
+        },
+        apimachinery::pkg::apis::meta::v1::Time,
+    };
 
     use super::*;
     const TENANT_ID: &str = "abcdefghijklmnopqrst";
@@ -1948,8 +1959,57 @@ mod tests {
         replicator_identity_with(TENANT_ID, PIPELINE_ID, REPLICATOR_ID)
     }
 
+    fn failed_replicator_pod(deleting: bool) -> Pod {
+        Pod {
+            metadata: ObjectMeta {
+                deletion_timestamp: deleting.then(|| Time(Utc::now())),
+                ..Default::default()
+            },
+            status: Some(KubernetesPodStatus {
+                phase: Some("Failed".to_owned()),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: create_replicator_container_name("tenant-42"),
+                    state: Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code: 1,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     fn max_pipeline_runtime_identity() -> PipelineRuntimeIdentity {
         replicator_identity_with(MAX_TENANT_ID, MAX_BIGINT_ID, MAX_BIGINT_ID)
+    }
+
+    #[test]
+    fn deleting_replicator_pod_is_stopping_even_when_its_container_failed() {
+        let pod = failed_replicator_pod(true);
+
+        let status = HttpK8sClient::derive_replicator_pod_status(
+            &pod,
+            &create_replicator_container_name("tenant-42"),
+        );
+
+        assert_eq!(status, PodStatus::Stopping);
+    }
+
+    #[test]
+    fn failed_replicator_pod_is_failed_when_not_deleting() {
+        let pod = failed_replicator_pod(false);
+
+        let status = HttpK8sClient::derive_replicator_pod_status(
+            &pod,
+            &create_replicator_container_name("tenant-42"),
+        );
+
+        assert_eq!(status, PodStatus::Failed);
     }
 
     fn default_k8s_config() -> K8sConfig {
