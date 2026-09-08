@@ -114,7 +114,8 @@ Compared with Debezium Server 3.1.3.Final in Hardbyte's
 across four fast HTTP consumers.
 
 Tested ETL `d206d66e` (July 2026) with a custom `HttpDestination` and
-`MemoryStore`; destination, store, and deployment choices affect performance.
+`MemoryStore`. Results compare specific configurations: versions, polling,
+batching, destination, store, workload, and deployment all affect performance.
 See [benchmark details](https://supabase.github.io/etl/reference/benchmarks/)
 for versions, measurement methodology, and configuration differences.
 
