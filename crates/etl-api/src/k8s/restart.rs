@@ -127,6 +127,7 @@ pub(super) async fn restart_outdated_pod(
                 // deletion by name alone against a potentially different pod.
                 Err(kube::Error::Api(error)) if matches!(error.code, 404 | 409) => {
                     tokio::time::sleep(RESTART_POLL_INTERVAL).await;
+                    continue;
                 }
                 Err(error) => return Err(error.into()),
             }
