@@ -258,20 +258,9 @@ async function checkSeoEndpoints() {
   );
   assert(!homeText.includes('<div'), 'Homepage Markdown contains presentation-only HTML.');
   assert(!homeText.includes('PipelinesMark'), 'Homepage Markdown contains a UI component name.');
-  const canonicalHtmlUrls = [
-    `${canonicalBaseUrl}/`,
-    `${canonicalBaseUrl}/guides/first-pipeline/`,
-    `${canonicalBaseUrl}/guides/standalone-replicator/`,
-    `${canonicalBaseUrl}/guides/configure-postgres/`,
-    `${canonicalBaseUrl}/guides/custom-implementations/`,
-    `${canonicalBaseUrl}/explanation/concepts/`,
-    `${canonicalBaseUrl}/explanation/architecture/`,
-    `${canonicalBaseUrl}/explanation/schema-changes/`,
-    `${canonicalBaseUrl}/reference/destinations/`,
-    `${canonicalBaseUrl}/reference/benchmarks/`,
-    `${canonicalBaseUrl}/explanation/events/`,
-    `${canonicalBaseUrl}/explanation/traits/`,
-  ];
+  const canonicalHtmlUrls = markdownPaths.map((path) =>
+    `${canonicalBaseUrl}${path === '/index.md' ? '/' : path.replace(/\.md$/, '/')}`,
+  );
   assert(
     markdownTexts.every((text, index) =>
       text.includes(`Canonical HTML: ${canonicalHtmlUrls[index]}`),
@@ -311,7 +300,7 @@ async function checkSeoEndpoints() {
       ),
     'The untitled benchmark callout is not preserved as a Markdown blockquote.',
   );
-  const destinationsText = markdownTexts[8];
+  const destinationsText = markdownTexts[markdownPaths.indexOf('/reference/destinations.md')];
   assert(
     destinationsText.includes('**Status: Stable**') &&
       destinationsText.match(/\*\*Status: In progress\*\*/g)?.length === 3 &&
