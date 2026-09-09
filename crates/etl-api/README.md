@@ -37,6 +37,17 @@ Stop and stop-all return `202 Accepted` after Kubernetes accepts the deletion
 requests. Resources can still be terminating; poll pipeline status before assuming
 shutdown has completed.
 
+Start completes cleanup of an inactive runtime before recreating it, including
+when a preceding stop has only acknowledged deletion. If cleanup exceeds 30
+seconds, start returns `503 Service Unavailable` without applying new resources;
+retry after shutdown completes. An active runtime is reconciled without deleting
+it first. A successful start does not wait for the new Pod to become ready.
+
+Pipeline status combines StatefulSet desired state with Pod health. An active
+StatefulSet with a missing or terminating Pod reports `starting` while Kubernetes
+replaces it. A terminating StatefulSet, or a remaining Pod without a StatefulSet,
+reports `stopping`. Once both are absent, status becomes `stopped`.
+
 `POST /v1/pipelines/{pipeline_id}/rollback-tables` restarts replication from scratch
 for a single table, all errored tables, or all tables. The request contains only
 `target`; legacy extra fields are ignored. Any table state can be targeted manually.

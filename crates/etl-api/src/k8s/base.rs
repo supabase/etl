@@ -185,19 +185,19 @@ impl From<&str> for PodPhase {
     }
 }
 
-/// The derived status of a replicator pod.
+/// The derived operational status of a replicator runtime.
 ///
-/// Combines the pod's phase, deletion timestamp, and exit status to determine
-/// the operational state from the API's perspective.
+/// Combines StatefulSet desired state with Pod phase, deletion intent, and
+/// container health from the API's perspective.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodStatus {
-    /// Pod has successfully stopped and no longer exists.
+    /// The runtime has stopped.
     Stopped,
-    /// Pod is pending or initializing.
+    /// The runtime is creating, initializing, or replacing its Pod.
     Starting,
     /// Pod is running and ready.
     Started,
-    /// Pod is terminating after a deletion request.
+    /// The runtime is being deleted, including any remaining Pod.
     Stopping,
     /// Pod failed to start or exited with an error.
     Failed,

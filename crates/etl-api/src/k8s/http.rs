@@ -417,7 +417,29 @@ impl HttpK8sClient {
         false
     }
 
-    /// Derives the externally visible replicator status from a Pod.
+    /// Distinguishes runtime shutdown from Pod replacement using desired state.
+    fn derive_replicator_status(
+        stateful_set: Option<&StatefulSet>,
+        pod: Option<&Pod>,
+        replicator_container_name: &str,
+    ) -> PodStatus {
+        let Some(stateful_set) = stateful_set else {
+            return if pod.is_some() { PodStatus::Stopping } else { PodStatus::Stopped };
+        };
+        if stateful_set.metadata.deletion_timestamp.is_some() {
+            return PodStatus::Stopping;
+        }
+        let Some(pod) = pod else {
+            return PodStatus::Starting;
+        };
+        if pod.metadata.deletion_timestamp.is_some() {
+            return PodStatus::Starting;
+        }
+
+        Self::derive_replicator_pod_status(pod, replicator_container_name)
+    }
+
+    /// Derives the observed replicator status from a Pod.
     ///
     /// Deletion intent takes precedence over container health because a
     /// terminating Pod may retain a failed container status while Kubernetes
@@ -1063,12 +1085,16 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
-        let Some(pod) = self.pods_api.get_opt(&create_pod_name(resource_prefix)).await? else {
-            return Ok(PodStatus::Stopped);
-        };
+        let stateful_set =
+            self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?;
+        let pod = self.pods_api.get_opt(&create_pod_name(resource_prefix)).await?;
 
         let replicator_container_name = create_replicator_container_name(resource_prefix);
-        Ok(Self::derive_replicator_pod_status(&pod, &replicator_container_name))
+        Ok(Self::derive_replicator_status(
+            stateful_set.as_ref(),
+            pod.as_ref(),
+            &replicator_container_name,
+        ))
     }
 }
 
@@ -2010,6 +2036,49 @@ mod tests {
         );
 
         assert_eq!(status, PodStatus::Stopping);
+    }
+
+    /// Desired runtime state separates replacement from shutdown and Pod
+    /// failure.
+    #[test]
+    fn replicator_status_distinguishes_replacement_from_shutdown() {
+        let active = StatefulSet::default();
+        let deleting = StatefulSet {
+            metadata: ObjectMeta {
+                deletion_timestamp: Some(Time(Utc::now())),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let failed_pod = failed_replicator_pod(false);
+        let deleting_pod = failed_replicator_pod(true);
+        let running_pod = Pod {
+            status: Some(KubernetesPodStatus {
+                phase: Some("Running".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        for (stateful_set, pod, expected) in [
+            (None, None, PodStatus::Stopped),
+            (None, Some(&deleting_pod), PodStatus::Stopping),
+            (Some(&deleting), None, PodStatus::Stopping),
+            (Some(&deleting), Some(&running_pod), PodStatus::Stopping),
+            (Some(&active), None, PodStatus::Starting),
+            (Some(&active), Some(&deleting_pod), PodStatus::Starting),
+            (Some(&active), Some(&failed_pod), PodStatus::Failed),
+            (Some(&active), Some(&running_pod), PodStatus::Started),
+        ] {
+            assert_eq!(
+                HttpK8sClient::derive_replicator_status(
+                    stateful_set,
+                    pod,
+                    &create_replicator_container_name("tenant-42"),
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
