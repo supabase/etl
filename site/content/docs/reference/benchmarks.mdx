@@ -7,12 +7,14 @@ icon: Gauge
 ## Independent benchmark
 
 Hardbyte's independent CDC benchmarks compare six configurations across
-steady-state delivery, mixed-speed consumers, and consumer outages. The table
-summarizes latency, runtime memory, and source WAL retention for all six
-configurations, in alphabetical order. **Bold marks the lowest reported value in each
-column, including ties at the published precision.**
+steady-state delivery, mixed-speed consumers, and consumer outages.
 
-| CDC configuration | Fast-consumer tail latency | Fast-consumer memory | Mixed-speed tail latency | Source slot WAL during outage |
+The table shows **selected results from separate benchmark scenarios**, with
+all six configurations in alphabetical order. Each metric heading links to
+its source table. **Bold marks the lowest reported value in each column,
+including ties at the published precision.**
+
+| CDC configuration | [Fast-consumer tail latency](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady) | [Fast-consumer memory](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady) | [Mixed-speed tail latency](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-hetero/REPORT.md#fanout_steady) | [Source slot WAL during outage](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#dead_consumer) |
 | --- | ---: | ---: | ---: | ---: |
 | Debezium + Kafka | 961 ms | 1,385.4 MB | 1,074 ms | **11.0 MB** |
 | Debezium Server | 848 ms | 1,629.3 MB | 1,181 ms | 57.3 MB |
