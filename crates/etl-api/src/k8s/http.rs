@@ -39,6 +39,7 @@ use crate::{
         ReplicatorWorkloadConfig,
         base::RESOURCE_DELETE_TIMEOUT,
         resources::{ReplicatorStatefulSetResourceRequirements, ReplicatorVpaResourcePolicy},
+        restart::{RESTARTED_AT_ANNOTATION, restart_outdated_pod},
     },
 };
 
@@ -884,9 +885,20 @@ impl K8sClient for HttpK8sClient {
         // fields. If there is an override (likely during an incident or SREs
         // intervention), we want to override their changes.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
-        self.stateful_sets_api.patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set)).await?;
+        let applied = self
+            .stateful_sets_api
+            .patch(&stateful_set_name, &pp, &Patch::Apply(stateful_set))
+            .await?;
 
-        Ok(())
+        // Apply the template before deleting any pod so its replacement uses
+        // the new configuration, even when an unready pod blocks rolling updates.
+        restart_outdated_pod(
+            &self.stateful_sets_api,
+            &self.pods_api,
+            &applied,
+            &create_pod_name(resource_prefix),
+        )
+        .await
     }
 
     async fn create_or_update_replicator_vertical_pod_autoscaler(
@@ -1788,7 +1800,7 @@ fn create_replicator_stateful_set_json(
             "labels": identity_labels,
             "annotations": {
               // Attach template annotations (e.g., restart checksum) to trigger a rolling restart.
-              "etl.supabase.com/restarted-at": restarted_at_annotation,
+              (RESTARTED_AT_ANNOTATION): restarted_at_annotation,
             }
           },
           "spec": {
