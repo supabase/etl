@@ -29,16 +29,16 @@ pub enum TenantSourceDbError {
 }
 
 pub async fn create_tenant_and_source(
-    txn: &mut PgTransaction<'_>,
+    api_txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     tenant_name: &str,
     source_name: &str,
     source_config: FullApiSourceConfig,
     encryption_key: &EncryptionKeyring,
 ) -> Result<(String, i64), TenantSourceDbError> {
-    let tenant_id = create_tenant(txn.deref_mut(), tenant_id, tenant_name).await?;
+    let tenant_id = create_tenant(api_txn.deref_mut(), tenant_id, tenant_name).await?;
     let source_id =
-        create_source(txn.deref_mut(), &tenant_id, source_name, source_config, encryption_key)
+        create_source(api_txn.deref_mut(), &tenant_id, source_name, source_config, encryption_key)
             .await?;
 
     Ok((tenant_id, source_id))

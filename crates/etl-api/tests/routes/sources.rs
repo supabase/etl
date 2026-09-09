@@ -621,6 +621,50 @@ async fn source_validation_with_non_matching_trusted_username_returns_failure() 
     drop_pg_database(&source_db_config).await;
 }
 
+/// Busy pipelines reject source edits before network validation, and failed
+/// validation releases the lock without persisting the edit.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_update_checks_pipeline_lock_before_connection_validation() {
+    let trusted_source = create_trusted_source_database().await;
+    let app =
+        spawn_test_app_with_trusted_username(Some(trusted_source.trusted_username.clone())).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_config = source_config_from_db_config(&trusted_source.trusted_config);
+    let source_id =
+        create_source_with_config(&app, &tenant_id, new_name(), source_config.clone()).await;
+    create_default_image(&app).await;
+    let pipeline_id = create_pipeline_for_source(&app, &tenant_id, source_id).await;
+    let mut unreachable_config = source_config;
+    unreachable_config.host = "127.0.0.1".to_owned();
+    unreachable_config.hostaddr = None;
+    unreachable_config.port = 1;
+    let update = UpdateSourceRequest { name: updated_name(), config: unreachable_config };
+    let deletion = app.k8s_state.pause_deletion().await;
+    let (stopped, ()) = tokio::join!(app.stop_pipeline(&tenant_id, pipeline_id), async {
+        deletion.wait_until_entered().await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            app.update_source(&tenant_id, source_id, &update),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error: etl_api::routes::ErrorMessage = response.json().await.unwrap();
+        assert!(error.message.contains("operation is in progress"));
+        deletion.release();
+    });
+    assert_eq!(stopped.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        app.update_source(&tenant_id, source_id, &update).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
+    let source: ReadSourceResponse =
+        app.read_source(&tenant_id, source_id).await.json().await.unwrap();
+    assert_eq!(source.name, new_name());
+    drop_trusted_source_database(trusted_source).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn source_update_with_matching_trusted_username_succeeds() {
     init_test_tracing();

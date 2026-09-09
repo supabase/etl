@@ -274,9 +274,10 @@ pub async fn is_replicator_pod_stopped(
 /// The StatefulSet is authoritative because it owns the replicator Pod and
 /// expresses whether Kubernetes should keep the runtime running. Pod status is
 /// observational and may lag during creation, replacement, or deletion. An
-/// existing non-terminating StatefulSet is reconciled even when its Pod is
-/// missing or failed; a missing or terminating StatefulSet is not reconciled
-/// even when its Pod is still running.
+/// existing non-terminating StatefulSet with at least one desired replica is
+/// reconciled even when its Pod is missing or failed; a missing or terminating
+/// StatefulSet, or one scaled to zero, is not reconciled even when its Pod is
+/// still running.
 pub async fn should_reconcile_pipeline_runtime(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
@@ -1017,6 +1018,13 @@ mod tests {
         ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("vpa:{resource_prefix}"));
             Ok(())
+        }
+
+        async fn complete_pending_replicator_restart(
+            &self,
+            _resource_prefix: &str,
+        ) -> Result<bool, K8sError> {
+            Ok(true)
         }
 
         async fn delete_replicator_stateful_set(

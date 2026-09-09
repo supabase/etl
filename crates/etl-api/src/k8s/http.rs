@@ -9,7 +9,7 @@ use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::{
     api::{
         apps::v1::StatefulSet,
-        core::v1::{ConfigMap, Namespace, Pod, Secret, ServiceAccount},
+        core::v1::{ConfigMap, ContainerStatus, Namespace, Pod, Secret, ServiceAccount},
     },
     apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
@@ -366,68 +366,81 @@ impl HttpK8sClient {
         }
     }
 
-    /// Returns true if the replicator container in the pod has terminated with
-    /// error code
-    fn has_replicator_container_error(pod: &Pod, replicator_container_name: &str) -> bool {
-        // Find the replicator container status
-        let container_status = pod.status.as_ref().and_then(|status| {
-            status.container_statuses.as_ref().and_then(|container_statuses| {
-                container_statuses.iter().find(|cs| cs.name == replicator_container_name).cloned()
-            })
-        });
+    /// Distinguishes a requested replacement from an unready current Pod.
+    fn has_pending_replicator_restart(stateful_set: &StatefulSet, pod: Option<&Pod>) -> bool {
+        let Some(pod) = pod else {
+            return true;
+        };
+        if pod.metadata.deletion_timestamp.is_some() {
+            return true;
+        }
+        let desired_restart = stateful_set
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.template.metadata.as_ref())
+            .and_then(|metadata| metadata.annotations.as_ref())
+            .and_then(|annotations| annotations.get(RESTARTED_AT_ANNOTATION));
+        let pod_restart = pod
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(RESTARTED_AT_ANNOTATION));
+        desired_restart != pod_restart
+    }
 
-        let Some(container_status) = container_status else {
+    /// Recognizes container failures while keeping normal startup states
+    /// pending.
+    fn container_has_error(container: &ContainerStatus) -> bool {
+        let Some(state) = &container.state else {
             return false;
         };
-
-        let Some(state) = &container_status.state else {
-            return false;
-        };
-
-        // Currently terminated with non-zero exit code.
         if let Some(terminated) = &state.terminated {
             return terminated.exit_code != 0;
         }
-
-        // Waiting state, we want to distinguish normal waiting reasons from abnormal
-        // ones.
-        if let Some(waiting) = &state.waiting
-            && let Some(reason) = &waiting.reason
-        {
-            match reason.as_str() {
-                // Crash/restart errors
-                "CrashLoopBackOff" => return true,
-
-                // Image-related errors (6 predefined in kubelet)
-                "ImagePullBackOff"
-                | "ErrImagePull"
-                | "ErrImageNeverPull"
-                | "InvalidImageName"
-                | "ImageInspectError"
-                | "RegistryUnavailable" => return true,
-
-                // Container creation errors
-                "CreateContainerConfigError" | "CreateContainerError" | "RunContainerError" => {
-                    return true;
-                }
-                _ => {}
-            }
-        }
-
-        false
+        state.waiting.as_ref().and_then(|waiting| waiting.reason.as_deref()).is_some_and(|reason| {
+            matches!(
+                reason,
+                "CrashLoopBackOff"
+                    | "ImagePullBackOff"
+                    | "ErrImagePull"
+                    | "ErrImageNeverPull"
+                    | "InvalidImageName"
+                    | "ImageInspectError"
+                    | "RegistryUnavailable"
+                    | "CreateContainerConfigError"
+                    | "CreateContainerError"
+                    | "RunContainerError"
+            )
+        })
     }
 
-    /// Distinguishes runtime shutdown from Pod replacement using desired state.
+    /// Combines desired workload identity and revision with observed Pod
+    /// health.
+    ///
+    /// A missing or outdated Pod is a replacement in progress, not a stopped
+    /// pipeline. Health from a Pod owned by a different StatefulSet must never
+    /// make the current runtime appear ready. Readiness describes the runtime;
+    /// durable table state and replication progress are reported separately.
     fn derive_replicator_status(
         stateful_set: Option<&StatefulSet>,
         pod: Option<&Pod>,
         replicator_container_name: &str,
     ) -> PodStatus {
         let Some(stateful_set) = stateful_set else {
-            return if pod.is_some() { PodStatus::Stopping } else { PodStatus::Stopped };
+            return match pod {
+                None => PodStatus::Stopped,
+                Some(pod) if pod.metadata.deletion_timestamp.is_some() => PodStatus::Stopping,
+                Some(_) => PodStatus::Unknown,
+            };
         };
         if stateful_set.metadata.deletion_timestamp.is_some() {
             return PodStatus::Stopping;
+        }
+        let Some(spec) = &stateful_set.spec else {
+            return PodStatus::Unknown;
+        };
+        if spec.replicas == Some(0) {
+            return if pod.is_some() { PodStatus::Stopping } else { PodStatus::Stopped };
         }
         let Some(pod) = pod else {
             return PodStatus::Starting;
@@ -435,11 +448,59 @@ impl HttpK8sClient {
         if pod.metadata.deletion_timestamp.is_some() {
             return PodStatus::Starting;
         }
+        let Some(uid) = &stateful_set.metadata.uid else {
+            return PodStatus::Unknown;
+        };
+        if !pod.metadata.owner_references.as_ref().is_some_and(|owners| {
+            owners.iter().any(|owner| {
+                owner.controller == Some(true) && owner.kind == "StatefulSet" && &owner.uid == uid
+            })
+        }) {
+            return PodStatus::Unknown;
+        }
+
+        // Do not report the previous process as started while a newer template
+        // is waiting for the controller or kubelet to replace it.
+        let desired_restart = spec
+            .template
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.annotations.as_ref())
+            .and_then(|annotations| annotations.get(RESTARTED_AT_ANNOTATION));
+        let pod_restart = pod
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(RESTARTED_AT_ANNOTATION));
+        if desired_restart != pod_restart {
+            return PodStatus::Starting;
+        }
+        if let Some(generation) = stateful_set.metadata.generation
+            && stateful_set
+                .status
+                .as_ref()
+                .and_then(|status| status.observed_generation)
+                .is_none_or(|observed| observed < generation)
+        {
+            return PodStatus::Starting;
+        }
+
+        if let Some(revision) =
+            stateful_set.status.as_ref().and_then(|status| status.update_revision.as_ref())
+            && pod
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get("controller-revision-hash"))
+                != Some(revision)
+        {
+            return PodStatus::Starting;
+        }
 
         Self::derive_replicator_pod_status(pod, replicator_container_name)
     }
 
-    /// Derives the observed replicator status from a Pod.
+    /// Derives current container readiness after workload identity is checked.
     ///
     /// Deletion intent takes precedence over container health because a
     /// terminating Pod may retain a failed container status while Kubernetes
@@ -448,19 +509,47 @@ impl HttpK8sClient {
         if pod.metadata.deletion_timestamp.is_some() {
             return PodStatus::Stopping;
         }
-
-        if Self::has_replicator_container_error(pod, replicator_container_name) {
+        let Some(status) = &pod.status else {
+            return PodStatus::Starting;
+        };
+        if status.phase.as_deref() == Some("Failed") {
             return PodStatus::Failed;
         }
-
-        let phase = pod.status.as_ref().map_or(PodPhase::Unknown, |status| {
-            status.phase.as_deref().map_or(PodPhase::Unknown, PodPhase::from)
+        if status
+            .init_container_statuses
+            .as_ref()
+            .is_some_and(|containers| containers.iter().any(Self::container_has_error))
+        {
+            return PodStatus::Failed;
+        }
+        let replicator = status.container_statuses.as_ref().and_then(|containers| {
+            containers.iter().find(|container| container.name == replicator_container_name)
         });
-
-        match phase {
-            PodPhase::Pending => PodStatus::Starting,
-            PodPhase::Running => PodStatus::Started,
-            PodPhase::Succeeded => PodStatus::Stopped,
+        if replicator.is_some_and(Self::container_has_error) {
+            return PodStatus::Failed;
+        }
+        let ready = status
+            .conditions
+            .as_ref()
+            .and_then(|conditions| conditions.iter().find(|condition| condition.type_ == "Ready"));
+        if ready.is_some_and(|condition| condition.status == "Unknown") {
+            return PodStatus::Unknown;
+        }
+        match status.phase.as_deref().map_or(PodPhase::Unknown, PodPhase::from) {
+            PodPhase::Running => {
+                if replicator.is_some_and(|container| {
+                    container.ready
+                        && container.state.as_ref().is_some_and(|state| state.running.is_some())
+                }) && ready.is_some_and(|condition| condition.status == "True")
+                {
+                    PodStatus::Started
+                } else {
+                    PodStatus::Starting
+                }
+            }
+            // The active StatefulSet uses Always restart policy, so a clean
+            // container exit is recovery, not a completed pipeline stop.
+            PodPhase::Pending | PodPhase::Succeeded => PodStatus::Starting,
             PodPhase::Failed => PodStatus::Failed,
             PodPhase::Unknown => PodStatus::Unknown,
         }
@@ -991,6 +1080,32 @@ impl K8sClient for HttpK8sClient {
         }
     }
 
+    async fn complete_pending_replicator_restart(
+        &self,
+        resource_prefix: &str,
+    ) -> Result<bool, K8sError> {
+        let Some(stateful_set) =
+            self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?
+        else {
+            return Ok(false);
+        };
+        if stateful_set.metadata.deletion_timestamp.is_some() {
+            return Ok(false);
+        }
+        let pod = self.pods_api.get_opt(&create_pod_name(resource_prefix)).await?;
+        if !Self::has_pending_replicator_restart(&stateful_set, pod.as_ref()) {
+            return Ok(false);
+        }
+        restart_outdated_pod(
+            &self.stateful_sets_api,
+            &self.pods_api,
+            &stateful_set,
+            &create_pod_name(resource_prefix),
+        )
+        .await?;
+        Ok(true)
+    }
+
     async fn delete_replicator_stateful_set(
         &self,
         resource_prefix: &str,
@@ -1037,8 +1152,10 @@ impl K8sClient for HttpK8sClient {
         let stateful_set =
             self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?;
 
-        Ok(stateful_set
-            .is_some_and(|stateful_set| stateful_set.metadata.deletion_timestamp.is_none()))
+        Ok(stateful_set.is_some_and(|stateful_set| {
+            stateful_set.metadata.deletion_timestamp.is_none()
+                && stateful_set.spec.as_ref().is_some_and(|spec| spec.replicas.unwrap_or(1) > 0)
+        }))
     }
 
     async fn create_or_update_ducklake_maintenance(
@@ -1085,9 +1202,12 @@ impl K8sClient for HttpK8sClient {
     ) -> Result<PodStatus, K8sError> {
         debug!("getting pod status");
 
-        let stateful_set =
-            self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?;
-        let pod = self.pods_api.get_opt(&create_pod_name(resource_prefix)).await?;
+        let stateful_set_name = create_stateful_set_name(resource_prefix);
+        let pod_name = create_pod_name(resource_prefix);
+        let (stateful_set, pod) = tokio::try_join!(
+            self.stateful_sets_api.get_opt(&stateful_set_name),
+            self.pods_api.get_opt(&pod_name),
+        )?;
 
         let replicator_container_name = create_replicator_container_name(resource_prefix);
         Ok(Self::derive_replicator_status(
@@ -1970,10 +2090,10 @@ mod tests {
     use insta::{assert_json_snapshot, assert_snapshot};
     use k8s_openapi::{
         api::core::v1::{
-            ContainerState, ContainerStateTerminated, ContainerStatus,
-            PodStatus as KubernetesPodStatus,
+            ContainerState, ContainerStateRunning, ContainerStateTerminated, ContainerStateWaiting,
+            ContainerStatus, PodCondition, PodStatus as KubernetesPodStatus,
         },
-        apimachinery::pkg::apis::meta::v1::Time,
+        apimachinery::pkg::apis::meta::v1::{OwnerReference, Time},
     };
 
     use super::*;
@@ -2038,30 +2158,70 @@ mod tests {
         assert_eq!(status, PodStatus::Stopping);
     }
 
-    /// Desired runtime state separates replacement from shutdown and Pod
-    /// failure.
-    #[test]
-    fn replicator_status_distinguishes_replacement_from_shutdown() {
-        let active = StatefulSet::default();
-        let deleting = StatefulSet {
+    /// Builds a controller-observed workload and its ready, current Pod.
+    fn ready_runtime() -> (StatefulSet, Pod) {
+        let stateful_set: StatefulSet = serde_json::from_value(json!({
+            "metadata": {"uid": "workload-uid", "generation": 1},
+            "spec": {"replicas": 1, "selector": {}, "template": {}},
+            "status": {"replicas": 1, "observedGeneration": 1, "updateRevision": "revision-1"}
+        }))
+        .unwrap();
+        let pod = Pod {
             metadata: ObjectMeta {
-                deletion_timestamp: Some(Time(Utc::now())),
+                owner_references: Some(vec![OwnerReference {
+                    api_version: "apps/v1".to_owned(),
+                    kind: "StatefulSet".to_owned(),
+                    name: "replicator".to_owned(),
+                    uid: "workload-uid".to_owned(),
+                    controller: Some(true),
+                    ..Default::default()
+                }]),
+                labels: Some(BTreeMap::from([(
+                    "controller-revision-hash".to_owned(),
+                    "revision-1".to_owned(),
+                )])),
                 ..Default::default()
             },
-            ..Default::default()
-        };
-        let failed_pod = failed_replicator_pod(false);
-        let deleting_pod = failed_replicator_pod(true);
-        let running_pod = Pod {
             status: Some(KubernetesPodStatus {
                 phase: Some("Running".to_owned()),
+                conditions: Some(vec![PodCondition {
+                    type_: "Ready".to_owned(),
+                    status: "True".to_owned(),
+                    ..Default::default()
+                }]),
+                container_statuses: Some(vec![ContainerStatus {
+                    name: create_replicator_container_name("tenant-42"),
+                    ready: true,
+                    state: Some(ContainerState {
+                        running: Some(ContainerStateRunning::default()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
                 ..Default::default()
             }),
             ..Default::default()
         };
+        (stateful_set, pod)
+    }
+
+    /// Desired workload state distinguishes replacements, shutdown, and
+    /// orphans.
+    #[test]
+    fn replicator_status_distinguishes_replacement_from_shutdown() {
+        let (active, running_pod) = ready_runtime();
+        let mut deleting = active.clone();
+        deleting.metadata.deletion_timestamp = Some(Time(Utc::now()));
+        let mut deleting_pod = running_pod.clone();
+        deleting_pod.metadata.deletion_timestamp = Some(Time(Utc::now()));
+        let mut failed_pod = running_pod.clone();
+        failed_pod.status = failed_replicator_pod(false).status;
+        let mut scaled_down = active.clone();
+        scaled_down.spec.as_mut().unwrap().replicas = Some(0);
 
         for (stateful_set, pod, expected) in [
             (None, None, PodStatus::Stopped),
+            (None, Some(&running_pod), PodStatus::Unknown),
             (None, Some(&deleting_pod), PodStatus::Stopping),
             (Some(&deleting), None, PodStatus::Stopping),
             (Some(&deleting), Some(&running_pod), PodStatus::Stopping),
@@ -2069,14 +2229,176 @@ mod tests {
             (Some(&active), Some(&deleting_pod), PodStatus::Starting),
             (Some(&active), Some(&failed_pod), PodStatus::Failed),
             (Some(&active), Some(&running_pod), PodStatus::Started),
+            (Some(&scaled_down), None, PodStatus::Stopped),
+            (Some(&scaled_down), Some(&running_pod), PodStatus::Stopping),
         ] {
             assert_eq!(
                 HttpK8sClient::derive_replicator_status(
                     stateful_set,
                     pod,
-                    &create_replicator_container_name("tenant-42"),
+                    &create_replicator_container_name("tenant-42")
                 ),
                 expected
+            );
+        }
+    }
+
+    /// An unready current Pod still accepts an explicit restart.
+    #[test]
+    fn pending_restart_is_distinct_from_pod_readiness() {
+        let (mut active, mut pod) = ready_runtime();
+        pod.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].ready = false;
+        assert!(!HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
+        active.spec.as_mut().unwrap().template.metadata = Some(ObjectMeta {
+            annotations: Some(BTreeMap::from([(
+                RESTARTED_AT_ANNOTATION.to_owned(),
+                "new-restart".to_owned(),
+            )])),
+            ..Default::default()
+        });
+        assert!(HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
+        pod.metadata.annotations =
+            active.spec.as_ref().unwrap().template.metadata.as_ref().unwrap().annotations.clone();
+        assert!(!HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
+        pod.metadata.deletion_timestamp = Some(Time(Utc::now()));
+        assert!(HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
+        assert!(HttpK8sClient::has_pending_replicator_restart(&active, None));
+    }
+
+    /// Healthy old Pods cannot satisfy a different owner or pending revision.
+    #[test]
+    fn replicator_status_requires_current_workload_identity_and_revision() {
+        let (active, pod) = ready_runtime();
+        for case in 0..6 {
+            let mut active = active.clone();
+            let mut pod = pod.clone();
+            let expected = match case {
+                0 => {
+                    pod.metadata.owner_references = None;
+                    PodStatus::Unknown
+                }
+                1 => {
+                    active.metadata.uid = Some("replacement-uid".to_owned());
+                    PodStatus::Unknown
+                }
+                2 => {
+                    active.metadata.generation = Some(2);
+                    PodStatus::Starting
+                }
+                3 => {
+                    active.status.as_mut().unwrap().observed_generation = None;
+                    PodStatus::Starting
+                }
+                4 => {
+                    active.status.as_mut().unwrap().update_revision = Some("revision-2".to_owned());
+                    PodStatus::Starting
+                }
+                _ => {
+                    active.spec.as_mut().unwrap().template.metadata = Some(ObjectMeta {
+                        annotations: Some(BTreeMap::from([(
+                            RESTARTED_AT_ANNOTATION.to_owned(),
+                            "new-restart".to_owned(),
+                        )])),
+                        ..Default::default()
+                    });
+                    // An old failure should not hide a requested replacement.
+                    pod.status = failed_replicator_pod(false).status;
+                    PodStatus::Starting
+                }
+            };
+            assert_eq!(
+                HttpK8sClient::derive_replicator_status(
+                    Some(&active),
+                    Some(&pod),
+                    &create_replicator_container_name("tenant-42")
+                ),
+                expected,
+                "case {case}"
+            );
+        }
+    }
+
+    /// Running phase alone does not establish readiness or successful recovery.
+    #[test]
+    fn replicator_status_requires_readiness_and_recognizes_failures() {
+        let (active, pod) = ready_runtime();
+        for case in 0..11 {
+            let mut pod = pod.clone();
+            let status = pod.status.as_mut().unwrap();
+            let expected = match case {
+                0 => {
+                    status.container_statuses.as_mut().unwrap()[0].ready = false;
+                    PodStatus::Starting
+                }
+                1 => {
+                    status.conditions = None;
+                    PodStatus::Starting
+                }
+                2 => {
+                    status.conditions.as_mut().unwrap()[0].status = "False".to_owned();
+                    PodStatus::Starting
+                }
+                3 => {
+                    status.conditions.as_mut().unwrap()[0].status = "Unknown".to_owned();
+                    PodStatus::Unknown
+                }
+                4 => {
+                    status.container_statuses = None;
+                    PodStatus::Starting
+                }
+                5 => {
+                    status.phase = Some("Succeeded".to_owned());
+                    PodStatus::Starting
+                }
+                6 => {
+                    status.container_statuses.as_mut().unwrap()[0].state = Some(ContainerState {
+                        terminated: Some(ContainerStateTerminated {
+                            exit_code: 0,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                    PodStatus::Starting
+                }
+                7 => {
+                    status.init_container_statuses =
+                        failed_replicator_pod(false).status.unwrap().container_statuses;
+                    PodStatus::Failed
+                }
+                8 => {
+                    status.container_statuses.as_mut().unwrap()[0].state = Some(ContainerState {
+                        waiting: Some(ContainerStateWaiting {
+                            reason: Some("ImagePullBackOff".to_owned()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    });
+                    PodStatus::Failed
+                }
+                9 => {
+                    status.container_statuses.as_mut().unwrap()[0].last_state =
+                        Some(ContainerState {
+                            terminated: Some(ContainerStateTerminated {
+                                exit_code: 1,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        });
+                    PodStatus::Started
+                }
+                _ => {
+                    status.phase = Some("Pending".to_owned());
+                    PodStatus::Starting
+                }
+            };
+            assert_eq!(
+                HttpK8sClient::derive_replicator_status(
+                    Some(&active),
+                    Some(&pod),
+                    &create_replicator_container_name("tenant-42")
+                ),
+                expected,
+                "case {case}"
             );
         }
     }

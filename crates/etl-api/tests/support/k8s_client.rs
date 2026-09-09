@@ -13,14 +13,47 @@ use etl_api::{
         ReplicatorConfigMapFile, ReplicatorWorkloadConfig,
     },
 };
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
+
+/// One-shot barrier for observing and releasing a Kubernetes deletion.
+///
+/// Dropping the test handle also releases the request after a failed assertion.
+#[derive(Clone, Default)]
+pub(crate) struct DeletionGate {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl DeletionGate {
+    /// Waits until the request reaches deletion while holding its API locks.
+    pub(crate) async fn wait_until_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.entered.notified())
+            .await
+            .unwrap();
+    }
+
+    /// Allows the paused request to complete.
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+impl Drop for DeletionGate {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct MockK8sState {
     pod_status: Arc<RwLock<PodStatus>>,
     create_calls: Arc<AtomicUsize>,
+    stateful_set_apply_calls: Arc<AtomicUsize>,
     vpa_delete_calls: Arc<AtomicUsize>,
     deletion_timeout: Arc<AtomicBool>,
+    deletion_gate: Arc<RwLock<Option<DeletionGate>>>,
+    restart_completion_calls: Arc<AtomicUsize>,
+    restart_pending: Arc<AtomicBool>,
     waited_for_deletion: Arc<AtomicBool>,
     stateful_set_active: Arc<AtomicBool>,
     ducklake_maintenance_create_calls: Arc<AtomicUsize>,
@@ -34,8 +67,12 @@ impl Default for MockK8sState {
         Self {
             pod_status: Arc::new(RwLock::new(PodStatus::Started)),
             create_calls: Arc::new(AtomicUsize::new(0)),
+            stateful_set_apply_calls: Arc::new(AtomicUsize::new(0)),
             vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
             deletion_timeout: Arc::new(AtomicBool::new(false)),
+            deletion_gate: Arc::new(RwLock::new(None)),
+            restart_completion_calls: Arc::new(AtomicUsize::new(0)),
+            restart_pending: Arc::new(AtomicBool::new(false)),
             waited_for_deletion: Arc::new(AtomicBool::new(false)),
             stateful_set_active: Arc::new(AtomicBool::new(true)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
@@ -46,6 +83,24 @@ impl Default for MockK8sState {
 }
 
 impl MockK8sState {
+    /// Pauses the next workload deletion until the test releases its gate.
+    pub(crate) async fn pause_deletion(&self) -> DeletionGate {
+        let gate = DeletionGate::default();
+        *self.deletion_gate.write().await = Some(gate.clone());
+        gate
+    }
+
+    /// Controls whether an accepted Pod replacement remains pending.
+    pub(crate) fn set_restart_pending(&self, pending: bool) {
+        self.restart_pending.store(pending, Ordering::Relaxed);
+    }
+
+    /// Counts retries that drive an accepted replacement without changing its
+    /// template.
+    pub(crate) fn restart_completion_calls(&self) -> usize {
+        self.restart_completion_calls.load(Ordering::Relaxed)
+    }
+
     /// Controls whether workload deletion times out.
     pub(crate) fn set_deletion_timeout(&self, timeout: bool) {
         self.deletion_timeout.store(timeout, Ordering::Relaxed);
@@ -67,6 +122,12 @@ impl MockK8sState {
 
     pub(crate) fn create_calls(&self) -> usize {
         self.create_calls.load(Ordering::Relaxed)
+    }
+
+    /// Counts workload applications independently of their supporting
+    /// resources.
+    pub(crate) fn stateful_set_apply_calls(&self) -> usize {
+        self.stateful_set_apply_calls.load(Ordering::Relaxed)
     }
 
     pub(crate) fn vpa_delete_calls(&self) -> usize {
@@ -247,6 +308,7 @@ impl K8sClient for MockK8sClient {
         _identity: &PipelineRuntimeIdentity,
         workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError> {
+        self.state.stateful_set_apply_calls.fetch_add(1, Ordering::Relaxed);
         *self.state.last_replicator_image.write().await =
             Some(workload_config.replicator_image.clone());
         self.set_last_replicator_resource_override(
@@ -267,12 +329,28 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
+    async fn complete_pending_replicator_restart(
+        &self,
+        _resource_prefix: &str,
+    ) -> Result<bool, K8sError> {
+        let pending = self.state.restart_pending.load(Ordering::Relaxed);
+        if pending {
+            self.state.restart_completion_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(pending)
+    }
+
     async fn delete_replicator_stateful_set(
         &self,
         resource_prefix: &str,
         wait: bool,
     ) -> Result<(), K8sError> {
         self.state.waited_for_deletion.store(wait, Ordering::Relaxed);
+        let gate = self.state.deletion_gate.write().await.take();
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         if wait && self.state.deletion_timeout.load(Ordering::Relaxed) {
             return Err(K8sError::ResourceDeletionTimeout {
                 kind: "StatefulSet",

@@ -291,7 +291,50 @@ and the VPA's live policy govern those allocations. Deleting the VPA also does
 not guarantee that the recommender forgets usage history.
 
 Stopping and starting a pipeline still deletes the autoscaler resource: stop
-deletes the StatefulSet and VPA, and start always recreates both resources.
+deletes the StatefulSet and VPA, and starting a stopped pipeline recreates both
+resources. Starting an already active workload leaves it unchanged.
+
+## Pipeline lifecycle and runtime status
+
+Operations on existing pipelines use transaction-scoped PostgreSQL row locks
+across API instances. Overlapping operations return HTTP 409 so callers can
+retry; reads remain unblocked. Locks are released on commit or rollback.
+
+Pipeline operations lock their target. Source and destination changes lock all
+existing pipelines discovered for that resource; tenant operations lock the
+pipelines discovered for that tenant. Configuration updates restart affected
+active pipelines and leave stopped pipelines stopped.
+
+This coordinates operations on discovered pipelines, but does not fully serialize
+concurrent pipeline creation or attachment. See [the locking module](src/data/locks.rs)
+for implementation details and limitations.
+
+### Deletion and retries
+
+Pipeline and tenant deletion clean up source metadata and replication slots
+before committing API deletion. Keeping API records until cleanup succeeds
+preserves the information needed to reclaim remaining source state. Cleanup is
+idempotent, so callers can retry if source cleanup succeeds but API deletion fails.
+
+If the initial source connection fails, deletion logs a warning and skips source
+cleanup. Once connected, cleanup failures retain API records for retry. API,
+source-database, and Kubernetes changes do not share an atomic transaction.
+
+### Lifecycle responses
+
+- Start returns HTTP 200 after ensuring a workload exists; an already active
+  workload is unchanged. If previous shutdown is still pending, HTTP 503 means
+  the caller should retry.
+- Stop returns HTTP 202 after Kubernetes accepts deletion; shutdown may continue
+  after the response.
+- Restart returns HTTP 202 after requesting replacement. Stopped or stopping
+  pipelines return HTTP 409.
+- Table reset holds the pipeline lock through shutdown, source reset, and
+  restoration of an initially active workload.
+
+Poll runtime status to follow these transitions. `started` means the current
+Kubernetes workload is ready; initial-sync state and replication progress are
+reported separately.
 
 ### Encryption Keys
 

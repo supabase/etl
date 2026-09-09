@@ -42,7 +42,7 @@ pub enum DestinationPipelinesDbError {
 
 #[expect(clippy::too_many_arguments)]
 pub async fn create_destination_and_pipeline(
-    txn: &mut PgTransaction<'_>,
+    api_txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     source_id: i64,
     destination_name: &str,
@@ -52,7 +52,7 @@ pub async fn create_destination_and_pipeline(
     encryption_key: &EncryptionKeyring,
 ) -> Result<(i64, i64), DestinationPipelinesDbError> {
     let destination_id = create_destination(
-        txn.deref_mut(),
+        api_txn.deref_mut(),
         tenant_id,
         destination_name,
         destination_config,
@@ -61,7 +61,7 @@ pub async fn create_destination_and_pipeline(
     .await?;
 
     let pipeline_id =
-        create_pipeline(txn, tenant_id, source_id, destination_id, image_id, pipeline_config)
+        create_pipeline(api_txn, tenant_id, source_id, destination_id, image_id, pipeline_config)
             .await?;
 
     Ok((destination_id, pipeline_id))
@@ -69,7 +69,7 @@ pub async fn create_destination_and_pipeline(
 
 #[expect(clippy::too_many_arguments)]
 pub async fn update_destination_and_pipeline(
-    txn: &mut PgTransaction<'_>,
+    api_txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     destination_id: i64,
     pipeline_id: i64,
@@ -80,7 +80,7 @@ pub async fn update_destination_and_pipeline(
     encryption_key: &EncryptionKeyring,
 ) -> Result<(), DestinationPipelinesDbError> {
     let destination_id_res = update_destination(
-        txn.deref_mut(),
+        api_txn.deref_mut(),
         tenant_id,
         destination_name,
         destination_id,
@@ -94,7 +94,7 @@ pub async fn update_destination_and_pipeline(
     };
 
     let pipeline_id_res = update_pipeline(
-        txn.deref_mut(),
+        api_txn.deref_mut(),
         tenant_id,
         pipeline_id,
         source_id,
