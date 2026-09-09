@@ -111,7 +111,11 @@ ETL provides **at-least-once delivery**. If restarts occur, some events may be d
 
 ### Why Not Exactly-Once?
 
-Exactly-once delivery requires distributed transactions between Postgres and the destination, adding complexity and latency. Instead, ETL optimizes for throughput and simplicity while minimizing duplicates through:
+ETL does not promise exactly-once delivery across its source, store, and
+destinations. A failure can occur after the destination commits a write but
+before ETL saves the corresponding checkpoint. Destinations can use idempotent
+writes or deduplication to keep replay from changing the final result.
+ETL also limits replay through:
 
 - **Controlled shutdown**: The pipeline attempts to finish in-flight work before its shutdown deadline; interrupted work can be replayed after restart
 - **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
@@ -142,6 +146,6 @@ persisted across restarts.
 | **FinishedCopy** | Table Sync Worker | Copy complete, waiting for catch-up coordination |
 | **SyncWait** | Table Sync Worker | Waiting for Apply Worker to pause (in-memory only) |
 | **Catchup** | Apply Worker | Apply Worker paused; Table Sync Worker catching up to its LSN (in-memory only) |
-| **SyncDone** | Table Sync Worker | Catch-up complete; durable decoder retained until Apply materializes local state |
+| **SyncDone** | Table Sync Worker | Catch-up complete; awaiting a persisted apply checkpoint and local decoder before handover |
 | **Ready** | Apply Worker | Apply Worker now handles this table exclusively |
 | **Errored** | Either | Error occurred; contains reason, solution hint, and retry policy |

@@ -168,6 +168,33 @@ ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
 Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
 Parser fuzz targets live in `fuzz/`.
 
+## Documentation
+
+The docs site uses Next.js and Fumadocs. Use Node.js 22, matching CI. From the
+repository root:
+
+```bash
+cd site
+npm ci
+npm run dev
+```
+
+Open [http://localhost:3000/etl/](http://localhost:3000/etl/). Pages live in
+`site/content/docs/` and reload as you edit them. Keep `/etl/` in the URL;
+the root path returns 404. Use `localhost` to avoid development origin errors
+with the network address printed by Next.js.
+
+To check the exported site, run these commands from `site/`:
+
+```bash
+npm run build
+npx playwright install chromium
+npm run smoke:docs
+```
+
+For a manual preview of the build, run `npm run preview` and open the URL
+printed by the server.
+
 ## Troubleshooting
 
 - Nothing listens on 5430: run `cargo x init` (or `SKIP_DOCKER=1` with

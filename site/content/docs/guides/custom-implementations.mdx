@@ -13,12 +13,13 @@ for the distinction and upstream maintenance expectations.
 
 ## Understanding the Destination Trait
 
-ETL delivers data to destinations in **two phases**:
+ETL uses two write methods. Initial sync uses both: it copies existing rows,
+then catches up changes before ongoing replication begins.
 
-| Phase | Method | When | Data Type |
-|-------|--------|------|-----------|
-| Initial sync | `write_table_rows()` | Startup | `Option<TableCopyBatchId>` and `Vec<TableRow>` |
-| Ongoing replication | `write_events()` | During catch-up and ongoing replication | `Vec<Event>` including `Relation` schema events |
+| Method | When | Data |
+| --- | --- | --- |
+| `write_table_rows()` | Copying existing rows during initial sync | `Option<TableCopyBatchId>` and `Vec<TableRow>` |
+| `write_events()` | Catch-up and ongoing replication | `Vec<Event>` including `Relation` schema events |
 
 <Callout className="etl-callout" type="info" title="Note">
   During initial sync, parallel table sync workers each process their own
@@ -38,7 +39,7 @@ defaults, recovery, and current limitations.
 ## Create the project [#create-the-project] [step]
 
 ```bash title="Terminal"
-cargo new etl-custom --lib
+cargo new etl-custom
 cd etl-custom
 rustup override set 1.95.0
 ```
@@ -340,7 +341,8 @@ impl TableStateLifecycleStore for CustomStore {
 }
 ```
 
-**Check:** `cargo check` succeeds.
+The module will be compiled when it is declared in `src/main.rs` in the
+[Wire it together](#wire-it-together) step.
 
 ## Implement a custom destination [#implement-a-custom-destination] [step]
 
@@ -498,7 +500,7 @@ impl Destination for HttpDestination {
 }
 ```
 
-**Check:** `cargo check` succeeds.
+The module will be compiled after the next step wires it into the pipeline.
 
 ## Wire it together [#wire-it-together] [step]
 
@@ -586,11 +588,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 ## Test the pipeline [#test-the-pipeline] [step]
 
+First, compile the complete example:
+
+```bash title="Terminal"
+cargo check
+```
+
+Before running, create `my_publication` in your database following
+[Configure Postgres](/guides/configure-postgres/#publications), and replace the
+placeholder endpoint with an HTTP service that implements the example's
+`rows`, `events`, and `tables/{table_name}/drop-for-copy` routes.
+
+This HTTP example demonstrates the destination contract, not a complete
+replication format: row values use debug strings, and change events include
+only their type and table name. A production implementation needs typed row
+payloads, sequence keys, schema handling, and idempotent writes. The service
+must acknowledge success only after the submitted work is durable, because
+this adapter treats a successful HTTP response as `Durable`.
+
 ```bash title="Terminal"
 cargo run
 ```
 
-The pipeline will connect to Postgres and start replicating. You'll see your custom store logging **state transitions** and your destination receiving **HTTP calls**.
+The pipeline logs state transitions and sends HTTP requests to your service.
 
 ## Next Steps
 

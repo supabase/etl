@@ -105,6 +105,7 @@ export function getAgentPageGroups() {
     ['/reference/destinations', 7],
     ['/explanation/events', 8],
     ['/explanation/traits', 9],
+    ['/reference/benchmarks', 10],
   ]);
 
   return sectionOrder.map((section) => ({

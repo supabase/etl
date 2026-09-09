@@ -8,7 +8,10 @@ Build a pipeline that performs an initial sync of a Postgres table, then
 replicates row changes through a small custom `Destination`.
 
 <Callout className="etl-callout" type="info" title="Want a real destination immediately?">
-  The fastest full pipeline is local ClickHouse. After cloning this repository:
+  For a built-in destination, start with local ClickHouse. After cloning this
+  repository and completing the toolchain prerequisites in
+  [DEVELOPMENT.md](https://github.com/supabase/etl/blob/main/DEVELOPMENT.md),
+  run these commands from the repository root:
 
   ```bash
   cargo x init

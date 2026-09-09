@@ -46,7 +46,10 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO etl_user;
 
 The role must be able to `SELECT` every published table so ETL can copy existing
 rows. Create the publication as a table owner or superuser; the replication
-role does not have to own the tables.
+role does not have to own the tables. Run the schema and table grants in the
+database being replicated. `ALTER DEFAULT PRIVILEGES` applies to future
+objects created by the role executing it; repeat it with `FOR ROLE` for each
+role that creates published tables.
 
 By default, `Pipeline::start()` also installs ETL source helpers and a
 `ddl_command_end` event trigger. Creating that event trigger requires
@@ -61,8 +64,10 @@ needs. This lets ETL catch up after a temporary disconnect.
 
 **ETL creates its logical slots automatically.** Do not pre-create a slot for
 the pipeline. The apply worker uses `supabase_etl_apply_{pipeline_id}`; table
-sync workers create temporary `supabase_etl_table_sync_{pipeline_id}_{table_id}`
-slots during initial sync and drop them when that copy finishes.
+sync workers create `supabase_etl_table_sync_{pipeline_id}_{table_id}` slots
+for initial sync and drop them after catch-up completes. These are persistent
+PostgreSQL slots with a short lifecycle, not session-scoped `TEMPORARY` slots;
+they can remain after a failed or interrupted sync.
 
 ### Viewing Replication Slots
 
@@ -80,8 +85,9 @@ SELECT pg_drop_replication_slot('supabase_etl_apply_1');
 ```
 
 <Callout className="etl-callout" type="warn" title="Warning">
-  Only delete slots when you are sure they are not in use. Deleting an active
-  slot will break replication.
+  PostgreSQL rejects attempts to drop an active slot. Dropping an inactive
+  slot still discards its saved position and WAL-retention protection, so stop
+  the pipeline and plan its recovery before deleting a slot it needs.
 </Callout>
 
 ## Max Replication Slots
@@ -93,7 +99,11 @@ Controls how many replication slots Postgres can maintain.
 max_replication_slots = 20
 ```
 
-ETL uses a **single replication slot** for its main apply worker. Additional slots are created for parallel table copies during initial sync or when new tables are added to the publication. The `max_table_sync_workers` pipeline parameter controls parallel copies, so total slots used by ETL never exceed `max_table_sync_workers + 1`.
+Each pipeline uses one apply-worker slot and additional slots for table sync
+workers. Budget at least `max_table_sync_workers + 1` slots per pipeline for
+normal operation, plus capacity for other replication clients and slots left
+by interrupted or errored syncs. `max_table_sync_workers` limits concurrent
+workers, not every slot that may remain in PostgreSQL.
 
 Increase this setting when:
 
@@ -114,7 +124,9 @@ Set this to at least `max_replication_slots` to ensure all slots can connect.
 
 ## WAL Keep Size
 
-Provides a disk-backed safety buffer when replication consumers fall behind.
+Sets a minimum amount of recent WAL to retain for physical standbys. Logical
+replication slots retain the WAL they need independently; `wal_keep_size` is
+neither a slot-retention limit nor a guarantee against slot invalidation.
 
 ```ini title="postgresql.conf"
 wal_keep_size = 1GB
@@ -134,8 +146,9 @@ Replication slots prevent Postgres from deleting WAL files until all consumers h
   consistent snapshot point.
 
 <Callout className="etl-callout" type="warn" title="Warning">
-  If WAL grows beyond the configured limit, Postgres will terminate the
-  replication slot. Control this with `max_slot_wal_keep_size`:
+  `max_slot_wal_keep_size` limits slot-based WAL retention at checkpoint time.
+  If required WAL is removed, the slot becomes unusable and replication needs
+  recovery. This is not a hard cap on total WAL directory size:
 </Callout>
 
 ```ini title="postgresql.conf"
@@ -180,8 +193,10 @@ available:
 - Bound retention with `max_slot_wal_keep_size` based on available disk.
 - Alert on `confirmed_flush_lag_bytes`, `retained_wal_bytes`, `safe_wal_size`,
   and `wal_status`.
-- Treat `safe_wal_size IS NULL` as unlimited retention and `0` as no remaining
-  headroom.
+- Interpret `safe_wal_size` together with `wal_status` and
+  `max_slot_wal_keep_size`: `NULL` can mean a lost slot or unlimited retention,
+  while `0` means no remaining headroom. See
+  [PostgreSQL's slot monitoring reference](https://www.postgresql.org/docs/18/view-pg-replication-slots.html).
 - Resolve errored tables promptly and size `max_table_sync_workers` to balance
   copy speed with resource use.
 

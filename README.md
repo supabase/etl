@@ -107,7 +107,7 @@ tokio = { version = "1", features = ["full"] }
 
 ## Independent Benchmark
 
-**~33× lower tail latency. ~125× lower measured runtime memory.**
+**~33× lower tail latency. ~125× smaller measured runtime memory footprint.**
 Compared with Debezium Server 3.1.3.Final in Hardbyte's
 [independent CDC benchmark](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady):
 **26 ms vs. 848 ms** and **13 MB vs. 1,629 MB**, at 200 source changes/s
