@@ -2,6 +2,7 @@ mod batches;
 mod client;
 mod config;
 mod core;
+mod embedding;
 mod encoding;
 mod external_maintenance;
 mod inline_size;
@@ -133,6 +134,7 @@ pub use batches::{
     reset_ducklake_test_hooks,
 };
 pub use config::S3Config;
+pub use duckdb::Connection;
 pub use etl_maintenance::ducklake::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, DuckLakeMaintenanceOutcome,
     ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,

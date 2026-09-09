@@ -789,17 +789,19 @@ pub(super) async fn apply_table_batch_with_retry(
 /// mixed CDC streams can commit larger insert groups without breaking atomic
 /// ordering.
 pub(super) fn prepare_mutation_table_batches(
+    batch_size: Option<std::num::NonZeroUsize>,
     replicated_table_schema: &ReplicatedTableSchema,
     table_name: DuckLakeTableName,
     replay_epoch: String,
     tracked_mutations: Vec<TrackedTableMutation>,
 ) -> EtlResult<Vec<PreparedDuckLakeTableBatch>> {
+    let batch_size = batch_size.map_or(CDC_MUTATION_BATCH_SIZE, std::num::NonZeroUsize::get);
     let mut prepared_batches = Vec::new();
     let mut pending_mutations = Vec::new();
 
     for tracked_mutation in tracked_mutations {
         pending_mutations.push(tracked_mutation);
-        if pending_mutations.len() >= CDC_MUTATION_BATCH_SIZE {
+        if pending_mutations.len() >= batch_size {
             push_prepared_mutation_batch(
                 &mut prepared_batches,
                 replicated_table_schema,
@@ -3157,6 +3159,7 @@ mod tests {
     fn prepare_mutation_table_batches_insert_only_uses_single_upsert_operation() {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
+            None,
             &replicated_table_schema,
             ducklake_table_name(),
             LEGACY_REPLAY_EPOCH.to_owned(),
@@ -3207,6 +3210,7 @@ mod tests {
     fn prepare_mutation_table_batches_split_mixed_cdc_at_delete_boundaries() {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
+            None,
             &replicated_table_schema,
             ducklake_table_name(),
             LEGACY_REPLAY_EPOCH.to_owned(),
@@ -3259,6 +3263,7 @@ mod tests {
     fn prepare_mutation_table_batches_group_contiguous_deletes() {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
+            None,
             &replicated_table_schema,
             ducklake_table_name(),
             LEGACY_REPLAY_EPOCH.to_owned(),
@@ -3306,6 +3311,7 @@ mod tests {
     fn prepare_mutation_table_batches_group_contiguous_updates() {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
+            None,
             &replicated_table_schema,
             ducklake_table_name(),
             LEGACY_REPLAY_EPOCH.to_owned(),
@@ -3361,50 +3367,55 @@ mod tests {
 
     #[test]
     fn prepare_mutation_table_batches_split_non_inserts_at_cap() {
-        let replicated_table_schema = make_replicated_schema();
-        let tracked = (0..=CDC_MUTATION_BATCH_SIZE)
-            .map(|idx| {
-                TrackedTableMutation::new(
-                    EventSequenceKey::new(PgLsn::from(200 + idx as u64), 0),
-                    TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
-                        Cell::I32(idx as i32),
-                        Cell::String(format!("name-{idx}")),
-                    ]))),
-                )
-            })
-            .collect();
-        let batches = prepare_mutation_table_batches(
-            &replicated_table_schema,
-            ducklake_table_name(),
-            LEGACY_REPLAY_EPOCH.to_owned(),
-            tracked,
-        )
-        .unwrap();
+        for configured_size in [None, std::num::NonZeroUsize::new(CDC_MUTATION_BATCH_SIZE * 2)] {
+            let replicated_table_schema = make_replicated_schema();
+            let batch_size =
+                configured_size.map_or(CDC_MUTATION_BATCH_SIZE, std::num::NonZeroUsize::get);
+            let tracked = (0..=batch_size)
+                .map(|idx| {
+                    TrackedTableMutation::new(
+                        EventSequenceKey::new(PgLsn::from(200 + idx as u64), 0),
+                        TableMutation::Delete(OldTableRow::Full(TableRow::new(vec![
+                            Cell::I32(idx as i32),
+                            Cell::String(format!("name-{idx}")),
+                        ]))),
+                    )
+                })
+                .collect();
+            let batches = prepare_mutation_table_batches(
+                configured_size,
+                &replicated_table_schema,
+                ducklake_table_name(),
+                LEGACY_REPLAY_EPOCH.to_owned(),
+                tracked,
+            )
+            .unwrap();
 
-        assert_eq!(batches.len(), 2);
+            assert_eq!(batches.len(), 2);
 
-        match &batches[0].action {
-            PreparedDuckLakeTableBatchAction::Mutation(prepared) => match &prepared[0] {
-                PreparedTableMutation::Delete { predicates, .. } => {
-                    assert_eq!(predicates.len(), CDC_MUTATION_BATCH_SIZE);
-                }
-                PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
-                    panic!("expected delete batch")
-                }
-            },
-            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
-        }
+            match &batches[0].action {
+                PreparedDuckLakeTableBatchAction::Mutation(prepared) => match &prepared[0] {
+                    PreparedTableMutation::Delete { predicates, .. } => {
+                        assert_eq!(predicates.len(), batch_size);
+                    }
+                    PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
+                        panic!("expected delete batch")
+                    }
+                },
+                PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+            }
 
-        match &batches[1].action {
-            PreparedDuckLakeTableBatchAction::Mutation(prepared) => match &prepared[0] {
-                PreparedTableMutation::Delete { predicates, .. } => {
-                    assert_eq!(predicates.len(), 1);
-                }
-                PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
-                    panic!("expected delete batch")
-                }
-            },
-            PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+            match &batches[1].action {
+                PreparedDuckLakeTableBatchAction::Mutation(prepared) => match &prepared[0] {
+                    PreparedTableMutation::Delete { predicates, .. } => {
+                        assert_eq!(predicates.len(), 1);
+                    }
+                    PreparedTableMutation::Upsert(_) | PreparedTableMutation::Update { .. } => {
+                        panic!("expected delete batch")
+                    }
+                },
+                PreparedDuckLakeTableBatchAction::Truncate => panic!("expected mutation batch"),
+            }
         }
     }
 
@@ -3412,6 +3423,7 @@ mod tests {
     fn prepare_mutation_table_batches_isolate_update_in_its_own_atomic_batch() {
         let replicated_table_schema = make_replicated_schema();
         let batches = prepare_mutation_table_batches(
+            None,
             &replicated_table_schema,
             ducklake_table_name(),
             LEGACY_REPLAY_EPOCH.to_owned(),
