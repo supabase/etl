@@ -13,6 +13,8 @@ homepage.workspace = true
 doctest = false
 
 [features]
+# Explicit opt-in: database errors and SQL may contain source row values.
+ducklake-query-error-details = ["ducklake"]
 default = ["tls-rustls-ring", "bundled"]
 bundled = ["duckdb?/bundled", "duckdb?/json", "duckdb?/parquet", "etl-maintenance?/bundled"]
 tls-rustls-ring = [

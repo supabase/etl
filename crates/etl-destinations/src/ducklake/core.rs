@@ -184,6 +184,24 @@ fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
         .connect_lazy_with(options))
 }
 
+/// Drains accepted table work and reports every failure before returning one.
+async fn finish_table_tasks(tasks: &mut tokio::task::JoinSet<EtlResult<()>>) -> EtlResult<()> {
+    let mut first_error = None;
+    while let Some(result) = tasks.join_next().await {
+        let result = result.map_err(|source| etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake table task failed", source: source)).and_then(|result| result);
+        if let Err(error) = result {
+            tracing::error!(error = %error, detail = error.detail(), "ducklake table task failed");
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Returns whether a DuckLake DDL error indicates another transaction already
 /// created the requested table.
 pub(super) fn is_create_table_conflict(error: &duckdb::Error, table_name: &str) -> bool {
@@ -3383,11 +3401,7 @@ where
                     });
                 }
 
-                while let Some(result) = join_set.join_next().await {
-                    result.map_err(|_| {
-                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake write task panicked")
-                    })??;
-                }
+                finish_table_tasks(&mut join_set).await?;
             }
 
             // Apply schema changes sequentially before any later row events
@@ -3477,11 +3491,7 @@ where
                     });
                 }
 
-                while let Some(result) = join_set.join_next().await {
-                    result.map_err(|_| {
-                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake truncate task panicked")
-                    })??;
-                }
+                finish_table_tasks(&mut join_set).await?;
             }
         }
 
@@ -4468,6 +4478,24 @@ mod tests {
 
         let batch_id = NEXT_BATCH_ID.fetch_add(1, Ordering::Relaxed);
         TableCopyBatchId::new(TableCopyAttemptId::from_u128(1), batch_id)
+    }
+
+    #[tokio::test]
+    async fn failing_table_does_not_abort_other_accepted_work() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let other_completed = Arc::clone(&completed);
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async {
+            Err(etl_error!(ErrorKind::DestinationQueryFailed, "First write failed"))
+        });
+        tasks.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            other_completed.store(true, Ordering::SeqCst);
+            Err(etl_error!(ErrorKind::DestinationQueryFailed, "Second write failed"))
+        });
+        assert!(finish_table_tasks(&mut tasks).await.is_err());
+        assert!(completed.load(Ordering::SeqCst));
+        assert!(tasks.is_empty());
     }
 
     #[test]

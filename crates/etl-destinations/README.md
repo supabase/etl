@@ -51,3 +51,9 @@ Parquet build. Hosts supplying a compatible native DuckDB library can disable
 default features and select `ducklake` plus their TLS feature. Their initializer
 must load extensions matching that library. Other dependencies enabling `bundled`
 will still enable it through Cargo feature unification.
+
+`ducklake-query-error-details` explicitly includes original DuckDB UPDATE/DELETE
+errors, their source chains and SQL in diagnostics. These can contain row values;
+leave the feature disabled to retain the default redaction. Concurrent table
+failures are logged individually and accepted table tasks finish before the
+first error is returned to the apply loop.

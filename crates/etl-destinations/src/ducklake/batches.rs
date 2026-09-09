@@ -112,17 +112,33 @@ fn is_duckdb_interrupt_error(error: &duckdb::Error) -> bool {
     error.to_string().contains("INTERRUPT Error: Interrupted")
 }
 
-/// Sanitized DuckDB query failure for statements that may contain row values.
-#[derive(Debug)]
-struct DuckDbSensitiveQueryError;
-
+/// Query failure whose value-bearing diagnostics require explicit opt-in.
+struct DuckDbSensitiveQueryError {
+    error: duckdb::Error,
+    sql: String,
+}
 impl fmt::Display for DuckDbSensitiveQueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DuckDB query failed; error message omitted because it may contain row values")
+        if cfg!(feature = "ducklake-query-error-details") {
+            write!(f, "{}; SQL: {}", self.error, self.sql)
+        } else {
+            write!(
+                f,
+                "DuckDB query failed; error message omitted because it may contain row values"
+            )
+        }
     }
 }
-
-impl error::Error for DuckDbSensitiveQueryError {}
+impl fmt::Debug for DuckDbSensitiveQueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+impl error::Error for DuckDbSensitiveQueryError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        if cfg!(feature = "ducklake-query-error-details") { Some(&self.error) } else { None }
+    }
+}
 
 /// Formats query context for a delete mutation without row values.
 fn format_delete_mutation_error_detail(
@@ -2320,8 +2336,9 @@ fn apply_delete_mutation(
         let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
         conn.execute_batch(&sql_query).map_err(|error| {
             let duckdb_interrupted = is_duckdb_interrupt_error(&error);
+            let error = DuckDbSensitiveQueryError { error, sql: sql_query.clone() };
             tracing::error!(
-                error = %DuckDbSensitiveQueryError,
+                error = %error,
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
                 batch_kind = batch.batch_kind.as_str(),
@@ -2351,7 +2368,7 @@ fn apply_delete_mutation(
                     chunk_count,
                     chunk.len(),
                 ),
-                source: DuckDbSensitiveQueryError
+                source: error
             )
         })?;
     }
@@ -2373,13 +2390,14 @@ fn apply_update_mutation(
     let set_clause = assignments.join(", ");
     let target_table = qualified_lake_table_name(table_name);
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
-    conn.execute_batch(&sql_query).map_err(|_err| {
-        tracing::error!(error = %DuckDbSensitiveQueryError, "error updating rows");
+    conn.execute_batch(&sql_query).map_err(|error| {
+        let error = DuckDbSensitiveQueryError { error, sql: sql_query.clone() };
+        tracing::error!(error = %error, "error updating rows");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
             format_update_mutation_error_detail(&target_table, assignments.len(), !predicate.is_empty()),
-            source: DuckDbSensitiveQueryError
+            source: error
         )
     })?;
 
@@ -2642,6 +2660,11 @@ mod tests {
     ) {
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(error.description(), Some(description));
+        if cfg!(feature = "ducklake-query-error-details") {
+            assert!(error.to_string().contains(sensitive_value));
+            assert!(error.to_string().contains("SQL:"));
+            return;
+        }
         assert!(!error.to_string().contains(sensitive_value));
         assert!(!error.detail().is_some_and(|detail| detail.contains(sensitive_value)));
         let source = error.source().expect("expected sanitized source");
