@@ -2338,7 +2338,7 @@ fn apply_delete_mutation(
             let duckdb_interrupted = is_duckdb_interrupt_error(&error);
             let error = DuckDbSensitiveQueryError { error, sql: sql_query.clone() };
             tracing::error!(
-                error = %error,
+                error = "DuckDB DELETE failed; row-bearing diagnostics omitted from logs",
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
                 batch_kind = batch.batch_kind.as_str(),
@@ -2392,7 +2392,7 @@ fn apply_update_mutation(
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
     conn.execute_batch(&sql_query).map_err(|error| {
         let error = DuckDbSensitiveQueryError { error, sql: sql_query.clone() };
-        tracing::error!(error = %error, "error updating rows");
+        tracing::error!(error = "DuckDB UPDATE failed; row-bearing diagnostics omitted from logs", table = %table_name, "error updating rows");
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",

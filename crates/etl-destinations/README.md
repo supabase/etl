@@ -29,8 +29,9 @@ When embedding DuckLake, the builder also accepts a `connection_initializer`
 and a `table_name_mapper`. The initializer returns a fresh DuckDB instance with
 `lake` already attached to the configured catalog and data path. It owns
 extension loading, credentials, resource/spill limits and catalog options,
-including schema-scoped options and the attachment's data inlining limit. ETL
-continues to own COPY, CDC, replay state, pooled connection clones and session
+including schema-scoped options and the attachment's data inlining limit for both
+COPY and CDC. Host initialization bypasses the standalone COPY inlining override.
+ETL continues to own COPY, CDC, replay state, pooled connection clones and session
 settings. The initializer runs again on instance replacement; it must not retain
 connections to retired instances. Existing persisted table names take precedence
 over a new mapping, and sorting configuration uses destination names.
@@ -53,7 +54,8 @@ must load extensions matching that library. Other dependencies enabling `bundled
 will still enable it through Cargo feature unification.
 
 `ducklake-query-error-details` explicitly includes original DuckDB UPDATE/DELETE
-errors, their source chains and SQL in diagnostics. These can contain row values;
+errors, their source chains and SQL in returned errors. Automatic mutation/task
+logs retain structural context without rendering those errors. Returned errors can contain row values;
 leave the feature disabled to retain the default redaction. Concurrent table
 failures are logged individually and accepted table tasks finish before the
 first error is returned to the apply loop.

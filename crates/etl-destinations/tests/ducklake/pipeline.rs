@@ -1996,6 +1996,15 @@ async fn embedded_destination_keeps_copy_cdc_and_maintenance_on_one_instance() {
         .await;
     database.insert_values(users.name.clone(), &["name", "age"], &[&"after", &2]).await.unwrap();
     inserted.notified().await;
+    let mapped_for_inline_check =
+        DuckLakeTableName::new("replicated", format!("{}_{}", users.name.schema, users.name.name));
+    let flushed = raw.run_maintenance(Duration::from_secs(30), move |conn| {
+        let sql = format!("select coalesce(sum(rows_flushed), 0) from ducklake_flush_inlined_data('lake', {}, schema => {})", quote_literal(mapped_for_inline_check.table()), quote_literal(mapped_for_inline_check.schema()));
+        conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).map_err(|source| {
+            etl_error!(ErrorKind::DestinationQueryFailed, "Inline verification failed", source: source)
+        })
+    }).await.unwrap();
+    assert_eq!(flushed, 0);
     pipeline.shutdown_and_wait().await.unwrap();
     drop(wrapped);
     drop(raw);

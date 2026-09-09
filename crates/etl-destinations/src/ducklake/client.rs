@@ -1006,7 +1006,12 @@ where
 {
     let operation_kind = DUCKDB_BLOCKING_OPERATION_KIND;
     let operation_id = NEXT_DUCKDB_BLOCKING_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+        etl_error!(ErrorKind::ConfigError, "DuckLake operation timeout is too large")
+    })?;
+    let abort_deadline = deadline.checked_add(BLOCKING_ABORT_GRACE).ok_or_else(|| {
+        etl_error!(ErrorKind::ConfigError, "DuckLake operation timeout leaves no abort grace")
+    })?;
     let slot_wait_started = Instant::now();
     let permit = tokio::time::timeout_at(deadline, Arc::clone(&blocking_slots).acquire_owned())
         .await
@@ -1026,7 +1031,6 @@ where
     // connection active.
     let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
-    let abort_deadline = deadline + BLOCKING_ABORT_GRACE;
 
     let blocking_task = tokio::task::spawn_blocking(move || -> EtlResult<R> {
         // Please if you modify the code inside this blocking task do not add any
@@ -1342,6 +1346,26 @@ mod tests {
             expected_timed_out,
             "unexpected timeout state for watchdog sequence `{name}`"
         );
+    }
+
+    #[tokio::test]
+    async fn overflowing_timeout_returns_config_error_before_running_operation() {
+        let pool = Arc::new(
+            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test").await.unwrap(),
+        );
+        let slots = Arc::new(Semaphore::new(1));
+        let error = run_duckdb_blocking_with_timeout(
+            pool,
+            Arc::clone(&slots),
+            Duration::MAX,
+            |_| -> EtlResult<()> {
+                panic!("an invalid timeout must not start native work");
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert_eq!(slots.available_permits(), 1);
     }
 
     #[tokio::test]
