@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
     time::Duration,
 };
 
@@ -18,10 +17,7 @@ use etl::{
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
 };
-use tokio::{
-    sync::{Mutex, Semaphore},
-    time::timeout,
-};
+use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::{
@@ -84,48 +80,71 @@ fn take_truncate_operations(iter: &mut EventIter) -> Vec<(ReplicatedTableSchema,
     operations
 }
 
-/// Coordinates the initial Snowflake setup of each table.
-///
-/// Copy partitions can concurrently observe missing destination metadata. A
-/// per-table gate gives one caller ownership of the complete `Creating` ->
-/// remote setup -> `Applied` transition so a stale caller cannot overwrite
-/// completed metadata with `Creating`. The registry mutex is released before a
-/// caller waits for its table gate.
-#[derive(Clone)]
-struct TableInitializer {
-    /// Stable initialization gates retained for this destination's lifetime.
-    gates: Arc<Mutex<HashMap<TableId, Arc<Semaphore>>>>,
-}
+/// Initializes a table, channel, and durable metadata under one lifecycle gate.
+async fn initialize_table<S, T, C>(
+    client: &Client<T, C>,
+    store: &S,
+    table_schema: &ReplicatedTableSchema,
+) -> EtlResult<()>
+where
+    S: DestinationStore,
+    T: TokenProvider + 'static,
+    C: StreamClient,
+{
+    table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+    let table_id = table_schema.id();
+    let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
+    let columns: Vec<_> =
+        table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
 
-impl TableInitializer {
-    /// Creates an empty table-initialization registry.
-    fn new() -> Self {
-        Self { gates: Arc::new(Mutex::new(HashMap::new())) }
+    // Applied metadata needs no transition coordination, but this process
+    // may still need to reopen its local channel state.
+    if let Some(metadata) = store.get_destination_table_metadata(table_id).await?
+        && metadata.is_applied()
+    {
+        ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
+        client
+            .prepare_existing_table(table_id, metadata.table_id(), &columns)
+            .await
+            .map_err(EtlError::from)?;
+        return Ok(());
     }
 
-    /// Initializes the Snowflake table, channel, and durable metadata for copy.
-    async fn initialize<S, T, C>(
-        &self,
-        client: &Client<T, C>,
-        store: &S,
-        table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<()>
-    where
-        S: DestinationStore,
-        T: TokenProvider + 'static,
-        C: StreamClient,
-    {
-        table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
-        let table_id = table_schema.id();
-        let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
-        let columns: Vec<_> =
-            table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
+    // Own the complete Creating -> remote setup -> Applied transition with
+    // the same gate used by channel reopening and table-copy reset.
+    let table = client.lock_table(table_id).await;
 
-        // Applied metadata needs no transition coordination, but this process
-        // may still need to reopen its local channel state.
-        if let Some(metadata) = store.get_destination_table_metadata(table_id).await?
-            && metadata.is_applied()
-        {
+    // Re-read under the table gate because another copy partition may have
+    // completed setup after the fast-path read.
+    let snapshot_id = table_schema.inner().snapshot_id;
+    let replication_mask = table_schema.replication_mask().clone();
+    schema::validate_no_cdc_collisions(&columns).map_err(EtlError::from)?;
+    let creating_metadata = match store.get_destination_table_metadata(table_id).await? {
+        None => {
+            if client.table_exists(&table_name).await.map_err(EtlError::from)? {
+                bail!(
+                    ErrorKind::DestinationTableAlreadyExists,
+                    "Snowflake destination table already exists",
+                    format!(
+                        "Table {table_name} exists, but this pipeline has no destination metadata \
+                         proving ownership. Remove the table or use another destination schema \
+                         before retrying."
+                    )
+                );
+            }
+
+            // Record ownership before creating remote state so a restart can
+            // find and remove a partial setup.
+            let metadata = DestinationTableMetadata::new_creating(
+                table_name.clone(),
+                snapshot_id,
+                replication_mask.clone(),
+            );
+            store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+            Some(metadata)
+        }
+        Some(metadata) if metadata.is_applied() => {
+            // Another copy partition completed setup while this caller waited.
             ensure_destination_schema_matches_metadata(
                 "Snowflake",
                 table_id,
@@ -133,120 +152,57 @@ impl TableInitializer {
                 table_schema,
             )?;
             client
-                .prepare_existing_table(table_id, metadata.table_id(), &columns)
+                .prepare_table(&table, metadata.table_id(), &columns, false)
                 .await
                 .map_err(EtlError::from)?;
             return Ok(());
         }
-
-        // Hold the registry only long enough to obtain the stable gate for this
-        // table; unrelated tables must not wait on its remote setup.
-        let gate = {
-            let mut gates = self.gates.lock().await;
-            Arc::clone(gates.entry(table_id).or_insert_with(|| Arc::new(Semaphore::new(1))))
-        };
-
-        // The permit owns the complete Creating -> remote setup -> Applied
-        // transition for this table.
-        let _permit = gate.acquire_owned().await.map_err(|error| {
-            etl_error!(
-                ErrorKind::InvalidState,
-                "Snowflake table initialization gate is closed",
-                format!("Table {table_id}"),
-                source: error
-            )
-        })?;
-
-        // Re-read under the table gate because another copy partition may have
-        // completed setup after the fast-path read.
-        let snapshot_id = table_schema.inner().snapshot_id;
-        let replication_mask = table_schema.replication_mask().clone();
-        schema::validate_no_cdc_collisions(&columns).map_err(EtlError::from)?;
-        let creating_metadata = match store.get_destination_table_metadata(table_id).await? {
-            None => {
-                if client.table_exists(&table_name).await.map_err(EtlError::from)? {
-                    bail!(
-                        ErrorKind::DestinationTableAlreadyExists,
-                        "Snowflake destination table already exists",
-                        format!(
-                            "Table {table_name} exists, but this pipeline has no destination \
-                             metadata proving ownership. Remove the table or use another \
-                             destination schema before retrying."
-                        )
-                    );
-                }
-
-                // Record ownership before creating remote state so a restart can
-                // find and remove a partial setup.
-                let metadata = DestinationTableMetadata::new_creating(
-                    table_name.clone(),
-                    snapshot_id,
-                    replication_mask.clone(),
-                );
-                store.store_destination_table_metadata(table_id, metadata.clone()).await?;
-                Some(metadata)
-            }
-            Some(metadata) if metadata.is_applied() => {
-                // Another copy partition completed setup while this caller waited.
-                ensure_destination_schema_matches_metadata(
-                    "Snowflake",
-                    table_id,
-                    &metadata,
-                    table_schema,
-                )?;
-                client
-                    .prepare_existing_table(table_id, metadata.table_id(), &columns)
-                    .await
-                    .map_err(EtlError::from)?;
-                return Ok(());
-            }
-            Some(metadata) if metadata.is_creating() => {
-                // Resume a matching initial setup left by an earlier failure or
-                // cancellation.
-                ensure_destination_schema_matches_metadata(
-                    "Snowflake",
-                    table_id,
-                    &metadata,
-                    table_schema,
-                )?;
-                if metadata.table_id() != table_name {
-                    bail!(
-                        ErrorKind::CorruptedTableSchema,
-                        "Interrupted Snowflake table setup metadata does not match current table",
-                        format!(
-                            "Table {table_id} has interrupted initial setup metadata for '{}', \
-                             but the current setup resolves to '{table_name}'.",
-                            metadata.table_id()
-                        )
-                    );
-                }
-
-                Some(metadata)
-            }
-            Some(_) => {
-                // Applying metadata belongs to schema evolution, which requires
-                // its separate recovery path.
+        Some(metadata) if metadata.is_creating() => {
+            // Resume a matching initial setup left by an earlier failure or
+            // cancellation.
+            ensure_destination_schema_matches_metadata(
+                "Snowflake",
+                table_id,
+                &metadata,
+                table_schema,
+            )?;
+            if metadata.table_id() != table_name {
                 bail!(
-                    ErrorKind::InvalidState,
-                    "Snowflake table schema is still being applied",
+                    ErrorKind::CorruptedTableSchema,
+                    "Interrupted Snowflake table setup metadata does not match current table",
                     format!(
-                        "Table {table_id} has an interrupted schema change and cannot be prepared \
-                         for streaming until that change is recovered."
+                        "Table {table_id} has interrupted initial setup metadata for '{}', but \
+                         the current setup resolves to '{table_name}'.",
+                        metadata.table_id()
                     )
                 );
             }
-        };
 
-        // Remote setup is retry-safe and remains inside the per-table permit.
-        client.initialize_table(table_id, &table_name, &columns).await.map_err(EtlError::from)?;
-
-        // Publish completion only after both the table and channel exist.
-        if let Some(metadata) = creating_metadata {
-            store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+            Some(metadata)
         }
+        Some(_) => {
+            // Applying metadata belongs to schema evolution, which requires
+            // its separate recovery path.
+            bail!(
+                ErrorKind::InvalidState,
+                "Snowflake table schema is still being applied",
+                format!(
+                    "Table {table_id} has an interrupted schema change and cannot be prepared for \
+                     streaming until that change is recovered."
+                )
+            );
+        }
+    };
 
-        Ok(())
+    // Remote setup is retry-safe and remains inside the per-table permit.
+    client.prepare_table(&table, &table_name, &columns, true).await.map_err(EtlError::from)?;
+
+    // Publish completion only after both the table and channel exist.
+    if let Some(metadata) = creating_metadata {
+        store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
     }
+
+    Ok(())
 }
 
 /// Execution context captured by Snowflake background event tasks.
@@ -265,17 +221,11 @@ struct DestinationWriter<S, T, C> {
     client: Client<T, C>,
     /// Destination metadata store.
     store: S,
-    /// Per-table initial-setup coordinator.
-    table_initializer: TableInitializer,
 }
 
 impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for DestinationWriter<S, T, C> {
     fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-            store: self.store.clone(),
-            table_initializer: self.table_initializer.clone(),
-        }
+        Self { client: self.client.clone(), store: self.store.clone() }
     }
 }
 
@@ -304,10 +254,7 @@ where
     /// Create a new destination.
     pub fn new(client: Client<T, C>, store: S) -> Self {
         register_metrics();
-        Self {
-            writer: DestinationWriter { client, store, table_initializer: TableInitializer::new() },
-            tasks: TaskSet::new(),
-        }
+        Self { writer: DestinationWriter { client, store }, tasks: TaskSet::new() }
     }
 
     /// Fetches the latest committed offset for this table's channel.
@@ -327,7 +274,7 @@ where
 {
     /// Initializes a Snowflake table and channel for initial-copy writes.
     async fn initialize_table(&self, table_schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        self.table_initializer.initialize(&self.client, &self.store, table_schema).await
+        initialize_table(&self.client, &self.store, table_schema).await
     }
 
     /// Loads the durable applied schema and prepares its existing table for
@@ -872,7 +819,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        sync::Arc,
+        task::{Context, Poll, Waker},
+    };
 
     use etl::{
         data::{Cell, PartialTableRow},
@@ -1022,6 +972,36 @@ mod tests {
 
         let applied_metadata = creating_metadata.to_applied();
         ensure_snowflake_metadata_applied(table_id, &applied_metadata).unwrap();
+    }
+
+    #[tokio::test]
+    async fn waiting_initialization_rechecks_metadata_without_relocking() {
+        let (destination, store) = test_destination();
+        let schema = replicated_schema();
+        let table = destination.writer.client.lock_table(schema.id()).await;
+        let mut initialization = Box::pin(destination.writer.initialize_table(&schema));
+        assert!(initialization.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+
+        // Another copy partition completes while this caller waits for the gate.
+        let metadata = DestinationTableMetadata::new_applied(
+            try_stringify_table_name(schema.name()).unwrap().to_uppercase(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+        drop(table);
+
+        // Reopening reaches the deliberately failing token provider without
+        // recursively acquiring the lifecycle gate or changing Applied metadata.
+        let Poll::Ready(result) =
+            initialization.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+        else {
+            panic!("initialization should not reacquire its table gate");
+        };
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationError);
+        assert!(
+            store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap().is_applied()
+        );
     }
 
     #[tokio::test]
