@@ -27,8 +27,8 @@ use crate::{
     },
     k8s::{
         DestinationType, K8sClient, K8sError, KubernetesMaintenanceMaterializer,
-        PipelineRuntimeIdentity, PodStatus, ReplicatorConfigMapFile, ReplicatorWorkloadConfig,
-        ducklake_maintenance_policy_from_config,
+        PipelineRuntimeIdentity, PodStatus, RESOURCE_DELETE_TIMEOUT, ReplicatorConfigMapFile,
+        ReplicatorWorkloadConfig, ducklake_maintenance_policy_from_config,
     },
 };
 
@@ -114,7 +114,8 @@ pub enum Secrets {
 /// The runtime currently consists of secrets, configuration, maintenance, the
 /// StatefulSet running the replicator, and its VPA. Updating the StatefulSet
 /// intentionally forces pod recreation so the replicator observes the latest
-/// runtime configuration.
+/// runtime configuration. `wait` controls completion of any prerequisite
+/// deletions, not readiness of the newly created runtime.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
@@ -127,6 +128,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     supabase_api_url: Option<&str>,
     ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
     tls_config: TlsConfig,
+    wait: bool,
 ) -> Result<(), K8sCoreError> {
     let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
     let identity = PipelineRuntimeIdentity {
@@ -166,8 +168,14 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         tls_config,
     )?;
 
-    create_or_update_dynamic_replicator_secrets(k8s_client, &resource_prefix, &identity, secrets)
-        .await?;
+    create_or_update_dynamic_replicator_secrets(
+        k8s_client,
+        &resource_prefix,
+        &identity,
+        secrets,
+        wait,
+    )
+    .await?;
     create_or_update_replicator_config(
         k8s_client,
         &resource_prefix,
@@ -186,7 +194,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         replicator_id: replicator.id,
         resource_prefix: resource_prefix.clone(),
     };
-    let maintenance_materializer = KubernetesMaintenanceMaterializer::new(k8s_client);
+    let maintenance_materializer = KubernetesMaintenanceMaterializer::new(k8s_client, wait);
 
     create_or_update_ducklake_maintenance(
         &maintenance_materializer,
@@ -215,21 +223,37 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
 
 /// Deletes the Kubernetes runtime associated with a pipeline.
 ///
-/// This removes all resources that currently comprise the pipeline runtime.
+/// With `wait`, each deletion waits for completion before proceeding. The
+/// workload is removed before its configuration so rollback can safely change
+/// durable state. The entire deletion shares one bounded timeout.
 pub async fn delete_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
-    replicator: Replicator,
+    replicator: &Replicator,
+    wait: bool,
 ) -> Result<(), K8sCoreError> {
     let resource_prefix = create_k8s_object_prefix(tenant_id, replicator.id);
 
-    k8s_client.delete_replicator_vertical_pod_autoscaler(&resource_prefix).await?;
-    k8s_client.delete_ducklake_maintenance(&resource_prefix).await?;
-    delete_dynamic_replicator_secrets(k8s_client, &resource_prefix).await?;
-    delete_replicator_config(k8s_client, &resource_prefix).await?;
-    delete_replicator_stateful_set(k8s_client, &resource_prefix).await?;
+    let deletion = async {
+        k8s_client.delete_replicator_stateful_set(&resource_prefix, wait).await?;
+        k8s_client.delete_replicator_vertical_pod_autoscaler(&resource_prefix, wait).await?;
+        k8s_client.delete_ducklake_maintenance(&resource_prefix, wait).await?;
+        delete_dynamic_replicator_secrets(k8s_client, &resource_prefix, wait).await?;
+        k8s_client.delete_replicator_config_map(&resource_prefix, wait).await?;
 
-    Ok(())
+        Ok::<(), K8sCoreError>(())
+    };
+    if wait {
+        tokio::time::timeout(RESOURCE_DELETE_TIMEOUT, deletion).await.map_err(|_| {
+            K8sError::ResourceDeletionTimeout {
+                kind: "PipelineRuntime",
+                name: resource_prefix.clone(),
+                timeout_seconds: RESOURCE_DELETE_TIMEOUT.as_secs(),
+            }
+        })?
+    } else {
+        deletion.await
+    }
 }
 
 /// Returns `true` if the replicator pod is stopped, `false` otherwise.
@@ -244,24 +268,22 @@ pub async fn is_replicator_pod_stopped(
     Ok(matches!(pod_status, PodStatus::Stopped))
 }
 
-/// Returns `true` if the existing Kubernetes pipeline runtime should be
-/// reconciled.
+/// Returns `true` if Kubernetes desired state says the pipeline runtime should
+/// be reconciled.
 ///
-/// A stopped pod normally means the pipeline is intentionally inactive. A
-/// StatefulSet without a pod means Kubernetes still has desired runtime state,
-/// so reconciliation should repair or migrate it.
+/// The StatefulSet is authoritative because it owns the replicator Pod and
+/// expresses whether Kubernetes should keep the runtime running. Pod status is
+/// observational and may lag during creation, replacement, or deletion. An
+/// existing non-terminating StatefulSet is reconciled even when its Pod is
+/// missing or failed; a missing or terminating StatefulSet is not reconciled
+/// even when its Pod is still running.
 pub async fn should_reconcile_pipeline_runtime(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,
     replicator_id: i64,
 ) -> Result<bool, K8sCoreError> {
     let resource_prefix = create_k8s_object_prefix(tenant_id, replicator_id);
-    let pod_status = k8s_client.get_replicator_pod_status(&resource_prefix).await?;
-    if !matches!(pod_status, PodStatus::Stopped) {
-        return Ok(true);
-    }
-
-    Ok(k8s_client.replicator_stateful_set_exists(&resource_prefix).await?)
+    Ok(k8s_client.replicator_stateful_set_is_active(&resource_prefix).await?)
 }
 
 /// Returns `true` when the replicator is active in Kubernetes.
@@ -423,6 +445,7 @@ async fn create_or_update_dynamic_replicator_secrets(
     resource_prefix: &str,
     identity: &PipelineRuntimeIdentity,
     secrets: Secrets,
+    wait: bool,
 ) -> Result<(), K8sCoreError> {
     match secrets {
         Secrets::None => {}
@@ -466,7 +489,7 @@ async fn create_or_update_dynamic_replicator_secrets(
                     .create_or_update_clickhouse_secret(resource_prefix, identity, Some(password))
                     .await?;
             } else {
-                k8s_client.delete_clickhouse_secret(resource_prefix).await?;
+                k8s_client.delete_clickhouse_secret(resource_prefix, wait).await?;
             }
         }
         Secrets::Ducklake {
@@ -619,38 +642,19 @@ async fn create_or_update_ducklake_maintenance(
 async fn delete_dynamic_replicator_secrets(
     k8s_client: &dyn K8sClient,
     resource_prefix: &str,
+    wait: bool,
 ) -> Result<(), K8sCoreError> {
-    k8s_client.delete_postgres_secret(resource_prefix).await?;
+    k8s_client.delete_postgres_secret(resource_prefix, wait).await?;
 
     // Delete all destination-specific secret types unconditionally. Only one will
     // exist at a time, but if a pipeline's destination was changed (e.g. BigQuery →
     // ClickHouse) the old secret type might still be present. Deleting a
     // non-existent secret is a safe no-op.
-    k8s_client.delete_bigquery_secret(resource_prefix).await?;
-    k8s_client.delete_clickhouse_secret(resource_prefix).await?;
-    k8s_client.delete_iceberg_secret(resource_prefix).await?;
-    k8s_client.delete_ducklake_secret(resource_prefix).await?;
-    k8s_client.delete_snowflake_secret(resource_prefix).await?;
-
-    Ok(())
-}
-
-/// Deletes the Kubernetes config map containing replicator configuration.
-async fn delete_replicator_config(
-    k8s_client: &dyn K8sClient,
-    resource_prefix: &str,
-) -> Result<(), K8sCoreError> {
-    k8s_client.delete_replicator_config_map(resource_prefix).await?;
-
-    Ok(())
-}
-
-/// Deletes the Kubernetes stateful set running the replicator.
-async fn delete_replicator_stateful_set(
-    k8s_client: &dyn K8sClient,
-    resource_prefix: &str,
-) -> Result<(), K8sCoreError> {
-    k8s_client.delete_replicator_stateful_set(resource_prefix).await?;
+    k8s_client.delete_bigquery_secret(resource_prefix, wait).await?;
+    k8s_client.delete_clickhouse_secret(resource_prefix, wait).await?;
+    k8s_client.delete_iceberg_secret(resource_prefix, wait).await?;
+    k8s_client.delete_ducklake_secret(resource_prefix, wait).await?;
+    k8s_client.delete_snowflake_secret(resource_prefix, wait).await?;
 
     Ok(())
 }
@@ -684,7 +688,7 @@ mod tests {
     struct RecordingK8sClient {
         calls: Arc<Mutex<Vec<String>>>,
         pod_status: PodStatus,
-        stateful_set_exists: bool,
+        stateful_set_active: bool,
     }
 
     impl RecordingK8sClient {
@@ -698,7 +702,7 @@ mod tests {
             Self {
                 calls: Arc::default(),
                 pod_status: PodStatus::Stopped,
-                stateful_set_exists: false,
+                stateful_set_active: false,
             }
         }
     }
@@ -916,24 +920,44 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_postgres_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+        async fn delete_postgres_secret(
+            &self,
+            _resource_prefix: &str,
+            _wait: bool,
+        ) -> Result<(), K8sError> {
             Ok(())
         }
 
-        async fn delete_bigquery_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+        async fn delete_bigquery_secret(
+            &self,
+            _resource_prefix: &str,
+            _wait: bool,
+        ) -> Result<(), K8sError> {
             Ok(())
         }
 
-        async fn delete_iceberg_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+        async fn delete_iceberg_secret(
+            &self,
+            _resource_prefix: &str,
+            _wait: bool,
+        ) -> Result<(), K8sError> {
             Ok(())
         }
 
-        async fn delete_clickhouse_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
+        async fn delete_clickhouse_secret(
+            &self,
+            resource_prefix: &str,
+            _wait: bool,
+        ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("delete-clickhouse:{resource_prefix}"));
             Ok(())
         }
 
-        async fn delete_ducklake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
+        async fn delete_ducklake_secret(
+            &self,
+            resource_prefix: &str,
+            _wait: bool,
+        ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("delete-ducklake:{resource_prefix}"));
             Ok(())
         }
@@ -949,7 +973,11 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_snowflake_secret(&self, resource_prefix: &str) -> Result<(), K8sError> {
+        async fn delete_snowflake_secret(
+            &self,
+            resource_prefix: &str,
+            _wait: bool,
+        ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("delete-snowflake:{resource_prefix}"));
             Ok(())
         }
@@ -966,6 +994,7 @@ mod tests {
         async fn delete_replicator_config_map(
             &self,
             _resource_prefix: &str,
+            _wait: bool,
         ) -> Result<(), K8sError> {
             Ok(())
         }
@@ -993,6 +1022,7 @@ mod tests {
         async fn delete_replicator_stateful_set(
             &self,
             _resource_prefix: &str,
+            _wait: bool,
         ) -> Result<(), K8sError> {
             Ok(())
         }
@@ -1000,16 +1030,17 @@ mod tests {
         async fn delete_replicator_vertical_pod_autoscaler(
             &self,
             resource_prefix: &str,
+            _wait: bool,
         ) -> Result<(), K8sError> {
             self.calls.lock().unwrap().push(format!("delete-vpa:{resource_prefix}"));
             Ok(())
         }
 
-        async fn replicator_stateful_set_exists(
+        async fn replicator_stateful_set_is_active(
             &self,
             _resource_prefix: &str,
         ) -> Result<bool, K8sError> {
-            Ok(self.stateful_set_exists)
+            Ok(self.stateful_set_active)
         }
 
         async fn create_or_update_ducklake_maintenance(
@@ -1022,7 +1053,11 @@ mod tests {
             Ok(())
         }
 
-        async fn delete_ducklake_maintenance(&self, resource_prefix: &str) -> Result<(), K8sError> {
+        async fn delete_ducklake_maintenance(
+            &self,
+            resource_prefix: &str,
+            _wait: bool,
+        ) -> Result<(), K8sError> {
             self.calls
                 .lock()
                 .unwrap()
@@ -1050,7 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn ducklake_maintenance_is_deleted_when_config_is_absent() {
         let client = RecordingK8sClient::default();
-        let materializer = KubernetesMaintenanceMaterializer::new(&client);
+        let materializer = KubernetesMaintenanceMaterializer::new(&client, true);
 
         create_or_update_ducklake_maintenance(
             &materializer,
@@ -1068,7 +1103,7 @@ mod tests {
     #[tokio::test]
     async fn ducklake_maintenance_is_created_for_ducklake_config() {
         let client = RecordingK8sClient::default();
-        let materializer = KubernetesMaintenanceMaterializer::new(&client);
+        let materializer = KubernetesMaintenanceMaterializer::new(&client, true);
 
         create_or_update_ducklake_maintenance(
             &materializer,
@@ -1168,10 +1203,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_pod_with_stateful_set_is_reconciled() {
+    async fn active_stateful_set_is_reconciled_when_pod_is_stopped() {
         let client = RecordingK8sClient {
             pod_status: PodStatus::Stopped,
-            stateful_set_exists: true,
+            stateful_set_active: true,
             ..Default::default()
         };
 
@@ -1182,10 +1217,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_pod_without_stateful_set_is_not_reconciled() {
+    async fn inactive_stateful_set_is_not_reconciled_when_pod_is_started() {
         let client = RecordingK8sClient {
-            pod_status: PodStatus::Stopped,
-            stateful_set_exists: false,
+            pod_status: PodStatus::Started,
+            stateful_set_active: false,
+            ..Default::default()
+        };
+
+        let should_reconcile =
+            should_reconcile_pipeline_runtime(&client, "tenant-42", 4).await.unwrap();
+
+        assert!(!should_reconcile);
+    }
+
+    #[tokio::test]
+    async fn active_stateful_set_is_reconciled_when_pod_has_failed() {
+        let client = RecordingK8sClient {
+            pod_status: PodStatus::Failed,
+            stateful_set_active: true,
+            ..Default::default()
+        };
+
+        let should_reconcile =
+            should_reconcile_pipeline_runtime(&client, "tenant-42", 4).await.unwrap();
+
+        assert!(should_reconcile);
+    }
+
+    #[tokio::test]
+    async fn inactive_stateful_set_is_not_reconciled_when_pod_has_failed() {
+        let client = RecordingK8sClient {
+            pod_status: PodStatus::Failed,
+            stateful_set_active: false,
             ..Default::default()
         };
 
@@ -1208,6 +1271,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             secrets,
+            true,
         )
         .await
         .unwrap();
@@ -1234,6 +1298,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             secrets,
+            true,
         )
         .await
         .unwrap();
@@ -1260,6 +1325,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             secrets,
+            true,
         )
         .await
         .unwrap();
@@ -1309,6 +1375,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             secrets,
+            true,
         )
         .await
         .unwrap();

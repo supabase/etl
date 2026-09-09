@@ -2,7 +2,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
@@ -20,6 +20,9 @@ pub(crate) struct MockK8sState {
     pod_status: Arc<RwLock<PodStatus>>,
     create_calls: Arc<AtomicUsize>,
     vpa_delete_calls: Arc<AtomicUsize>,
+    deletion_timeout: Arc<AtomicBool>,
+    waited_for_deletion: Arc<AtomicBool>,
+    stateful_set_active: Arc<AtomicBool>,
     ducklake_maintenance_create_calls: Arc<AtomicUsize>,
     last_replicator_image: Arc<RwLock<Option<String>>>,
     last_replicator_resource_override:
@@ -32,6 +35,9 @@ impl Default for MockK8sState {
             pod_status: Arc::new(RwLock::new(PodStatus::Started)),
             create_calls: Arc::new(AtomicUsize::new(0)),
             vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
+            deletion_timeout: Arc::new(AtomicBool::new(false)),
+            waited_for_deletion: Arc::new(AtomicBool::new(false)),
+            stateful_set_active: Arc::new(AtomicBool::new(true)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
             last_replicator_image: Arc::new(RwLock::new(None)),
             last_replicator_resource_override: Arc::new(RwLock::new(None)),
@@ -40,8 +46,23 @@ impl Default for MockK8sState {
 }
 
 impl MockK8sState {
+    /// Controls whether workload deletion times out.
+    pub(crate) fn set_deletion_timeout(&self, timeout: bool) {
+        self.deletion_timeout.store(timeout, Ordering::Relaxed);
+    }
+
+    /// Reports whether the caller requested the workload termination barrier.
+    pub(crate) fn waited_for_deletion(&self) -> bool {
+        self.waited_for_deletion.load(Ordering::Relaxed)
+    }
+
     pub(crate) async fn set_pod_status(&self, pod_status: PodStatus) {
         *self.pod_status.write().await = pod_status;
+    }
+
+    /// Controls whether the StatefulSet represents active desired state.
+    pub(crate) fn set_stateful_set_active(&self, active: bool) {
+        self.stateful_set_active.store(active, Ordering::Relaxed);
     }
 
     pub(crate) fn create_calls(&self) -> usize {
@@ -143,23 +164,43 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_postgres_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_postgres_secret(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
-    async fn delete_clickhouse_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_clickhouse_secret(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
-    async fn delete_bigquery_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_bigquery_secret(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
-    async fn delete_iceberg_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_iceberg_secret(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
-    async fn delete_ducklake_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_ducklake_secret(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
@@ -174,7 +215,11 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_snowflake_secret(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_snowflake_secret(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
@@ -188,7 +233,11 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_replicator_config_map(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_config_map(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
@@ -218,23 +267,36 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_replicator_stateful_set(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_replicator_stateful_set(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError> {
+        self.state.waited_for_deletion.store(wait, Ordering::Relaxed);
+        if wait && self.state.deletion_timeout.load(Ordering::Relaxed) {
+            return Err(K8sError::ResourceDeletionTimeout {
+                kind: "StatefulSet",
+                name: resource_prefix.to_owned(),
+                timeout_seconds: 30,
+            });
+        }
         Ok(())
     }
 
     async fn delete_replicator_vertical_pod_autoscaler(
         &self,
         _resource_prefix: &str,
+        _wait: bool,
     ) -> Result<(), K8sError> {
         self.state.vpa_delete_calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
-    async fn replicator_stateful_set_exists(
+    async fn replicator_stateful_set_is_active(
         &self,
         _resource_prefix: &str,
     ) -> Result<bool, K8sError> {
-        Ok(false)
+        Ok(self.state.stateful_set_active.load(Ordering::Relaxed))
     }
 
     async fn create_or_update_ducklake_maintenance(
@@ -247,7 +309,11 @@ impl K8sClient for MockK8sClient {
         Ok(())
     }
 
-    async fn delete_ducklake_maintenance(&self, _resource_prefix: &str) -> Result<(), K8sError> {
+    async fn delete_ducklake_maintenance(
+        &self,
+        _resource_prefix: &str,
+        _wait: bool,
+    ) -> Result<(), K8sError> {
         Ok(())
     }
 
