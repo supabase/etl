@@ -212,6 +212,13 @@ pub(crate) struct ColumnSchemaMessage {
     pub(crate) attname: String,
     /// The type OID from `pg_attribute.atttypid`.
     pub(crate) atttypid: u32,
+    /// Source type name, optional for older snapshots.
+    #[serde(default)]
+    pub(crate) typname: Option<String>,
+    /// Owning extension, optional for snapshots emitted before this field
+    /// existed.
+    #[serde(default)]
+    pub(crate) type_extension_name: Option<String>,
     /// The type modifier from `pg_attribute.atttypmod`.
     pub(crate) atttypmod: i32,
     /// The physical column number from `pg_attribute.attnum`.
@@ -245,7 +252,16 @@ pub(crate) fn build_column_schemas(
     columns
         .into_iter()
         .map(|column| {
-            let typ = convert_type_oid_to_type(column.atttypid);
+            // Extension OIDs are database-local. Reuse the durable float array
+            // representation for pgvector's single-precision vector values.
+            // An unrelated user-defined type named vector retains the fallback.
+            let typ = if column.typname.as_deref() == Some("vector")
+                && column.type_extension_name.as_deref() == Some("vector")
+            {
+                crate::schema::Type::FLOAT4_ARRAY
+            } else {
+                convert_type_oid_to_type(column.atttypid)
+            };
             ColumnSchema::new(
                 column.attname,
                 typ,
@@ -1820,5 +1836,69 @@ mod tests {
                 Cell::String("smith".to_owned()),
             ])))
         );
+    }
+
+    /// Builds the schema shape shared by COPY bootstrap and transactional DDL.
+    fn vector_column_message(oid: u32, extension: Option<&str>) -> super::ColumnSchemaMessage {
+        serde_json::from_value(serde_json::json!({
+            "attname": "embedding", "attnum": 1, "atttypid": oid,
+            "typname": "vector", "type_extension_name": extension,
+            "atttypmod": 3, "attnotnull": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pgvector_copy_and_cdc_use_the_same_durable_value_type() {
+        use etl_postgres::store::schema::{postgres_type_to_string, string_to_postgres_type};
+
+        use crate::{
+            data::ArrayCell, postgres::codec::table_row::parse_table_row_from_postgres_copy_bytes,
+        };
+
+        // OIDs vary across databases. Persisted types must decode after restart.
+        for oid in [90_001, 90_002] {
+            let columns = super::build_column_schemas(
+                vec![vector_column_message(oid, Some("vector"))],
+                vec![],
+            );
+            assert_eq!(columns[0].typ, Type::FLOAT4_ARRAY);
+            let restored_type = string_to_postgres_type(&postgres_type_to_string(&columns[0].typ));
+            assert_eq!(restored_type, Type::FLOAT4_ARRAY);
+            let copy =
+                parse_table_row_from_postgres_copy_bytes(b"[0.1,-2,3.5]\n", &columns).unwrap();
+            let cdc = convert_tuple_to_row(
+                columns.iter(),
+                &[TupleData::Text(Bytes::from_static(b"[0.1,-2,3.5]"))],
+            )
+            .unwrap();
+            assert_eq!(copy, cdc);
+            assert_eq!(
+                copy.values(),
+                &[Cell::Array(ArrayCell::F32(vec![Some(0.1), Some(-2.0), Some(3.5)]))]
+            );
+            let null_copy = parse_table_row_from_postgres_copy_bytes(b"\\N\n", &columns).unwrap();
+            let null_cdc = convert_tuple_to_row(columns.iter(), &[TupleData::Null]).unwrap();
+            assert_eq!(null_copy, null_cdc);
+            assert_eq!(null_copy.values(), &[Cell::Null]);
+        }
+    }
+
+    #[test]
+    fn pgvector_mapping_requires_extension_identity() {
+        for extension in [None, Some("unrelated")] {
+            let columns =
+                super::build_column_schemas(vec![vector_column_message(90_001, extension)], vec![]);
+            assert_eq!(columns[0].typ, Type::TEXT);
+        }
+        let old = serde_json::from_value::<super::ColumnSchemaMessage>(serde_json::json!({
+            "attname": "embedding", "attnum": 1, "atttypid": 90_001,
+            "typname": "vector", "atttypmod": 3, "attnotnull": false
+        }))
+        .unwrap();
+        assert_eq!(super::build_column_schemas(vec![old], vec![])[0].typ, Type::TEXT);
+        let mut builtin = vector_column_message(Type::FLOAT4_ARRAY.oid(), None);
+        builtin.typname = Some("_float4".to_owned());
+        assert_eq!(super::build_column_schemas(vec![builtin], vec![])[0].typ, Type::FLOAT4_ARRAY);
     }
 }
