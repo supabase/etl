@@ -587,6 +587,12 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'atttypid', s.atttypid::pg_catalog.int8,
                             'typname', s.typname,
                             'formatted_type', s.formatted_type,
+                            'array_delimiter', (
+                                select element.typdelim::pg_catalog.text
+                                from pg_catalog.pg_type array_type
+                                join pg_catalog.pg_type element on element.oid = array_type.typelem
+                                where array_type.oid = s.atttypid
+                            ),
                             'type_extension_name', (
                                 select e.extname::pg_catalog.text
                                 from pg_catalog.pg_depend d

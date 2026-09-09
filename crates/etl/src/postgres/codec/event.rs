@@ -217,6 +217,9 @@ pub(crate) struct ColumnSchemaMessage {
     /// Formatted source type, including the array suffix for custom arrays.
     #[serde(default)]
     pub(crate) formatted_type: Option<String>,
+    /// Element delimiter for arrays, absent in older schema messages.
+    #[serde(default)]
+    pub(crate) array_delimiter: Option<String>,
     /// Owning extension, optional for snapshots emitted before this field
     /// existed.
     #[serde(default)]
@@ -264,7 +267,9 @@ pub(crate) fn build_column_schemas(
                 {
                     Type::FLOAT4_ARRAY
                 }
-                None if column.formatted_type.as_deref().is_some_and(|typ| typ.ends_with("[]")) => {
+                None if column.array_delimiter.as_deref() == Some(",")
+                    && column.formatted_type.as_deref().is_some_and(|typ| typ.ends_with("[]")) =>
+                {
                     Type::TEXT_ARRAY
                 }
                 None => Type::TEXT,
@@ -1914,7 +1919,7 @@ mod tests {
         use crate::data::ArrayCell;
         let column = serde_json::from_value::<super::ColumnSchemaMessage>(serde_json::json!({
             "attname": "statuses", "attnum": 1, "atttypid": 90_003,
-            "typname": "_status", "formatted_type": "status[]",
+            "typname": "_status", "formatted_type": "status[]", "array_delimiter": ",",
             "atttypmod": -1, "attnotnull": false
         }))
         .unwrap();
@@ -1933,5 +1938,24 @@ mod tests {
                 Some("done".to_owned())
             ]))]
         );
+    }
+    #[test]
+    fn custom_arrays_with_unknown_or_non_comma_delimiters_remain_text() {
+        for delimiter in [None, Some(";")] {
+            let column = serde_json::from_value::<super::ColumnSchemaMessage>(serde_json::json!({
+                "attname": "values", "attnum": 1, "atttypid": 90_004,
+                "formatted_type": "custom[]", "array_delimiter": delimiter,
+                "atttypmod": -1, "attnotnull": false
+            }))
+            .unwrap();
+            let columns = super::build_column_schemas(vec![column], vec![]);
+            assert_eq!(columns[0].typ, Type::TEXT);
+            let row = convert_tuple_to_row(
+                columns.iter(),
+                &[TupleData::Text(Bytes::from_static(b"{a;b}"))],
+            )
+            .unwrap();
+            assert_eq!(row.values(), &[Cell::String("{a;b}".to_owned())]);
+        }
     }
 }
