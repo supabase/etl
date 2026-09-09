@@ -14,6 +14,7 @@
     "---Reference---",
     "./reference/destinations",
     "./explanation/events",
-    "./explanation/traits"
+    "./explanation/traits",
+    "./reference/benchmarks"
   ]
 }

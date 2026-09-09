@@ -105,6 +105,20 @@ tokio = { version = "1", features = ["full"] }
 - **Recovery-aware:** Persist checkpoints and table state for safe restarts and
   at-least-once delivery.
 
+## Independent Benchmark
+
+**~33× lower tail latency. ~125× lower measured runtime memory.**
+Compared with Debezium Server 3.1.3.Final in Hardbyte's
+[independent CDC benchmark](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady):
+**26 ms vs. 848 ms** and **13 MB vs. 1,629 MB**, at 200 source changes/s
+across four fast HTTP consumers.
+
+Tested ETL `d206d66e` (July 2026) with a custom `HttpDestination` and
+`MemoryStore`. Results compare specific configurations: versions, polling,
+batching, destination, store, workload, and deployment all affect performance.
+See [benchmark details](https://supabase.github.io/etl/reference/benchmarks/)
+for versions, measurement methodology, and configuration differences.
+
 ## [Destinations](https://supabase.github.io/etl/reference/destinations/)
 
 | Feature | Destination | Status |
