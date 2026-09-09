@@ -586,6 +586,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'attnum', s.attnum,
                             'atttypid', s.atttypid::pg_catalog.int8,
                             'typname', s.typname,
+                            'formatted_type', s.formatted_type,
                             'type_extension_name', (
                                 select e.extname::pg_catalog.text
                                 from pg_catalog.pg_depend d

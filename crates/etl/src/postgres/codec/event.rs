@@ -4,7 +4,6 @@ use std::{
     str::FromStr,
 };
 
-use etl_postgres::type_utils::convert_type_oid_to_type;
 use postgres_replication::protocol;
 use serde::Deserialize;
 use tokio_postgres::types::PgLsn;
@@ -18,7 +17,7 @@ use crate::{
     postgres::codec::text::parse_cell_from_postgres_text,
     schema::{
         ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
-        TableName, TableSchema,
+        TableName, TableSchema, Type,
     },
 };
 
@@ -215,6 +214,9 @@ pub(crate) struct ColumnSchemaMessage {
     /// Source type name, optional for older snapshots.
     #[serde(default)]
     pub(crate) typname: Option<String>,
+    /// Formatted source type, including the array suffix for custom arrays.
+    #[serde(default)]
+    pub(crate) formatted_type: Option<String>,
     /// Owning extension, optional for snapshots emitted before this field
     /// existed.
     #[serde(default)]
@@ -255,12 +257,17 @@ pub(crate) fn build_column_schemas(
             // Extension OIDs are database-local. Reuse the durable float array
             // representation for pgvector's single-precision vector values.
             // An unrelated user-defined type named vector retains the fallback.
-            let typ = if column.typname.as_deref() == Some("vector")
-                && column.type_extension_name.as_deref() == Some("vector")
-            {
-                crate::schema::Type::FLOAT4_ARRAY
-            } else {
-                convert_type_oid_to_type(column.atttypid)
+            let typ = match Type::from_oid(column.atttypid) {
+                Some(typ) => typ,
+                None if column.typname.as_deref() == Some("vector")
+                    && column.type_extension_name.as_deref() == Some("vector") =>
+                {
+                    Type::FLOAT4_ARRAY
+                }
+                None if column.formatted_type.as_deref().is_some_and(|typ| typ.ends_with("[]")) => {
+                    Type::TEXT_ARRAY
+                }
+                None => Type::TEXT,
             };
             ColumnSchema::new(
                 column.attname,
@@ -1900,5 +1907,31 @@ mod tests {
         let mut builtin = vector_column_message(Type::FLOAT4_ARRAY.oid(), None);
         builtin.typname = Some("_float4".to_owned());
         assert_eq!(super::build_column_schemas(vec![builtin], vec![])[0].typ, Type::FLOAT4_ARRAY);
+    }
+
+    #[test]
+    fn custom_enum_arrays_keep_array_shape_and_null_elements() {
+        use crate::data::ArrayCell;
+        let column = serde_json::from_value::<super::ColumnSchemaMessage>(serde_json::json!({
+            "attname": "statuses", "attnum": 1, "atttypid": 90_003,
+            "typname": "_status", "formatted_type": "status[]",
+            "atttypmod": -1, "attnotnull": false
+        }))
+        .unwrap();
+        let columns = super::build_column_schemas(vec![column], vec![]);
+        assert_eq!(columns[0].typ, Type::TEXT_ARRAY);
+        let row = convert_tuple_to_row(
+            columns.iter(),
+            &[TupleData::Text(Bytes::from_static(b"{queued,NULL,done}"))],
+        )
+        .unwrap();
+        assert_eq!(
+            row.values(),
+            &[Cell::Array(ArrayCell::String(vec![
+                Some("queued".to_owned()),
+                None,
+                Some("done".to_owned())
+            ]))]
+        );
     }
 }
