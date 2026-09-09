@@ -743,6 +743,11 @@ struct EventBatch {
 }
 
 impl EventBatch {
+    /// Creates an empty event batch.
+    fn empty() -> Self {
+        Self::default()
+    }
+
     /// Creates an empty event batch with the specified event capacity.
     fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -1001,15 +1006,23 @@ impl ApplyLoopState {
     /// PostgreSQL feedback keeps reporting the last flush LSN until a later
     /// durable write proves the carried LSN safe.
     ///
-    /// Ordinarily, if no later batch arrives, durability for the accepted
-    /// write is deferred until replay or the next batch. A terminal table-sync
-    /// catchup is the exception: once keepalive progress reaches its target,
-    /// ETL dispatches an empty required-durability write through the same
-    /// pending-result path.
+    /// When no later batch arrives, a keepalive can dispatch an empty
+    /// required-durability write through the same pending-result path. The
+    /// loop remains non-quiescent until that result confirms durability.
     fn is_quiescent(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
+    }
+
+    /// Returns whether a keepalive may settle an accepted commit without
+    /// interrupting a transaction or competing with buffered destination work.
+    fn can_settle_idle_durability(&self) -> bool {
+        self.exit_intent.is_none()
+            && !self.is_draining_for_shutdown()
+            && !self.handling_transaction()
+            && !self.has_unresolved_batch_work()
+            && self.last_commit_end_lsn.is_some()
     }
 
     /// Returns the checkpoint LSN to report to PostgreSQL.
@@ -1473,6 +1486,7 @@ where
 
                 self.state
                     .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+                self.maybe_settle_idle_durability().await?;
             }
         }
 
@@ -2088,12 +2102,13 @@ where
         // flushed now that the previous in-flight result has resolved.
         if processing_paused {
             if let Some(metadata) = metadata.as_ref() {
-                // A required-durability write is terminal, so `Complete` must have
-                // stopped intake before a successor batch could be queued behind it.
-                debug_assert_ne!(
-                    metadata.durability,
-                    WriteEventsDurability::RequireDurable,
-                    "required-durability write must not have a queued successor batch"
+                // A nonempty required-durability write is terminal and stops
+                // intake. An empty idle barrier may have a successor buffered
+                // while it confirms only its captured commit end LSN.
+                debug_assert!(
+                    metadata.durability != WriteEventsDurability::RequireDurable
+                        || metadata.event_count == 0,
+                    "terminal event write must not have a queued successor batch"
                 );
             }
 
@@ -2228,13 +2243,37 @@ where
 
         let event_batch = self.state.event_batch.take();
 
-        self.dispatch_write_events(event_batch, reason).await
+        // A terminal batch must settle all accepted writes before completion.
+        let durability = match self.state.exit_intent {
+            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
+            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
+        };
+        self.dispatch_write_events(event_batch, durability, reason).await
+    }
+
+    /// Settles an idle accepted commit while leaving normal intake enabled.
+    ///
+    /// The empty write captures the carried commit in its result metadata.
+    /// Later events may fill the next batch, but cannot be dispatched until
+    /// this result completes. Shutdown never starts a new idle barrier.
+    async fn maybe_settle_idle_durability(&mut self) -> EtlResult<()> {
+        if !self.state.can_settle_idle_durability() {
+            return Ok(());
+        }
+
+        self.dispatch_write_events(
+            EventBatch::empty(),
+            WriteEventsDurability::RequireDurable,
+            "keepalive settling idle durability",
+        )
+        .await
     }
 
     /// Dispatches one streaming write through the shared async-result path.
     async fn dispatch_write_events(
         &mut self,
         event_batch: EventBatch,
+        durability: WriteEventsDurability,
         reason: &str,
     ) -> EtlResult<()> {
         debug_assert!(!self.state.has_pending_flush_result());
@@ -2247,13 +2286,7 @@ where
         } = event_batch;
         let event_count = events.len();
 
-        // `Complete` is terminal, so no later write is guaranteed to settle an
-        // `Accepted` result. Its final batch must confirm cumulative durability
-        // before the apply loop can complete.
-        let durability = match self.state.exit_intent {
-            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
-            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
-        };
+        debug_assert!(event_count > 0 || durability == WriteEventsDurability::RequireDurable);
         debug!(
             worker_type = %self.worker_context.worker_type(),
             event_count,
@@ -2367,6 +2400,7 @@ where
                 .await?;
 
                 self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+                self.maybe_settle_idle_durability().await?;
 
                 Ok(HandleMessageResult::no_event())
             }
@@ -3494,11 +3528,12 @@ where
             && self.state.last_commit_end_lsn.is_some()
             && self.table_sync_catchup_target_reached().await
         {
-            // Record completion before dispatch so intake stops and the empty write
-            // requires durability.
+            // Record completion before dispatch so intake stops until the
+            // terminal durability barrier settles.
             self.state.record_exit_intent(Some(ExitIntent::Complete));
             self.dispatch_write_events(
-                EventBatch::default(),
+                EventBatch::empty(),
+                WriteEventsDurability::RequireDurable,
                 "table sync catchup reached without a terminal event batch",
             )
             .await?;
@@ -4776,5 +4811,50 @@ mod tests {
             pending,
             TableDecodingState::PendingRelation { previous_relation_masks: None, .. }
         ));
+    }
+
+    #[test]
+    fn idle_durability_requires_idle_accepted_work() {
+        let mut state = ApplyLoopState::new(
+            ReplicationProgress::new(100.into()),
+            ReplicationLagMetrics::new(100.into()),
+            Duration::from_secs(6),
+            SnapshotId::initial(),
+            "test_slot".to_owned(),
+        );
+
+        // Only accepted work at an idle boundary may start a durability barrier.
+        assert!(!state.can_settle_idle_durability());
+        state.update_last_commit_end_lsn(Some(200.into()));
+        assert!(state.can_settle_idle_durability());
+
+        state.remote_final_lsn = Some(300.into());
+        assert!(!state.can_settle_idle_durability());
+        state.remote_final_lsn = None;
+
+        state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+        assert!(!state.can_settle_idle_durability());
+        state.event_batch.take();
+
+        let (_result, pending) = WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: Some(200.into()),
+            durability: WriteEventsDurability::RequireDurable,
+            event_count: 0,
+            relation_table_ids: HashSet::new(),
+            streaming_payload_metadata: StreamingPayloadMetadata::default(),
+            dispatched_at: Instant::now(),
+        });
+        state.pending_flush_result = Some(pending);
+        assert!(!state.can_settle_idle_durability());
+        state.pending_flush_result = None;
+
+        for exit_intent in [ExitIntent::Pause, ExitIntent::Complete] {
+            state.exit_intent = Some(exit_intent);
+            assert!(!state.can_settle_idle_durability());
+        }
+        state.exit_intent = None;
+
+        state.start_draining_for_shutdown();
+        assert!(!state.can_settle_idle_durability());
     }
 }
