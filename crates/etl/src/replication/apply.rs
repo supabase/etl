@@ -743,6 +743,11 @@ struct EventBatch {
 }
 
 impl EventBatch {
+    /// Creates an empty event batch.
+    fn empty() -> Self {
+        Self::default()
+    }
+
     /// Creates an empty event batch with the specified event capacity.
     fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -2257,7 +2262,7 @@ where
         }
 
         self.dispatch_write_events(
-            EventBatch::default(),
+            EventBatch::empty(),
             WriteEventsDurability::RequireDurable,
             "keepalive settling idle durability",
         )
@@ -3527,7 +3532,7 @@ where
             // terminal durability barrier settles.
             self.state.record_exit_intent(Some(ExitIntent::Complete));
             self.dispatch_write_events(
-                EventBatch::default(),
+                EventBatch::empty(),
                 WriteEventsDurability::RequireDurable,
                 "table sync catchup reached without a terminal event batch",
             )
