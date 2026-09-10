@@ -204,6 +204,18 @@ async fn finish_table_tasks(tasks: &mut tokio::task::JoinSet<EtlResult<()>>) -> 
     }
 }
 
+/// Rejects destination names reserved for ETL replay bookkeeping.
+fn validate_ducklake_table_name(table_name: &DuckLakeTableName) -> EtlResult<()> {
+    if table_name.is_internal_helper() {
+        return Err(etl_error!(
+            ErrorKind::InvalidState,
+            "DuckLake destination table uses a reserved ETL helper name",
+            format!("Table {table_name} cannot be used for replication")
+        ));
+    }
+    Ok(())
+}
+
 /// Rejects another source's durable claim before creating or recovering a
 /// table. Callers serialize initial creation with `table_creation_slots`;
 /// pending metadata reserves a name even when physical DDL has not completed.
@@ -212,10 +224,14 @@ async fn ensure_unique_table_identity<S: DestinationStore>(
     table_id: TableId,
     table_name: &DuckLakeTableName,
 ) -> EtlResult<()> {
+    validate_ducklake_table_name(table_name)?;
     for schema in store.get_table_schemas().await? {
         if schema.id != table_id
             && let Some(metadata) = store.get_destination_table_metadata(schema.id).await?
-            && DuckLakeTableName::from_metadata_id(metadata.table_id())? == *table_name
+            && let owner = DuckLakeTableName::from_metadata_id(metadata.table_id())?
+            // DuckDB resolves even quoted identifiers using ASCII case folding.
+            && owner.schema().eq_ignore_ascii_case(table_name.schema())
+            && owner.table().eq_ignore_ascii_case(table_name.table())
         {
             return Err(etl_error!(
                 ErrorKind::InvalidState,
@@ -690,10 +706,13 @@ impl<S> DuckLakeDestinationBuilder<S> {
 
     /// Maps newly discovered tables to their durable destination names.
     ///
-    /// The mapping must be deterministic, injective and avoid ETL helper
-    /// names. Existing tables retain their stored identity, including after a
-    /// restart or a source rename; changing this callback does not move data.
-    /// Table sorting policies refer to the resulting destination names.
+    /// The mapping must be deterministic, injective under ASCII
+    /// case-insensitive identifier comparison, and avoid the reserved
+    /// `__etl_` prefix in any case. Invalid names and identities already
+    /// owned by another source are rejected. Existing tables retain their
+    /// stored identity, including after a restart or a source rename;
+    /// changing this callback does not move data. Table sorting policies
+    /// refer to the resulting destination names.
     pub fn table_name_mapper<F>(mut self, map: F) -> Self
     where
         F: Fn(&TableName) -> EtlResult<DuckLakeTableName> + Send + Sync + 'static,
@@ -3901,10 +3920,12 @@ where
 
     /// Maps a table only before its durable destination identity exists.
     fn map_new_table_name(&self, source: &TableName) -> EtlResult<DuckLakeTableName> {
-        match &self.embedding.table_name_mapper {
+        let table_name = match &self.embedding.table_name_mapper {
             Some(map) => map(source),
             None => table_name_to_ducklake_table_name(source),
-        }
+        }?;
+        validate_ducklake_table_name(&table_name)?;
+        Ok(table_name)
     }
 
     /// Returns the stored destination table name or the deterministic default.
@@ -5901,8 +5922,18 @@ mod tests {
         for metadata in [pending.clone(), pending.to_applied()] {
             store.store_destination_table_metadata(first.id, metadata).await.unwrap();
             ensure_unique_table_identity(&store, first.id, &name).await.unwrap();
-            let error = ensure_unique_table_identity(&store, second.id, &name).await.unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::InvalidState);
+            for candidate in [
+                name.clone(),
+                DuckLakeTableName::new("PUBLIC", "users"),
+                DuckLakeTableName::new("public", "Users"),
+                DuckLakeTableName::new("PUBLIC", "USERS"),
+            ] {
+                ensure_unique_table_identity(&store, first.id, &candidate).await.unwrap();
+                let error =
+                    ensure_unique_table_identity(&store, second.id, &candidate).await.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::InvalidState);
+                assert!(store.get_destination_table_metadata(second.id).await.unwrap().is_none());
+            }
             ensure_unique_table_identity(
                 &store,
                 second.id,
@@ -5911,5 +5942,61 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn mapped_table_identity_rejects_reserved_helpers() {
+        let store = MemoryStore::new();
+        let schema = make_schema(1, "public", "users");
+        store.store_table_schema(schema.clone()).await.unwrap();
+        for table in [
+            "__etl_applied_table_batches",
+            "__etl_streaming_progress",
+            "__ETL_APPLIED_TABLE_BATCHES",
+            "__EtL_streaming_progress",
+        ] {
+            for namespace in ["main", "MAIN", "public"] {
+                let name = DuckLakeTableName::new(namespace, table);
+                let error =
+                    ensure_unique_table_identity(&store, schema.id, &name).await.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::InvalidState);
+                assert!(store.get_destination_table_metadata(schema.id).await.unwrap().is_none());
+            }
+        }
+        for table in ["__etl", "__et", "users", "éééusers", "__étl_users"] {
+            ensure_unique_table_identity(&store, schema.id, &DuckLakeTableName::new("main", table))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn mapped_table_identity_preserves_non_ascii_distinctions() {
+        let store = MemoryStore::new();
+        let first = make_schema(1, "public", "first");
+        let second = make_schema(2, "public", "second");
+        store.store_table_schema(first.clone()).await.unwrap();
+        store.store_table_schema(second.clone()).await.unwrap();
+        let name = DuckLakeTableName::new("schéma", "Üsers");
+        let schema = ReplicatedTableSchema::all(Arc::new(first.clone()));
+        let metadata = DestinationTableMetadata::new_creating(
+            name.to_metadata_id().unwrap(),
+            first.snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(first.id, metadata).await.unwrap();
+        for candidate in
+            [DuckLakeTableName::new("schéma", "üsers"), DuckLakeTableName::new("schÉma", "Üsers")]
+        {
+            ensure_unique_table_identity(&store, second.id, &candidate).await.unwrap();
+        }
+        let error = ensure_unique_table_identity(
+            &store,
+            second.id,
+            &DuckLakeTableName::new("SCHéMA", "ÜSERS"),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
     }
 }

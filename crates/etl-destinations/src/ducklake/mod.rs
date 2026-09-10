@@ -89,7 +89,7 @@ impl DuckLakeTableName {
 
     /// Returns whether this is an internal ETL helper table.
     pub(super) fn is_internal_helper(&self) -> bool {
-        self.table.starts_with("__etl_")
+        self.table.get(..6).is_some_and(|prefix| prefix.eq_ignore_ascii_case("__etl_"))
     }
 }
 
