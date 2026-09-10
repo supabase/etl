@@ -58,7 +58,7 @@ use crate::{
         ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
-        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL,
+        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL, ddl_command_tag_label,
     },
     pipeline::PipelineId,
     postgres::{
@@ -2529,7 +2529,7 @@ where
         };
 
         let table_id = schema_change_message.table_id();
-        let command_tag = schema_change_message.command_tag.clone();
+        let command_tag = ddl_command_tag_label(&schema_change_message.command_tag);
         let column_count = schema_change_message.columns.len();
 
         if !schema_change_message.applies_to_publication(&self.config.publication_name) {
@@ -2588,7 +2588,7 @@ where
             counter!(
                 ETL_DDL_SCHEMA_CHANGES_TOTAL,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                COMMAND_TAG_LABEL => command_tag.clone(),
+                COMMAND_TAG_LABEL => command_tag,
                 OUTCOME_LABEL => "failed_store",
             )
             .increment(1);
@@ -2599,7 +2599,7 @@ where
         counter!(
             ETL_DDL_SCHEMA_CHANGES_TOTAL,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            COMMAND_TAG_LABEL => command_tag.clone(),
+            COMMAND_TAG_LABEL => command_tag,
             OUTCOME_LABEL => "applied",
         )
         .increment(1);
@@ -2607,7 +2607,7 @@ where
         histogram!(
             ETL_DDL_SCHEMA_CHANGE_COLUMNS,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            COMMAND_TAG_LABEL => command_tag.clone(),
+            COMMAND_TAG_LABEL => command_tag,
         )
         .record(column_count as f64);
 

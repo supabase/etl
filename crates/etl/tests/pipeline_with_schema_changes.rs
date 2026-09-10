@@ -21,7 +21,8 @@ use etl::{
     },
 };
 use etl_postgres::tokio::test_utils::TableModification;
-use etl_telemetry::tracing::init_test_tracing;
+use etl_telemetry::{metrics::init_metrics_handle, tracing::init_test_tracing};
+use pg_escape::quote_identifier;
 use rand::random;
 use tokio_postgres::types::Type;
 
@@ -1182,4 +1183,171 @@ async fn partitioned_table_schema_change_updates_relation_message() {
         ],
     );
     assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
+}
+
+/// Verifies bounded DDL metric labels without changing schema application or
+/// publication filtering, using real trigger output and crafted logical
+/// messages.
+#[tokio::test(flavor = "multi_thread")]
+async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
+    /// Counter for DDL handling outcomes.
+    const DDL_COUNTER: &str = "etl_ddl_schema_changes_total";
+    /// Exported observation count for the DDL column histogram.
+    const DDL_COLUMN_COUNT: &str = "etl_ddl_schema_change_columns_count";
+
+    init_test_tracing();
+    let metrics_handle = init_metrics_handle().unwrap();
+    let (mut database, table_name, table_id, store, destination, pipeline, _, publication_name) =
+        create_database_and_sync_done_pipeline_with_table(
+            "ddl_metric_labels",
+            &[("value", "integer not null")],
+        )
+        .await;
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    // A new supported trigger tag must also be added to the metric mapping.
+    let mut trigger_tags: Vec<String> = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select evttags from pg_catalog.pg_event_trigger
+             where evtname = 'supabase_etl_ddl_message_trigger'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    trigger_tags.sort();
+    assert_eq!(trigger_tags, ["ALTER PUBLICATION", "ALTER TABLE"]);
+
+    // Exercise both tags through the installed trigger with unchanged columns.
+    database
+        .run_sql(&format!(
+            "alter table {} alter column value set default 7",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter publication {} set (publish = 'insert')",
+            quote_identifier(&publication_name)
+        ))
+        .await
+        .unwrap();
+
+    let client = database.client.as_mut().unwrap();
+    let mut payload: serde_json::Value = client
+        .query_one(
+            "select pg_catalog.jsonb_build_object(
+                'nspname', n.nspname,
+                'relname', c.relname,
+                'oid', c.oid::bigint,
+                'identity', etl.describe_table_identity(c.oid),
+                'columns', (
+                    select pg_catalog.jsonb_agg(
+                        pg_catalog.jsonb_build_object(
+                            'attname', s.attname,
+                            'attnum', s.attnum,
+                            'atttypid', s.atttypid::bigint,
+                            'atttypmod', s.atttypmod,
+                            'attnotnull', s.attnotnull,
+                            'default_expression', s.default_expression
+                        ) order by s.attnum
+                    )
+                    from etl.describe_table_schema(c.oid) s
+                )
+             )
+             from pg_catalog.pg_class c
+             join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+             where c.oid = $1",
+            &[&table_id.into_inner()],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    let unexpected_tags = ["unexpected_a".to_owned(), "unexpected_b".to_owned(), "x".repeat(4096)];
+    let transaction = client.transaction().await.unwrap();
+    for command_tag in &unexpected_tags {
+        payload["command_tag"] = command_tag.clone().into();
+        // Unknown tags retain existing behavior for tracked and untracked tables.
+        for oid in [table_id.into_inner(), 0] {
+            payload["oid"] = oid.into();
+            transaction
+                .query_one(
+                    "select pg_catalog.pg_logical_emit_message(true, 'supabase_etl_ddl', $1::text)",
+                    &[&payload.to_string()],
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    payload["oid"] = table_id.into_inner().into();
+    payload["command_tag"] = "ALTER PUBLICATION".into();
+    payload["publication_name"] = "other_publication".into();
+    // An invalid schema would break the following row if publication filtering
+    // were accidentally bypassed while normalizing labels.
+    payload["columns"] = serde_json::json!([]);
+    transaction
+        .query_one(
+            "select pg_catalog.pg_logical_emit_message(true, 'supabase_etl_ddl', $1::text)",
+            &[&payload.to_string()],
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    // A subsequent row proves that all preceding messages have been handled.
+    let inserted = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    database.insert_values(table_name, &["value"], &[&7_i32]).await.unwrap();
+    inserted.notified().await;
+    ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
+        panic!("expected insert event");
+    };
+    assert_eq!(insert.table_row.values(), &[Cell::I64(1), Cell::I32(7)]);
+
+    let metrics = metrics_handle.render();
+    let samples: Vec<_> = metrics
+        .lines()
+        .filter(|line| {
+            (line.starts_with(&format!("{DDL_COUNTER}{{"))
+                || line.starts_with(&format!("{DDL_COLUMN_COUNT}{{")))
+                && line.contains("worker_type=\"apply\"")
+        })
+        .collect();
+    let unknown_count = u64::try_from(unexpected_tags.len()).unwrap();
+    let expected = [
+        (DDL_COUNTER, "ALTER TABLE", Some("applied"), 1),
+        (DDL_COUNTER, "ALTER PUBLICATION", Some("applied"), 1),
+        (DDL_COUNTER, "ALTER PUBLICATION", Some("skipped_publication"), 1),
+        (DDL_COUNTER, "unknown", Some("applied"), unknown_count),
+        (DDL_COUNTER, "unknown", Some("skipped"), unknown_count),
+        (DDL_COLUMN_COUNT, "ALTER TABLE", None, 1),
+        (DDL_COLUMN_COUNT, "ALTER PUBLICATION", None, 1),
+        (DDL_COLUMN_COUNT, "unknown", None, unknown_count),
+    ];
+    assert_eq!(samples.len(), expected.len());
+    for (metric, command_tag, outcome, count) in expected {
+        let matching: Vec<_> = samples
+            .iter()
+            .filter(|line| {
+                line.starts_with(&format!("{metric}{{"))
+                    && line.contains(&format!("command_tag=\"{command_tag}\""))
+                    && outcome
+                        .is_none_or(|outcome| line.contains(&format!("outcome=\"{outcome}\"")))
+            })
+            .collect();
+        assert_eq!(matching.len(), 1);
+        let value: u64 = matching[0].rsplit_once(' ').unwrap().1.parse().unwrap();
+        assert_eq!(value, count);
+    }
 }
