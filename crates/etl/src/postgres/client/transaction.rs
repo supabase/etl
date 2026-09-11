@@ -585,6 +585,24 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'attname', s.attname,
                             'attnum', s.attnum,
                             'atttypid', s.atttypid::pg_catalog.int8,
+                            'typname', s.typname,
+                            'formatted_type', s.formatted_type,
+                            'array_delimiter', (
+                                select element.typdelim::pg_catalog.text
+                                from pg_catalog.pg_type array_type
+                                join pg_catalog.pg_type element on element.oid = array_type.typelem
+                                where array_type.oid = s.atttypid
+                            ),
+                            'type_extension_name', (
+                                select e.extname::pg_catalog.text
+                                from pg_catalog.pg_depend d
+                                join pg_catalog.pg_extension e on e.oid = d.refobjid
+                                where d.classid = 'pg_catalog.pg_type'::pg_catalog.regclass
+                                  and d.objid = s.atttypid
+                                  and d.objsubid = 0
+                                  and d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+                                  and d.deptype = 'e'
+                            ),
                             'atttypmod', s.atttypmod,
                             'attnotnull', s.attnotnull,
                             'default_expression', s.default_expression
