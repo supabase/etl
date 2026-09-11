@@ -58,6 +58,9 @@ async fn async_main() -> anyhow::Result<()> {
     match args.len() {
         // Run the application server
         1 => {
+            #[cfg(feature = "hotpath")]
+            let _hotpath = etl_telemetry::profiling::init()?;
+            hotpath::tokio_runtime!();
             let config = load_config::<ApiConfig>()
                 .context("Loading API configuration for server startup")?;
             config.validate().context("Validating API configuration")?;

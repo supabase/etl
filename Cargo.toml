@@ -89,6 +89,7 @@ fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/supabase/gcp-bigquery-client", rev = "8035bcd1a7c3f08f8679326c40200b11901e38ed", default-features = false }
 hex = { version = "0.4", default-features = false }
+hotpath = { version = "=0.25.1", default-features = false }
 humantime = { version = "2.3.0", default-features = false }
 hyper-rustls = { version = "0.27.9", default-features = false }
 hyper-util = { version = "0.1.20", default-features = false }

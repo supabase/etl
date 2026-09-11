@@ -41,7 +41,7 @@
 use std::{
     pin::Pin,
     sync::{
-        Arc, Mutex, PoisonError, RwLock,
+        Arc, PoisonError,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -50,6 +50,7 @@ use std::{
 
 use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
+use hotpath::wrap::std::sync::{Mutex, RwLock};
 use metrics::{counter, gauge, histogram};
 use tokio::{
     sync::watch,
@@ -233,7 +234,6 @@ impl MemorySnapshot {
 }
 
 /// Internal shared state for memory backpressure.
-#[derive(Debug)]
 struct MemoryMonitorInner {
     /// Handle for the task that refreshes memory snapshots.
     refresh_task: Mutex<Option<JoinHandle<()>>>,
@@ -245,6 +245,16 @@ struct MemoryMonitorInner {
     snapshot_revision: AtomicU64,
     /// Interval between memory refreshes in milliseconds.
     memory_refresh_interval_ms: u64,
+}
+
+impl std::fmt::Debug for MemoryMonitorInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryMonitorInner")
+            .field("backpressure", &self.backpressure)
+            .field("snapshot_revision", &self.snapshot_revision)
+            .field("memory_refresh_interval_ms", &self.memory_refresh_interval_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Shared backpressure state that exists only when backpressure is configured.
@@ -303,9 +313,15 @@ impl MemoryMonitor {
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
-                refresh_task: Mutex::new(None),
+                refresh_task: hotpath::mutex!(
+                    std::sync::Mutex::new(None),
+                    label = "memory_refresh_task"
+                ),
                 backpressure,
-                snapshot: RwLock::new(startup_snapshot),
+                snapshot: hotpath::rw_lock!(
+                    std::sync::RwLock::new(startup_snapshot),
+                    label = "memory_snapshot"
+                ),
                 snapshot_revision: AtomicU64::new(0),
                 memory_refresh_interval_ms,
             }),
@@ -454,6 +470,7 @@ impl MemoryMonitor {
 
     /// Updates the backpressure active state and notifies subscribers when it
     /// changes.
+    #[hotpath::measure(label = "memory_backpressure_publish")]
     fn set_backpressure_active(&self, backpressure_active: bool) {
         let Some(backpressure) = self.inner.backpressure.as_ref() else {
             return;
@@ -578,16 +595,22 @@ impl MemoryMonitor {
     pub(crate) fn new_for_test_with_backpressure(config: Option<MemoryBackpressureConfig>) -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
-                refresh_task: Mutex::new(None),
+                refresh_task: hotpath::mutex!(
+                    std::sync::Mutex::new(None),
+                    label = "memory_refresh_task"
+                ),
                 backpressure: config.map(|config| BackpressureMonitor {
                     active_tx: watch::channel(false).0,
                     config,
                 }),
-                snapshot: RwLock::new(MemorySnapshot {
-                    used: 0,
-                    total: 0,
-                    source: MemorySnapshotSource::System,
-                }),
+                snapshot: hotpath::rw_lock!(
+                    std::sync::RwLock::new(MemorySnapshot {
+                        used: 0,
+                        total: 0,
+                        source: MemorySnapshotSource::System,
+                    }),
+                    label = "memory_snapshot"
+                ),
                 snapshot_revision: AtomicU64::new(0),
                 memory_refresh_interval_ms: 100,
             }),

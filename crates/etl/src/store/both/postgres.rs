@@ -9,9 +9,9 @@ use etl_postgres::store::{
     checkpoint, destination_table_metadata as pg_destination_table_metadata, schema,
     table_state as pg_table_state,
 };
+use hotpath::wrap::tokio::sync::Mutex;
 use metrics::gauge;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
@@ -169,7 +169,7 @@ impl Inner {
 /// and the cache update. This keeps the persistent state and in-memory cache
 /// ordered consistently, at the cost of serializing operations that could
 /// eventually be independent with finer-grained per-table locking.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PostgresStore {
     pipeline_id: PipelineId,
     pool: PgPool,
@@ -197,7 +197,24 @@ impl PostgresStore {
             destination_tables_metadata: Arc::new(BTreeMap::new()),
         };
 
-        Ok(Self { pipeline_id, pool, inner: Arc::new(Mutex::new(inner)) })
+        Ok(Self {
+            pipeline_id,
+            pool,
+            inner: Arc::new(hotpath::mutex!(
+                tokio::sync::Mutex::new(inner),
+                label = "postgres_store"
+            )),
+        })
+    }
+}
+
+impl std::fmt::Debug for PostgresStore {
+    /// Formats structural metadata without inspecting the instrumented lock.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PostgresStore")
+            .field("pipeline_id", &self.pipeline_id)
+            .finish_non_exhaustive()
     }
 }
 

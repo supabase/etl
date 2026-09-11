@@ -491,7 +491,7 @@ fn schema_cleanup_retention_snapshot_id(
 #[derive(Debug)]
 struct ApplyLoopTasks {
     /// Sender for serialized background schema cleanup requests.
-    schema_cleanup_tx: Option<mpsc::Sender<SchemaCleanupRequest>>,
+    schema_cleanup_tx: Option<hotpath::wrap::tokio::sync::mpsc::Sender<SchemaCleanupRequest>>,
     /// Background worker that serially processes schema cleanup requests.
     schema_cleanup_worker_task: JoinHandle<()>,
     /// Background replication lag sampler task owned by this apply loop.
@@ -510,8 +510,7 @@ impl ApplyLoopTasks {
     where
         S: SchemaStore + Send + Sync + 'static,
     {
-        let (schema_cleanup_tx, schema_cleanup_rx) =
-            mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
+        let (schema_cleanup_tx, schema_cleanup_rx) = Self::schema_cleanup_channel();
         let schema_cleanup_worker_task =
             Self::spawn_schema_cleanup_worker(schema_store, schema_cleanup_rx, worker_type);
 
@@ -527,6 +526,17 @@ impl ApplyLoopTasks {
             schema_cleanup_worker_task,
             replication_lag_sampler_task,
         }
+    }
+
+    /// Creates the bounded cleanup queue with call-site aggregated profiling.
+    fn schema_cleanup_channel() -> (
+        hotpath::wrap::tokio::sync::mpsc::Sender<SchemaCleanupRequest>,
+        hotpath::wrap::tokio::sync::mpsc::Receiver<SchemaCleanupRequest>,
+    ) {
+        hotpath::channel!(
+            mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY),
+            label = "schema_cleanup"
+        )
     }
 
     /// Tries to queue a schema cleanup request for one table.
@@ -557,7 +567,7 @@ impl ApplyLoopTasks {
     /// Starts the worker that serially prunes requested table schema versions.
     fn spawn_schema_cleanup_worker<S>(
         schema_store: S,
-        mut schema_cleanup_rx: mpsc::Receiver<SchemaCleanupRequest>,
+        mut schema_cleanup_rx: hotpath::wrap::tokio::sync::mpsc::Receiver<SchemaCleanupRequest>,
         worker_type: WorkerType,
     ) -> JoinHandle<()>
     where
@@ -2270,6 +2280,7 @@ where
     }
 
     /// Dispatches one streaming write through the shared async-result path.
+    #[hotpath::measure]
     async fn dispatch_write_events(
         &mut self,
         event_batch: EventBatch,
@@ -2700,6 +2711,7 @@ where
     ///
     /// Builds a replication mask from the relation message and stores it for
     /// use by DML handlers.
+    #[hotpath::measure]
     async fn handle_relation_message(
         &mut self,
         message: &protocol::RelationBody,
@@ -3480,6 +3492,7 @@ where
     ///
     /// Test failpoints deliberately return the candidate without writing it so
     /// recovery tests can model a lost checkpoint write.
+    #[hotpath::measure]
     async fn persist_replication_checkpoint(&self, checkpoint_lsn: PgLsn) -> EtlResult<PgLsn> {
         let worker_type = self.worker_context.worker_type();
 
@@ -4672,6 +4685,187 @@ mod tests {
         replication::state::StoredTableDecodingState,
         schema::{ColumnSchema, TableName},
     };
+
+    /// Keeps the production cleanup queue bounded and drains accepted messages
+    /// after the last sender closes, with profiling enabled or disabled.
+    #[tokio::test]
+    async fn schema_cleanup_channel_preserves_capacity_and_closure() {
+        let (tx, mut rx) = ApplyLoopTasks::schema_cleanup_channel();
+        for _ in 0..SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
+            tx.try_send(SchemaCleanupRequest {
+                table_id: TableId::new(1),
+                retention_snapshot_id: SnapshotId::initial(),
+            })
+            .unwrap();
+        }
+        let rejected = tx
+            .try_send(SchemaCleanupRequest {
+                table_id: TableId::new(1),
+                retention_snapshot_id: SnapshotId::initial(),
+            })
+            .unwrap_err();
+        assert!(matches!(rejected, mpsc::error::TrySendError::Full(_)));
+
+        drop(tx);
+        let mut received = 0;
+        while rx.recv().await.is_some() {
+            received += 1;
+        }
+        assert_eq!(received, SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
+    }
+
+    /// Exercises core synchronization and its shared Prometheus exposition
+    /// without source or destination services.
+    #[cfg(feature = "hotpath")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn core_profiling_exports_locks_and_channels() {
+        use etl_telemetry::{metrics::init_metrics_handle, profiling};
+
+        use crate::{
+            runtime::{
+                BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool, TableSyncWorkerState,
+                concurrency::{TaskSet, create_shutdown_channel},
+            },
+            store::MemoryStore,
+        };
+
+        /// Reads one scalar sample selected by its fixed profiling label.
+        fn sample(snapshot: &str, family: &str, label: &str) -> Option<f64> {
+            snapshot.lines().find_map(|line| {
+                if !line.starts_with(&format!("{family}{{"))
+                    || !line.contains(&format!("\"{label}\""))
+                {
+                    return None;
+                }
+                line.rsplit_once(' ')?.1.parse().ok()
+            })
+        }
+
+        let _profiler = profiling::init().unwrap();
+        let handle = init_metrics_handle().unwrap();
+        let store = MemoryStore::new();
+        let (tx, rx) = ApplyLoopTasks::schema_cleanup_channel();
+        for _ in 0..3 {
+            tx.try_send(SchemaCleanupRequest {
+                table_id: TableId::new(1),
+                retention_snapshot_id: SnapshotId::initial(),
+            })
+            .unwrap();
+        }
+        // Deliberately leave work queued before starting the real cleanup worker.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        drop(tx);
+        ApplyLoopTasks::spawn_schema_cleanup_worker(store, rx, WorkerType::Apply).await.unwrap();
+
+        let state = TableSyncWorkerState::new(TableId::new(1), TableState::Init);
+        let held = state.lock().await;
+        tokio::join!(
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                drop(held);
+            },
+            async {
+                let mut state = state.lock().await;
+                state.set(TableState::Init);
+            }
+        );
+
+        let pool = TableSyncWorkerPool::new();
+        assert!(pool.get_active_worker_state(TableId::new(1)).await.is_none());
+        pool.wait_all().await.unwrap();
+
+        let memory = MemoryMonitor::new_for_test();
+        memory.set_total_memory_bytes_for_test(1024);
+        let governor = BatchMemoryGovernor::new(1, memory.clone(), 0.5, 1024);
+        let slots = governor.register_batch_slots(2);
+        assert_eq!(governor.batch_size_target_bytes(), 256);
+        drop(slots);
+        memory.set_backpressure_active_for_test(true);
+        memory.wait_for_refresh_task().await.unwrap();
+
+        let tasks = TaskSet::new();
+        let held = tasks.drain().await.unwrap();
+        tokio::join!(
+            async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                drop(held);
+            },
+            tasks.spawn(async {})
+        );
+        drop(tasks.drain().await.unwrap());
+
+        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        shutdown_tx.shutdown().unwrap();
+        shutdown_rx.changed().await.unwrap();
+
+        let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = profiling::render_metrics(&handle, &[]).await;
+                if sample(&snapshot, "hotpath_channel_received_total", "schema_cleanup")
+                    == Some(3.0)
+                    && sample(
+                        &snapshot,
+                        "hotpath_mutex_wait_seconds_count",
+                        "table_sync_worker_state",
+                    ) == Some(2.0)
+                    && sample(&snapshot, "hotpath_function_calls_total", "shutdown_signal_wait")
+                        == Some(1.0)
+                    && sample(&snapshot, "hotpath_mutex_acquisitions_total", "memory_refresh_task")
+                        == Some(1.0)
+                    && sample(&snapshot, "hotpath_rwlock_acquisitions_total", "memory_snapshot")
+                        == Some(2.0)
+                {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(snapshot.contains("etl_hotpath_exporter_up 1"));
+        assert!(snapshot.contains("etl_schema_cleanups_total{"));
+        assert_eq!(sample(&snapshot, "hotpath_channel_sent_total", "schema_cleanup"), Some(3.0));
+        assert_eq!(
+            sample(&snapshot, "hotpath_channel_max_queue_size", "schema_cleanup"),
+            Some(3.0)
+        );
+        assert_eq!(sample(&snapshot, "hotpath_channel_queue_size", "schema_cleanup"), Some(0.0));
+        assert!(
+            sample(&snapshot, "hotpath_channel_proc_seconds_sum", "schema_cleanup").unwrap() > 0.0
+        );
+        for label in [
+            "table_sync_worker_state",
+            "table_sync_worker_tasks",
+            "memory_store",
+            "batch_memory_update",
+            "memory_refresh_task",
+        ] {
+            assert!(sample(&snapshot, "hotpath_mutex_acquisitions_total", label).unwrap() > 0.0);
+        }
+        for label in ["table_sync_worker_registry", "memory_snapshot"] {
+            assert!(sample(&snapshot, "hotpath_rwlock_acquisitions_total", label).unwrap() > 0.0);
+        }
+        assert!(
+            sample(&snapshot, "hotpath_mutex_wait_seconds_sum", "table_sync_worker_state").unwrap()
+                > 0.0
+        );
+        assert!(
+            sample(&snapshot, "hotpath_function_duration_seconds_sum", "task_registry_lock_wait")
+                .unwrap()
+                > 0.0
+        );
+
+        for line in snapshot.lines().filter(|line| {
+            line.starts_with("hotpath_")
+                && !line.contains("_bucket{")
+                && (line.contains("schema_cleanup")
+                    || line.contains("table_sync_worker_state")
+                    || line.contains("task_registry_lock_wait"))
+        }) {
+            println!("{line}");
+        }
+    }
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {

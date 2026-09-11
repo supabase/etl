@@ -1,7 +1,7 @@
 use std::{future::Future, sync::Arc};
 
 use tokio::{
-    sync::{Mutex, OwnedMutexGuard},
+    sync::{Mutex, MutexGuard, OwnedMutexGuard},
     task::JoinSet,
 };
 use tracing::{error, warn};
@@ -61,7 +61,7 @@ impl TaskSet {
     where
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
         inner.join_set.spawn(task);
     }
 
@@ -73,19 +73,20 @@ impl TaskSet {
     /// synchronously while the registry is locked and should only construct the
     /// returned future. This keeps large task futures out of callers' async
     /// state while they wait for registration.
+    #[hotpath::measure]
     pub async fn spawn_with<F, Fut>(&self, task_factory: F)
     where
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
         inner.join_set.spawn(task_factory());
     }
 
     /// Reaps completed tasks once enough of them may have accumulated to
     /// justify the lock.
     pub async fn try_reap(&self) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
         if inner.join_set.len() <= TASK_REAP_THRESHOLD {
             return Ok(());
         }
@@ -115,8 +116,9 @@ impl TaskSet {
     ///
     /// If a tracked task panics, this method returns an error without a guard.
     /// Tasks not yet joined remain tracked and continue running.
+    #[hotpath::measure]
     pub async fn drain(&self) -> EtlResult<TaskSetDrainGuard> {
-        let mut inner = Arc::clone(&self.inner).lock_owned().await;
+        let mut inner = self.lock_registry_owned().await;
 
         while let Some(result) = inner.join_set.join_next().await {
             self.handle_task_result(result)?;
@@ -131,7 +133,7 @@ impl TaskSet {
     /// keep the mutex locked while draining the remaining tasks so no new work
     /// can be submitted concurrently once shutdown has begun.
     pub async fn shutdown(&self) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
 
         inner.join_set.abort_all();
 
@@ -140,6 +142,19 @@ impl TaskSet {
         }
 
         Ok(())
+    }
+
+    /// Measures registry contention while preserving borrowed guard semantics.
+    #[hotpath::measure(label = "task_registry_lock_wait")]
+    async fn lock_registry(&self) -> MutexGuard<'_, TaskSetInner> {
+        self.inner.lock().await
+    }
+
+    /// Measures drain admission without shortening the returned guard's
+    /// lifetime.
+    #[hotpath::measure(label = "task_registry_owned_lock_wait")]
+    async fn lock_registry_owned(&self) -> OwnedMutexGuard<TaskSetInner> {
+        Arc::clone(&self.inner).lock_owned().await
     }
 
     /// Handles the outcome of a completed task.

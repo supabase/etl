@@ -181,6 +181,7 @@ impl<T> AsyncResult<T> {
 
     /// Sends the final result to the waiting receiver and records its
     /// completion instant.
+    #[hotpath::measure(label = "async_result_send")]
     pub fn send(self, result: EtlResult<T>) {
         let completed_at = Instant::now();
         if self.tx.send((completed_at, result)).is_err() {
@@ -227,6 +228,7 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
 
 impl<T, M> PendingAsyncResult<T, M> {
     /// Waits for completion or returns when shutdown is requested.
+    #[hotpath::measure(label = "async_result_wait")]
     pub(crate) async fn with_shutdown(
         self,
         shutdown_rx: &mut ShutdownRx,

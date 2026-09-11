@@ -788,6 +788,11 @@ pub fn run(
         .layer(sentry_layer)
         .layer(trace_layer);
 
+    #[cfg(feature = "hotpath")]
+    let app = crate::profiling::profile_router(app);
+    #[cfg(feature = "hotpath")]
+    let internal_app = crate::profiling::profile_router(internal_app);
+
     listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
     internal_listener.set_nonblocking(true)?;

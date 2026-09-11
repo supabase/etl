@@ -15,6 +15,11 @@ on:
         type: boolean
         required: false
         default: true
+      hotpath:
+        description: "Enable Hotpath profiling and Prometheus metrics"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -116,3 +121,4 @@ jobs:
       checkout_ref: ${{ needs.resolve-ref.outputs.ref }}
       build_args: |
         ENABLE_EGRESS=true
+        ENABLE_HOTPATH=${{ github.event_name == 'workflow_dispatch' && inputs.hotpath || false }}

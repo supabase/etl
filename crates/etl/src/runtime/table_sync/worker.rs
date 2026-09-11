@@ -4,9 +4,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::slots::EtlReplicationSlot;
 use futures::FutureExt;
+use hotpath::wrap::tokio::sync::{Mutex, MutexGuard};
 use metrics::counter;
 use tokio::{
-    sync::{Mutex, MutexGuard, Notify, Semaphore},
+    sync::{AcquireError, Notify, OwnedSemaphorePermit, Semaphore},
     task::AbortHandle,
 };
 use tracing::{Instrument, debug, error, info, warn};
@@ -172,7 +173,7 @@ impl TableSyncWorkerStateInner {
 /// The state handle supports atomic updates, notifications, and blocking waits
 /// for specific state transitions, making it suitable for complex multi-worker
 /// scenarios.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct TableSyncWorkerState {
     inner: Arc<Mutex<TableSyncWorkerStateInner>>,
 }
@@ -183,7 +184,7 @@ impl TableSyncWorkerState {
     /// This constructor initializes the state management structure with the
     /// specified table ID and table state. It sets up the notification
     /// mechanism for coordinating state changes between workers.
-    fn new(table_id: TableId, table_state: TableState) -> Self {
+    pub(crate) fn new(table_id: TableId, table_state: TableState) -> Self {
         let inner = TableSyncWorkerStateInner {
             table_id,
             table_state,
@@ -191,7 +192,12 @@ impl TableSyncWorkerState {
             retry_attempts: 0,
         };
 
-        Self { inner: Arc::new(Mutex::new(inner)) }
+        Self {
+            inner: Arc::new(hotpath::mutex!(
+                tokio::sync::Mutex::new(inner),
+                label = "table_sync_worker_state"
+            )),
+        }
     }
 
     /// Waits for the table to reach a specific table state type.
@@ -261,6 +267,12 @@ impl Deref for TableSyncWorkerState {
 
     fn deref(&self) -> &Self::Target {
         &self.inner
+    }
+}
+
+impl std::fmt::Debug for TableSyncWorkerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TableSyncWorkerState").finish_non_exhaustive()
     }
 }
 
@@ -635,6 +647,12 @@ where
         }
     }
 
+    /// Measures scheduler admission while preserving owned permit semantics.
+    #[hotpath::measure(label = "table_sync_run_permit_wait")]
+    async fn acquire_run_permit(&self) -> Result<OwnedSemaphorePermit, AcquireError> {
+        Arc::clone(&self.run_permit).acquire_owned().await
+    }
+
     /// Executes the core table synchronization process.
     ///
     /// This method orchestrates the complete table sync workflow: acquiring run
@@ -668,7 +686,7 @@ where
 
             // We use `acquired_owned` for better semantics over `acquire` since we want to own the
             // permit in this future.
-            permit = Arc::clone(&self.run_permit).acquire_owned() => {
+            permit = self.acquire_run_permit() => {
                 permit
             }
         }

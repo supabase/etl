@@ -5,4 +5,6 @@
 //! development and production logging modes.
 
 pub mod metrics;
+#[cfg(feature = "hotpath")]
+pub mod profiling;
 pub mod tracing;
