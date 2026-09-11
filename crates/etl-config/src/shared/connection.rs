@@ -324,17 +324,21 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
             .ssl_mode(ssl_mode)
             .ssl_root_cert_from_pem(self.tls.trusted_root_certs.clone().into_bytes());
 
-        if let Some(password) = &self.password {
-            connect_options = connect_options.password(password.expose_secret());
-        }
+        // Always override SQLx's inherited PGPASSWORD, including when no
+        // password is configured.
+        connect_options = connect_options
+            .password(self.password.as_ref().map_or("", |password| password.expose_secret()));
 
         // TODO: Enable TCP keepalive once available in sqlx.
         // The tcp_keepalive_time() method was added in PR #3559 but may not be
         // available in the current sqlx version (0.8.6). When upgrading sqlx,
-        // uncomment the following to enable keepalive for API/state connections:
+        // uncomment the following to enable keepalive for API/state
+        // connections:
         //
-        // connect_options = connect_options
-        //     .tcp_keepalive_time(Duration::from_secs(self.keepalive.idle_secs));
+        // ```
+        // connect_options =
+        //     connect_options.tcp_keepalive_time(Duration::from_secs(self.keepalive.idle_secs));
+        // ```
 
         // Apply options if provided
         if let Some(opts) = options {
@@ -381,9 +385,10 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
         }
 
         // Always enable TCP keepalive to prevent idle connection timeouts,
-        // especially on managed Postgres services like Supabase. This is critical
-        // during parallel table copies where the main connection holds an exported
-        // snapshot but sits idle while child connections perform the actual data copy.
+        // especially on managed Postgres services like Supabase. This is
+        // critical during parallel table copies where the main
+        // connection holds an exported snapshot but sits idle while
+        // child connections perform the actual data copy.
         config
             .keepalives(true)
             .keepalives_idle(Duration::from_secs(self.keepalive.idle_secs))
@@ -408,6 +413,10 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
+    use sqlx::ConnectOptions;
+
     use super::*;
 
     fn pg_connection_config(hostaddr: Option<IpAddr>) -> PgConnectionConfig {
@@ -479,6 +488,42 @@ mod tests {
         assert_eq!(options.lock_timeout, 6_000);
         assert_eq!(options.idle_in_transaction_session_timeout, 60_000);
         assert_eq!(options.application_name, "custom_workload");
+    }
+
+    /// Verifies that configured passwords override the ambient password.
+    #[test]
+    fn sqlx_options_use_only_configured_password() {
+        if std::env::var_os("ETL_CONFIG_TEST_PASSWORD_CHILD").is_none() {
+            // Set PGPASSWORD before starting the child to avoid mutating the
+            // environment while other tests or libraries may read it.
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "shared::connection::tests::sqlx_options_use_only_configured_password",
+                ])
+                .env("ETL_CONFIG_TEST_PASSWORD_CHILD", "1")
+                .env("PGPASSWORD", "placeholderambientpassword")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(stdout.contains("1 passed;"), "{stdout}");
+            return;
+        }
+
+        for password in [None, Some(""), Some("placeholderconfiguredpassword")] {
+            let mut config = pg_connection_config(None);
+            config.host = "example.com".to_owned();
+            config.password = password.map(SecretString::from);
+            let options: SqlxConnectOptions = config.with_db(None);
+
+            // URL serialization normalizes an empty password to absence.
+            assert_eq!(
+                options.to_url_lossy().password(),
+                password.filter(|password| !password.is_empty())
+            );
+        }
     }
 
     #[test]
