@@ -86,6 +86,19 @@ pub(crate) const CONFIRMATION_LABEL: &str = "confirmation";
 /// Label key for the destination write status ("accepted" or "durable").
 pub(crate) const WRITE_STATUS_LABEL: &str = "status";
 
+/// Returns a bounded DDL command tag for metrics and logging.
+///
+/// Source triggers emit `ALTER TABLE` and `ALTER PUBLICATION`. Logical messages
+/// can also be emitted directly, so all other tags map to `unknown`.
+/// Keep this classification separate from the raw tag used by replication.
+pub(crate) fn ddl_command_tag_label(command_tag: &str) -> &'static str {
+    match command_tag {
+        "ALTER TABLE" => "ALTER TABLE",
+        "ALTER PUBLICATION" => "ALTER PUBLICATION",
+        _ => "unknown",
+    }
+}
+
 /// Register metrics emitted by etl. This should be called before starting a
 /// pipeline. It is safe to call this method multiple times. It is guaranteed to
 /// register the metrics only once.
@@ -371,4 +384,29 @@ pub(crate) fn register_metrics() {
             "Difference between the source Postgres current WAL position and ETL's checkpoint LSN."
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::observability::ddl_command_tag_label;
+
+    /// Preserves supported labels and bounds unexpected tag values.
+    #[test]
+    fn ddl_command_tag_labels_are_bounded() {
+        assert_eq!(ddl_command_tag_label("ALTER TABLE"), "ALTER TABLE");
+        assert_eq!(ddl_command_tag_label("ALTER PUBLICATION"), "ALTER PUBLICATION");
+
+        for command_tag in [
+            "",
+            "alter table",
+            "ALTER TABLE ",
+            "ALTER PUBLICATION extra",
+            "CREATE TABLE",
+            "ALTER TABLE\0",
+            "変更",
+            &"x".repeat(4096),
+        ] {
+            assert_eq!(ddl_command_tag_label(command_tag), "unknown");
+        }
+    }
 }
