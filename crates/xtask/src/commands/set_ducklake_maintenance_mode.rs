@@ -93,13 +93,13 @@ async fn set_ducklake_maintenance_mode(
     println!("Found destination:");
     println!("  id: {destination_id}");
 
-    let dest_config: StoredDestinationConfig = decrypt_and_deserialize_from_value::<
+    let mut dest_config: StoredDestinationConfig = decrypt_and_deserialize_from_value::<
         EncryptedStoredDestinationConfig,
         StoredDestinationConfig,
     >(config_value, encryption_keyring)
     .context("Failed to decrypt and deserialize destination config")?;
 
-    let StoredDestinationConfig::Ducklake { maintenance_mode: current_mode, .. } = &dest_config
+    let StoredDestinationConfig::Ducklake { maintenance_mode: current_mode, .. } = &mut dest_config
     else {
         bail!("Destination {destination_id} is not a DuckLake destination");
     };
@@ -113,48 +113,7 @@ async fn set_ducklake_maintenance_mode(
 
     println!("New maintenance_mode:     {mode:?}");
 
-    let updated_config = match dest_config {
-        StoredDestinationConfig::Ducklake {
-            catalog_url,
-            catalog_pooler_url,
-            data_path,
-            pool_size,
-            s3_access_key_id,
-            s3_secret_access_key,
-            s3_region,
-            s3_endpoint,
-            s3_url_style,
-            s3_use_ssl,
-            metadata_schema,
-            maintenance_target_file_size,
-            parquet_row_group_size_bytes,
-            parquet_row_group_size,
-            expire_snapshots_older_than,
-            maintenance_mode: _,
-            copy_buffer,
-            table_sorting,
-        } => StoredDestinationConfig::Ducklake {
-            catalog_url,
-            catalog_pooler_url,
-            data_path,
-            pool_size,
-            s3_access_key_id,
-            s3_secret_access_key,
-            s3_region,
-            s3_endpoint,
-            s3_url_style,
-            s3_use_ssl,
-            metadata_schema,
-            maintenance_target_file_size,
-            parquet_row_group_size_bytes,
-            parquet_row_group_size,
-            expire_snapshots_older_than,
-            maintenance_mode: mode,
-            copy_buffer,
-            table_sorting,
-        },
-        _ => unreachable!(),
-    };
+    *current_mode = mode;
 
     if dry_run {
         println!(
@@ -167,7 +126,7 @@ async fn set_ducklake_maintenance_mode(
     let encrypted_config = encrypt_and_serialize::<
         StoredDestinationConfig,
         EncryptedStoredDestinationConfig,
-    >(updated_config, encryption_keyring)
+    >(dest_config, encryption_keyring)
     .context("Failed to encrypt and serialize updated destination config")?;
 
     sqlx::query("UPDATE app.destinations SET config = $1 WHERE id = $2")
