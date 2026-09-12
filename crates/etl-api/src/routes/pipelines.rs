@@ -1025,7 +1025,7 @@ pub(crate) async fn read_all_pipelines(
     post,
     path = "/pipelines/{pipeline_id}/start",
     summary = "Start a pipeline",
-    description = "Starts the pipeline by deploying its replicator.",
+    description = "Starts the pipeline by deploying its replicator. If a previous stop is still completing, waits up to 30 seconds for runtime deletion before recreating it. Returns 503 if shutdown has not completed; retry after the pipeline stops.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1034,6 +1034,7 @@ pub(crate) async fn read_all_pipelines(
         (status = 200, description = "Pipeline started successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline, source, or destination not found", body = ErrorMessage),
+        (status = 503, description = "Previous pipeline shutdown is still completing", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1053,6 +1054,12 @@ pub(crate) async fn start_pipeline(
     let mut txn = pool.begin().await?;
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+
+    // A successful stop response only acknowledges deletion. Finish removing
+    // an inactive runtime before applying resources that could still be deleted.
+    if !should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+        delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, true).await?;
+    }
 
     let tls_config = source_tls_config.get_tls_config();
 

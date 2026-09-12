@@ -1528,6 +1528,40 @@ async fn an_existing_pipeline_can_be_started() {
 
     // Assert
     assert!(response.status().is_success());
+    assert!(!app.k8s_state.waited_for_deletion());
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+}
+
+/// Starting after stop must finish shutdown before applying a replacement.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_pipeline_finishes_previous_shutdown() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    app.k8s_state.set_stateful_set_active(false);
+    app.k8s_state.set_pod_status(PodStatus::Stopping).await;
+    let creates_before = app.k8s_state.create_calls();
+
+    let response = app.start_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.k8s_state.waited_for_deletion());
+    assert!(app.k8s_state.create_calls() > creates_before);
+}
+
+/// A shutdown timeout must not report a successful start or apply new
+/// resources.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_pipeline_deletion_timeout_does_not_recreate_runtime() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    app.k8s_state.set_stateful_set_active(false);
+    app.k8s_state.set_pod_status(PodStatus::Stopping).await;
+    app.k8s_state.set_deletion_timeout(true);
+    let creates_before = app.k8s_state.create_calls();
+
+    let response = app.start_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(app.k8s_state.waited_for_deletion());
+    assert_eq!(app.k8s_state.create_calls(), creates_before);
 }
 
 #[tokio::test(flavor = "multi_thread")]
