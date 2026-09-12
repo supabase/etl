@@ -762,6 +762,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            generated: false,
             default_expression: None,
         }
     }

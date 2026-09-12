@@ -308,7 +308,7 @@ pub fn numeric_modifiers(modifier: TypeModifier) -> Option<NumericModifiers> {
 ///
 /// This type contains all metadata about a column including its name, data
 /// type, type modifier, ordinal position, primary key information, nullability,
-/// and default expression.
+/// generation kind, and default expression.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column.
@@ -324,7 +324,18 @@ pub struct ColumnSchema {
     pub primary_key_ordinal_position: Option<i32>,
     /// Whether the column can contain NULL values.
     pub nullable: bool,
+    /// Whether the column is a Postgres stored generated column.
+    ///
+    /// A stored generated column only reaches the logical stream on Postgres 18
+    /// with `publish_generated_columns = stored`; otherwise it stays in the
+    /// table schema but out of the replication mask. Virtual generated columns
+    /// are never represented because they are absent from the WAL.
+    pub generated: bool,
     /// The source default expression for this column, if one is defined.
+    ///
+    /// Always [`None`] for a generated column: Postgres stores the generation
+    /// expression in `pg_attrdef`, and that expression is not a destination
+    /// default.
     pub default_expression: Option<String>,
 }
 
@@ -344,6 +355,7 @@ impl ColumnSchema {
             ordinal_position,
             primary_key_ordinal_position: None,
             nullable,
+            generated: false,
             default_expression: None,
         }
     }
@@ -362,6 +374,12 @@ impl ColumnSchema {
     /// Sets the optional primary key ordinal position for this column.
     pub fn with_primary_key_ordinal_position(mut self, ordinal_position: Option<i32>) -> Self {
         self.primary_key_ordinal_position = ordinal_position;
+        self
+    }
+
+    /// Sets whether this column is a stored generated column.
+    pub fn with_generated(mut self, generated: bool) -> Self {
+        self.generated = generated;
         self
     }
 
@@ -392,6 +410,7 @@ pub struct ColumnSchemaBuilder {
     ordinal_position: i32,
     primary_key_ordinal_position: Option<i32>,
     nullable: bool,
+    generated: bool,
     default_expression: Option<String>,
 }
 
@@ -405,6 +424,7 @@ impl ColumnSchemaBuilder {
             ordinal_position,
             primary_key_ordinal_position: None,
             nullable: true,
+            generated: false,
             default_expression: None,
         }
     }
@@ -439,6 +459,12 @@ impl ColumnSchemaBuilder {
         self
     }
 
+    /// Marks the column as a stored generated column.
+    pub fn generated(mut self, generated: bool) -> Self {
+        self.generated = generated;
+        self
+    }
+
     /// Sets the source default expression for this column.
     pub fn default_expression(mut self, default_expression: String) -> Self {
         self.default_expression = Some(default_expression);
@@ -460,6 +486,7 @@ impl ColumnSchemaBuilder {
             ordinal_position: self.ordinal_position,
             primary_key_ordinal_position: self.primary_key_ordinal_position,
             nullable: self.nullable,
+            generated: self.generated,
             default_expression: self.default_expression,
         }
     }
@@ -614,7 +641,28 @@ mod tests {
         assert_eq!(schema.ordinal_position, 3);
         assert_eq!(schema.primary_key_ordinal_position, Some(1));
         assert!(!schema.nullable);
+        assert!(!schema.generated);
         assert_eq!(schema.default_expression.as_deref(), Some("'new'::text"));
+    }
+
+    #[test]
+    fn column_schema_defaults_to_not_generated() {
+        let schema = ColumnSchema::new("height_cm".to_owned(), Type::NUMERIC, -1, 2, true);
+
+        assert!(!schema.generated);
+        assert!(!ColumnSchema::builder("height_cm".to_owned(), Type::NUMERIC, 2).build().generated);
+    }
+
+    #[test]
+    fn column_schema_marks_generated_columns() {
+        let schema =
+            ColumnSchema::new("height_in".to_owned(), Type::NUMERIC, -1, 3, true).with_generated(true);
+        let built = ColumnSchema::builder("height_in".to_owned(), Type::NUMERIC, 3)
+            .generated(true)
+            .build();
+
+        assert!(schema.generated);
+        assert!(built.generated);
     }
 
     #[test]

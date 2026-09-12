@@ -152,6 +152,11 @@ impl ReplicationMask {
     /// stored schema is from an earlier point before DDL changes. Rather
     /// than failing, we enable all columns and let the system converge when
     /// the actual DDL message is replayed.
+    ///
+    /// The fallback is unsound for a schema containing generated columns: those
+    /// only reach the stream on Postgres 18 with
+    /// `publish_generated_columns = stored`, so an all-replicated mask can be
+    /// wider than the tuples that follow.
     pub fn build_or_all(
         table_schema: &TableSchema,
         replicated_column_names: &HashSet<String>,
@@ -1087,6 +1092,11 @@ impl ColumnAlteration {
             "column alteration should change its identified field"
         );
         let mut expected_after = before_column_schema.clone();
+        // The generated flag is deliberately not an alteration kind: it never changes
+        // destination DDL, so no destination operation is planned for it. Carry it
+        // through so a statement that both drops an expression and changes a classified
+        // field still validates against the field its kind identifies.
+        expected_after.generated = after_column_schema.generated;
         match kind {
             ColumnAlterationKind::Rename => {
                 expected_after.name.clone_from(&after_column_schema.name);

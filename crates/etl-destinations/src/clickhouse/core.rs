@@ -168,13 +168,18 @@ fn ensure_clickhouse_renames_are_supported(table_name: &str, plan: &SchemaPlan) 
 /// source default. ClickHouse cannot represent a top-level nullable array, so a
 /// replication-mask expansion containing an array fails instead of silently
 /// exposing empty arrays for historical rows.
+///
+/// A generated column follows the same rule regardless of why it appeared. It
+/// carries source values that predate its arrival in the destination, so
+/// treating it as a plain table-schema addition would backfill historical rows
+/// with an empty array rather than the values the source already holds.
 fn clickhouse_add_column_definition(
     table_name: &str,
     after_column_schema: &ColumnSchema,
     reason: ColumnPresenceChangeReason,
 ) -> EtlResult<(ColumnSchema, bool)> {
     let mut destination_column_schema = after_column_schema.clone();
-    if reason == ColumnPresenceChangeReason::ReplicationMask {
+    if reason == ColumnPresenceChangeReason::ReplicationMask || after_column_schema.generated {
         if is_array_type(&after_column_schema.typ) {
             return Err(etl_error!(
                 ErrorKind::SourceSchemaError,
