@@ -50,6 +50,15 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::I64)
         }
         Type::FLOAT4 => Ok(Cell::F32(str.parse()?)),
+        // pgvector is lowered to FLOAT4_ARRAY in the schema snapshot. Its
+        // scalar text format uses brackets, unlike PostgreSQL array literals.
+        Type::FLOAT4_ARRAY if str.starts_with('[') && str.ends_with(']') => {
+            let values = str[1..str.len() - 1]
+                .split(',')
+                .map(|value| Ok(Some(value.trim().parse::<f32>()?)))
+                .collect::<EtlResult<Vec<_>>>()?;
+            Ok(Cell::Array(ArrayCell::F32(values)))
+        }
         Type::FLOAT4_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::F32)
         }
@@ -1000,5 +1009,18 @@ mod tests {
 
         let cell = parse_cell_from_postgres_text(&custom_type, "test").unwrap();
         assert_eq!(cell, Cell::String("test".to_owned()));
+    }
+
+    #[test]
+    fn pgvector_text_preserves_float_values_and_native_array_syntax() {
+        let vector = parse_cell_from_postgres_text(&Type::FLOAT4_ARRAY, "[0.1,-0,1e-30]").unwrap();
+        let native =
+            parse_cell_from_postgres_text(&Type::FLOAT4_ARRAY, "[0:2]={0.1,-0,1e-30}").unwrap();
+        assert_eq!(vector, native);
+        let Cell::Array(ArrayCell::F32(values)) = vector else { panic!("expected float array") };
+        assert!(values[1].unwrap().is_sign_negative());
+        for input in ["[]", "[1,]", "[NULL]", "[1,invalid]", "[1,2"] {
+            assert!(parse_cell_from_postgres_text(&Type::FLOAT4_ARRAY, input).is_err());
+        }
     }
 }
