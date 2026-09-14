@@ -295,8 +295,16 @@ pub(super) async fn read_replicator_status(
 mod tests {
     //! Runtime classification and Kubernetes read-interleaving tests.
 
-    use std::collections::BTreeMap;
+    use std::{
+        collections::{BTreeMap, VecDeque},
+        convert::Infallible,
+        sync::{Arc, Mutex},
+    };
 
+    use axum::{
+        body::Body,
+        http::{Method, Request, Response},
+    };
     use chrono::Utc;
     use k8s_openapi::{
         api::{
@@ -309,6 +317,7 @@ mod tests {
         },
         apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference, Time},
     };
+    use kube::{Api, Client};
     use serde_json::json;
 
     use crate::k8s::{
@@ -320,28 +329,38 @@ mod tests {
     /// Name of the only application container in the test runtime.
     const REPLICATOR_CONTAINER_NAME: &str = "tenant-42-replicator";
 
-    /// Builds a failed process observation, optionally during deletion.
-    fn failed_replicator_pod(deleting: bool) -> Pod {
-        Pod {
-            metadata: ObjectMeta {
-                deletion_timestamp: deleting.then(|| Time(Utc::now())),
-                ..Default::default()
-            },
-            status: Some(KubernetesPodStatus {
-                phase: Some("Failed".to_owned()),
-                container_statuses: Some(vec![ContainerStatus {
-                    name: REPLICATOR_CONTAINER_NAME.to_owned(),
-                    state: Some(ContainerState {
-                        terminated: Some(ContainerStateTerminated {
-                            exit_code: 1,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
+    /// Exact endpoints expected from the status observer in the test namespace.
+    const STATEFUL_SET_PATH: &str = "/apis/apps/v1/namespaces/test/statefulsets/replicator";
+    /// Named Pod endpoint expected from the status observer.
+    const POD_PATH: &str = "/api/v1/namespaces/test/pods/replicator-0";
+
+    /// A named change to a healthy fixture and its expected customer-facing
+    /// state.
+    type RuntimeCase = (&'static str, fn(&mut StatefulSet, &mut Pod), PodStatus);
+
+    /// Builds a current container termination, distinct from its historical
+    /// state.
+    fn terminated_container(name: &str, exit_code: i32) -> ContainerStatus {
+        ContainerStatus {
+            name: name.to_owned(),
+            state: Some(ContainerState {
+                terminated: Some(ContainerStateTerminated { exit_code, ..Default::default() }),
                 ..Default::default()
             }),
+            ..Default::default()
+        }
+    }
+
+    /// Builds a failed Pod whose process and readiness agree with its phase.
+    fn failed_pod_status() -> KubernetesPodStatus {
+        KubernetesPodStatus {
+            phase: Some("Failed".to_owned()),
+            conditions: Some(vec![PodCondition {
+                type_: "Ready".to_owned(),
+                status: "False".to_owned(),
+                ..Default::default()
+            }]),
+            container_statuses: Some(vec![terminated_container(REPLICATOR_CONTAINER_NAME, 1)]),
             ..Default::default()
         }
     }
@@ -350,12 +369,16 @@ mod tests {
     fn ready_runtime() -> (StatefulSet, Pod) {
         let stateful_set: StatefulSet = serde_json::from_value(json!({
             "metadata": {"uid": "workload-uid", "generation": 1},
-            "spec": {"replicas": 1, "selector": {}, "template": {}},
+            "spec": {"replicas": 1, "selector": {}, "template": {"metadata": {"annotations": {RESTARTED_AT_ANNOTATION: "restart-1"}}}},
             "status": {"replicas": 1, "observedGeneration": 1, "updateRevision": "revision-1"}
         }))
         .unwrap();
         let pod = Pod {
             metadata: ObjectMeta {
+                annotations: Some(BTreeMap::from([(
+                    RESTARTED_AT_ANNOTATION.to_owned(),
+                    "restart-1".to_owned(),
+                )])),
                 owner_references: Some(vec![OwnerReference {
                     api_version: "apps/v1".to_owned(),
                     kind: "StatefulSet".to_owned(),
@@ -403,7 +426,7 @@ mod tests {
         let mut deleting_pod = running_pod.clone();
         deleting_pod.metadata.deletion_timestamp = Some(Time(Utc::now()));
         let mut failed_pod = running_pod.clone();
-        failed_pod.status = failed_replicator_pod(false).status;
+        failed_pod.status = Some(failed_pod_status());
         let mut scaled_down = active.clone();
         scaled_down.spec.as_mut().unwrap().replicas = Some(0);
 
@@ -430,129 +453,153 @@ mod tests {
     /// Healthy old Pods cannot satisfy a different owner or pending revision.
     #[test]
     fn replicator_status_requires_current_workload_identity_and_revision() {
-        let (active, pod) = ready_runtime();
-        for case in 0..6 {
-            let mut active = active.clone();
-            let mut pod = pod.clone();
-            let expected = match case {
-                0 => {
-                    pod.metadata.owner_references = None;
-                    PodStatus::Unknown
-                }
-                1 => {
-                    active.metadata.uid = Some("replacement-uid".to_owned());
-                    PodStatus::Unknown
-                }
-                2 => {
-                    active.metadata.generation = Some(2);
-                    PodStatus::Starting
-                }
-                3 => {
-                    active.status.as_mut().unwrap().observed_generation = None;
-                    PodStatus::Starting
-                }
-                4 => {
-                    active.status.as_mut().unwrap().update_revision = Some("revision-2".to_owned());
-                    PodStatus::Starting
-                }
-                _ => {
-                    active.spec.as_mut().unwrap().template.metadata = Some(ObjectMeta {
-                        annotations: Some(BTreeMap::from([(
-                            RESTARTED_AT_ANNOTATION.to_owned(),
-                            "new-restart".to_owned(),
-                        )])),
-                        ..Default::default()
-                    });
-                    // An old failure should not hide a requested replacement.
-                    pod.status = failed_replicator_pod(false).status;
-                    PodStatus::Starting
-                }
-            };
+        let cases: &[RuntimeCase] = &[
+            ("missing owner", |_, pod| pod.metadata.owner_references = None, PodStatus::Unknown),
+            (
+                "different owner",
+                |workload, _| workload.metadata.uid = Some("replacement-uid".to_owned()),
+                PodStatus::Unknown,
+            ),
+            (
+                "non-controlling owner",
+                |_, pod| {
+                    pod.metadata.owner_references.as_mut().unwrap()[0].controller = Some(false);
+                },
+                PodStatus::Unknown,
+            ),
+            (
+                "unobserved generation",
+                |workload, _| workload.metadata.generation = Some(2),
+                PodStatus::Starting,
+            ),
+            (
+                "missing observed generation",
+                |workload, _| workload.status.as_mut().unwrap().observed_generation = None,
+                PodStatus::Starting,
+            ),
+            (
+                "different revision",
+                |workload, _| {
+                    workload.status.as_mut().unwrap().update_revision =
+                        Some("revision-2".to_owned());
+                },
+                PodStatus::Starting,
+            ),
+            ("missing pod revision", |_, pod| pod.metadata.labels = None, PodStatus::Starting),
+        ];
+
+        for &(case, modify, expected) in cases {
+            let (mut workload, mut pod) = ready_runtime();
+            modify(&mut workload, &mut pod);
+
             assert_eq!(
-                derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
+                derive_replicator_status(Some(&workload), Some(&pod), REPLICATOR_CONTAINER_NAME),
                 expected,
-                "case {case}"
+                "{case}"
             );
         }
     }
 
-    /// Running phase alone does not establish readiness or successful recovery.
+    /// Missing process or readiness evidence cannot establish successful
+    /// startup.
     #[test]
-    fn replicator_status_requires_readiness_and_recognizes_failures() {
-        let (active, pod) = ready_runtime();
-        for case in 0..11 {
-            let mut pod = pod.clone();
-            let status = pod.status.as_mut().unwrap();
-            let expected = match case {
-                0 => {
-                    status.container_statuses.as_mut().unwrap()[0].ready = false;
-                    PodStatus::Starting
-                }
-                1 => {
-                    status.conditions = None;
-                    PodStatus::Starting
-                }
-                2 => {
-                    status.conditions.as_mut().unwrap()[0].status = "False".to_owned();
-                    PodStatus::Starting
-                }
-                3 => {
-                    status.conditions.as_mut().unwrap()[0].status = "Unknown".to_owned();
-                    PodStatus::Unknown
-                }
-                4 => {
-                    status.container_statuses = None;
-                    PodStatus::Starting
-                }
-                5 => {
-                    status.phase = Some("Succeeded".to_owned());
-                    PodStatus::Starting
-                }
-                6 => {
-                    status.container_statuses.as_mut().unwrap()[0].state = Some(ContainerState {
-                        terminated: Some(ContainerStateTerminated {
-                            exit_code: 0,
-                            ..Default::default()
-                        }),
+    fn replicator_status_requires_current_process_and_readiness() {
+        let cases: &[RuntimeCase] = &[
+            (
+                "container not ready",
+                |_, pod| {
+                    pod.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].ready =
+                        false;
+                },
+                PodStatus::Starting,
+            ),
+            (
+                "missing readiness condition",
+                |_, pod| pod.status.as_mut().unwrap().conditions = None,
+                PodStatus::Starting,
+            ),
+            (
+                "pod not ready",
+                |_, pod| {
+                    pod.status.as_mut().unwrap().conditions.as_mut().unwrap()[0].status =
+                        "False".to_owned();
+                },
+                PodStatus::Starting,
+            ),
+            (
+                "missing containers",
+                |_, pod| pod.status.as_mut().unwrap().container_statuses = None,
+                PodStatus::Starting,
+            ),
+            (
+                "different container",
+                |_, pod| {
+                    pod.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].name =
+                        "sidecar".to_owned();
+                },
+                PodStatus::Starting,
+            ),
+            (
+                "missing process state",
+                |_, pod| {
+                    pod.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].state =
+                        None;
+                },
+                PodStatus::Starting,
+            ),
+            ("missing pod status", |_, pod| pod.status = None, PodStatus::Starting),
+            (
+                "phase not reported yet",
+                |_, pod| pod.status = Some(KubernetesPodStatus::default()),
+                PodStatus::Starting,
+            ),
+            (
+                "pending scheduling",
+                |_, pod| {
+                    pod.status = Some(KubernetesPodStatus {
+                        phase: Some("Pending".to_owned()),
                         ..Default::default()
                     });
-                    PodStatus::Starting
-                }
-                7 => {
-                    status.init_container_statuses =
-                        failed_replicator_pod(false).status.unwrap().container_statuses;
-                    PodStatus::Failed
-                }
-                8 => {
-                    status.container_statuses.as_mut().unwrap()[0].state = Some(ContainerState {
-                        waiting: Some(ContainerStateWaiting {
-                            reason: Some("ImagePullBackOff".to_owned()),
-                            ..Default::default()
-                        }),
+                },
+                PodStatus::Starting,
+            ),
+            (
+                "failed pod without container details",
+                |_, pod| {
+                    pod.status = Some(KubernetesPodStatus {
+                        phase: Some("Failed".to_owned()),
                         ..Default::default()
                     });
-                    PodStatus::Failed
-                }
-                9 => {
-                    status.container_statuses.as_mut().unwrap()[0].last_state =
-                        Some(ContainerState {
-                            terminated: Some(ContainerStateTerminated {
-                                exit_code: 1,
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        });
-                    PodStatus::Started
-                }
-                _ => {
-                    status.phase = Some("Pending".to_owned());
-                    PodStatus::Starting
-                }
-            };
+                },
+                PodStatus::Failed,
+            ),
+        ];
+
+        for &(case, modify, expected) in cases {
+            let (mut workload, mut pod) = ready_runtime();
+            modify(&mut workload, &mut pod);
+
+            assert_eq!(
+                derive_replicator_status(Some(&workload), Some(&pod), REPLICATOR_CONTAINER_NAME),
+                expected,
+                "{case}"
+            );
+        }
+    }
+
+    /// Clean process exit under an active workload is recovery, not shutdown.
+    #[test]
+    fn clean_exit_is_starting_until_the_replacement_process_runs() {
+        let (active, mut pod) = ready_runtime();
+        let status = pod.status.as_mut().unwrap();
+        status.conditions.as_mut().unwrap()[0].status = "False".to_owned();
+        status.container_statuses = Some(vec![terminated_container(REPLICATOR_CONTAINER_NAME, 0)]);
+        for phase in ["Running", "Succeeded"] {
+            pod.status.as_mut().unwrap().phase = Some(phase.to_owned());
             assert_eq!(
                 derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
-                expected,
-                "case {case}"
+                PodStatus::Starting,
+                "{phase}"
             );
         }
     }
@@ -561,32 +608,40 @@ mod tests {
     /// success.
     #[test]
     fn incomplete_workload_observations_never_report_started() {
-        let (active, pod) = ready_runtime();
-        for (case, expected) in [
-            ("missing spec", PodStatus::Unknown),
-            ("missing uid", PodStatus::Unknown),
-            ("missing generation", PodStatus::Unknown),
-            ("missing status", PodStatus::Starting),
-            ("missing revision", PodStatus::Starting),
-            ("empty revision", PodStatus::Starting),
-            ("multiple replicas", PodStatus::Unknown),
-        ] {
-            let mut active = active.clone();
-            match case {
-                "missing spec" => active.spec = None,
-                "missing uid" => active.metadata.uid = None,
-                "missing generation" => active.metadata.generation = None,
-                "missing status" => active.status = None,
-                "missing revision" => active.status.as_mut().unwrap().update_revision = None,
-                "empty revision" => {
-                    active.status.as_mut().unwrap().update_revision = Some(String::new());
-                }
-                "multiple replicas" => active.spec.as_mut().unwrap().replicas = Some(2),
-                _ => unreachable!("The cases above exhaust the fixture variants"),
-            }
+        let cases: &[RuntimeCase] = &[
+            ("missing spec", |workload, _| workload.spec = None, PodStatus::Unknown),
+            ("missing uid", |workload, _| workload.metadata.uid = None, PodStatus::Unknown),
+            (
+                "missing generation",
+                |workload, _| workload.metadata.generation = None,
+                PodStatus::Unknown,
+            ),
+            ("missing status", |workload, _| workload.status = None, PodStatus::Starting),
+            (
+                "missing revision",
+                |workload, _| workload.status.as_mut().unwrap().update_revision = None,
+                PodStatus::Starting,
+            ),
+            (
+                "empty revision",
+                |workload, _| {
+                    workload.status.as_mut().unwrap().update_revision = Some(String::new());
+                },
+                PodStatus::Starting,
+            ),
+            (
+                "multiple replicas",
+                |workload, _| workload.spec.as_mut().unwrap().replicas = Some(2),
+                PodStatus::Unknown,
+            ),
+        ];
+
+        for &(case, modify, expected) in cases {
+            let (mut workload, mut pod) = ready_runtime();
+            modify(&mut workload, &mut pod);
 
             assert_eq!(
-                derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
+                derive_replicator_status(Some(&workload), Some(&pod), REPLICATOR_CONTAINER_NAME),
                 expected,
                 "{case}"
             );
@@ -603,10 +658,11 @@ mod tests {
                 let mut pod = pod.clone();
                 let status = pod.status.as_mut().unwrap();
                 status.phase = Some(phase.to_owned());
-                status.conditions.as_mut().unwrap()[0].status = "Unknown".to_owned();
+                if phase == "Running" {
+                    status.conditions.as_mut().unwrap()[0].status = "Unknown".to_owned();
+                }
                 if failed {
-                    status.container_statuses =
-                        failed_replicator_pod(false).status.unwrap().container_statuses;
+                    status.container_statuses = failed_pod_status().container_statuses;
                 }
 
                 assert_eq!(
@@ -616,44 +672,37 @@ mod tests {
             }
         }
 
-        for terminated in [false, true] {
-            let mut pod = pod.clone();
-            let container =
-                &mut pod.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0];
-            container.state = Some(if terminated {
-                ContainerState {
-                    terminated: Some(ContainerStateTerminated {
-                        exit_code: 137,
-                        reason: Some("ContainerStatusUnknown".to_owned()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }
-            } else {
-                ContainerState {
-                    waiting: Some(ContainerStateWaiting {
-                        reason: Some("ContainerStatusUnknown".to_owned()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }
-            });
-
-            assert_eq!(
-                derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
-                PodStatus::Unknown
-            );
-        }
+        let mut pod = pod;
+        let status = pod.status.as_mut().unwrap();
+        status.conditions.as_mut().unwrap()[0].status = "False".to_owned();
+        let container = &mut status.container_statuses.as_mut().unwrap()[0];
+        container.ready = false;
+        container.state = Some(ContainerState {
+            terminated: Some(ContainerStateTerminated {
+                exit_code: 137,
+                reason: Some("ContainerStatusUnknown".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
+            PodStatus::Unknown
+        );
     }
 
-    /// Shutdown and replacement retain their meaning across every Pod health
-    /// state.
+    /// Shutdown and replacement override healthy, failed, and unknown
+    /// observations.
     #[test]
     fn lifecycle_intent_precedes_process_health() {
         let (active, pod) = ready_runtime();
-        for phase in ["Pending", "Running", "Succeeded", "Failed", "Unknown"] {
+        for status in [
+            pod.status.clone().unwrap(),
+            failed_pod_status(),
+            KubernetesPodStatus { phase: Some("Unknown".to_owned()), ..Default::default() },
+        ] {
             let mut pod = pod.clone();
-            pod.status.as_mut().unwrap().phase = Some(phase.to_owned());
+            pod.status = Some(status);
             let mut deleting = active.clone();
             deleting.metadata.deletion_timestamp = Some(Time(Utc::now()));
             assert_eq!(
@@ -691,26 +740,15 @@ mod tests {
     async fn observe_responses(
         responses: Vec<(&str, serde_json::Value)>,
     ) -> Result<PodStatus, K8sError> {
-        use std::{
-            collections::VecDeque,
-            convert::Infallible,
-            sync::{Arc, Mutex},
-        };
-
-        use axum::{
-            body::Body,
-            http::{Request, Response},
-        };
-        use kube::{Api, Client};
-
         let responses = Arc::new(Mutex::new(VecDeque::from_iter(
-            responses.into_iter().map(|(kind, value)| (kind.to_owned(), value)),
+            responses.into_iter().map(|(path, value)| (path.to_owned(), value)),
         )));
         let service = tower::service_fn({
             let responses = Arc::clone(&responses);
             move |request: Request<kube::client::Body>| {
-                let (kind, value) = responses.lock().unwrap().pop_front().unwrap();
-                assert!(request.uri().path().contains(&format!("/{kind}/")));
+                let (path, value) = responses.lock().unwrap().pop_front().unwrap();
+                assert_eq!(request.method(), Method::GET);
+                assert_eq!(request.uri().path(), path);
                 async move {
                     let code = value
                         .get("code")
@@ -756,11 +794,11 @@ mod tests {
 
         assert_eq!(
             observe_responses(vec![
-                ("statefulsets", absent.clone()),
-                ("pods", absent.clone()),
-                ("statefulsets", active.clone()),
-                ("pods", pod.clone()),
-                ("statefulsets", active.clone()),
+                (STATEFUL_SET_PATH, absent.clone()),
+                (POD_PATH, absent.clone()),
+                (STATEFUL_SET_PATH, active.clone()),
+                (POD_PATH, pod.clone()),
+                (STATEFUL_SET_PATH, active.clone()),
             ])
             .await
             .unwrap(),
@@ -768,11 +806,11 @@ mod tests {
         );
         assert_eq!(
             observe_responses(vec![
-                ("statefulsets", active.clone()),
-                ("pods", pod.clone()),
-                ("statefulsets", absent.clone()),
-                ("pods", absent.clone()),
-                ("statefulsets", absent),
+                (STATEFUL_SET_PATH, active.clone()),
+                (POD_PATH, pod.clone()),
+                (STATEFUL_SET_PATH, absent.clone()),
+                (POD_PATH, absent.clone()),
+                (STATEFUL_SET_PATH, absent),
             ])
             .await
             .unwrap(),
@@ -783,11 +821,11 @@ mod tests {
         replacement["metadata"]["uid"] = json!("new-workload");
         assert_eq!(
             observe_responses(vec![
-                ("statefulsets", active),
-                ("pods", pod.clone()),
-                ("statefulsets", replacement.clone()),
-                ("pods", pod),
-                ("statefulsets", replacement),
+                (STATEFUL_SET_PATH, active),
+                (POD_PATH, pod.clone()),
+                (STATEFUL_SET_PATH, replacement.clone()),
+                (POD_PATH, pod),
+                (STATEFUL_SET_PATH, replacement),
             ])
             .await
             .unwrap(),
@@ -814,11 +852,11 @@ mod tests {
 
             assert_eq!(
                 observe_responses(vec![
-                    ("statefulsets", active.clone()),
-                    ("pods", pod.clone()),
-                    ("statefulsets", changed.clone()),
-                    ("pods", pod.clone()),
-                    ("statefulsets", changed),
+                    (STATEFUL_SET_PATH, active.clone()),
+                    (POD_PATH, pod.clone()),
+                    (STATEFUL_SET_PATH, changed.clone()),
+                    (POD_PATH, pod.clone()),
+                    (STATEFUL_SET_PATH, changed),
                 ])
                 .await
                 .unwrap(),
@@ -836,11 +874,14 @@ mod tests {
         let pod = serde_json::to_value(pod).unwrap();
         let mut unobserved = active.clone();
         unobserved["status"] = json!({"replicas": 1});
+        unobserved["metadata"]["resourceVersion"] = json!("10");
+        let mut active = active;
+        active["metadata"]["resourceVersion"] = json!("11");
         assert_eq!(
             observe_responses(vec![
-                ("statefulsets", unobserved),
-                ("pods", pod.clone()),
-                ("statefulsets", active.clone()),
+                (STATEFUL_SET_PATH, unobserved),
+                (POD_PATH, pod.clone()),
+                (STATEFUL_SET_PATH, active.clone()),
             ])
             .await
             .unwrap(),
@@ -853,11 +894,11 @@ mod tests {
         third["metadata"]["generation"] = json!(3);
         assert_eq!(
             observe_responses(vec![
-                ("statefulsets", active),
-                ("pods", pod.clone()),
-                ("statefulsets", second),
-                ("pods", pod),
-                ("statefulsets", third),
+                (STATEFUL_SET_PATH, active),
+                (POD_PATH, pod.clone()),
+                (STATEFUL_SET_PATH, second),
+                (POD_PATH, pod),
+                (STATEFUL_SET_PATH, third),
             ])
             .await
             .unwrap(),
@@ -865,21 +906,28 @@ mod tests {
         );
     }
 
-    /// Unavailable or forbidden observations must never become a stopped
-    /// pipeline.
+    /// Every initial and retry read preserves the Kubernetes API error code.
     #[tokio::test]
     async fn observation_propagates_api_errors_at_each_read() {
         let (active, pod) = ready_runtime();
+        let mut changed = active.clone();
+        changed.metadata.generation = Some(2);
         for code in [403, 500, 503] {
-            for failed_read in 0..3 {
+            for failed_read in 0..5 {
                 let mut responses = vec![
-                    ("statefulsets", serde_json::to_value(&active).unwrap()),
-                    ("pods", serde_json::to_value(&pod).unwrap()),
-                    ("statefulsets", serde_json::to_value(&active).unwrap()),
+                    (STATEFUL_SET_PATH, serde_json::to_value(&active).unwrap()),
+                    (POD_PATH, serde_json::to_value(&pod).unwrap()),
+                    (STATEFUL_SET_PATH, serde_json::to_value(&changed).unwrap()),
+                    (POD_PATH, serde_json::to_value(&pod).unwrap()),
+                    (STATEFUL_SET_PATH, serde_json::to_value(&changed).unwrap()),
                 ];
                 responses.truncate(failed_read + 1);
                 responses[failed_read].1 = json!({"apiVersion": "v1", "kind": "Status", "status": "Failure", "reason": "TestFailure", "message": "Test observation failure", "code": code});
-                assert!(observe_responses(responses).await.is_err());
+                let error = observe_responses(responses).await.unwrap_err();
+                assert!(
+                    matches!(error, K8sError::Kube(kube::Error::Api(error)) if error.code == code),
+                    "status {code}, read {failed_read}"
+                );
             }
         }
     }
@@ -889,6 +937,7 @@ mod tests {
     fn waiting_reasons_distinguish_recovery_failures_and_unknown_states() {
         let (active, pod) = ready_runtime();
         for (reason, expected) in [
+            ("", PodStatus::Starting),
             ("ContainerCreating", PodStatus::Starting),
             ("PodInitializing", PodStatus::Starting),
             ("RestartingAllContainers", PodStatus::Starting),
@@ -908,6 +957,7 @@ mod tests {
             let mut pod = pod.clone();
             let status = pod.status.as_mut().unwrap();
             status.conditions.as_mut().unwrap()[0].status = "False".to_owned();
+            status.container_statuses.as_mut().unwrap()[0].ready = false;
             status.container_statuses.as_mut().unwrap()[0].state = Some(ContainerState {
                 waiting: Some(ContainerStateWaiting {
                     reason: Some(reason.to_owned()),
@@ -938,8 +988,7 @@ mod tests {
             reason: Some("Deferred".to_owned()),
             ..Default::default()
         });
-        status.ephemeral_container_statuses =
-            failed_replicator_pod(false).status.unwrap().container_statuses;
+        status.ephemeral_container_statuses = Some(vec![terminated_container("debugger", 1)]);
 
         assert_eq!(
             derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
@@ -947,32 +996,55 @@ mod tests {
         );
     }
 
-    /// Completed initialization is healthy, while a current sidecar failure is
-    /// not.
+    /// Current failures in regular and init containers clear after recovery.
     #[test]
-    fn init_container_completion_and_sidecar_recovery_are_not_sticky_failures() {
+    fn container_failures_do_not_remain_after_recovery() {
+        for name in [REPLICATOR_CONTAINER_NAME, "sidecar", "init-sidecar"] {
+            let (active, mut pod) = ready_runtime();
+            let status = pod.status.as_mut().unwrap();
+            status.conditions.as_mut().unwrap()[0].status = "False".to_owned();
+            let failed = terminated_container(name, 1);
+            if name == "init-sidecar" {
+                status.init_container_statuses = Some(vec![failed]);
+            } else if name == REPLICATOR_CONTAINER_NAME {
+                status.container_statuses = Some(vec![failed]);
+            } else {
+                status.container_statuses.as_mut().unwrap().push(failed);
+            }
+            assert_eq!(
+                derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
+                PodStatus::Failed,
+                "{name}"
+            );
+
+            let status = pod.status.as_mut().unwrap();
+            let containers = if name == "init-sidecar" {
+                status.init_container_statuses.as_mut().unwrap()
+            } else {
+                status.container_statuses.as_mut().unwrap()
+            };
+            let container = containers.iter_mut().find(|container| container.name == name).unwrap();
+            container.last_state = container.state.take();
+            container.state = Some(ContainerState {
+                running: Some(ContainerStateRunning::default()),
+                ..Default::default()
+            });
+            container.ready = true;
+            status.conditions.as_mut().unwrap()[0].status = "True".to_owned();
+            assert_eq!(
+                derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
+                PodStatus::Started,
+                "{name}"
+            );
+        }
+    }
+
+    /// An ordinary init container is expected to terminate successfully.
+    #[test]
+    fn completed_init_container_does_not_prevent_started() {
         let (active, mut pod) = ready_runtime();
-        let mut init = failed_replicator_pod(false).status.unwrap().container_statuses.unwrap();
-        pod.status.as_mut().unwrap().init_container_statuses = Some(init.clone());
-        assert_eq!(
-            derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
-            PodStatus::Failed
-        );
-
-        init[0].state.as_mut().unwrap().terminated.as_mut().unwrap().exit_code = 0;
-        pod.status.as_mut().unwrap().init_container_statuses = Some(init.clone());
-        assert_eq!(
-            derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
-            PodStatus::Started
-        );
-
-        init[0].state.as_mut().unwrap().terminated.as_mut().unwrap().exit_code = 1;
-        init[0].last_state = init[0].state.take();
-        init[0].state = Some(ContainerState {
-            running: Some(ContainerStateRunning::default()),
-            ..Default::default()
-        });
-        pod.status.as_mut().unwrap().init_container_statuses = Some(init);
+        pod.status.as_mut().unwrap().init_container_statuses =
+            Some(vec![terminated_container("init", 0)]);
         assert_eq!(
             derive_replicator_status(Some(&active), Some(&pod), REPLICATOR_CONTAINER_NAME),
             PodStatus::Started
