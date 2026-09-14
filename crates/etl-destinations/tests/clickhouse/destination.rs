@@ -30,10 +30,10 @@ use std::sync::{
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
-    data::{ArrayCell, Cell, PgNumeric, TableRow},
+    data::{ArrayCell, Cell, PgNumeric, TableRow, UpdatedTableRow},
     destination::DestinationTableMetadata,
     error::{ErrorKind, EtlError, EtlResult},
-    event::{Event, RelationEvent},
+    event::{Event, InsertEvent, RelationEvent, UpdateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
@@ -845,6 +845,182 @@ async fn clickhouse_column_default_expression(
         .fetch_optional::<String>()
         .await
         .unwrap()
+}
+
+/// Stores the source schema shared by upgrade and replay scenarios.
+async fn store_id_value_schema(store: &MemoryStore, table: &str) -> ReplicatedTableSchema {
+    let schema = store
+        .store_table_schema(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), table.to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        ))
+        .await
+        .unwrap();
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Legacy MergeTree writes fail without repair or data loss, then resume after
+/// the documented manual upgrade while preserving existing metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+
+    // Use the previous release's DDL, not the current schema generator.
+    database
+        .db_client()
+        .query(
+            "create table retained_rows (id Int64, value String, cdc_operation String, cdc_lsn \
+             UInt64) engine = MergeTree() order by tuple()",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
+        .execute()
+        .await
+        .unwrap();
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let error = destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(2), Cell::String("rejected".to_owned())])],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+    drop(destination);
+
+    assert_eq!(
+        database.query::<(i64, String)>("select id, value from retained_rows").await,
+        vec![(1, "retained".to_owned())]
+    );
+    assert_eq!(
+        database
+            .query::<String>(
+                "select name from system.columns where database = currentDatabase() and table = \
+                 'retained_rows' order by position",
+            )
+            .await,
+        vec!["id", "value", "cdc_operation", "cdc_lsn"]
+    );
+    assert_eq!(
+        store.get_destination_table_metadata(schema.id()).await.unwrap(),
+        Some(metadata.clone())
+    );
+
+    database
+        .db_client()
+        .query("alter table retained_rows add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn")
+        .execute()
+        .await
+        .unwrap();
+    let restarted =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    restarted
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 7,
+            replicated_table_schema: schema.clone(),
+            table_row: TableRow::new(vec![Cell::I64(2), Cell::String("resumed".to_owned())]),
+        })])
+        .await
+        .unwrap();
+    drop(restarted);
+
+    assert_eq!(
+        database
+            .query::<(i64, String, u64, u64)>(
+                "select id, value, cdc_lsn, cdc_tx_ordinal from retained_rows order by id",
+            )
+            .await,
+        vec![(1, "retained".to_owned(), 10, 0), (2, "resumed".to_owned(), 100, 7)]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
+}
+
+/// The previous ReplacingMergeTree layout and current-state view remain usable
+/// without ALTER or recopy when a new destination loads retained metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+
+    database
+        .db_client()
+        .query(
+            "create table retained_rows (id Int64, value String, _etl_version UInt128, \
+             _etl_deleted UInt8) engine = ReplacingMergeTree(_etl_version, _etl_deleted) order by \
+             id",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query(
+            "create view retained_rows__current as select id, value from retained_rows final \
+             where _etl_deleted = 0",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'old', 0, 0), (2, 'retained', 0, 0)")
+        .execute()
+        .await
+        .unwrap();
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_events(vec![Event::Update(UpdateEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 7,
+            replicated_table_schema: schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("updated".to_owned()),
+            ])),
+            old_table_row: None,
+        })])
+        .await
+        .unwrap();
+    drop(destination);
+
+    assert_eq!(
+        database
+            .query::<(i64, String)>("select id, value from retained_rows__current order by id")
+            .await,
+        vec![(1, "updated".to_owned()), (2, "retained".to_owned())]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
 }
 
 #[tokio::test(flavor = "multi_thread")]

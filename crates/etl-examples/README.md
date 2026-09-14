@@ -265,6 +265,60 @@ select <user columns> from (
 where cdc_operation != 'DELETE'
 ```
 
+### Upgrading Existing ClickHouse Tables
+
+Adding `cdc_tx_ordinal` is a breaking layout change for existing `MergeTree`
+tables. ETL does not add the column automatically: the next write from a
+restarted destination fails before inserting rows. `ReplacingMergeTree` keeps
+its `_etl_version UInt128` / `_etl_deleted UInt8` layout and does not require
+this ALTER.
+
+For a non-destructive MergeTree upgrade:
+
+1. Stop **all writers** to every affected destination table, including old
+   replicator instances. Do not rely on a connection reconnect to reload the
+   physical schema; running destinations cache it.
+2. Verify the physical table has the expected user columns followed by
+   `cdc_operation String` and `cdc_lsn UInt64`, with no source column named
+   `cdc_tx_ordinal`. Resolve other schema drift separately.
+3. Append the new column to each physical table, using its actual ClickHouse
+   database and escaped table name. For example:
+
+   ```sql
+   alter table default.public_orders
+       add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn;
+   ```
+
+   For a distributed deployment, complete the DDL on every replica or shard
+   used by writers before continuing.
+4. Keep the existing ETL metadata, schema snapshots, and replication
+   checkpoints. Start only the upgraded writer, and update current-state
+   queries to order by both `cdc_lsn` and `cdc_tx_ordinal`.
+
+Existing events receive ordinal `0`. This cannot reconstruct their ordering
+within an old transaction. Neither this ALTER nor the new writer removes stale
+old-key rows left by earlier primary-key-changing updates, including stale rows
+in `ReplacingMergeTree`.
+
+If an accurate current-state baseline is required, use ETL's table reset/re-copy
+path instead. It drops and recreates the destination table and copies the current
+source contents; **the previous append-only event history is lost**. Preserve
+that history separately if needed. `TRUNCATE` alone is not a layout migration
+and does not reset ETL checkpoints.
+
+Do not mix old and new MergeTree writers: their positional RowBinary layouts
+differ. To roll back, stop all writers again, then either restore the previous
+table layout (dropping `cdc_tx_ordinal` discards its recorded ordering data) or
+reset/re-copy using the previous writer. Restore compatible consumer queries
+before resuming. A binary-only rollback is not sufficient for MergeTree.
+ReplacingMergeTree has no corresponding layout rollback, but the old writer
+reintroduces the primary-key update bug.
+
+Updates also require old primary-key values when the key changes. Use
+`REPLICA IDENTITY DEFAULT` with a primary key or `REPLICA IDENTITY FULL`;
+alternative replica-identity keys that do not identify the primary key cannot
+produce safe tombstones. Full new row images remain required.
+
 ---
 
 ## DuckLake

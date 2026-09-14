@@ -30,6 +30,7 @@ use crate::{
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
+            CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
             create_current_view_sql, create_table_sql, drop_current_view_sql,
             supports_column_default, trailing_cdc_column_names,
         },
@@ -367,6 +368,51 @@ fn summarize_column_names<'a>(column_names: impl IntoIterator<Item = &'a str>) -
     summary
 }
 
+/// Rejects the previous MergeTree column layout without attempting repair.
+///
+/// Only the missing transaction ordinal is recognized: other name/order drift,
+/// metadata types, and an existing source column with that name are not treated
+/// as this upgrade.
+fn reject_legacy_merge_tree_layout(
+    clickhouse_table_name: &str,
+    expected_column_names: &[String],
+    actual_columns: &[ClickHouseTableColumn],
+) -> EtlResult<()> {
+    let Some((last_name, legacy_names)) = expected_column_names.split_last() else {
+        return Ok(());
+    };
+    let [.., operation, lsn] = actual_columns else {
+        return Ok(());
+    };
+    if last_name != CDC_TX_ORDINAL_COLUMN_NAME
+        || operation.name != CDC_OPERATION_COLUMN_NAME
+        || operation.type_name != "String"
+        || lsn.name != CDC_LSN_COLUMN_NAME
+        || lsn.type_name != "UInt64"
+        || actual_columns.iter().any(|column| column.name == CDC_TX_ORDINAL_COLUMN_NAME)
+        || !actual_columns.iter().map(|column| &column.name).eq(legacy_names)
+    {
+        return Ok(());
+    }
+
+    Err(etl_error!(
+        ErrorKind::CorruptedTableSchema,
+        "ClickHouse MergeTree table requires a transaction ordinal upgrade",
+        format!(
+            "Table '{}' uses the previous MergeTree layout without '{}'. Stop all writers, verify \
+             the table schema, add '{} UInt64 DEFAULT 0' after '{}', then restart only upgraded \
+             writers with the existing ETL metadata and checkpoints. Historical event order and \
+             stale primary-key rows cannot be repaired by this column addition; reset and recopy \
+             the table if a fresh current-state baseline is required. ETL does not migrate the \
+             table automatically.",
+            clickhouse_table_name,
+            CDC_TX_ORDINAL_COLUMN_NAME,
+            CDC_TX_ORDINAL_COLUMN_NAME,
+            CDC_LSN_COLUMN_NAME,
+        )
+    ))
+}
+
 /// Derives RowBinary nullable flags from the actual ClickHouse table schema.
 ///
 /// RowBinary requires a leading null-marker byte before each `Nullable(T)`
@@ -385,6 +431,7 @@ fn nullable_flags_from_clickhouse_columns(
     expected_column_names: &[String],
     actual_columns: &[ClickHouseTableColumn],
 ) -> EtlResult<Arc<[bool]>> {
+    reject_legacy_merge_tree_layout(clickhouse_table_name, expected_column_names, actual_columns)?;
     if actual_columns.len() != expected_column_names.len() {
         return Err(etl_error!(
             ErrorKind::CorruptedTableSchema,
@@ -948,6 +995,16 @@ where
                 );
                 let plan = old_schema.plan_schema_change(schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
                 ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
+                for endpoint_schema in [&old_schema, schema] {
+                    reject_legacy_merge_tree_layout(
+                        clickhouse_table_name,
+                        &expected_clickhouse_column_names(
+                            endpoint_schema,
+                            self.inserter_config.engine,
+                        ),
+                        &actual_columns,
+                    )?;
+                }
                 let actual_user_column_names =
                     clickhouse_user_column_names(&actual_columns, self.inserter_config.engine)?;
                 let old_column_names: Vec<_> = old_schema
