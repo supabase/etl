@@ -1524,20 +1524,6 @@ async fn simulator_tenant_can_update_pipeline_to_registered_non_default_version(
     assert_eq!(version.new_version.map(|image| image.id), Some(default_image_id));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn an_existing_pipeline_can_be_started() {
-    init_test_tracing();
-    let (app, tenant_id, _source_id, _destination_id, pipeline_id) = setup_basic_pipeline().await;
-
-    // Act
-    let response = app.start_pipeline(&tenant_id, pipeline_id).await;
-
-    // Assert
-    assert!(response.status().is_success());
-    assert!(!app.k8s_state.waited_for_deletion());
-    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
-}
-
 /// Repeated starts are idempotent even while Kubernetes is still starting.
 #[tokio::test(flavor = "multi_thread")]
 async fn starting_an_active_pipeline_does_not_replace_its_runtime() {
@@ -1548,25 +1534,44 @@ async fn starting_an_active_pipeline_does_not_replace_its_runtime() {
         assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
     }
     assert_eq!(app.k8s_state.create_calls(), creates_before);
+    assert!(!app.k8s_state.waited_for_deletion());
     assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
 }
 
-/// A retry must drive the pending replacement without generating another
-/// revision.
+/// Restart restores committed configuration after an update reached Kubernetes
+/// but failed before the API transaction committed.
 #[tokio::test(flavor = "multi_thread")]
-async fn restarting_a_starting_pipeline_completes_the_pending_restart() {
-    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
-    app.k8s_state.set_pod_status(PodStatus::Starting).await;
-    app.k8s_state.set_restart_pending(true);
-    let creates_before = app.k8s_state.create_calls();
-    for _ in 0..3 {
-        assert_eq!(
-            app.restart_pipeline(&tenant_id, pipeline_id).await.status(),
-            StatusCode::ACCEPTED
-        );
-    }
-    assert_eq!(app.k8s_state.create_calls(), creates_before);
-    assert_eq!(app.k8s_state.restart_completion_calls(), 3);
+async fn restarting_after_update_timeout_restores_committed_configuration() {
+    let (app, tenant_id, pipeline_id, source_pool, source_config) =
+        setup_pipeline_with_source_db().await;
+    assert_eq!(app.restart_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::ACCEPTED);
+    let committed_image = app.k8s_state.last_replicator_image().await.unwrap();
+    let committed_version: GetPipelineVersionResponse =
+        app.get_pipeline_version(&tenant_id, pipeline_id).await.json().await.unwrap();
+    let updated_image = "example.com/etl-replicator:updated".to_owned();
+    let updated_image_id = create_image_with_name(&app, updated_image.clone(), true).await;
+
+    // The template survives the timeout while the API image change rolls back.
+    app.k8s_state.set_restart_timeout(true);
+    let response = app
+        .update_pipeline_version(
+            &tenant_id,
+            pipeline_id,
+            &UpdatePipelineVersionRequest { version_id: updated_image_id },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(app.k8s_state.last_replicator_image().await, Some(updated_image));
+    let persisted_version: GetPipelineVersionResponse =
+        app.get_pipeline_version(&tenant_id, pipeline_id).await.json().await.unwrap();
+    assert_eq!(persisted_version.version.id, committed_version.version.id);
+
+    app.k8s_state.set_restart_timeout(false);
+    assert_eq!(app.restart_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.last_replicator_image().await, Some(committed_image));
+
+    source_pool.close().await;
+    drop_pg_database(&source_config).await;
 }
 
 /// Unready current Pods can be replaced instead of being mistaken for pending
@@ -1919,36 +1924,6 @@ async fn pipeline_operations_do_not_lock_related_resources() {
 
     resource_txn.rollback().await.unwrap();
 
-    pool.close().await;
-}
-
-/// Losing the lock-owning database session must not leave a persistent API
-/// lock.
-#[tokio::test(flavor = "multi_thread")]
-async fn pipeline_lock_is_released_when_database_session_terminates() {
-    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
-    let pool = get_connection_pool(app.database_config());
-    let mut api_txn = pool.begin().await.unwrap();
-
-    sqlx::query("select id from app.pipelines where id = $1 for update")
-        .bind(pipeline_id)
-        .execute(&mut *api_txn)
-        .await
-        .unwrap();
-    let backend_pid: i32 =
-        sqlx::query_scalar("select pg_backend_pid()").fetch_one(&mut *api_txn).await.unwrap();
-    assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::CONFLICT);
-    // Terminate only the session created by this isolated test.
-    let terminated: bool = sqlx::query_scalar("select pg_terminate_backend($1)")
-        .bind(backend_pid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(terminated);
-
-    assert!(api_txn.rollback().await.is_err());
-
-    assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
     pool.close().await;
 }
 

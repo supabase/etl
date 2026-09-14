@@ -1116,7 +1116,7 @@ pub(crate) async fn start_pipeline(
     post,
     path = "/pipelines/{pipeline_id}/restart",
     summary = "Restart a pipeline",
-    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. A pending Pod replacement is completed without creating another template revision. An unready Pod already on the current template can still be explicitly restarted. If current publication membership and durable state in your database indicate initial sync, the API resets the VPA to its configured bounds and initial update mode, including when copying existing rows is skipped. If no table needs initial sync or inspection fails, it preserves the VPA. This is a best-effort check, not a guarantee of memory allocation throughout initial sync: state can change after inspection, and internal pipeline retries, container restarts, and Kubernetes Pod replacements bypass the reset. Existing VPA recommendations may still apply, and deletion does not guarantee that the recommender forgets usage history.",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. Every explicit restart reapplies the configuration stored in the API database, including while a previous Pod replacement is pending. Retrying a restart can request another template revision. If current publication membership and durable state in your database indicate initial sync, the API resets the VPA to its configured bounds and initial update mode, including when copying existing rows is skipped. If no table needs initial sync or inspection fails, it preserves the VPA. This is a best-effort check, not a guarantee of memory allocation throughout initial sync: state can change after inspection, and internal pipeline retries, container restarts, and Kubernetes Pod replacements bypass the reset. Existing VPA recommendations may still apply, and deletion does not guarantee that the recommender forgets usage history.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1145,25 +1145,9 @@ pub(crate) async fn restart_pipeline(
     let mut api_txn = pool.begin().await?;
 
     lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
-    let replicator = data::replicators::read_replicator_by_pipeline_id(
-        api_txn.deref_mut(),
-        tenant_id,
-        pipeline_id,
-    )
-    .await?
-    .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
-
-    // A replacement already in progress satisfies another explicit restart.
-    // Configuration updates still reconcile their new template independently.
-    let prefix = create_k8s_object_prefix(tenant_id, replicator.id);
-    if !should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await? {
-        return Err(PipelineError::InactivePipeline(pipeline_id));
-    }
-    if k8s_client.complete_pending_replicator_restart(&prefix).await? {
-        api_txn.commit().await?;
-
-        return Ok(StatusCode::ACCEPTED);
-    }
+    // A pending replacement may contain configuration from an API update that
+    // rolled back after Kubernetes accepted it. Reconcile stored configuration
+    // on every explicit restart, including while a replacement is pending.
     let restarted = restart_replicator_if_running(
         &mut api_txn,
         tenant_id,

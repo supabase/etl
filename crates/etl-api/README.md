@@ -40,13 +40,14 @@ shutdown has completed.
 Start completes cleanup of an inactive runtime before recreating it, including
 when a preceding stop has only acknowledged deletion. If cleanup exceeds 30
 seconds, start returns `503 Service Unavailable` without applying new resources;
-retry after shutdown completes. An active runtime is reconciled without deleting
-it first. A successful start does not wait for the new Pod to become ready.
+retry after shutdown completes. An active runtime is left unchanged. A successful
+start does not wait for the new Pod to become ready.
 
 Pipeline status combines StatefulSet desired state with Pod health. An active
 StatefulSet with a missing or terminating Pod reports `starting` while Kubernetes
-replaces it. A terminating StatefulSet, or a remaining Pod without a StatefulSet,
-reports `stopping`. Once both are absent, status becomes `stopped`.
+replaces it. A terminating StatefulSet reports `stopping`. Without a StatefulSet,
+a terminating Pod reports `stopping`, while a non-terminating orphan Pod reports
+`unknown`. Once both are absent, status becomes `stopped`.
 
 `POST /v1/pipelines/{pipeline_id}/rollback-tables` restarts replication from scratch
 for a single table, all errored tables, or all tables. The request contains only
@@ -301,7 +302,7 @@ across API instances. Overlapping operations return HTTP 409 so callers can
 retry; reads remain unblocked. Locks are released on commit or rollback.
 
 Pipeline operations lock their target. Source and destination changes lock all
-existing pipelines discovered for that resource; tenant operations lock the
+existing pipelines discovered for that resource; tenant deletion locks the
 pipelines discovered for that tenant. Configuration updates restart affected
 active pipelines and leave stopped pipelines stopped.
 
@@ -328,7 +329,9 @@ source-database, and Kubernetes changes do not share an atomic transaction.
 - Stop returns HTTP 202 after Kubernetes accepts deletion; shutdown may continue
   after the response.
 - Restart returns HTTP 202 after requesting replacement. Stopped or stopping
-  pipelines return HTTP 409.
+  pipelines return HTTP 409. Every explicit restart reapplies the configuration
+  stored in the API database, including when a previous replacement is pending.
+  Retrying a restart can therefore request another template revision.
 - Table reset holds the pipeline lock through shutdown, source reset, and
   restoration of an initially active workload.
 

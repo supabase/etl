@@ -1020,13 +1020,6 @@ mod tests {
             Ok(())
         }
 
-        async fn complete_pending_replicator_restart(
-            &self,
-            _resource_prefix: &str,
-        ) -> Result<bool, K8sError> {
-            Ok(true)
-        }
-
         async fn delete_replicator_stateful_set(
             &self,
             _resource_prefix: &str,

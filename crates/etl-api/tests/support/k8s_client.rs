@@ -51,9 +51,8 @@ pub(crate) struct MockK8sState {
     stateful_set_apply_calls: Arc<AtomicUsize>,
     vpa_delete_calls: Arc<AtomicUsize>,
     deletion_timeout: Arc<AtomicBool>,
+    restart_timeout: Arc<AtomicBool>,
     deletion_gate: Arc<RwLock<Option<DeletionGate>>>,
-    restart_completion_calls: Arc<AtomicUsize>,
-    restart_pending: Arc<AtomicBool>,
     waited_for_deletion: Arc<AtomicBool>,
     stateful_set_active: Arc<AtomicBool>,
     ducklake_maintenance_create_calls: Arc<AtomicUsize>,
@@ -70,9 +69,8 @@ impl Default for MockK8sState {
             stateful_set_apply_calls: Arc::new(AtomicUsize::new(0)),
             vpa_delete_calls: Arc::new(AtomicUsize::new(0)),
             deletion_timeout: Arc::new(AtomicBool::new(false)),
+            restart_timeout: Arc::new(AtomicBool::new(false)),
             deletion_gate: Arc::new(RwLock::new(None)),
-            restart_completion_calls: Arc::new(AtomicUsize::new(0)),
-            restart_pending: Arc::new(AtomicBool::new(false)),
             waited_for_deletion: Arc::new(AtomicBool::new(false)),
             stateful_set_active: Arc::new(AtomicBool::new(true)),
             ducklake_maintenance_create_calls: Arc::new(AtomicUsize::new(0)),
@@ -83,22 +81,16 @@ impl Default for MockK8sState {
 }
 
 impl MockK8sState {
+    /// Fails controller observation after accepting the workload template.
+    pub(crate) fn set_restart_timeout(&self, timeout: bool) {
+        self.restart_timeout.store(timeout, Ordering::Relaxed);
+    }
+
     /// Pauses the next workload deletion until the test releases its gate.
     pub(crate) async fn pause_deletion(&self) -> DeletionGate {
         let gate = DeletionGate::default();
         *self.deletion_gate.write().await = Some(gate.clone());
         gate
-    }
-
-    /// Controls whether an accepted Pod replacement remains pending.
-    pub(crate) fn set_restart_pending(&self, pending: bool) {
-        self.restart_pending.store(pending, Ordering::Relaxed);
-    }
-
-    /// Counts retries that drive an accepted replacement without changing its
-    /// template.
-    pub(crate) fn restart_completion_calls(&self) -> usize {
-        self.restart_completion_calls.load(Ordering::Relaxed)
     }
 
     /// Controls whether workload deletion times out.
@@ -304,7 +296,7 @@ impl K8sClient for MockK8sClient {
 
     async fn create_or_update_replicator_stateful_set(
         &self,
-        _resource_prefix: &str,
+        resource_prefix: &str,
         _identity: &PipelineRuntimeIdentity,
         workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError> {
@@ -316,6 +308,10 @@ impl K8sClient for MockK8sClient {
         )
         .await;
         self.record_create_call();
+        if self.state.restart_timeout.load(Ordering::Relaxed) {
+            self.state.set_pod_status(PodStatus::Starting).await;
+            return Err(K8sError::StatefulSetRestartTimeout { name: resource_prefix.to_owned() });
+        }
         Ok(())
     }
 
@@ -327,17 +323,6 @@ impl K8sClient for MockK8sClient {
     ) -> Result<(), K8sError> {
         self.record_create_call();
         Ok(())
-    }
-
-    async fn complete_pending_replicator_restart(
-        &self,
-        _resource_prefix: &str,
-    ) -> Result<bool, K8sError> {
-        let pending = self.state.restart_pending.load(Ordering::Relaxed);
-        if pending {
-            self.state.restart_completion_calls.fetch_add(1, Ordering::Relaxed);
-        }
-        Ok(pending)
     }
 
     async fn delete_replicator_stateful_set(

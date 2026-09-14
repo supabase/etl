@@ -366,28 +366,6 @@ impl HttpK8sClient {
         }
     }
 
-    /// Distinguishes a requested replacement from an unready current Pod.
-    fn has_pending_replicator_restart(stateful_set: &StatefulSet, pod: Option<&Pod>) -> bool {
-        let Some(pod) = pod else {
-            return true;
-        };
-        if pod.metadata.deletion_timestamp.is_some() {
-            return true;
-        }
-        let desired_restart = stateful_set
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.template.metadata.as_ref())
-            .and_then(|metadata| metadata.annotations.as_ref())
-            .and_then(|annotations| annotations.get(RESTARTED_AT_ANNOTATION));
-        let pod_restart = pod
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|annotations| annotations.get(RESTARTED_AT_ANNOTATION));
-        desired_restart != pod_restart
-    }
-
     /// Recognizes container failures while keeping normal startup states
     /// pending.
     fn container_has_error(container: &ContainerStatus) -> bool {
@@ -1078,32 +1056,6 @@ impl K8sClient for HttpK8sClient {
             }
             Err(error) => Err(error.into()),
         }
-    }
-
-    async fn complete_pending_replicator_restart(
-        &self,
-        resource_prefix: &str,
-    ) -> Result<bool, K8sError> {
-        let Some(stateful_set) =
-            self.stateful_sets_api.get_opt(&create_stateful_set_name(resource_prefix)).await?
-        else {
-            return Ok(false);
-        };
-        if stateful_set.metadata.deletion_timestamp.is_some() {
-            return Ok(false);
-        }
-        let pod = self.pods_api.get_opt(&create_pod_name(resource_prefix)).await?;
-        if !Self::has_pending_replicator_restart(&stateful_set, pod.as_ref()) {
-            return Ok(false);
-        }
-        restart_outdated_pod(
-            &self.stateful_sets_api,
-            &self.pods_api,
-            &stateful_set,
-            &create_pod_name(resource_prefix),
-        )
-        .await?;
-        Ok(true)
     }
 
     async fn delete_replicator_stateful_set(
@@ -2241,28 +2193,6 @@ mod tests {
                 expected
             );
         }
-    }
-
-    /// An unready current Pod still accepts an explicit restart.
-    #[test]
-    fn pending_restart_is_distinct_from_pod_readiness() {
-        let (mut active, mut pod) = ready_runtime();
-        pod.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].ready = false;
-        assert!(!HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
-        active.spec.as_mut().unwrap().template.metadata = Some(ObjectMeta {
-            annotations: Some(BTreeMap::from([(
-                RESTARTED_AT_ANNOTATION.to_owned(),
-                "new-restart".to_owned(),
-            )])),
-            ..Default::default()
-        });
-        assert!(HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
-        pod.metadata.annotations =
-            active.spec.as_ref().unwrap().template.metadata.as_ref().unwrap().annotations.clone();
-        assert!(!HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
-        pod.metadata.deletion_timestamp = Some(Time(Utc::now()));
-        assert!(HttpK8sClient::has_pending_replicator_restart(&active, Some(&pod)));
-        assert!(HttpK8sClient::has_pending_replicator_restart(&active, None));
     }
 
     /// Healthy old Pods cannot satisfy a different owner or pending revision.

@@ -374,19 +374,6 @@ pub trait K8sClient: Send + Sync {
         workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError>;
 
-    /// Completes an already requested Pod replacement without changing its
-    /// template.
-    ///
-    /// Returns true when a missing, terminating, or outdated Pod is already
-    /// being replaced. Returns false when no replacement is pending or the
-    /// StatefulSet is inactive. An unready Pod on the current template must
-    /// still accept a new explicit restart. Retrying a pending restart drives
-    /// the accepted template after an earlier controller-observation timeout.
-    async fn complete_pending_replicator_restart(
-        &self,
-        resource_prefix: &str,
-    ) -> Result<bool, K8sError>;
-
     /// Creates or updates the Vertical Pod Autoscaler for the replicator
     /// `StatefulSet`.
     ///
