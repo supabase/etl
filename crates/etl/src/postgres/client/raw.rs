@@ -1,4 +1,4 @@
-use std::{fmt, num::NonZeroI32, sync::Arc, time::Duration};
+use std::{fmt, future::Future, num::NonZeroI32, sync::Arc, time::Duration};
 
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
@@ -8,7 +8,6 @@ use etl_postgres::{
     version::POSTGRES_17,
 };
 use pg_escape::{quote_identifier, quote_literal};
-use postgres_replication::LogicalReplicationStream;
 use rustls::{
     ClientConfig,
     pki_types::{CertificateDer, pem::PemObject},
@@ -33,6 +32,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
+    postgres::ReplicationMessageStream,
     schema::{TableId, TableName},
 };
 
@@ -675,12 +675,20 @@ impl PgReplicationClient {
     /// slot.
     ///
     /// The stream will begin reading changes from the provided `start_lsn`.
+    /// Supplying `keep_alive_deadline_duration` enables status feedback and
+    /// returns the feedback sender future for the caller to spawn and own.
+    /// `None` disables all feedback, allowing protocol tests to read and replay
+    /// without acknowledging WAL.
     pub async fn start_logical_replication(
         &self,
         publication_name: &str,
         slot_name: &str,
         start_lsn: PgLsn,
-    ) -> EtlResult<LogicalReplicationStream> {
+        keep_alive_deadline_duration: Option<Duration>,
+    ) -> EtlResult<(
+        ReplicationMessageStream,
+        Option<impl Future<Output = EtlResult<()>> + Send + 'static>,
+    )> {
         info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 
         // Do not convert the query or the options to lowercase, see comment in
@@ -698,9 +706,8 @@ impl PgReplicationClient {
         );
 
         let copy_stream = self.client.copy_both_simple::<bytes::Bytes>(&query).await?;
-        let stream = LogicalReplicationStream::new(copy_stream);
 
-        Ok(stream)
+        Ok(ReplicationMessageStream::create(copy_stream, keep_alive_deadline_duration))
     }
 
     /// Begins a new transaction with repeatable read isolation level.

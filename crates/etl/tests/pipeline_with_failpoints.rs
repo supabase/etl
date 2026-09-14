@@ -1,6 +1,10 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
-use std::time::Duration;
+use std::{
+    fmt::{self, Debug, Formatter},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use etl::{
     data::{Cell, TableRow},
@@ -24,7 +28,7 @@ use etl::{
             wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
-        faults::FaultyOp,
+        faults::{FaultAction, FaultyOp, HoldGate},
         memory_destination::MemoryDestination,
         notifying_store::NotifyingStore,
         pipeline::{
@@ -1100,6 +1104,219 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
         Some(TableState::SyncDone { .. })
     ));
 
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// Holds the first insert dispatch inside the destination method itself.
+///
+/// An unresolved result alone is insufficient here: the old main-loop timer
+/// already handled that case. This gate proves feedback survives an inline
+/// await.
+#[derive(Clone)]
+struct HoldingDispatchDestination {
+    /// Existing in-memory destination supplies normal schema and event
+    /// behavior.
+    inner: MemoryDestination<NotifyingStore>,
+    /// One test-controlled dispatch hold, taken without holding a lock across
+    /// await.
+    gate: Arc<Mutex<Option<HoldGate>>>,
+}
+
+impl Debug for HoldingDispatchDestination {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // MemoryDestination does not implement Debug; expose the test gate only.
+        f.debug_struct("HoldingDispatchDestination")
+            .field("gate", &self.gate)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Destination for HoldingDispatchDestination {
+    fn name() -> &'static str {
+        "holding_dispatch"
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        schema: &ReplicatedTableSchema,
+        result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.drop_table_for_copy(schema, result).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
+        rows: Vec<TableRow>,
+        result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        self.inner.write_table_rows(schema, batch_id, rows, result).await
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        if events.iter().any(|event| matches!(event, Event::Insert(_))) {
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.apply(Ok(())).await?;
+            }
+        }
+        self.inner.write_events(events, durability, result).await
+    }
+}
+
+/// Observes repeated feedback on the same WAL sender while apply is suspended.
+///
+/// Actual reply timestamps are the barrier. The timeout only bounds a failed
+/// observation; two heartbeat intervals exceed the configured two-second
+/// timeout.
+async fn assert_stalled_apply_feedback(database: &PgDatabase<Client>, pipeline_id: PipelineId) {
+    let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut backend_pid = None;
+        let mut feedback = None;
+        let mut last_reply_time = None;
+        let mut first_sample = true;
+        let mut replies = 0;
+        while replies < 3 {
+            let row = database
+                .client
+                .as_ref()
+                .unwrap()
+                .query_one(
+                    "select r.pid, r.write_lsn, r.flush_lsn, r.replay_lsn, extract(epoch from \
+                     r.reply_time)::float8 from pg_stat_replication r join pg_replication_slots s \
+                     on s.active_pid = r.pid where s.slot_name = $1",
+                    &[&slot_name],
+                )
+                .await
+                .unwrap();
+            let pid = row.get::<_, i32>(0);
+            assert_eq!(*backend_pid.get_or_insert(pid), pid);
+            let reply_time = row.get::<_, Option<f64>>(4);
+            if first_sample {
+                // Ignore feedback from before the stall, including any update
+                // already queued when the gate was reached.
+                last_reply_time = reply_time;
+                first_sample = false;
+            } else if reply_time.is_some() && reply_time != last_reply_time {
+                let positions = (
+                    row.get::<_, Option<PgLsn>>(1),
+                    row.get::<_, Option<PgLsn>>(2),
+                    row.get::<_, Option<PgLsn>>(3),
+                );
+                assert_eq!(*feedback.get_or_insert(positions), positions);
+                last_reply_time = reply_time;
+                replies += 1;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Feedback and safe checkpoints survive a suspended destination dispatch.
+#[tokio::test(flavor = "multi_thread")]
+async fn feedback_continues_during_destination_dispatch() {
+    let mut database = spawn_source_database().await;
+    database
+        .run_sql(&format!(
+            "alter database {} set wal_sender_timeout = '2s'",
+            quote_identifier(&database.config.name),
+        ))
+        .await
+        .unwrap();
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = schema.users_schema().id;
+    let store = NotifyingStore::new();
+    let (fault, hold) = FaultAction::hold();
+    let FaultAction::HoldResponse(gate) = fault else {
+        panic!("FaultAction::hold must produce a hold gate");
+    };
+    let destination = TestDestinationWrapper::wrap(HoldingDispatchDestination {
+        inner: MemoryDestination::new(store.clone()),
+        gate: Arc::new(Mutex::new(Some(gate))),
+    });
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+    pipeline.start().await.unwrap();
+    synced.notified().await;
+
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+    hold.wait_reached().await;
+    let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert_stalled_apply_feedback(&database, pipeline_id).await;
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
+    hold.release_ok();
+    applied.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    let events = destination.get_events().await;
+    assert_eq!(events.iter().filter(|event| matches!(event, Event::Insert(_))).count(), 1);
+}
+
+/// Catchup keeps the same WAL sender alive without advancing feedback or the
+/// durable checkpoint while the table-sync worker is suspended.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_catchup_keeps_replication_connection_alive() {
+    let _scenario = FailScenario::setup();
+    let catchup_entered = Arc::new(tokio::sync::Notify::new());
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let entered = Arc::clone(&catchup_entered);
+    fail::cfg_callback(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, move || {
+        entered.notify_one();
+        // The sender also drops on assertion failure, releasing the worker.
+        let _ = release_rx.lock().unwrap().recv();
+    })
+    .unwrap();
+
+    let database = spawn_source_database().await;
+    database
+        .run_sql(&format!(
+            "alter database {} set wal_sender_timeout = '2s'",
+            quote_identifier(&database.config.name),
+        ))
+        .await
+        .unwrap();
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+    let sync_done = store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+    pipeline.start().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), catchup_entered.notified()).await.unwrap();
+
+    let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert_stalled_apply_feedback(&database, pipeline_id).await;
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
+    release_tx.send(()).unwrap();
+    sync_done.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
@@ -2368,7 +2585,8 @@ impl IdleDurabilityTest {
         (commit_end_lsn, result)
     }
 
-    /// Receives an empty barrier, including the 36-second periodic fallback.
+    /// Receives an empty barrier driven by an incoming primary keepalive,
+    /// including a reply to ETL's 36-second periodic feedback.
     async fn next_barrier(&mut self) -> WriteEventsResult {
         let write = tokio::time::timeout(Duration::from_secs(50), self.writes_rx.recv())
             .await
