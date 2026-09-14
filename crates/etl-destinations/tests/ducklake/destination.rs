@@ -73,11 +73,13 @@ use etl_maintenance::{
     ExternalMaintenanceStore, ExternalMaintenanceWatcherConfig, PostgresExternalMaintenanceStore,
 };
 use etl_telemetry::tracing::init_test_tracing;
+#[cfg(feature = "test-utils")]
+use futures::FutureExt;
 use pg_escape::{quote_identifier, quote_literal};
 #[cfg(feature = "test-utils")]
 use sqlx::{postgres::PgPoolOptions, types::Json};
 #[cfg(feature = "test-utils")]
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use url::Url;
 
 use crate::support::ducklake::{
@@ -140,6 +142,46 @@ impl ExternalMaintenanceStore for LoadBlockingExternalMaintenanceStore {
 
     async fn clear_replicator_status(&self) -> EtlResult<()> {
         self.inner.clear_replicator_status().await
+    }
+}
+
+/// Serves a fixed maintenance snapshot and records every status without I/O.
+///
+/// Watcher timer tests use this store while Tokio time is paused so database
+/// latency and polling cannot hide intermediate status transitions.
+#[cfg(feature = "test-utils")]
+#[derive(Clone)]
+struct RecordingExternalMaintenanceStore {
+    /// The active maintenance run and its pause request.
+    state: ExternalMaintenanceState,
+    /// Captures reports in order, including transient states.
+    reports: mpsc::UnboundedSender<ExternalMaintenanceReplicatorStatus>,
+}
+
+#[cfg(feature = "test-utils")]
+#[async_trait::async_trait]
+impl ExternalMaintenanceStore for RecordingExternalMaintenanceStore {
+    async fn load_state(&self) -> EtlResult<ExternalMaintenanceState> {
+        Ok(self.state.clone())
+    }
+
+    async fn request_operations(
+        &self,
+        _request: ExternalMaintenanceOperationRequest,
+    ) -> EtlResult<ExternalMaintenanceRequestOutcome> {
+        unreachable!("The fixed active run prevents operation requests")
+    }
+
+    async fn report_replicator_status(
+        &self,
+        status: ExternalMaintenanceReplicatorStatus,
+    ) -> EtlResult<()> {
+        self.reports.send(status).unwrap();
+        Ok(())
+    }
+
+    async fn clear_replicator_status(&self) -> EtlResult<()> {
+        unreachable!("The fixed maintenance state always exists")
     }
 }
 
@@ -1128,12 +1170,11 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
 /// An external maintenance pause that expires while a buffered copy is active
 /// must cancel its queued exclusive lock request.
 #[cfg(feature = "test-utils")]
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
     let lake = create_test_lake("buffered_copy_expired_maintenance_pause_resumes_watcher").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let pipeline_id = 1164_i64;
     let run_id = "pipe-1164-buffered-copy-pause";
 
     let schema = make_schema(165, "public", "buffered_copy_expired_pause");
@@ -1151,73 +1192,67 @@ async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
         .await
         .unwrap();
 
-    write_table_rows_with_status(
+    let status = write_table_rows_with_status(
         &destination,
         &replicated_table_schema,
         vec![TableRow::new(vec![Cell::I32(1), Cell::String("first".to_owned())])],
     )
     .await
     .unwrap();
+    assert_eq!(status, DestinationWriteStatus::Accepted);
 
-    let coordination_pool =
-        PgPoolOptions::new().max_connections(2).connect(catalog_url.as_str()).await.unwrap();
-    let coordination_store =
-        PostgresExternalMaintenanceStore::new(pipeline_id, coordination_pool.clone());
-    coordination_store.ensure_schema().await.unwrap();
-    coordination_store
-        .ensure_pipeline_state(
-            ExternalMaintenancePausePolicy::default(),
-            ExternalMaintenanceOperationPolicy::default(),
-        )
-        .await
-        .unwrap();
-
-    let watcher = tokio::spawn(run_external_maintenance_watcher(
-        destination.clone(),
-        coordination_store.clone(),
-        ExternalMaintenanceWatcherConfig {
-            poll_interval: Duration::from_millis(10),
-            request_cooldown: Duration::ZERO,
-            store_timeout: Duration::from_millis(100),
-            inline_flush_min_inlined_bytes: u64::MAX,
-            rewrite_data_files_min_active_data_files: i64::MAX,
-        },
-    ));
-
+    // Finish database I/O before pausing Tokio time. The lease uses UTC, so
+    // give it ample time to be observed and advance only the queued lock timer.
+    tokio::time::pause();
     let requested_at = Utc::now();
+    let pause_duration = Duration::from_secs(300);
     let operations = ExternalMaintenanceOperations {
         rewrite_data_files: true,
         ..ExternalMaintenanceOperations::default()
     };
-    sqlx::query(
-        "update etl.external_maintenance_state set active_run = $2, pause_request = $3, \
-         operation_request = null, updated_at = now() where pipeline_id = $1",
-    )
-    .bind(pipeline_id)
-    .bind(Json(ExternalMaintenanceRun {
-        run_id: run_id.to_owned(),
-        started_at: Some(requested_at),
-        operations,
-    }))
-    .bind(Json(ExternalMaintenancePause {
-        run_id: run_id.to_owned(),
-        requested_at: Some(requested_at),
-        expires_at: requested_at + TimeDelta::milliseconds(300),
-    }))
-    .execute(&coordination_pool)
-    .await
-    .unwrap();
+    let (reports, mut reported_statuses) = mpsc::unbounded_channel();
+    let watcher_store = RecordingExternalMaintenanceStore {
+        state: ExternalMaintenanceState {
+            active_run: Some(ExternalMaintenanceRun {
+                run_id: run_id.to_owned(),
+                started_at: Some(requested_at),
+                operations,
+            }),
+            pause_request: Some(ExternalMaintenancePause {
+                run_id: run_id.to_owned(),
+                requested_at: Some(requested_at),
+                expires_at: requested_at + TimeDelta::from_std(pause_duration).unwrap(),
+            }),
+            ..ExternalMaintenanceState::present()
+        },
+        reports,
+    };
+    let mut watcher = Box::pin(run_external_maintenance_watcher(
+        destination.clone(),
+        watcher_store,
+        ExternalMaintenanceWatcherConfig::default(),
+    ));
 
-    wait_for_replicator_maintenance_state(
-        &coordination_store,
-        ExternalMaintenanceReplicatorState::Pausing,
-    )
-    .await;
-    wait_for_replicator_maintenance_state(
-        &coordination_store,
-        ExternalMaintenanceReplicatorState::Running,
-    )
-    .await;
+    // Poll through the synchronous store calls until the active copy session
+    // blocks the exclusive lock. No elapsed time or database polling is needed.
+    assert!(watcher.as_mut().now_or_never().is_none());
+    let pausing = reported_statuses.try_recv().unwrap();
+    assert_eq!(pausing.state, ExternalMaintenanceReplicatorState::Pausing);
+    assert_eq!(pausing.observed_run_id.as_deref(), Some(run_id));
+    assert!(reported_statuses.try_recv().is_err());
+
+    tokio::time::advance(pause_duration + Duration::from_secs(1)).await;
+    // Let the timer driver process the elapsed deadline before polling again.
+    tokio::time::sleep(Duration::ZERO).await;
+    assert!(watcher.as_mut().now_or_never().is_none());
+    let running = reported_statuses.try_recv().unwrap();
+    assert_eq!(running.state, ExternalMaintenanceReplicatorState::Running);
+    assert!(running.observed_run_id.is_none());
+    assert!(reported_statuses.try_recv().is_err());
+
+    // Do not poll the fixed UTC lease again. Keep the watcher alive so dropping
+    // it cannot release a leaked lock request before the copy finishes.
+    tokio::time::resume();
 
     write_table_rows_with_status(
         &destination,
@@ -1228,11 +1263,24 @@ async fn buffered_copy_expired_maintenance_pause_resumes_watcher() {
     .unwrap();
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    watcher.abort();
-    assert!(watcher.await.unwrap_err().is_cancelled());
+    // A new exclusive request must succeed while the original watcher still
+    // exists, proving its expired request was removed from the lock queue.
+    let pause = tokio::time::timeout(
+        Duration::from_secs(10),
+        destination.acquire_external_maintenance_pause(),
+    )
+    .await
+    .unwrap();
+    drop(pause);
+    drop(watcher);
 
     let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
     assert_eq!(row_count, 2);
+    drop(destination);
+
+    // Database cleanup uses block_in_place, which requires a blocking thread
+    // when the test runs on a current-thread executor.
+    tokio::task::spawn_blocking(move || drop(lake)).await.unwrap();
 }
 
 /// Reaching the configured byte target should flush one window while leaving
