@@ -1597,7 +1597,7 @@ async fn ducklake_rejects_invalid_expire_snapshots_retention() {
 async fn ducklake_rejects_destructive_expire_snapshots_retention() {
     let lake = create_test_lake("ducklake_rejects_destructive_expire_snapshots_retention").await;
 
-    for retention in ["0 seconds", "-1 day", "23 hours"] {
+    for retention in ["0 seconds", "-1 day", "23 hours", "-1 year 361 days"] {
         let err = new_unbuffered_destination(
             lake.catalog_url.clone(),
             lake.data_url.clone(),
