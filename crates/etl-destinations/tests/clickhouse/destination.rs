@@ -867,6 +867,7 @@ async fn store_id_value_schema(store: &MemoryStore, table: &str) -> ReplicatedTa
 /// the documented manual upgrade while preserving existing metadata.
 #[tokio::test(flavor = "multi_thread")]
 async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
+    // GIVEN: a legacy MergeTree table with retained rows and metadata.
     init_test_tracing();
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
@@ -895,6 +896,8 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
         .execute()
         .await
         .unwrap();
+
+    // WHEN: a new destination attempts to write without upgrading the table.
     let destination =
         database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
     let error = destination
@@ -904,6 +907,8 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
         )
         .await
         .unwrap_err();
+
+    // THEN: the write fails without changing rows, columns, or metadata.
     assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
     drop(destination);
 
@@ -925,6 +930,7 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
         Some(metadata.clone())
     );
 
+    // WHEN: the ordinal column is added and the destination restarts.
     database
         .db_client()
         .query("alter table retained_rows add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn")
@@ -944,6 +950,7 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
         .unwrap();
     drop(restarted);
 
+    // THEN: old rows keep ordinal zero and new rows use their event ordinal.
     assert_eq!(
         database
             .query::<(i64, String, u64, u64)>(
@@ -959,6 +966,7 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
 /// without ALTER or recopy when a new destination loads retained metadata.
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
+    // GIVEN: an existing ReplacingMergeTree table, view, and retained metadata.
     init_test_tracing();
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
@@ -996,6 +1004,8 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
         .execute()
         .await
         .unwrap();
+
+    // WHEN: a new destination writes an update without changing the layout.
     let destination = database
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
@@ -1014,6 +1024,7 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
         .unwrap();
     drop(destination);
 
+    // THEN: the view shows the update and retained row, and metadata is unchanged.
     assert_eq!(
         database
             .query::<(i64, String)>("select id, value from retained_rows__current order by id")

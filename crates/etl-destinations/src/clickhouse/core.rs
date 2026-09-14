@@ -370,6 +370,8 @@ fn summarize_column_names<'a>(column_names: impl IntoIterator<Item = &'a str>) -
 
 /// Rejects the previous MergeTree column layout without attempting repair.
 ///
+/// This check is only relevant to tables created during the closed alpha.
+///
 /// Only the missing transaction ordinal is recognized: other name/order drift,
 /// metadata types, and an existing source column with that name are not treated
 /// as this upgrade.
