@@ -4,7 +4,6 @@ use etl_postgres::{below_version, version::POSTGRES_15};
 use pg_escape::{quote_identifier, quote_literal};
 use tokio::sync::watch;
 use tokio_postgres::{CopyOutStream, SimpleQueryMessage, Transaction};
-use tracing::warn;
 
 use super::{
     child::ChildPgReplicationClient,
@@ -20,6 +19,22 @@ use crate::{
     postgres::codec::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
     schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
+
+/// Returns the names of the columns Postgres can publish for a table.
+///
+/// Generated columns are excluded because they only reach the logical stream on
+/// Postgres 18 with `publish_generated_columns = stored`, which the catalog
+/// reports through `pg_publication_tables.attnames`. Treating them as
+/// replicated on a server that cannot report that would widen the replication
+/// mask past the tuple width and fail decoding on the first row event.
+fn replicable_column_names(table_schema: &TableSchema) -> HashSet<String> {
+    table_schema
+        .column_schemas
+        .iter()
+        .filter(|column_schema| !column_schema.generated)
+        .map(|column_schema| column_schema.name.clone())
+        .collect()
+}
 
 /// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
 ///
@@ -265,13 +280,9 @@ impl<'a> PgReplicationTransactionCore<'a> {
         publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
         // Column filtering in publications was added in Postgres 15. For earlier
-        // versions, all columns are replicated.
+        // versions, every replicable column is replicated.
         if below_version!(self.server_version, POSTGRES_15) {
-            return Ok(table_schema
-                .column_schemas
-                .iter()
-                .map(|column_schema| column_schema.name.clone())
-                .collect());
+            return Ok(replicable_column_names(table_schema));
         }
 
         // Query pg_publication_tables using unnest() to properly decode the attnames
@@ -316,11 +327,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
         }
 
         if column_names.is_empty() {
-            return Ok(table_schema
-                .column_schemas
-                .iter()
-                .map(|column_schema| column_schema.name.clone())
-                .collect());
+            return Ok(replicable_column_names(table_schema));
         }
 
         Ok(column_names)
@@ -525,49 +532,11 @@ impl<'a> PgReplicationTransactionCore<'a> {
         );
     }
 
-    /// Warns when the source table contains generated columns.
-    async fn warn_if_generated_columns_exist(&self, table_id: TableId) -> EtlResult<()> {
-        let generated_columns_check_query = format!(
-            r#"select exists (
-                select 1
-                from pg_attribute
-                where attrelid = {table_id}
-                    and attnum > 0
-                    and not attisdropped
-                    and attgenerated != ''
-            ) as has_generated;"#
-        );
-
-        for message in self.transaction.simple_query(&generated_columns_check_query).await? {
-            if let SimpleQueryMessage::Row(row) = message {
-                let has_generated_columns =
-                    get_row_value::<String>(&row, "has_generated", "pg_attribute")? == "t";
-                if has_generated_columns {
-                    warn!(
-                        "table {} contains generated columns that will not be replicated. \
-                         generated columns are not supported in postgres logical replication and \
-                         will be excluded from the etl schema. these columns will not appear in \
-                         the destination.",
-                        table_id
-                    );
-                }
-
-                // Explicity break for clarity; this query returns a single
-                // SimpleQueryMessage::Row.
-                break;
-            }
-        }
-
-        Ok(())
-    }
-
     /// Retrieves the raw schema snapshot.
     async fn get_table_schema_snapshot(
         &self,
         table_id: TableId,
     ) -> EtlResult<(TableName, Vec<ColumnSchemaMessage>, IdentityMessage)> {
-        self.warn_if_generated_columns_exist(table_id).await?;
-
         let schema_snapshot_query = format!(
             r#"
             with table_info as (
@@ -587,6 +556,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
                             'atttypid', s.atttypid::pg_catalog.int8,
                             'atttypmod', s.atttypmod,
                             'attnotnull', s.attnotnull,
+                            'attgenerated', s.attgenerated,
                             'default_expression', s.default_expression
                         )
                         order by s.attnum

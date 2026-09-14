@@ -218,6 +218,13 @@ pub(crate) struct ColumnSchemaMessage {
     pub(crate) attnum: i32,
     /// Whether the column is marked `NOT NULL` in `pg_attribute.attnotnull`.
     pub(crate) attnotnull: bool,
+    /// The generation kind from `pg_attribute.attgenerated`, or [`None`] when
+    /// the column is not generated.
+    ///
+    /// Defaulted because messages emitted before generated-column support have
+    /// no such key, and those still replay from the WAL after an upgrade.
+    #[serde(default)]
+    pub(crate) attgenerated: Option<String>,
     /// The default expression from `pg_attrdef`, if one exists.
     pub(crate) default_expression: Option<String>,
 }
@@ -246,6 +253,11 @@ pub(crate) fn build_column_schemas(
         .into_iter()
         .map(|column| {
             let typ = convert_type_oid_to_type(column.atttypid);
+            // Any generation kind counts as generated. The source snapshot only
+            // reports stored columns, so treating an unexpected kind as generated
+            // keeps it out of the replication mask instead of widening it past the
+            // tuple width.
+            let generated = column.attgenerated.is_some();
             ColumnSchema::new(
                 column.attname,
                 typ,
@@ -254,6 +266,7 @@ pub(crate) fn build_column_schemas(
                 !column.attnotnull,
             )
             .with_primary_key_ordinal_position(primary_key_positions.get(&column.attnum).copied())
+            .with_generated(generated)
             .with_default_expression_option(column.default_expression)
         })
         .collect()

@@ -35,6 +35,44 @@ use crate::{
     store::{PipelineStore, SchemaStore, StateStore},
 };
 
+/// Warns when a table has stored generated columns that do not replicate.
+///
+/// A stored generated column stays in the table schema on every version but
+/// only enters the replication mask on Postgres 18 with
+/// `publish_generated_columns = stored`. Anything left out of the mask never
+/// reaches the destination, so the operator needs to know which columns those
+/// are.
+fn warn_if_generated_columns_unreplicated(
+    table_id: TableId,
+    replicated_table_schema: &ReplicatedTableSchema,
+) {
+    let replicated_names = replicated_table_schema
+        .column_schemas()
+        .map(|column_schema| column_schema.name.as_str())
+        .collect::<Vec<_>>();
+    let unreplicated_generated_columns = replicated_table_schema
+        .inner()
+        .column_schemas
+        .iter()
+        .filter(|column_schema| {
+            column_schema.generated && !replicated_names.contains(&column_schema.name.as_str())
+        })
+        .map(|column_schema| column_schema.name.as_str())
+        .collect::<Vec<_>>();
+
+    if unreplicated_generated_columns.is_empty() {
+        return;
+    }
+
+    warn!(
+        %table_id,
+        columns = %unreplicated_generated_columns.join(","),
+        "table has generated columns that are not published and will not appear in the \
+         destination. postgres 18 can publish them with `alter publication ... set \
+         (publish_generated_columns = stored)`"
+    );
+}
+
 /// Result type for table synchronization operations.
 ///
 /// [`TableSyncResult`] indicates the outcome of a table sync operation,
@@ -302,6 +340,8 @@ where
             // without waiting for a fresh relation message after restarts.
             let replicated_table_schema =
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+
+            warn_if_generated_columns_unreplicated(table_id, &replicated_table_schema);
 
             let mut total_table_copy_rows = 0_u64;
             let mut total_table_copy_duration_secs = 0.0;
