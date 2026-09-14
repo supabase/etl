@@ -526,6 +526,7 @@ async fn updating_destination_pipeline_to_duplicate_source_destination_returns_c
 
     let pool = get_connection_pool(app.database_config());
     let mut txn = pool.begin().await.expect("failed to begin transaction");
+
     data::pipelines::create_pipeline(
         &mut txn,
         tenant_id,
@@ -536,6 +537,7 @@ async fn updating_destination_pipeline_to_duplicate_source_destination_returns_c
     )
     .await
     .expect("failed to create duplicate-conflict fixture pipeline");
+
     txn.commit().await.expect("failed to commit transaction");
 
     // Act

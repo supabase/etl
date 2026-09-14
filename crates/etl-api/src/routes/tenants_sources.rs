@@ -161,9 +161,10 @@ pub(crate) async fn create_tenant_and_source(
     )
     .await?;
 
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
+
     let (tenant_id, source_id) = data::tenants_sources::create_tenant_and_source(
-        &mut txn,
+        &mut api_txn,
         &tenant_and_source.tenant_id,
         &tenant_and_source.tenant_name,
         &tenant_and_source.source_name,
@@ -171,7 +172,8 @@ pub(crate) async fn create_tenant_and_source(
         &encryption_key,
     )
     .await?;
-    txn.commit().await?;
+
+    api_txn.commit().await?;
 
     let response = CreateTenantSourceResponse { tenant_id, source_id };
 

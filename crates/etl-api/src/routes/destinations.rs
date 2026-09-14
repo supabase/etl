@@ -23,7 +23,8 @@ use crate::{
     },
     data,
     data::{
-        destinations::{DestinationsDbError, destination_exists},
+        destinations::DestinationsDbError,
+        locks::lock_pipelines,
         pipelines::{
             PipelinesDbError, read_pipeline_ids_for_destination,
             read_pipelines_for_destination_for_deletion,
@@ -108,10 +109,8 @@ impl DestinationError {
 
 impl IntoResponse for DestinationError {
     fn into_response(self) -> Response {
-        let status_code = match &self {
-            DestinationError::Pipeline(PipelineError::InvalidPipelineRequest(_)) => {
-                StatusCode::BAD_REQUEST
-            }
+        let status_code = match self {
+            DestinationError::Pipeline(error) => return error.into_response(),
             DestinationError::DestinationsDb(DestinationsDbError::DestinationConfigUpdate(_)) => {
                 StatusCode::BAD_REQUEST
             }
@@ -119,9 +118,8 @@ impl IntoResponse for DestinationError {
             | DestinationError::PipelinesDb(_)
             | DestinationError::SourcesDb(_)
             | DestinationError::Environment(_)
-            | DestinationError::K8sCore(_)
-            | DestinationError::Pipeline(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            DestinationError::Validation(error) => utils::validation_error_status_code(error),
+            | DestinationError::K8sCore(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            DestinationError::Validation(ref error) => utils::validation_error_status_code(error),
             DestinationError::DestinationNotFound(_) | DestinationError::SourceNotFound(_) => {
                 StatusCode::NOT_FOUND
             }
@@ -309,6 +307,7 @@ pub(crate) async fn read_destination(
         (status = 200, description = "Destination updated successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Destination not found", body = ErrorMessage),
+        (status = 409, description = "Another pipeline operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations"
@@ -328,9 +327,14 @@ pub(crate) async fn update_destination(
     let destination_id = destination_id.into_inner();
     let destination = destination.into_inner();
 
-    let mut txn = pool.begin().await.map_err(DestinationsDbError::from)?;
+    let mut api_txn = pool.begin().await.map_err(DestinationsDbError::from)?;
+
+    let pipeline_ids =
+        read_pipeline_ids_for_destination(api_txn.deref_mut(), tenant_id, destination_id).await?;
+    lock_pipelines(&mut api_txn, tenant_id, &pipeline_ids).await?;
+
     data::destinations::update_destination(
-        txn.deref_mut(),
+        api_txn.deref_mut(),
         tenant_id,
         &destination.name,
         destination_id,
@@ -340,11 +344,9 @@ pub(crate) async fn update_destination(
     .await?
     .ok_or(DestinationError::DestinationNotFound(destination_id))?;
 
-    let pipeline_ids =
-        read_pipeline_ids_for_destination(txn.deref_mut(), tenant_id, destination_id).await?;
     for pipeline_id in pipeline_ids {
         restart_replicator_if_running(
-            txn.deref_mut(),
+            &mut api_txn,
             tenant_id,
             pipeline_id,
             &encryption_key,
@@ -355,7 +357,7 @@ pub(crate) async fn update_destination(
         .await?;
     }
 
-    txn.commit().await.map_err(DestinationsDbError::from)?;
+    api_txn.commit().await.map_err(DestinationsDbError::from)?;
 
     Ok(StatusCode::OK)
 }
@@ -372,7 +374,7 @@ pub(crate) async fn update_destination(
     responses(
         (status = 200, description = "Destination deleted successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 409, description = "Destination has an active pipeline or is still used by pipelines", body = ErrorMessage),
+        (status = 409, description = "Destination has an active pipeline, is still used by pipelines, or another operation is in progress", body = ErrorMessage),
         (status = 404, description = "Destination not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
@@ -387,12 +389,13 @@ pub(crate) async fn delete_destination(
     let tenant_id = extract_tenant_id(&headers)?;
     let destination_id = destination_id.into_inner();
 
-    if !destination_exists(&pool, tenant_id, destination_id).await? {
-        return Err(DestinationError::DestinationNotFound(destination_id));
-    }
+    let mut api_txn = pool.begin().await.map_err(DestinationsDbError::from)?;
 
     let pipelines =
-        read_pipelines_for_destination_for_deletion(&pool, tenant_id, destination_id).await?;
+        read_pipelines_for_destination_for_deletion(api_txn.deref_mut(), tenant_id, destination_id)
+            .await?;
+    let pipeline_ids: Vec<_> = pipelines.iter().map(|pipeline| pipeline.id).collect();
+    lock_pipelines(&mut api_txn, tenant_id, &pipeline_ids).await?;
     if let Some(pipeline_id) =
         first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
     {
@@ -403,14 +406,14 @@ pub(crate) async fn delete_destination(
         return Err(DestinationError::DestinationInUse(destination_id));
     }
 
-    // We intentionally keep this endpoint simple: the checks above provide the
-    // normal user-facing guard rails, but we do not try to serialize against
-    // concurrent pipeline creation here. A pipeline can still appear between
-    // the check and the final delete, in which case the database constraints
-    // are the last line of defense.
-    data::destinations::delete_destination(&pool, tenant_id, destination_id)
+    // Pipeline locks protect the discovered set, but do not serialize concurrent
+    // pipeline creation or attachment. Database constraints remain the final
+    // guard against deleting a destination that became referenced after the checks.
+    data::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;
+
+    api_txn.commit().await.map_err(DestinationsDbError::from)?;
 
     Ok(StatusCode::OK)
 }

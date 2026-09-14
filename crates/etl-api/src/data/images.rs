@@ -21,7 +21,7 @@ pub async fn create_image(
     name: &str,
     is_default: bool,
 ) -> Result<i64, ImagesDbError> {
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
 
     // If this is to be the new default image, first unset any existing default
     if is_default {
@@ -32,7 +32,7 @@ pub async fn create_image(
             where is_default = true
             "#
         )
-        .execute(&mut *txn)
+        .execute(&mut *api_txn)
         .await?;
     }
 
@@ -45,10 +45,10 @@ pub async fn create_image(
         name,
         is_default
     )
-    .fetch_one(&mut *txn)
+    .fetch_one(&mut *api_txn)
     .await?;
 
-    txn.commit().await?;
+    api_txn.commit().await?;
 
     Ok(record.id)
 }
@@ -94,7 +94,7 @@ pub async fn update_image(
     name: &str,
     is_default: bool,
 ) -> Result<Option<i64>, ImagesDbError> {
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
 
     // If this is to be the new default image, first unset any existing default.
     if is_default {
@@ -108,7 +108,7 @@ pub async fn update_image(
         "#,
         )
         .bind(image_id)
-        .fetch_optional(&mut *txn)
+        .fetch_optional(&mut *api_txn)
         .await?
         .is_none()
         {
@@ -123,7 +123,7 @@ pub async fn update_image(
             "#,
             image_id
         )
-        .execute(&mut *txn)
+        .execute(&mut *api_txn)
         .await?;
     }
 
@@ -138,16 +138,16 @@ pub async fn update_image(
         is_default,
         image_id
     )
-    .fetch_optional(&mut *txn)
+    .fetch_optional(&mut *api_txn)
     .await?;
 
-    txn.commit().await?;
+    api_txn.commit().await?;
 
     Ok(record.map(|r| r.id))
 }
 
 pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, ImagesDbError> {
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
 
     // First check if the image exists and if it's a default
     let image = sqlx::query!(
@@ -158,7 +158,7 @@ pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, I
         "#,
         image_id
     )
-    .fetch_optional(&mut *txn)
+    .fetch_optional(&mut *api_txn)
     .await?;
 
     let Some(image) = image else {
@@ -180,10 +180,10 @@ pub async fn delete_image(pool: &PgPool, image_id: i64) -> Result<Option<i64>, I
         "#,
         image_id
     )
-    .fetch_optional(&mut *txn)
+    .fetch_optional(&mut *api_txn)
     .await?;
 
-    txn.commit().await?;
+    api_txn.commit().await?;
 
     Ok(record.map(|r| r.id))
 }
