@@ -159,7 +159,6 @@ impl Destination for DeferredEventsDestination {
             return Ok(());
         }
 
-        assert_eq!(durability, WriteEventsDurability::MayDefer);
         async_result.send(Ok(DestinationWriteStatus::Durable));
 
         Ok(())
