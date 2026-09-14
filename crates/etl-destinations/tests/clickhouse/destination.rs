@@ -1058,6 +1058,7 @@ fn replay_key_change(
 /// its replacement. Restart and at-least-once replay must converge, including
 /// when a later event in the same transaction reuses the original key.
 async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
+    // GIVEN: copied rows, single-row inserts, and a rejecting constraint.
     init_test_tracing();
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
@@ -1085,10 +1086,14 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
         .execute()
         .await
         .unwrap();
+
+    // WHEN: a key change fails after writing its old-key tombstone.
     let error = destination
         .write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)])
         .await
         .unwrap_err();
+
+    // THEN: the failure is retryable and only the unaffected row remains.
     assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
     drop(destination);
 
@@ -1106,6 +1111,7 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
     };
     assert_eq!(database.query::<i64>(tombstone_query).await, vec![1]);
 
+    // WHEN: the constraint is removed and the key change replays on restart.
     database
         .db_client()
         .query("alter table public_replay drop constraint reject_two")
@@ -1114,17 +1120,19 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
         .unwrap();
     let restarted = database.build_destination_with_config(store, config).await;
     restarted.write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)]).await.unwrap();
+
+    // THEN: replay restores the moved row and preserves the unaffected row.
     assert_eq!(
         database.query::<(i64, String)>(&current_query).await,
         vec![(2, "moved".to_owned()), (9, "unaffected".to_owned())]
     );
 
+    // WHEN: a later event reuses the original key before stale replay.
     restarted.write_events(vec![replay_key_change(&schema, 2, 1, "reused", 8)]).await.unwrap();
     restarted.write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)]).await.unwrap();
     drop(restarted);
 
-    // MergeTree may retain duplicate events: only current-state convergence is
-    // guaranteed. Stale replay must neither revive key 2 nor remove reused key 1.
+    // THEN: the reused key survives and the stale replacement stays absent.
     assert_eq!(
         database.query::<(i64, String)>(&current_query).await,
         vec![(1, "reused".to_owned()), (9, "unaffected".to_owned())]

@@ -379,6 +379,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 /// Composite key changes use physical tuple positions even when the primary
 /// key definition has reversed order and a non-key column separates the keys.
 async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bool) {
+    // GIVEN: copied rows share key components in reversed tuple order.
     init_test_tracing();
     install_crypto_provider();
     let mut database = spawn_source_database().await;
@@ -438,6 +439,7 @@ async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bo
     pipeline.start().await.unwrap();
     copied.notified().await;
 
+    // WHEN: one transaction changes and reuses composite keys.
     let updated = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 4)])
         .await;
@@ -456,8 +458,7 @@ async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bo
     updated.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // Shared key components must not collapse distinct rows, leave stale keys,
-    // or let a tombstone remove the later reuse of the same composite key.
+    // THEN: all rows retain their final keys without stale keys.
     let query = current_state_query(
         engine,
         "test_composite__changes",
@@ -503,6 +504,7 @@ async fn composite_key_changes_full_identity_replacing_merge_tree() {
 /// non-key value changes. Other rows change each float key independently or
 /// move away and back within one transaction.
 async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
+    // GIVEN: copied rows have NaN float keys and FULL replica identity.
     init_test_tracing();
     install_crypto_provider();
     let mut database = spawn_source_database().await;
@@ -579,6 +581,7 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
     pipeline.start().await.unwrap();
     copied.notified().await;
 
+    // WHEN: one transaction preserves, changes, and reuses NaN-bearing keys.
     let updated = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 5)])
         .await;
@@ -603,6 +606,7 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
     updated.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
+    // THEN: unchanged NaNs and final changed or reused keys survive.
     let query = current_state_query(
         engine,
         "test_nan__changes",
@@ -629,9 +633,8 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
     assert_eq!(rows[1].1, 5.5);
     assert_eq!(rows[2].2, 5.5);
 
+    // THEN: MergeTree tombstones reflect only actual key changes.
     if engine == ClickHouseEngine::MergeTree {
-        // Unchanged NaNs compare equal in Postgres. They must not create a
-        // false DELETE tied with the UPDATE at the same event sequence.
         assert_eq!(
             clickhouse_db
                 .query::<(i64, u64)>(

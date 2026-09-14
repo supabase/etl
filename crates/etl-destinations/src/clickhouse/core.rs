@@ -2551,8 +2551,10 @@ mod tests {
 
     #[test]
     fn clickhouse_rows_for_update_emits_old_key_tombstone_when_primary_key_changes() {
+        // GIVEN: An update changes the primary key from one to two.
         let update_row = TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]);
 
+        // WHEN: Destination rows are prepared from the old key image.
         let rows = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::PrimaryKey),
             UpdatedTableRow::Full(update_row.clone()),
@@ -2560,6 +2562,7 @@ mod tests {
         )
         .unwrap();
 
+        // THEN: The old key is tombstoned and the new row is preserved.
         assert_eq!(
             rows.destination_old_key_tombstone,
             Some(TableRow::new(vec![Cell::I32(1), Cell::Null]))
@@ -2569,9 +2572,11 @@ mod tests {
 
     #[test]
     fn clickhouse_rows_for_update_projects_composite_old_key_in_schema_order() {
+        // GIVEN: Composite key ordinals differ from schema column order.
         let update_row =
             TableRow::new(vec![Cell::I32(2), Cell::I32(10), Cell::String("updated".to_owned())]);
 
+        // WHEN: An update changes one column of the composite key.
         let rows = clickhouse_rows_for_update(
             &replicated_composite_primary_key_schema(),
             UpdatedTableRow::Full(update_row.clone()),
@@ -2579,6 +2584,7 @@ mod tests {
         )
         .unwrap();
 
+        // THEN: The tombstone uses schema order and the new row is intact.
         assert_eq!(
             rows.destination_old_key_tombstone,
             Some(TableRow::new(vec![Cell::I32(1), Cell::I32(10), Cell::Null]))
@@ -2588,8 +2594,10 @@ mod tests {
 
     #[test]
     fn clickhouse_rows_for_update_skips_tombstone_when_primary_key_is_unchanged() {
+        // GIVEN: A full-identity update changes only a non-key column.
         let update_row = TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]);
 
+        // WHEN: Destination rows are prepared from the full old row.
         let rows = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::Full),
             UpdatedTableRow::Full(update_row.clone()),
@@ -2600,14 +2608,17 @@ mod tests {
         )
         .unwrap();
 
+        // THEN: No tombstone is emitted and the updated row is preserved.
         assert_eq!(rows.destination_old_key_tombstone, None);
         assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
     fn clickhouse_rows_for_update_accepts_primary_key_identity_without_old_row() {
+        // GIVEN: A primary-key identity update supplies a complete new row.
         let update_row = TableRow::new(vec![Cell::I32(1), Cell::String("updated".to_owned())]);
 
+        // WHEN: Destination rows are prepared without an old row image.
         let rows = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::PrimaryKey),
             UpdatedTableRow::Full(update_row.clone()),
@@ -2615,12 +2626,14 @@ mod tests {
         )
         .unwrap();
 
+        // THEN: The update is accepted without a tombstone.
         assert_eq!(rows.destination_old_key_tombstone, None);
         assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
     fn clickhouse_rows_for_update_uses_postgres_nan_equality_for_primary_keys() {
+        // GIVEN: Scalar and array primary keys contain NaN values.
         let cases = [
             (Type::FLOAT4, Cell::F32(f32::NAN)),
             (Type::FLOAT8, Cell::F64(f64::NAN)),
@@ -2628,6 +2641,7 @@ mod tests {
             (Type::FLOAT8_ARRAY, Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), None]))),
         ];
 
+        // WHEN: A non-key column changes but the NaN key is unchanged.
         for (primary_key_type, primary_key_value) in cases {
             let rows = clickhouse_rows_for_update(
                 &replicated_schema_with_primary_key_type(primary_key_type, IdentityType::Full),
@@ -2642,9 +2656,11 @@ mod tests {
             )
             .unwrap();
 
+            // THEN: PostgreSQL NaN equality prevents a spurious tombstone.
             assert!(rows.destination_old_key_tombstone.is_none());
         }
 
+        // WHEN: A non-NaN element changes in an array primary key.
         let rows = clickhouse_rows_for_update(
             &replicated_schema_with_primary_key_type(Type::FLOAT8_ARRAY, IdentityType::Full),
             UpdatedTableRow::Full(TableRow::new(vec![
@@ -2658,11 +2674,15 @@ mod tests {
         )
         .unwrap();
 
+        // THEN: The actual key change still produces a tombstone.
         assert!(rows.destination_old_key_tombstone.is_some());
     }
 
     #[test]
     fn clickhouse_rows_for_update_uses_postgres_nan_equality_for_key_image() {
+        // GIVEN: The old key image and new row both have a NaN primary key.
+
+        // WHEN: Rows are prepared using primary-key replica identity.
         let rows = clickhouse_rows_for_update(
             &replicated_schema_with_primary_key_type(Type::FLOAT8, IdentityType::PrimaryKey),
             UpdatedTableRow::Full(TableRow::new(vec![
@@ -2673,14 +2693,17 @@ mod tests {
         )
         .unwrap();
 
+        // THEN: PostgreSQL NaN equality prevents a spurious tombstone.
         assert!(rows.destination_old_key_tombstone.is_none());
     }
 
     #[test]
     fn clickhouse_rows_for_update_accepts_alternative_identity_with_full_old_row() {
+        // GIVEN: An alternative-identity update changes the primary key.
         let old_row = TableRow::new(vec![Cell::I32(1), Cell::String("before".to_owned())]);
         let update_row = TableRow::new(vec![Cell::I32(2), Cell::String("updated".to_owned())]);
 
+        // WHEN: Destination rows are prepared from the full old row.
         let rows = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::AlternativeKey),
             UpdatedTableRow::Full(update_row.clone()),
@@ -2688,12 +2711,16 @@ mod tests {
         )
         .unwrap();
 
+        // THEN: The old row is tombstoned and the new row is preserved.
         assert_eq!(rows.destination_old_key_tombstone, Some(old_row));
         assert_eq!(rows.destination_updated_row, update_row);
     }
 
     #[test]
     fn clickhouse_rows_for_update_rejects_alternative_identity_key_image() {
+        // GIVEN: An update supplies only an alternative-identity key image.
+
+        // WHEN: Destination rows are prepared from that key image.
         let error = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::AlternativeKey),
             UpdatedTableRow::Full(TableRow::new(vec![
@@ -2704,11 +2731,15 @@ mod tests {
         )
         .unwrap_err();
 
+        // THEN: The unsafe replica identity is rejected.
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
     fn clickhouse_rows_for_update_rejects_composite_alternative_identity_key_image() {
+        // GIVEN: A composite alternative identity omits the primary key.
+
+        // WHEN: Rows are prepared from the two-column key image.
         let error = clickhouse_rows_for_update(
             &replicated_schema_with_composite_alternative_identity(),
             UpdatedTableRow::Full(TableRow::new(vec![
@@ -2723,11 +2754,15 @@ mod tests {
         )
         .unwrap_err();
 
+        // THEN: The unsafe replica identity is rejected.
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
     fn clickhouse_rows_for_update_rejects_alternative_identity_without_old_row() {
+        // GIVEN: An alternative-identity update has no old row image.
+
+        // WHEN: Destination rows are prepared from the new row alone.
         let error = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::AlternativeKey),
             UpdatedTableRow::Full(TableRow::new(vec![
@@ -2738,11 +2773,15 @@ mod tests {
         )
         .unwrap_err();
 
+        // THEN: The unsafe replica identity is rejected.
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
     fn clickhouse_rows_for_update_rejects_malformed_new_row_width_without_old_row() {
+        // GIVEN: A primary-key update has an undersized complete new row.
+
+        // WHEN: Destination rows are prepared without an old row image.
         let error = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::PrimaryKey),
             UpdatedTableRow::Full(TableRow::new(vec![Cell::I32(1)])),
@@ -2750,11 +2789,15 @@ mod tests {
         )
         .unwrap_err();
 
+        // THEN: The malformed row width is rejected as invalid state.
         assert_eq!(error.kind(), ErrorKind::InvalidState);
     }
 
     #[test]
     fn clickhouse_rows_for_update_rejects_malformed_full_old_row_width() {
+        // GIVEN: A full-identity update has an undersized old row.
+
+        // WHEN: Rows are prepared with a correctly sized new row.
         let error = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::Full),
             UpdatedTableRow::Full(TableRow::new(vec![
@@ -2765,13 +2808,16 @@ mod tests {
         )
         .unwrap_err();
 
+        // THEN: The malformed old row width is rejected as invalid state.
         assert_eq!(error.kind(), ErrorKind::InvalidState);
     }
 
     #[test]
     fn clickhouse_rows_for_update_rejects_partial_rows_before_identity_checks() {
+        // GIVEN: An alternative-identity update contains a partial new row.
         let partial_row = PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
 
+        // WHEN: Destination rows are prepared without an old row image.
         let error = clickhouse_rows_for_update(
             &replicated_schema(IdentityType::AlternativeKey),
             UpdatedTableRow::Partial(partial_row),
@@ -2779,28 +2825,36 @@ mod tests {
         )
         .unwrap_err();
 
+        // THEN: The partial-row error precedes replica identity validation.
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
         assert!(error.to_string().contains("partial update row"));
     }
 
     #[test]
     fn clickhouse_full_update_row_defers_null_array_failure_to_row_binary_encoding() {
+        // GIVEN: The replicated schema contains a nullable array column.
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_owned(), "users".to_owned()),
             vec![ColumnSchema::new("tags".to_owned(), Type::TEXT_ARRAY, -1, 1, true)],
         ));
         let schema = ReplicatedTableSchema::all(table_schema);
+
+        // WHEN: A complete update row contains a null array.
         let row = clickhouse_full_update_row(
             &schema,
             UpdatedTableRow::Full(TableRow::new(vec![Cell::Null])),
         )
         .unwrap();
+
+        // THEN: The null array is accepted for later encoding.
         let values =
             row.into_values().into_iter().map(cell_to_clickhouse_value).collect::<Vec<_>>();
 
+        // WHEN: RowBinary encodes the array as non-nullable.
         let error = encode_to_row_binary(values, &[false], &mut Vec::new()).unwrap_err();
 
+        // THEN: RowBinary encoding reports the conversion error.
         assert_eq!(error.kind(), ErrorKind::ConversionError);
     }
 
@@ -2814,27 +2868,40 @@ mod tests {
 
     #[test]
     fn expand_key_row_rejects_short_primary_key_payload() {
+        // GIVEN: An empty key payload must identify a single-column key.
+
+        // WHEN: The key image is expanded to a complete row.
         let err =
             expand_key_row(TableRow::new(vec![]), &replicated_schema(IdentityType::PrimaryKey))
                 .unwrap_err();
 
+        // THEN: The missing key value is rejected as invalid state.
         assert_eq!(err.kind(), ErrorKind::InvalidState);
         assert!(err.to_string().contains("Expected 1 key values"));
     }
 
     #[test]
     fn expand_key_row_rejects_composite_alternative_identity() {
+        // GIVEN: The key image contains a composite alternative identity.
+
+        // WHEN: The key image is expanded to a complete row.
         let err = expand_key_row(
             TableRow::new(vec![Cell::I32(10), Cell::String("before".to_owned())]),
             &replicated_schema_with_composite_alternative_identity(),
         )
         .unwrap_err();
 
+        // THEN: The unsafe replica identity is rejected.
         assert_eq!(err.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 
     #[test]
     fn validate_clickhouse_table_shape_allows_other_engine_metadata_columns() {
+        // GIVEN: Source columns use MergeTree metadata names.
+
+        // WHEN: The schema is validated for ReplacingMergeTree.
+
+        // THEN: The other engine's metadata names are accepted.
         for column_name in
             [CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME]
         {
@@ -2845,6 +2912,11 @@ mod tests {
             .unwrap();
         }
 
+        // GIVEN: Source columns use ReplacingMergeTree metadata names.
+
+        // WHEN: The schema is validated for MergeTree.
+
+        // THEN: The other engine's metadata names are accepted.
         for column_name in [ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME] {
             validate_clickhouse_table_shape(
                 &replicated_schema_with_column_name(column_name),
