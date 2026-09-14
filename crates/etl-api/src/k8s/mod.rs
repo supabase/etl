@@ -19,6 +19,7 @@ mod maintenance;
 mod resources;
 mod restart;
 pub mod source_tls;
+mod status;
 
 pub use base::*;
 pub use maintenance::{KubernetesMaintenanceMaterializer, ducklake_maintenance_policy_from_config};

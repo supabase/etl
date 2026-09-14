@@ -630,15 +630,26 @@ pub struct RollbackTablesResponse {
     pub tables: Vec<RolledBackTable>,
 }
 
+/// Observed pipeline runtime state, independent of table replication progress.
+///
+/// Starting includes automatic recovery and replacement. Failed reports a
+/// current runtime failure and does not imply that automatic recovery has
+/// stopped. Unknown means that the current runtime state cannot be established.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "name")]
 pub enum PipelineStatus {
+    /// The pipeline runtime is stopped.
     Stopped,
+    /// The pipeline runtime is starting or being replaced.
     Starting,
+    /// The current pipeline runtime has started.
     Started,
+    /// The pipeline runtime is shutting down.
     Stopping,
+    /// The pipeline runtime currently reports a failure.
     Failed,
+    /// The pipeline runtime state cannot currently be confirmed.
     Unknown,
 }
 

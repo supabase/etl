@@ -187,21 +187,25 @@ impl From<&str> for PodPhase {
 
 /// The derived operational status of a replicator runtime.
 ///
-/// Combines StatefulSet desired state with Pod phase, deletion intent, and
-/// container health from the API's perspective.
+/// Combines desired workload state, deletion intent, and observed process
+/// health. This is a recoverable observation, not a terminal state machine or a
+/// measure of replication progress. A failed runtime can recover to starting or
+/// started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodStatus {
-    /// The runtime has stopped.
+    /// No runtime exists, or the workload is scaled to zero with no remaining
+    /// Pod.
     Stopped,
     /// The runtime is creating, initializing, or replacing its Pod.
     Starting,
-    /// Pod is running and ready.
+    /// The current runtime is running and Kubernetes reports it ready.
     Started,
     /// The runtime is being deleted, including any remaining Pod.
     Stopping,
-    /// Pod failed to start or exited with an error.
+    /// The current runtime reports a startup or execution failure.
     Failed,
-    /// Pod status could not be determined.
+    /// The observations are unknown, inconsistent, or outside the supported
+    /// architecture.
     Unknown,
 }
 

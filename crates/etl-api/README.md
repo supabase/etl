@@ -339,6 +339,55 @@ Poll runtime status to follow these transitions. `started` means the current
 Kubernetes workload is ready; initial-sync state and replication progress are
 reported separately.
 
+### How runtime status is observed
+
+The [status module](src/k8s/status.rs) derives the existing customer-facing states
+from the single-replica workload. It does not store another lifecycle state machine.
+The rules have explicit precedence:
+
+| Observation | State |
+| --- | --- |
+| Workload deletion requested, or zero desired replicas with a remaining Pod | `stopping` |
+| No workload or Pod; or zero desired replicas and no Pod | `stopped` |
+| Active workload with no Pod | `starting` |
+| Pod belongs to another workload incarnation | `unknown` |
+| Active workload with a terminating owned Pod | `starting` |
+| Restart annotation, observed generation, or revision is not current | `starting` |
+| Current Pod or container state is explicitly unknown | `unknown` |
+| Current Pod or application/init container reports a failure | `failed` |
+| Current replicator is running and ready and the Pod is ready | `started` |
+| Current process is still initializing, scheduling, or recovering | `starting` |
+
+A non-terminating orphan Pod, malformed workload metadata, or a workload scaled
+above one replica reports `unknown`. Observing ordinal zero cannot establish the
+health of multiple replicators. `failed` is an observation and can recover;
+`starting` and `stopping` do not promise completion within a fixed deadline.
+Historical container failures do not override successful recovery.
+
+Each observation reads the StatefulSet, then its Pod, then the StatefulSet again.
+If UID, generation, or deletion intent changed, it retries once using the newer
+workload. Continued changes return `unknown`. Ordinary controller status updates
+do not trigger retries. Kubernetes read errors remain API errors, never `stopped`.
+This costs three GETs normally and at most five during a lifecycle race.
+
+This is a bounded observation, not an atomic snapshot across Kubernetes resources.
+State can change after the final read, and node failure detection itself takes time.
+Mutation endpoints must retain their lifecycle locks and deletion barriers instead
+of treating a status response as authorization to change durable replication state.
+The check establishes runtime identity against the accepted Kubernetes workload;
+it does not certify that a failed API configuration update committed successfully.
+
+The implementation follows Kubernetes' [Pod lifecycle semantics](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
+and the observed-generation/revision checks used by
+[`kubectl rollout status`](https://github.com/kubernetes/kubectl/blob/v0.35.0/pkg/polymorphichelpers/rollout_status.go).
+StatefulSets do not have the same rollout conditions as Deployments, and Pod phase
+alone is not a health summary. No application readiness probes are added here.
+
+Run the deterministic classification and HTTP interleaving tests with
+`cargo nextest run -p etl-api --no-default-features --lib 'k8s::status::'`.
+These tests model node loss, API failures, and lifecycle read interleavings
+without requiring a Kubernetes cluster.
+
 ### Encryption Keys
 
 Sensitive source and destination config fields are encrypted before being stored
