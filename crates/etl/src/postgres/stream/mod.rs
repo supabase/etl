@@ -4,6 +4,5 @@ mod feedback;
 mod replication_message;
 mod table_copy;
 
-pub(crate) use feedback::StatusUpdateType;
 pub use replication_message::ReplicationMessageStream;
 pub(crate) use table_copy::{TableCopyRow, TableCopyStream};

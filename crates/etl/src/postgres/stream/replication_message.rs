@@ -16,7 +16,7 @@ use tokio_postgres::{CopyBothDuplex, types::PgLsn};
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    postgres::stream::feedback::{FeedbackHandle, StatusUpdateType},
+    postgres::stream::feedback::FeedbackHandle,
 };
 
 /// Decodes replication messages using the existing pgoutput protocol parser.
@@ -71,27 +71,19 @@ impl ReplicationMessageStream {
         (Self { stream, feedback_handle }, feedback_sender_future)
     }
 
-    /// Enqueues safe positions and optionally waits for request completion.
+    /// Enqueues safe positions without waiting for the sender to transmit them.
     ///
     /// Returns an error if this stream was created without feedback.
     pub(crate) async fn enqueue_status_update(
-        self: Pin<&mut Self>,
+        &self,
         write_lsn: PgLsn,
         flush_lsn: PgLsn,
         force: bool,
-        status_update_type: StatusUpdateType,
-        wait: bool,
     ) -> EtlResult<()> {
-        self.feedback_handle
-            .as_ref()
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "Replication feedback is disabled for this stream"
-                )
-            })?
-            .enqueue_status_update(write_lsn, flush_lsn, force, status_update_type, wait)
-            .await
+        let feedback_handle = self.feedback_handle.as_ref().ok_or_else(|| {
+            etl_error!(ErrorKind::InvalidState, "Replication feedback is disabled for this stream")
+        })?;
+        feedback_handle.enqueue_status_update(write_lsn, flush_lsn, force).await
     }
 }
 

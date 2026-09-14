@@ -14,10 +14,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use etl_postgres::time::POSTGRES_EPOCH;
 use futures::{Sink, SinkExt};
 use metrics::counter;
-use tokio::{
-    sync::{mpsc, oneshot},
-    time::Instant,
-};
+use tokio::{sync::mpsc, time::Instant};
 use tokio_postgres::types::PgLsn;
 use tracing::debug;
 #[cfg(feature = "failpoints")]
@@ -48,7 +45,7 @@ const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 /// The status update type when sending a status update message back to
 /// Postgres.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum StatusUpdateType {
+enum StatusUpdateType {
     /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
     /// Represents a periodic heartbeat sent while the apply loop is idle or
@@ -58,9 +55,6 @@ pub(crate) enum StatusUpdateType {
     /// fallback requests a reply. PostgreSQL's response can drive idle
     /// processing once the apply loop is able to read it.
     PeriodicKeepAlive,
-    /// Represents an update before shutdown that requests an immediate reply
-    /// from Postgres.
-    ShutdownFlush,
 }
 
 impl StatusUpdateType {
@@ -70,7 +64,6 @@ impl StatusUpdateType {
         match self {
             Self::KeepAlive => false,
             Self::PeriodicKeepAlive => true,
-            Self::ShutdownFlush => true,
         }
     }
 
@@ -79,7 +72,6 @@ impl StatusUpdateType {
         match self {
             Self::KeepAlive => "keep_alive",
             Self::PeriodicKeepAlive => "periodic_keep_alive",
-            Self::ShutdownFlush => "shutdown_flush",
         }
     }
 }
@@ -90,7 +82,7 @@ impl Display for StatusUpdateType {
     }
 }
 
-/// One explicit feedback request with optional completion confirmation.
+/// Safe progress and reply urgency supplied to the feedback sender.
 #[derive(Debug)]
 struct StatusUpdateRequest {
     /// Safely consumed WAL position supplied by the apply loop.
@@ -99,10 +91,6 @@ struct StatusUpdateRequest {
     flush_lsn: PgLsn,
     /// Whether this update must bypass debouncing.
     force: bool,
-    /// Protocol reply behavior and metric classification.
-    update_type: StatusUpdateType,
-    /// Optional confirmation that the request was processed or failed.
-    result_tx: Option<oneshot::Sender<EtlResult<()>>>,
 }
 
 /// Channel handle for submitting status updates to the [`FeedbackSender`].
@@ -138,51 +126,28 @@ impl FeedbackHandle {
         (Self { requests_tx }, feedback_sender.run(keep_alive_deadline_duration))
     }
 
-    /// Enqueues a status update for the [`FeedbackSender`], waiting for
-    /// processing when `wait` is true.
+    /// Enqueues safe progress for the [`FeedbackSender`].
     ///
-    /// If the task fails, its request channel closes and the next enqueue
-    /// returns an error to the apply loop. A request already enqueued without
-    /// waiting may return before the failure. Shutdown requests confirmation
-    /// before the owner may abort the feedback sender task.
-    ///
-    /// Waiting does not force a send: optional requests can still be debounced.
+    /// Completion means the request entered the bounded queue, not that it
+    /// reached the transport or PostgreSQL. A full queue applies backpressure.
+    /// If the sender fails, its channel closes and the next enqueue fails the
+    /// apply loop. Teardown may discard requests still queued or being sent;
+    /// restart safety depends on persisted checkpoints, not final feedback.
     pub(super) async fn enqueue_status_update(
         &self,
         write_lsn: PgLsn,
         flush_lsn: PgLsn,
         force: bool,
-        update_type: StatusUpdateType,
-        wait: bool,
     ) -> EtlResult<()> {
-        let (result_tx, result_rx) = if wait {
-            let (tx, rx) = oneshot::channel();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
-        };
-
-        self.requests_tx
-            .send(StatusUpdateRequest { write_lsn, flush_lsn, force, update_type, result_tx })
-            .await
-            .map_err(|_| {
+        self.requests_tx.send(StatusUpdateRequest { write_lsn, flush_lsn, force }).await.map_err(
+            |_| {
                 etl_error!(
                     ErrorKind::SourceConnectionFailed,
                     "Cannot send replication status update because the feedback sender task \
                      stopped"
                 )
-            })?;
-
-        if let Some(result_rx) = result_rx {
-            result_rx.await.map_err(|_| {
-                etl_error!(
-                    ErrorKind::SourceConnectionFailed,
-                    "Replication feedback sender task stopped before confirming the status update"
-                )
-            })??;
-        }
-
-        Ok(())
+            },
+        )
     }
 }
 
@@ -241,18 +206,11 @@ where
                     // Fault injection may suppress a send. Still space retries
                     // rather than spinning on an already-expired deadline.
                     deadline = Instant::now() + keep_alive_deadline_duration;
-
                 }
 
                 request = self.requests_rx.recv() => {
                     let Some(request) = request else { return Ok(()); };
-                    let result = self.send_status_update(request.write_lsn, request.flush_lsn, request.force, request.update_type).await;
-
-                    if let Some(result_tx) = request.result_tx {
-                        let _ = result_tx.send(result.as_ref().map(|_| ()).map_err(Clone::clone));
-                    }
-
-                    if result? {
+                    if self.send_status_update(request.write_lsn, request.flush_lsn, request.force, StatusUpdateType::KeepAlive).await? {
                         deadline = Instant::now() + keep_alive_deadline_duration;
                     }
                 }
@@ -260,7 +218,11 @@ where
         }
     }
 
-    /// Sends a status update to the Postgres server.
+    /// Encodes a status update and flushes it into the connection driver's
+    /// queue.
+    ///
+    /// The driver writes to the socket independently. Completion here does not
+    /// confirm a TCP flush, receipt by PostgreSQL, or slot persistence.
     ///
     /// Write and flush positions are clamped locally to the latest safe values
     /// supplied by the apply loop, even when an optional send is debounced.
@@ -273,7 +235,7 @@ where
     /// Primary keepalives do not all request an immediate response. In
     /// particular, a synchronous logical walsender may send one after pgoutput
     /// skips a transaction with no published changes. The apply loop still
-    /// calls this method for that keepalive so new flush progress can be
+    /// enqueues a status update for that keepalive so new flush progress can be
     /// reported promptly, but passes `force = false` when PostgreSQL did not
     /// request a reply.
     ///
@@ -288,7 +250,7 @@ where
     /// A non-forced call with an unchanged flush frontier is therefore
     /// debounced. A skipped update means ETL suppressed that redundant response
     /// locally; it does not mean a status message was sent and rejected by
-    /// PostgreSQL. Outside test fault injection, forced heartbeat and shutdown
+    /// PostgreSQL. Outside test fault injection, forced heartbeat
     /// responses always bypass this interval.
     async fn send_status_update(
         &mut self,
@@ -324,7 +286,7 @@ where
         // interval advances would provide no new durability information.
         if !force
             && let (Some(last_update), Some(last_flush_lsn)) =
-                (self.last_update.as_mut(), self.last_sent_flush_lsn.as_mut())
+                (self.last_update.as_ref(), self.last_sent_flush_lsn.as_ref())
         {
             // Only a changed flush frontier bypasses the interval because it
             // provides PostgreSQL with new confirmed progress. `write_lsn`
@@ -370,7 +332,7 @@ where
         //
         // This outgoing request flag is separate from `force`. For a primary
         // keepalive, `force` mirrors PostgreSQL's incoming reply-request flag.
-        // Background periodic and shutdown updates are forced and request a
+        // Background periodic updates are forced and request a
         // reply. PostgreSQL answers with a primary keepalive carrying
         // reply_requested = false. The apply loop may still enqueue an optional
         // KeepAlive response, subject to debouncing, but that response also has
@@ -424,7 +386,7 @@ mod tests {
     use crate::{
         error::{ErrorKind, EtlResult},
         etl_error,
-        postgres::stream::feedback::{FeedbackHandle, StatusUpdateType},
+        postgres::stream::feedback::FeedbackHandle,
     };
 
     /// Spawns the feedback sender with an observable in-memory sink.
@@ -468,19 +430,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn normal_feedback_resets_deadline_and_periodic_feedback_repeats_positions() {
         let (feedback_handle, mut messages, feedback_sender_task) = spawn_feedback_sender();
-        feedback_handle
-            .enqueue_status_update(100.into(), 80.into(), false, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap();
+        feedback_handle.enqueue_status_update(100.into(), 80.into(), false).await.unwrap();
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 100, 80, false);
 
         advance_feedback_sender(Duration::from_secs(9)).await;
         assert!(messages.try_recv().is_err());
-        feedback_handle
-            .enqueue_status_update(200.into(), 90.into(), false, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap();
+        feedback_handle.enqueue_status_update(200.into(), 90.into(), false).await.unwrap();
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 200, 90, false);
 
@@ -505,17 +461,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn debounced_feedback_preserves_state_without_postponing_deadline() {
         let (feedback_handle, mut messages, feedback_sender_task) = spawn_feedback_sender();
-        feedback_handle
-            .enqueue_status_update(100.into(), 80.into(), false, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap();
+        feedback_handle.enqueue_status_update(100.into(), 80.into(), false).await.unwrap();
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 100, 80, false);
         advance_feedback_sender(Duration::from_millis(50)).await;
-        feedback_handle
-            .enqueue_status_update(200.into(), 80.into(), false, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap();
+        feedback_handle.enqueue_status_update(200.into(), 80.into(), false).await.unwrap();
         tokio::task::yield_now().await;
         assert!(messages.try_recv().is_err());
 
@@ -525,37 +475,21 @@ mod tests {
         feedback_sender_task.await.unwrap().unwrap();
     }
 
-    /// Flush advancement, requested replies, and shutdown bypass optional
-    /// debouncing.
+    /// Flush advancement and requested replies bypass optional debouncing.
     #[tokio::test(start_paused = true)]
     async fn requested_feedback_is_immediate_and_positions_remain_monotonic() {
         let (feedback_handle, mut messages, feedback_sender_task) = spawn_feedback_sender();
-        feedback_handle
-            .enqueue_status_update(100.into(), 80.into(), false, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap();
+        feedback_handle.enqueue_status_update(100.into(), 80.into(), false).await.unwrap();
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 100, 80, false);
-        feedback_handle
-            .enqueue_status_update(200.into(), 90.into(), false, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap();
+        feedback_handle.enqueue_status_update(200.into(), 90.into(), false).await.unwrap();
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 200, 90, false);
 
         // An incoming request forces a response but does not request another reply.
-        feedback_handle
-            .enqueue_status_update(50.into(), 40.into(), true, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap();
+        feedback_handle.enqueue_status_update(50.into(), 40.into(), true).await.unwrap();
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 200, 90, false);
-        feedback_handle
-            .enqueue_status_update(0.into(), 0.into(), true, StatusUpdateType::ShutdownFlush, true)
-            .await
-            .unwrap();
-        tokio::task::yield_now().await;
-        assert_feedback(messages.try_recv().unwrap(), 200, 90, true);
         assert!(messages.try_recv().is_err());
         drop(feedback_handle);
         feedback_sender_task.await.unwrap().unwrap();
@@ -574,77 +508,55 @@ mod tests {
         feedback_sender_task.await.unwrap().unwrap();
     }
 
-    /// A failed final send reaches its waiting caller and terminates feedback.
+    /// An explicit send failure closes the channel for subsequent requests.
     #[tokio::test(start_paused = true)]
-    async fn shutdown_feedback_failure_reaches_waiting_caller() {
+    async fn requested_feedback_failure_rejects_next_request() {
         let (feedback_handle, messages, feedback_sender_task) = spawn_feedback_sender();
         drop(messages);
-        let error = feedback_handle
-            .enqueue_status_update(
-                100.into(),
-                80.into(),
-                true,
-                StatusUpdateType::ShutdownFlush,
-                true,
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+        feedback_handle.enqueue_status_update(100.into(), 80.into(), true).await.unwrap();
         assert_eq!(
             feedback_sender_task.await.unwrap().unwrap_err().kind(),
             ErrorKind::SourceConnectionFailed
         );
+        let error =
+            feedback_handle.enqueue_status_update(100.into(), 80.into(), true).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
     }
 
-    /// Completion waits depend on the caller's choice, independently of the
-    /// protocol update type.
+    /// Enqueueing waits only for queue capacity and fails if the sender stops.
     #[tokio::test(start_paused = true)]
-    async fn send_confirmation_is_explicit() {
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    async fn enqueue_only_waits_for_queue_capacity() {
         let (messages_tx, mut messages) = tokio::sync::mpsc::unbounded_channel();
-        let sink = Box::pin(futures::sink::unfold(
-            (Some(release_rx), messages_tx),
-            |(mut release, messages), message| async move {
-                if let Some(release) = release.take() {
-                    release.await.unwrap();
-                }
-                messages.send(message).unwrap();
-                Ok::<_, crate::error::EtlError>((release, messages))
-            },
-        ));
+        let sink =
+            Box::pin(futures::sink::unfold(messages_tx, |messages_tx, message| async move {
+                messages_tx.send(message).unwrap();
+                std::future::pending::<EtlResult<()>>().await?;
+                Ok::<_, crate::error::EtlError>(messages_tx)
+            }));
         let (feedback_handle, feedback_sender_future) =
             FeedbackHandle::create(sink, Duration::from_secs(10));
         let feedback_sender_task = tokio::spawn(feedback_sender_future);
         feedback_handle
-            .enqueue_status_update(
-                100.into(),
-                80.into(),
-                true,
-                StatusUpdateType::ShutdownFlush,
-                false,
-            )
-            .await
+            .enqueue_status_update(100.into(), 80.into(), true)
+            .now_or_never()
+            .unwrap()
             .unwrap();
-        // Let the feedback_sender_task consume the first request so the next can enter
-        // the queue.
-        tokio::task::yield_now().await;
-        let confirmed = feedback_handle.enqueue_status_update(
-            200.into(),
-            90.into(),
-            true,
-            StatusUpdateType::KeepAlive,
-            true,
-        );
-        let mut confirmed = Box::pin(confirmed);
-        assert!(confirmed.as_mut().now_or_never().is_none());
-        assert!(messages.try_recv().is_err());
+        assert_feedback(messages.recv().await.unwrap(), 100, 80, false);
+        assert!(!feedback_sender_task.is_finished());
 
-        release_tx.send(()).unwrap();
-        confirmed.await.unwrap();
-        assert_feedback(messages.try_recv().unwrap(), 100, 80, true);
-        assert_feedback(messages.try_recv().unwrap(), 200, 90, false);
-        drop(feedback_handle);
-        feedback_sender_task.await.unwrap().unwrap();
+        // The sender is blocked in the sink, so one more request fills the queue.
+        feedback_handle
+            .enqueue_status_update(200.into(), 90.into(), true)
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+        let mut queued =
+            Box::pin(feedback_handle.enqueue_status_update(300.into(), 100.into(), true));
+        assert!(queued.as_mut().now_or_never().is_none());
+
+        feedback_sender_task.abort();
+        assert!(feedback_sender_task.await.unwrap_err().is_cancelled());
+        assert_eq!(queued.await.unwrap_err().kind(), ErrorKind::SourceConnectionFailed);
     }
 
     /// A heartbeat failure closes the channel, failing the next apply request.
@@ -659,10 +571,8 @@ mod tests {
             feedback_sender_task.await.unwrap().unwrap_err().kind(),
             ErrorKind::SourceConnectionFailed
         );
-        let error = feedback_handle
-            .enqueue_status_update(100.into(), 80.into(), true, StatusUpdateType::KeepAlive, false)
-            .await
-            .unwrap_err();
+        let error =
+            feedback_handle.enqueue_status_update(100.into(), 80.into(), true).await.unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
         assert!(error.to_string().contains(
             "Cannot send replication status update because the feedback sender task stopped"

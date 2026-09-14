@@ -16,4 +16,4 @@ pub(crate) use source_pool::OutOfBandSourcePool;
 pub use stream::ReplicationMessageStream;
 #[cfg(not(any(test, feature = "test-utils")))]
 pub(crate) use stream::ReplicationMessageStream;
-pub(crate) use stream::{StatusUpdateType, TableCopyRow, TableCopyStream};
+pub(crate) use stream::{TableCopyRow, TableCopyStream};
