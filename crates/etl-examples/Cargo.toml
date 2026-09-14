@@ -41,21 +41,15 @@ snowflake = ["etl-destinations/snowflake"]
 
 [dependencies]
 
-clap = { workspace = true, default-features = true, features = [
-    "std",
-    "derive",
-    "env",
-] }
-etl = { workspace = true }
+clap = { workspace = true, default-features = true, features = ["std", "derive", "env"] }
+etl = { workspace = true, features = ["tls-rustls-ring"] }
 etl-config = { workspace = true }
-etl-destinations = { workspace = true }
+etl-destinations = { workspace = true, features = ["tls-rustls-ring"] }
 k8s-openapi = { workspace = true, features = ["latest"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 tokio = { workspace = true, features = ["macros", "signal", "time"] }
 tracing = { workspace = true, default-features = true }
-tracing-subscriber = { workspace = true, default-features = true, features = [
-    "env-filter",
-] }
+tracing-subscriber = { workspace = true, default-features = true, features = ["env-filter"] }
 url = { workspace = true }
 
 [lints]

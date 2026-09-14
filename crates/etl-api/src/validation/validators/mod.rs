@@ -11,6 +11,7 @@ mod nullable_array;
 mod pipeline;
 mod primary_key;
 mod replica_identity;
+mod slot_wal_keep_size;
 #[cfg(feature = "snowflake")]
 mod snowflake;
 mod source;
@@ -26,6 +27,9 @@ pub(super) use source::SourceValidator;
 
 use super::{ValidationContext, ValidationError, ValidationFailure, Validator};
 use crate::configs::pipeline::ApiPipelineConfig;
+
+/// Maximum number of source objects included in one validation finding.
+const MAX_REPORTED_OBJECTS: i64 = 100;
 
 /// Composite validator for pipeline prerequisites.
 #[derive(Debug)]
@@ -44,7 +48,11 @@ impl PipelineValidator {
         let table_sync_copy = self.config.table_sync_copy.clone().unwrap_or_default();
 
         vec![
-            Box::new(LogicalReplicationSettingsValidator::new(max_table_sync_workers)),
+            Box::new(LogicalReplicationSettingsValidator::new(
+                max_table_sync_workers,
+                publication_name.clone(),
+                table_sync_copy.clone(),
+            )),
             Box::new(PublicationExistsValidator::new(publication_name.clone())),
             Box::new(PublicationHasTablesValidator::new(publication_name.clone())),
             Box::new(PublicationExcludesEtlTablesValidator::new(publication_name.clone())),

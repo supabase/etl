@@ -1,8 +1,8 @@
-# `etl-postgres` - Shared Postgres Primitives
+# `etl-postgres`
 
-This crate contains Postgres-specific primitives shared by ETL workspace crates.
-It is not the primary end-user pipeline API; most pipeline users should import
-from `etl` and destination modules from `etl-destinations`.
+Postgres primitives shared by [Supabase ETL](https://supabase.github.io/etl/)
+workspace crates. This is not the primary end-user pipeline API; most pipeline
+users should import from `etl` and destination modules from `etl-destinations`.
 
 The public modules here cover reusable boundaries such as schema identifiers,
 Postgres value wrappers, replication slot naming, source database metadata, and

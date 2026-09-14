@@ -1,6 +1,6 @@
 ---
 source: crates/etl-api/src/configs/destination.rs
-assertion_line: 4067
+assertion_line: 4267
 expression: api_config
 ---
 {
@@ -21,6 +21,11 @@ expression: api_config
     "parquet_row_group_size": "100000",
     "expire_snapshots_older_than": "7 days",
     "maintenance_mode": "kubernetes",
+    "copy_buffer": {
+      "enabled": true,
+      "target_bytes": 268435456,
+      "max_total_bytes": 1073741824
+    },
     "table_sorting": {
       "tables": [
         {

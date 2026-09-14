@@ -10,7 +10,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-etl = { path = "../crates/etl", default-features = false, features = ["fuzzing"] }
+etl = { path = "../crates/etl", default-features = false, features = ["fuzzing", "tls-rustls-ring"] }
 libfuzzer-sys = "0.4"
 
 [[bin]]

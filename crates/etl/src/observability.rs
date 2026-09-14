@@ -45,7 +45,10 @@ pub(crate) const ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL: &str =
     "etl_memory_backpressure_transitions_total";
 pub(crate) const ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS: &str =
     "etl_memory_backpressure_activation_duration_seconds";
-pub(crate) const ETL_IDEAL_BATCH_SIZE_BYTES: &str = "etl_ideal_batch_size_bytes";
+pub(crate) const ETL_MEMORY_USED_BYTES: &str = "etl_memory_used_bytes";
+pub(crate) const ETL_MEMORY_TOTAL_BYTES: &str = "etl_memory_total_bytes";
+pub(crate) const ETL_BATCH_SIZE_TARGET_BYTES: &str = "etl_batch_size_target_bytes";
+pub(crate) const ETL_BATCH_REGISTERED_SLOTS: &str = "etl_batch_registered_slots";
 pub(crate) const ETL_APPLY_LOOP_RECEIVED_LAG_BYTES: &str = "etl_apply_loop_received_lag_bytes";
 pub(crate) const ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES: &str =
     "etl_apply_loop_effective_flush_lag_bytes";
@@ -76,10 +79,25 @@ pub(crate) const OUTCOME_LABEL: &str = "outcome";
 pub(crate) const ERROR_TYPE_LABEL: &str = "error_type";
 /// Label key for transition direction ("activate" or "resume").
 pub(crate) const DIRECTION_LABEL: &str = "direction";
+/// Label key for the selected memory measurement domain.
+pub(crate) const MEMORY_SOURCE_LABEL: &str = "source";
 /// Label key for how durability was confirmed ("direct" or "deferred").
 pub(crate) const CONFIRMATION_LABEL: &str = "confirmation";
 /// Label key for the destination write status ("accepted" or "durable").
 pub(crate) const WRITE_STATUS_LABEL: &str = "status";
+
+/// Returns a bounded DDL command tag for metrics and logging.
+///
+/// Source triggers emit `ALTER TABLE` and `ALTER PUBLICATION`. Logical messages
+/// can also be emitted directly, so all other tags map to `unknown`.
+/// Keep this classification separate from the raw tag used by replication.
+pub(crate) fn ddl_command_tag_label(command_tag: &str) -> &'static str {
+    match command_tag {
+        "ALTER TABLE" => "ALTER TABLE",
+        "ALTER PUBLICATION" => "ALTER PUBLICATION",
+        _ => "unknown",
+    }
+}
 
 /// Register metrics emitted by etl. This should be called before starting a
 /// pipeline. It is safe to call this method multiple times. It is guaranteed to
@@ -311,9 +329,30 @@ pub(crate) fn register_metrics() {
         );
 
         describe_gauge!(
-            ETL_IDEAL_BATCH_SIZE_BYTES,
+            ETL_MEMORY_USED_BYTES,
             Unit::Bytes,
-            "Current ideal batch size in bytes."
+            "Current memory usage in bytes for the selected system or cgroup memory domain, \
+             labeled by source."
+        );
+
+        describe_gauge!(
+            ETL_MEMORY_TOTAL_BYTES,
+            Unit::Bytes,
+            "Current memory capacity in bytes for the selected system or cgroup memory domain, \
+             labeled by source."
+        );
+
+        describe_gauge!(
+            ETL_BATCH_SIZE_TARGET_BYTES,
+            Unit::Bytes,
+            "Current advisory decoded byte target for each registered batch slot."
+        );
+
+        describe_gauge!(
+            ETL_BATCH_REGISTERED_SLOTS,
+            Unit::Count,
+            "Current number of registered batch-producing positions used to divide the global \
+             decoded-batch target."
         );
 
         describe_gauge!(
@@ -345,4 +384,29 @@ pub(crate) fn register_metrics() {
             "Difference between the source Postgres current WAL position and ETL's checkpoint LSN."
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::observability::ddl_command_tag_label;
+
+    /// Preserves supported labels and bounds unexpected tag values.
+    #[test]
+    fn ddl_command_tag_labels_are_bounded() {
+        assert_eq!(ddl_command_tag_label("ALTER TABLE"), "ALTER TABLE");
+        assert_eq!(ddl_command_tag_label("ALTER PUBLICATION"), "ALTER PUBLICATION");
+
+        for command_tag in [
+            "",
+            "alter table",
+            "ALTER TABLE ",
+            "ALTER PUBLICATION extra",
+            "CREATE TABLE",
+            "ALTER TABLE\0",
+            "変更",
+            &"x".repeat(4096),
+        ] {
+            assert_eq!(ddl_command_tag_label(command_tag), "unknown");
+        }
+    }
 }

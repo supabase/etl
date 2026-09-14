@@ -5,6 +5,7 @@ import {
   BookOpenText,
   Database,
   DatabaseZap,
+  Gauge,
   House,
   ListTree,
   Puzzle,
@@ -22,6 +23,7 @@ const icons: Record<string, LucideIcon> = {
   BookOpenText,
   Database,
   DatabaseZap,
+  Gauge,
   House,
   ListTree,
   Puzzle,
@@ -103,6 +105,7 @@ export function getAgentPageGroups() {
     ['/reference/destinations', 7],
     ['/explanation/events', 8],
     ['/explanation/traits', 9],
+    ['/reference/benchmarks', 10],
   ]);
 
   return sectionOrder.map((section) => ({
@@ -141,7 +144,7 @@ function getAgentHomeMarkdown() {
     })
     .join('\n\n');
 
-  return `${siteConfig.description} For each published table, it performs an initial sync of existing rows, then replicates changes to a destination. ${siteConfig.projectStatus}\n\nFor the managed Supabase product, use [Supabase Pipelines](${siteConfig.supabaseDocs}).\n\n## Documentation map\n\n${groups}\n\n## Replication phases\n\n1. **Initial sync:** Copy the existing rows selected by the publication.\n2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and truncates, then deliver those changes as ordered events.\n\nStreaming describes a transfer mode that may be used within either phase; it is not a separate replication phase. Across both phases, ETL persists checkpoints and table state so replication can recover safely after a restart.`;
+  return `${siteConfig.description} For each published table, it performs an initial sync of existing rows, then replicates changes to a destination. ${siteConfig.projectStatus}\n\nFor the managed Supabase product, use [Supabase Pipelines](${siteConfig.supabaseDocs}).\n\n## Documentation map\n\n${groups}\n\n## Replication phases\n\n1. **Initial sync:** Copy the existing rows selected by the publication, then catch up changes that occurred while the copy was running.\n2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and truncates, then deliver those changes as ordered events.\n\nStreaming describes a transfer mode that may be used within either phase; it is not a separate replication phase. Across both phases, a store persists checkpoints, schemas, destination metadata, and table state so replication can recover safely after a restart. Copy and change data capture (CDC) are replication paths, not customer-visible phases.`;
 }
 
 function rewriteAgentLinks(markdown: string) {
@@ -154,15 +157,16 @@ function rewriteAgentLinks(markdown: string) {
 
 function rewriteAgentCallouts(markdown: string) {
   return markdown.replace(
-    /<Callout\b[^>]*\btitle="([^"]+)"[^>]*>\s*([\s\S]*?)\s*<\/Callout>/g,
-    (_match, title: string, body: string) => {
+    /<Callout\b([^>]*)>\s*([\s\S]*?)\s*<\/Callout>/g,
+    (_match, attributes: string, body: string) => {
+      const title = attributes.match(/\btitle="([^"]+)"/)?.[1];
       const quotedBody = body
         .trim()
         .split('\n')
         .map((line) => (line.length > 0 ? `> ${line.trimStart()}` : '>'))
         .join('\n');
 
-      return `> **${title}**\n>\n${quotedBody}`;
+      return title ? `> **${title}**\n>\n${quotedBody}` : quotedBody;
     },
   );
 }

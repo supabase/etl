@@ -31,7 +31,7 @@ pub trait Destination {
 | `startup()` | Called after store caches are loaded, removed-publication tables are purged, and before workers start. Default is a no-op. Override to recover pending operations or rebuild process-local state |
 | `drop_table_for_copy()` | Drops the existing destination object and destination-private replay state before restarting a table copy. Receives the previously stored replicated schema for locating the old object |
 | `write_table_rows()` | Writes rows during initial table copy. Receives the current replicated schema, an optional batch ID, and the rows |
-| `write_events()` | Processes ongoing replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables, or be empty for a required durability barrier |
+| `write_events()` | Processes catch-up and ongoing replication events (inserts, updates, deletes, truncates, relations, and transaction markers). Batches may span multiple tables, or be empty for a required durability barrier |
 
 ### Implementation Notes
 
@@ -124,9 +124,11 @@ pub trait StateStore {
 ### Replication Checkpoint Methods
 
 A persisted replication checkpoint records a safe replay frontier for the apply
-worker or a table-sync worker. ETL can select a durably flushed commit boundary
-or, when the apply loop is fully idle, its last received LSN. The checkpoint
-lets the worker resume safely after a restart.
+worker or a table-sync worker. ETL saves progress at commit boundaries after
+the corresponding destination work is durable. PostgreSQL slot feedback
+can also advance when the loop is fully idle, but that feedback is distinct
+from the checkpoint saved in the store. The persisted checkpoint participates
+in selecting a safe restart position.
 
 | Method | Purpose |
 |--------|---------|
@@ -155,7 +157,7 @@ Tables progress through these states:
 | `FinishedCopy` | Yes | Copy complete, waiting for coordination |
 | `SyncWait` | No | Table sync worker signaling apply worker to pause |
 | `Catchup { lsn }` | No | Apply worker paused, table sync worker catching up to LSN |
-| `SyncDone { lsn }` | Yes | Caught up to LSN; durable decoder retained until Apply materializes local state |
+| `SyncDone { lsn }` | Yes | Caught up to LSN; awaiting a persisted apply checkpoint and local decoder before handover |
 | `Ready` | Yes | Changes via apply worker |
 | `Errored { reason, solution, retry_policy }` | Yes | Error occurred, excluded until rollback |
 
@@ -223,9 +225,10 @@ ETL provides two built-in implementations:
 - `PostgresStore`: Persistent storage backed by PostgreSQL
 
 `PostgresStore::new()` runs only the Postgres-backed state-store migrations.
-`Pipeline::start()` runs the source migrations required by ETL itself, including
-the schema helper functions and DDL event trigger, regardless of which store
-implementation you use.
+By default, `Pipeline::start()` runs the source migrations required by ETL
+itself, including the schema helper functions and DDL event trigger, regardless
+of the store implementation. With `run_source_migrations: false` or a read-only
+source replica, apply those migrations on the primary before starting ETL.
 
 ## Thread Safety
 

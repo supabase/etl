@@ -50,7 +50,7 @@ impl std::fmt::Display for TableSyncWorkerId {
 ///   state.
 ///
 /// Locking order during spawn is: workers_join_set lock -> workers write lock.
-/// This ensures that [`wait_all`] (which holds the workers_join_set lock)
+/// This ensures that [`Self::wait_all`] (which holds the workers_join_set lock)
 /// blocks any new spawns until all existing workers have completed.
 #[derive(Debug)]
 pub(crate) struct TableSyncWorkerPool {
@@ -81,7 +81,7 @@ impl TableSyncWorkerPool {
     /// ID.
     ///
     /// The locking order is: workers_join_set -> workers (write). This ensures
-    /// that if [`wait_all`] is in progress, this method blocks until it
+    /// that if [`Self::wait_all`] is in progress, this method blocks until it
     /// completes.
     pub(crate) async fn spawn<F>(&self, table_id: TableId, state: TableSyncWorkerState, future: F)
     where

@@ -162,14 +162,6 @@ where
             );
         }
 
-        // We always start memory monitoring for running workers to keep total memory
-        // snapshots available.
-        let memory_monitor = MemoryMonitor::new(
-            self.shutdown_tx.subscribe(),
-            self.config.memory_backpressure.clone(),
-            self.config.memory_refresh_interval_ms,
-        );
-
         // We create the first connection to Postgres.
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
@@ -205,6 +197,15 @@ where
         let out_of_band_source_pool = OutOfBandSourcePool::new(
             &self.config.pg_connection,
             Duration::from_millis(self.config.table_sync_monitor_refresh_interval_ms),
+        );
+
+        // Start memory monitoring only after fallible startup work completes.
+        // From this point onward, the monitor is owned by the started pipeline
+        // and Pipeline::wait joins its refresh task after shutdown.
+        let memory_monitor = MemoryMonitor::new(
+            self.shutdown_tx.subscribe(),
+            self.config.memory_backpressure.clone(),
+            self.config.memory_refresh_interval_ms,
         );
 
         // We create and start the apply worker.

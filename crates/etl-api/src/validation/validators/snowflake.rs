@@ -48,7 +48,7 @@ impl Validator for SnowflakeValidator {
         if self.user.is_empty() {
             return Ok(vec![ValidationFailure::critical(
                 "Snowflake User Required",
-                "Enter the Snowflake user that ETL should connect with.",
+                "Enter the Snowflake user that the pipeline should connect with.",
             )]);
         }
 

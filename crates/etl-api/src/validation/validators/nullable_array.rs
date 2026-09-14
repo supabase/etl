@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 use etl_postgres::version::POSTGRES_15;
 
+use super::MAX_REPORTED_OBJECTS;
 use crate::validation::{ValidationContext, ValidationError, ValidationFailure, Validator};
 
 /// Destination behavior for a top-level NULL array value.
@@ -22,12 +23,18 @@ pub(super) struct NullableArrayValidator {
     publication_name: String,
     /// Destination behavior described in the warning.
     behavior: NullableArrayBehavior,
+    /// Numeric PostgreSQL server version used to select supported catalogs.
+    server_version_num: i32,
 }
 
 impl NullableArrayValidator {
     /// Creates a nullable-array warning validator for a destination.
-    pub(super) fn new(publication_name: String, behavior: NullableArrayBehavior) -> Self {
-        Self { publication_name, behavior }
+    pub(super) fn new(
+        publication_name: String,
+        behavior: NullableArrayBehavior,
+        server_version_num: i32,
+    ) -> Self {
+        Self { publication_name, behavior, server_version_num }
     }
 }
 
@@ -41,44 +48,41 @@ impl Validator for NullableArrayValidator {
             return Ok(vec![]);
         };
 
-        let server_version_num: i32 =
-            sqlx::query_scalar("select current_setting('server_version_num')::int")
-                .fetch_one(source_pool)
-                .await?;
-        let nullable_arrays: Vec<(String, String)> = if server_version_num >= POSTGRES_15 {
-            sqlx::query_as(
+        let nullable_arrays: Vec<String> = if self.server_version_num >= POSTGRES_15 {
+            sqlx::query_scalar(
                 r#"
-                select n.nspname || '.' || c.relname, a.attname::text
+                select distinct
+                    format('%I.%I.%I', n.nspname, c.relname, a.attname) as column_name
                 from pg_publication p
                 cross join lateral pg_get_publication_tables(p.pubname) gpt
                 join pg_class c on c.oid = gpt.relid
                 join pg_namespace n on n.oid = c.relnamespace
                 join pg_attribute a on a.attrelid = c.oid
                 join pg_type t on t.oid = a.atttypid
-                left join pg_publication_tables pt
-                  on pt.pubname = p.pubname
-                 and pt.schemaname = n.nspname
-                 and pt.tablename = c.relname
                 where p.pubname = $1
                   and a.attnum > 0
                   and not a.attisdropped
                   and not a.attnotnull
                   and t.typcategory = 'A'
+                  -- Before PostgreSQL 18, NULL means that no publication
+                  -- column list was specified, so all ordinary columns apply.
                   and (
-                    cardinality(coalesce(pt.attnames, array[]::name[])) = 0
-                    or a.attname = any(pt.attnames)
+                    gpt.attrs is null
+                    or a.attnum = any(gpt.attrs::smallint[])
                   )
-                order by n.nspname, c.relname, a.attnum
-                limit 100
+                order by column_name
+                limit $2
                 "#,
             )
             .bind(&self.publication_name)
+            .bind(MAX_REPORTED_OBJECTS)
             .fetch_all(source_pool)
             .await?
         } else {
-            sqlx::query_as(
+            sqlx::query_scalar(
                 r#"
-                select n.nspname || '.' || c.relname, a.attname::text
+                select distinct
+                    format('%I.%I.%I', n.nspname, c.relname, a.attname) as column_name
                 from pg_publication p
                 cross join lateral pg_get_publication_tables(p.pubname) gpt
                 join pg_class c on c.oid = gpt.relid
@@ -90,11 +94,12 @@ impl Validator for NullableArrayValidator {
                   and not a.attisdropped
                   and not a.attnotnull
                   and t.typcategory = 'A'
-                order by n.nspname, c.relname, a.attnum
-                limit 100
+                order by column_name
+                limit $2
                 "#,
             )
             .bind(&self.publication_name)
+            .bind(MAX_REPORTED_OBJECTS)
             .fetch_all(source_pool)
             .await?
         };
@@ -105,7 +110,7 @@ impl Validator for NullableArrayValidator {
 
         let columns = nullable_arrays
             .iter()
-            .map(|(table, column)| format!("`{table}.{column}`"))
+            .map(|column| format!("`{column}`"))
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -113,15 +118,16 @@ impl Validator for NullableArrayValidator {
             NullableArrayBehavior::CoercesToEmpty => format!(
                 "BigQuery stores top-level NULL values as empty arrays in these array columns: \
                  {columns}.\n\nThe pipeline can start, but NULL and empty arrays become \
-                 indistinguishable in BigQuery. Make the source column `NOT NULL` if that \
-                 distinction matters."
+                 indistinguishable in BigQuery. Make each affected column in your database `NOT \
+                 NULL` if that distinction matters."
             ),
             NullableArrayBehavior::CannotEncode => format!(
                 "ClickHouse RowBinary cannot encode top-level NULL values for these array \
                  columns: {columns}.\n\nThe pipeline can start because non-NULL arrays are \
                  supported, but replication fails if an affected column contains a top-level NULL \
-                 value. Ensure producers always write an array value, or make the source column \
-                 `NOT NULL` after replacing existing NULL values. Empty arrays remain supported."
+                 value. Ensure producers always write an array value, or make each affected \
+                 column in your database `NOT NULL` after replacing existing NULL values. Empty \
+                 arrays remain supported."
             ),
         };
 

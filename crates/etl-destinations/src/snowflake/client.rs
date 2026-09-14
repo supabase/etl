@@ -9,7 +9,7 @@ use etl::{
 };
 use metrics::{counter, gauge, histogram};
 use tokio::{
-    sync::{Mutex, RwLock},
+    sync::{Mutex, OwnedMutexGuard, RwLock},
     time::{Instant, sleep},
 };
 use tracing::{debug, warn};
@@ -37,7 +37,19 @@ use crate::{
     },
 };
 
+/// Cached, successfully opened channels shared by client clones.
 type ChannelMap<C> = Arc<RwLock<HashMap<TableId, Arc<Mutex<ChannelHandle<C>>>>>>;
+
+/// Exclusive ownership of one table's setup or reset.
+///
+/// The table ID travels with the guard so preparation cannot accidentally use
+/// another table's gate. Initial copy retains it through metadata completion.
+pub(super) struct TableLifecycleGuard {
+    /// Table whose lifecycle is locked.
+    table_id: TableId,
+    /// Releases the stable per-table gate when the operation finishes.
+    _guard: OwnedMutexGuard<()>,
+}
 
 /// Process-local state carried between the two phases of a table-copy reset.
 ///
@@ -49,11 +61,15 @@ type ChannelMap<C> = Arc<RwLock<HashMap<TableId, Arc<Mutex<ChannelHandle<C>>>>>>
 /// [`Client::drop_detached_table_for_copy`] consumes the value outside that
 /// timeout to drop the Snowpipe channel and Snowflake table. This split keeps
 /// local draining and lock acquisition bounded without cancelling a remote
-/// drop whose outcome would then be unknown.
+/// drop whose outcome would then be unknown. The table lifecycle guard remains
+/// held through both phases, preventing setup from publishing a stale channel.
 ///
 /// This value does not block event admission. The caller must retain its
 /// [`etl::destination::TaskSetDrainGuard`] until the remote drop returns.
 pub(super) struct DetachedTableForCopy<C> {
+    /// Prevents setup from publishing a replacement before remote drop
+    /// finishes.
+    table: TableLifecycleGuard,
     /// Previously cached channel handle, when one existed in this process.
     channel: Option<Arc<Mutex<ChannelHandle<C>>>>,
     /// Snowflake table name to drop after retiring local state.
@@ -244,6 +260,8 @@ pub struct Client<T, C = RestStreamClient<T>> {
     schema: String,
     pipeline_id: PipelineId,
     channels: ChannelMap<C>,
+    /// Stable lifecycle gates retained across channel removal and recreation.
+    table_gates: Arc<Mutex<HashMap<TableId, Arc<Mutex<()>>>>>,
     pending_durability: Arc<Mutex<PendingDurabilityState>>,
 }
 
@@ -256,6 +274,7 @@ impl<T: TokenProvider, C: StreamClient> Clone for Client<T, C> {
             schema: self.schema.clone(),
             pipeline_id: self.pipeline_id,
             channels: Arc::clone(&self.channels),
+            table_gates: Arc::clone(&self.table_gates),
             pending_durability: Arc::clone(&self.pending_durability),
         }
     }
@@ -372,6 +391,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             schema,
             pipeline_id,
             channels: Arc::new(RwLock::new(HashMap::new())),
+            table_gates: Arc::new(Mutex::new(HashMap::new())),
             pending_durability: Arc::new(Mutex::new(PendingDurabilityState::default())),
         }
     }
@@ -386,14 +406,13 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.sql_client.table_exists(table_name).await
     }
 
-    /// Creates a table when needed and prepares it for initial-copy writes.
-    pub(super) async fn initialize_table(
-        &self,
-        table_id: TableId,
-        table_name: &str,
-        columns: &[ColumnSchema],
-    ) -> Result<()> {
-        self.prepare_channel(table_id, table_name, columns, true).await
+    /// Locks one table's setup/reset lifecycle without retaining the registry.
+    pub(super) async fn lock_table(&self, table_id: TableId) -> TableLifecycleGuard {
+        let gate = {
+            let mut gates = self.table_gates.lock().await;
+            Arc::clone(gates.entry(table_id).or_insert_with(|| Arc::new(Mutex::new(()))))
+        };
+        TableLifecycleGuard { table_id, _guard: gate.lock_owned().await }
     }
 
     /// Opens and validates an existing table for streaming writes.
@@ -403,30 +422,26 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         table_name: &str,
         columns: &[ColumnSchema],
     ) -> Result<()> {
-        self.prepare_channel(table_id, table_name, columns, false).await
+        if self.has_channel(table_id).await {
+            return Ok(());
+        }
+
+        let table = self.lock_table(table_id).await;
+        self.prepare_table(&table, table_name, columns, false).await
     }
 
-    /// Prepares one table and caches its validated channel.
-    #[allow(clippy::map_entry)]
-    async fn prepare_channel(
+    /// Prepares a table under its lifecycle guard, optionally creating it.
+    ///
+    /// The caller retains the guard through any associated metadata transition.
+    pub(super) async fn prepare_table(
         &self,
-        table_id: TableId,
+        table: &TableLifecycleGuard,
         table_name: &str,
         columns: &[ColumnSchema],
         create_if_missing: bool,
     ) -> Result<()> {
-        // Fast path: read lock, check if already set up.
-        let channels = self.channels.read().await;
-        if channels.contains_key(&table_id) {
-            return Ok(());
-        }
-        drop(channels);
-
-        // Slow path: hold write lock for the entire setup. This runs once
-        // per table per process lifetime, so blocking other tables briefly
-        // during startup is acceptable.
-        let mut channels = self.channels.write().await;
-        if channels.contains_key(&table_id) {
+        // Another caller may have completed setup while this one waited.
+        if self.has_channel(table.table_id).await {
             return Ok(());
         }
 
@@ -448,7 +463,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         handle.open().await?;
 
         // Persist table-channel mapping.
-        channels.insert(table_id, Arc::new(Mutex::new(handle)));
+        self.channels.write().await.insert(table.table_id, Arc::new(Mutex::new(handle)));
         Ok(())
     }
 
@@ -651,14 +666,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         table_id: TableId,
         table_name: &str,
     ) -> Result<DetachedTableForCopy<C>> {
-        let mut channels = self.channels.write().await;
+        // Event tasks must be drained before taking this gate, since they may
+        // need it to finish opening a channel. Never wait on it under a registry.
+        let table = self.lock_table(table_id).await;
         let mut pending = self.pending_durability.lock().await;
         pending.discard(table_id)?;
 
-        let channel = channels.remove(&table_id);
+        let channel = self.channels.write().await.remove(&table_id);
         pending.observe_metrics();
 
-        Ok(DetachedTableForCopy { channel, table_name: table_name.to_owned() })
+        Ok(DetachedTableForCopy { table, channel, table_name: table_name.to_owned() })
     }
 
     /// Drops the remote channel and table for previously detached local state.
@@ -666,7 +683,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         &self,
         detached: DetachedTableForCopy<C>,
     ) -> Result<()> {
-        let DetachedTableForCopy { channel, table_name } = detached;
+        let DetachedTableForCopy { table, channel, table_name } = detached;
 
         let drop_channel_result = if let Some(channel) = channel {
             let mut guard = channel.lock().await;
@@ -687,7 +704,9 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             Err(error) => return Err(error),
         }
 
-        self.sql_client.drop_table(&table_name).await
+        let result = self.sql_client.drop_table(&table_name).await;
+        drop(table);
+        result
     }
 
     /// Validates and refreshes the table's ingestion state after a schema
@@ -837,7 +856,34 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        future::{Future, pending},
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+        task::{Context, Poll, Waker},
+    };
+
     use super::*;
+
+    /// Polls a future once to check a deliberately blocked operation.
+    fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// Pauses each SQL request at authentication without making a network call.
+    #[derive(Default)]
+    struct PendingTokenProvider {
+        calls: AtomicUsize,
+    }
+
+    impl TokenProvider for PendingTokenProvider {
+        async fn get_token(&self) -> Result<String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            pending().await
+        }
+
+        async fn invalidate_token(&self) {}
+    }
 
     struct UnusedTokenProvider;
 
@@ -859,9 +905,8 @@ mod tests {
         }
     }
 
-    fn test_client() -> Client<UnusedTokenProvider, RestStreamClient<UnusedTokenProvider>> {
+    fn test_client<T: TokenProvider + 'static>(auth: Arc<T>) -> Client<T> {
         let config = Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
-        let auth = Arc::new(UnusedTokenProvider);
         let http = reqwest::Client::new();
         let sql_client =
             SqlClient::new(config.clone_without_credentials(), Arc::clone(&auth), http.clone());
@@ -1009,10 +1054,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn blocked_setup_does_not_block_other_table_setup() {
+        let auth = Arc::new(PendingTokenProvider::default());
+        let client = test_client(Arc::clone(&auth));
+        let mut first = Box::pin(client.prepare_existing_table(TableId::new(1), "FIRST", &[]));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+
+        let mut second = Box::pin(client.prepare_existing_table(TableId::new(2), "SECOND", &[]));
+        assert!(poll_once(second.as_mut()).is_pending());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn blocked_setup_does_not_block_ready_channel() {
+        let client = test_client(Arc::new(PendingTokenProvider::default()));
+        let ready_id = TableId::new(2);
+        let channel = Arc::new(Mutex::new(ChannelHandle::new(
+            Arc::clone(&client.stream_client),
+            client.pipeline_id,
+            client.database.clone(),
+            client.schema.clone(),
+            "READY".to_owned(),
+        )));
+        client.channels.write().await.insert(ready_id, channel);
+
+        let mut setup = Box::pin(client.prepare_existing_table(TableId::new(1), "FIRST", &[]));
+        assert!(poll_once(setup.as_mut()).is_pending());
+
+        let offset = OffsetToken::new(10.into(), 1);
+        let mut lookup = Box::pin(client.is_offset_committed(ready_id, &offset));
+        assert!(matches!(poll_once(lookup.as_mut()), Poll::Ready(Ok(false))));
+    }
+
+    #[tokio::test]
+    async fn same_table_setup_waits_and_cancellation_releases_gate() {
+        let auth = Arc::new(PendingTokenProvider::default());
+        let client = test_client(Arc::clone(&auth));
+        let table_id = TableId::new(1);
+        let other = client.clone();
+        let mut first = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
+        let mut second = Box::pin(other.prepare_existing_table(table_id, "TABLE", &[]));
+        assert!(poll_once(first.as_mut()).is_pending());
+        assert!(poll_once(second.as_mut()).is_pending());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+
+        drop(first);
+        assert!(poll_once(second.as_mut()).is_pending());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+        assert!(!client.has_channel(table_id).await);
+    }
+
+    #[tokio::test]
+    async fn failed_setup_remains_retryable() {
+        let client = test_client(Arc::new(UnusedTokenProvider));
+        let table_id = TableId::new(1);
+        for _ in 0..2 {
+            let error = client.prepare_existing_table(table_id, "TABLE", &[]).await.unwrap_err();
+            assert!(matches!(error, Error::Auth(_)));
+            assert!(!client.has_channel(table_id).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn waiting_setup_reuses_published_channel() {
+        let client = test_client(Arc::new(UnusedTokenProvider));
+        let table_id = TableId::new(1);
+        let table = client.lock_table(table_id).await;
+        let mut setup = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
+        assert!(poll_once(setup.as_mut()).is_pending());
+
+        // Model the first caller publishing while the second waits for its gate.
+        let channel = Arc::new(Mutex::new(ChannelHandle::new(
+            Arc::clone(&client.stream_client),
+            client.pipeline_id,
+            client.database.clone(),
+            client.schema.clone(),
+            "TABLE".to_owned(),
+        )));
+        client.channels.write().await.insert(table_id, Arc::clone(&channel));
+        drop(table);
+
+        setup.await.unwrap();
+        assert!(Arc::ptr_eq(&client.get_channel(table_id).await.unwrap(), &channel));
+    }
+
+    #[tokio::test]
+    async fn reset_waits_for_setup_and_blocks_reopening_during_remote_drop() {
+        let auth = Arc::new(PendingTokenProvider::default());
+        let client = test_client(Arc::clone(&auth));
+        let table_id = TableId::new(1);
+        let mut setup = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
+        assert!(poll_once(setup.as_mut()).is_pending());
+        let mut reset = Box::pin(client.detach_table_for_copy(table_id, "TABLE"));
+        assert!(poll_once(reset.as_mut()).is_pending());
+
+        drop(setup);
+        let detached = reset.await.unwrap();
+        assert!(!client.has_channel(table_id).await);
+        let mut reopen = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
+        assert!(poll_once(reopen.as_mut()).is_pending());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 1);
+
+        let mut remote_drop = Box::pin(client.drop_detached_table_for_copy(detached));
+        assert!(poll_once(remote_drop.as_mut()).is_pending());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+        assert!(poll_once(reopen.as_mut()).is_pending());
+        assert_eq!(auth.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn detach_table_for_copy_retires_channel_and_pending_target() {
         let table_id = TableId::new(1);
         let table_name = "TEST_TABLE";
-        let client = test_client();
+        let client = test_client(Arc::new(UnusedTokenProvider));
         let channel = Arc::new(Mutex::new(ChannelHandle::new(
             Arc::clone(&client.stream_client),
             client.pipeline_id,
@@ -1037,5 +1192,11 @@ mod tests {
         assert!(pending.is_empty());
         assert_eq!(pending.row_batches, 0);
         assert_eq!(pending.bytes, 0);
+        drop(pending);
+
+        let error = client.drop_detached_table_for_copy(detached).await.unwrap_err();
+        assert!(matches!(error, Error::Auth(_)));
+        let mut next_setup = Box::pin(client.lock_table(table_id));
+        assert!(poll_once(next_setup.as_mut()).is_ready());
     }
 }

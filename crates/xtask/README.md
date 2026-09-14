@@ -1,4 +1,34 @@
-# xtask — Chaos Testing CLI
+# `xtask`
+
+Workspace task runner for the [Supabase ETL](https://supabase.github.io/etl/)
+repository. Run commands with `cargo x` (an alias for `cargo xtask`).
+`cargo x --help` prints every command.
+
+## Local services
+
+From a fresh clone:
+
+```bash
+cargo x init
+```
+
+That starts Docker and databases. Then:
+
+```bash
+cargo x setup api && cargo x run api
+
+# or, ClickHouse by default:
+cargo x setup replicator
+cargo x seed
+cargo x run replicator
+```
+
+Generated configuration is gitignored. See
+[DEVELOPMENT.md](../../DEVELOPMENT.md).
+
+The rest of this page documents the `chaos` command family.
+
+## Chaos Testing
 
 Network chaos injection for Kubernetes, powered by [Chaos Mesh](https://chaos-mesh.org/).
 

@@ -1,6 +1,8 @@
 //! SQL accessors for durable table replication state.
 
-use sqlx::{PgExecutor, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow};
+use sqlx::{
+    PgExecutor, Postgres, Transaction, Type, postgres::types::Oid as SqlxTableId, prelude::FromRow,
+};
 
 use crate::schema::TableId;
 
@@ -176,17 +178,19 @@ pub async fn rollback_table_state(
     Ok(None)
 }
 
-/// Resets table state to initial state.
+/// Replaces table state history with one fresh state within a transaction.
 ///
-/// Removes all existing state entries for the table (including history) and
-/// creates a new Init entry, effectively restarting replication from scratch.
-/// Destination table metadata and schemas are preserved for use on restart.
-pub async fn reset_table_state(
-    conn: &mut sqlx::PgConnection,
+/// Destination table metadata and stored schemas are intentionally preserved
+/// so callers can use them to delete the existing destination object before a
+/// fresh copy. Requiring an explicit transaction lets callers replace multiple
+/// table states as one atomic operation.
+pub async fn replace_table_state_raw(
+    txn: &mut Transaction<'_, Postgres>,
     pipeline_id: i64,
     table_id: TableId,
+    state: StoredTableStateType,
+    metadata: serde_json::Value,
 ) -> sqlx::Result<StoredTableStateRow> {
-    // Delete all existing entries for this pipeline and table
     sqlx::query(
         r#"
         delete from etl.replication_state
@@ -195,12 +199,10 @@ pub async fn reset_table_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .execute(&mut *conn)
+    .execute(&mut **txn)
     .await?;
 
-    // Insert a new `Init` state entry and return it
-    let metadata = serde_json::json!({"type": "init"});
-    let row: StoredTableStateRow = sqlx::query_as(
+    let row = sqlx::query_as(
         r#"
         insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
         values ($1, $2, $3, $4, null, true)
@@ -209,9 +211,9 @@ pub async fn reset_table_state(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .bind(StoredTableStateType::Init)
+    .bind(state)
     .bind(metadata)
-    .fetch_one(&mut *conn)
+    .fetch_one(&mut **txn)
     .await?;
 
     Ok(row)

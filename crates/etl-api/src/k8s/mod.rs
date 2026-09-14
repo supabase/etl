@@ -16,6 +16,8 @@ mod base;
 pub mod core;
 pub mod http;
 mod maintenance;
+mod resources;
+mod restart;
 pub mod source_tls;
 
 pub use base::*;

@@ -1,13 +1,17 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
-use etl_config::shared::DestinationKind;
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use thiserror::Error;
 
 use crate::configs::{
     destination::StoredDestinationConfig,
     log::LogLevel,
-    pipeline::{DuckLakeMaintenanceConfig, ReplicatorResourcesConfig},
+    pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
 };
+
+/// Maximum time to wait for a Kubernetes deletion operation to complete.
+pub(crate) const RESOURCE_DELETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Errors from Kubernetes operations.
 ///
@@ -26,6 +30,21 @@ pub enum K8sError {
     /// server.
     #[error("An error occurred with kube when dealing with K8s: {0}")]
     Kube(#[from] kube::Error),
+    /// A StatefulSet restart could not be initiated before its deadline.
+    #[error("Timed out initiating restart of Kubernetes StatefulSet '{name}'")]
+    StatefulSetRestartTimeout {
+        /// StatefulSet name.
+        name: String,
+    },
+    /// A restart encountered missing identity metadata or an unexpected pod
+    /// owner.
+    #[error("Invalid Kubernetes {kind} resource '{name}' encountered during restart")]
+    InvalidRestartResource {
+        /// Kubernetes resource kind.
+        kind: &'static str,
+        /// Kubernetes resource name.
+        name: String,
+    },
     /// A Kubernetes resource remained present after deletion was requested.
     #[error(
         "Timed out waiting for Kubernetes {kind} resource '{name}' to be deleted after \
@@ -41,7 +60,7 @@ pub enum K8sError {
     },
 }
 
-/// A file to be stored in a [`ConfigMap`] that is used to configure a
+/// A file to be stored in a Kubernetes `ConfigMap` that is used to configure a
 /// replicator.
 ///
 /// Each file becomes a key-value pair in the config map's data section.
@@ -73,13 +92,13 @@ pub struct DuckLakeMaintenanceResourceConfig {
     pub policy: DuckLakeMaintenancePolicy,
 }
 
-/// Replicator StatefulSet materialization input.
+/// Input shared by the replicator StatefulSet and VPA materializers.
 #[derive(Debug, Clone)]
-pub struct ReplicatorStatefulSetConfig {
+pub struct ReplicatorWorkloadConfig {
     /// Image for the replicator container.
     pub replicator_image: String,
-    /// Optional resource overrides.
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    /// Optional pipeline-level replicator resource override.
+    pub replicator_resource_override: Option<PipelineReplicatorResourceOverrideConfig>,
     /// Destination type used to select destination-specific env/secrets.
     pub destination_type: DestinationType,
     /// DuckLake maintenance policy.
@@ -112,20 +131,6 @@ pub enum DestinationType {
         /// secret entry.
         passphrase_secret_required: bool,
     },
-}
-
-impl DestinationType {
-    /// Returns the product destination kind represented by this Kubernetes
-    /// type.
-    pub const fn kind(self) -> DestinationKind {
-        match self {
-            DestinationType::BigQuery => DestinationKind::BigQuery,
-            DestinationType::Iceberg => DestinationKind::Iceberg,
-            DestinationType::ClickHouse { .. } => DestinationKind::ClickHouse,
-            DestinationType::Ducklake => DestinationKind::Ducklake,
-            DestinationType::Snowflake { .. } => DestinationKind::Snowflake,
-        }
-    }
 }
 
 impl From<&StoredDestinationConfig> for DestinationType {
@@ -205,6 +210,10 @@ pub enum PodStatus {
 /// Methods use server-side apply patches to provide idempotent create-or-update
 /// semantics where possible. All operations target the data-plane namespace
 /// unless otherwise specified.
+///
+/// Deletion methods accept `wait`: false returns after Kubernetes accepts
+/// deletion; true waits for absence with a bounded timeout. Already absent
+/// resources succeed.
 #[async_trait]
 pub trait K8sClient: Send + Sync {
     /// Creates or updates the Postgres password secret for a replicator.
@@ -266,27 +275,47 @@ pub trait K8sClient: Send + Sync {
     /// Deletes the Postgres password secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_postgres_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    async fn delete_postgres_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Deletes the ClickHouse credentials for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_clickhouse_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    async fn delete_clickhouse_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Deletes the BigQuery service account secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_bigquery_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    async fn delete_bigquery_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Deletes the Iceberg credentials secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_iceberg_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    async fn delete_iceberg_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Deletes the DuckLake credentials secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_ducklake_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    async fn delete_ducklake_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Creates or updates the Snowflake credentials secret for a replicator.
     ///
@@ -303,9 +332,13 @@ pub trait K8sClient: Send + Sync {
     /// Deletes the Snowflake credentials secret for a replicator.
     ///
     /// Does nothing if the secret does not exist.
-    async fn delete_snowflake_secret(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    async fn delete_snowflake_secret(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
-    /// Creates or updates the replicator configuration [`ConfigMap`].
+    /// Creates or updates the replicator configuration `ConfigMap`.
     ///
     /// Accepts a list of files to store in the config map. Each file's filename
     /// becomes a key in the config map's data section with the content as its
@@ -317,10 +350,14 @@ pub trait K8sClient: Send + Sync {
         files: Vec<ReplicatorConfigMapFile>,
     ) -> Result<(), K8sError>;
 
-    /// Deletes the replicator configuration [`ConfigMap`].
+    /// Deletes the replicator configuration `ConfigMap`.
     ///
     /// Does nothing if the config map does not exist.
-    async fn delete_replicator_config_map(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    async fn delete_replicator_config_map(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Creates or updates the replicator `StatefulSet`.
     ///
@@ -328,38 +365,55 @@ pub trait K8sClient: Send + Sync {
     /// methods. Applying this resource intentionally changes the pod template
     /// restart annotation so the StatefulSet recreates its pods. This ensures
     /// the replicator process observes newly materialized mounted config and
-    /// secret-backed environment values.
+    /// secret-backed environment values. This does not wait for readiness of
+    /// the replacement.
     async fn create_or_update_replicator_stateful_set(
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
-        config: ReplicatorStatefulSetConfig,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError>;
 
     /// Creates or updates the Vertical Pod Autoscaler for the replicator
     /// `StatefulSet`.
+    ///
+    /// A pipeline request override is used as both bounds for that resource.
+    /// Other configured autoscaling bounds are independent of the StatefulSet
+    /// startup allocation. When autoscaling is omitted, the corresponding
+    /// startup allocation is used as both VPA bounds.
     async fn create_or_update_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,
         identity: &PipelineRuntimeIdentity,
+        workload_config: &ReplicatorWorkloadConfig,
     ) -> Result<(), K8sError>;
 
     /// Deletes the replicator `StatefulSet`.
     ///
-    /// Does nothing if the stateful set does not exist.
-    async fn delete_replicator_stateful_set(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    /// With `wait`, waits for both the StatefulSet and its Pods to disappear.
+    /// Does nothing if the workload does not exist.
+    async fn delete_replicator_stateful_set(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Deletes the replicator Vertical Pod Autoscaler.
     ///
-    /// Does nothing if the autoscaler does not exist.
+    /// With `wait`, waits until the Kubernetes API reports the autoscaler
+    /// absent. Does nothing if the autoscaler does not exist.
     async fn delete_replicator_vertical_pod_autoscaler(
         &self,
         resource_prefix: &str,
+        wait: bool,
     ) -> Result<(), K8sError>;
 
-    /// Returns whether the replicator `StatefulSet` exists.
-    async fn replicator_stateful_set_exists(&self, resource_prefix: &str)
-    -> Result<bool, K8sError>;
+    /// Returns whether the replicator `StatefulSet` exists and is not being
+    /// deleted.
+    async fn replicator_stateful_set_is_active(
+        &self,
+        resource_prefix: &str,
+    ) -> Result<bool, K8sError>;
 
     /// Creates or updates the DuckLake maintenance CR.
     async fn create_or_update_ducklake_maintenance(
@@ -369,8 +423,13 @@ pub trait K8sClient: Send + Sync {
         config: DuckLakeMaintenanceResourceConfig,
     ) -> Result<(), K8sError>;
 
-    /// Deletes the DuckLake maintenance CR and waits until it is absent.
-    async fn delete_ducklake_maintenance(&self, resource_prefix: &str) -> Result<(), K8sError>;
+    /// Deletes the DuckLake maintenance CR, optionally waiting until it is
+    /// absent.
+    async fn delete_ducklake_maintenance(
+        &self,
+        resource_prefix: &str,
+        wait: bool,
+    ) -> Result<(), K8sError>;
 
     /// Retrieves the current status of a replicator pod.
     ///

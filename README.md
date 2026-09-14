@@ -64,8 +64,8 @@ Supabase ETL replicates each table in two phases:
 
 1. **Initial sync:** Copy the existing rows selected by the publication, then
    catch up changes that occurred while the copy was running.
-2. **Ongoing replication:** Capture new inserts, updates, deletes, and truncates,
-   then deliver those changes as ordered events.
+2. **Ongoing replication:** Capture subsequent inserts, updates, deletes, and
+   truncates, then deliver those changes as ordered events.
 
 Across both phases, a store persists checkpoints, schemas, destination
 metadata, and table state so replication can recover safely after a restart.
@@ -105,17 +105,33 @@ tokio = { version = "1", features = ["full"] }
 - **Recovery-aware:** Persist checkpoints and table state for safe restarts and
   at-least-once delivery.
 
+## Independent Benchmark
+
+**~33× lower tail latency. ~125× smaller measured runtime memory footprint.**
+Compared with Debezium Server 3.1.3.Final in Hardbyte's
+[independent CDC benchmark](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady):
+**26 ms vs. 848 ms** and **13 MB vs. 1,629 MB**, at 200 source changes/s
+across four fast HTTP consumers.
+
+Tested ETL `d206d66e` (July 2026) with a custom `HttpDestination` and
+`MemoryStore`. Results compare specific configurations: versions, polling,
+batching, destination, store, workload, and deployment all affect performance.
+See [benchmark details](https://supabase.github.io/etl/reference/benchmarks/)
+for versions, measurement methodology, and configuration differences.
+
 ## [Destinations](https://supabase.github.io/etl/reference/destinations/)
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `bigquery` | Google BigQuery | Stable |
 | `clickhouse` | ClickHouse | In progress |
+| `bigquery` | Google BigQuery | Stable |
 | `ducklake` | DuckLake | In progress |
 | `snowflake` | Snowflake | In progress |
 | `iceberg` | Apache Iceberg | Deprecated |
 
-BigQuery is the stable, recommended default. See the
+ClickHouse is the fastest way to start locally: `cargo x init` runs it, and
+`cargo x setup replicator` configures it by default. BigQuery is the most
+mature cloud destination. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
 for maturity and limitations, and the
 [`etl-examples` guide](crates/etl-examples/README.md) for runnable examples.
@@ -132,8 +148,15 @@ for the complete setup and production guidance.
 
 ## Development
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for local setup, migrations, formatting,
-linting, and tests. The workspace uses Rust 1.95.0 from `rust-toolchain.toml`.
+```bash
+cargo x init              # Docker, databases, migrations
+cargo x setup api && cargo x run api
+cargo x setup replicator && cargo x seed && cargo x run replicator
+```
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) to start the replicator or API, pick a
+destination, and run tests. The workspace uses Rust 1.95.0 from
+`rust-toolchain.toml`.
 
 ## Contributing
 

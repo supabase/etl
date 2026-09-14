@@ -91,7 +91,7 @@ impl TestSnowflakeArgs {
         eprintln!("{GREEN}❄️  running Snowflake destination integration tests.{RESET}");
         let tests = CargoFeatureSelection::new(
             true,
-            vec!["snowflake".to_owned(), "test-utils".to_owned()],
+            vec!["snowflake".to_owned(), "test-utils".to_owned(), "tls-rustls-ring".to_owned()],
             vec!["etl-destinations".to_owned()],
         )
         .apply_to(

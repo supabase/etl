@@ -2,6 +2,7 @@ pub mod client;
 mod core;
 mod encoding;
 mod metrics;
+mod network;
 mod schema;
 mod sql;
 #[cfg(feature = "test-utils")]

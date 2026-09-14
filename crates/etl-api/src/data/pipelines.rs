@@ -1,10 +1,14 @@
 use std::ops::DerefMut;
 
+use etl::store::TableState;
 use etl_postgres::{
+    publications::publication_table_ids_query,
     slots,
     store::{destination_table_metadata, health, schema, table_state},
 };
-use sqlx::{FromRow, PgConnection, PgExecutor, PgPool, PgTransaction};
+use sqlx::{
+    AssertSqlSafe, FromRow, PgConnection, PgExecutor, PgPool, PgTransaction, postgres::types::Oid,
+};
 use thiserror::Error;
 
 use crate::{
@@ -32,6 +36,59 @@ use crate::{
 /// area for breaking changes to the `etl` schema in the source database since
 /// only one pipeline will use it.
 pub const MAX_PIPELINES_PER_TENANT: i64 = 1;
+
+/// Returns published tables that would perform initial sync on restart.
+///
+/// Expands publication membership using the replicator's schema and partition
+/// rules, then joins current state for this pipeline. New tables start in
+/// [`TableState::Init`]. Copy selection does not affect this decision: skipping
+/// existing rows still requires table sync.
+///
+/// The publication must come from the configuration used for the replacement.
+/// This observation does not lock membership or replication progress; either
+/// can change before the replicator starts.
+pub(crate) async fn read_pipeline_tables_to_sync(
+    pool: &PgPool,
+    pipeline_id: i64,
+    publication_name: &str,
+) -> Result<Vec<u32>, PipelineError> {
+    let query = format!(
+        r#"
+        with publication_tables as ({})
+        select publication_table.oid, state.id, state.metadata
+        from publication_tables publication_table
+        left join etl.replication_state state
+            on state.table_id = publication_table.oid
+            and state.pipeline_id = $1
+            and state.is_current = true
+        "#,
+        publication_table_ids_query(publication_name),
+    );
+    let rows =
+        sqlx::query_as::<_, (Oid, Option<i64>, Option<serde_json::Value>)>(AssertSqlSafe(query))
+            .bind(pipeline_id)
+            .fetch_all(pool)
+            .await?;
+
+    let mut tables_to_sync = Vec::new();
+    for (table_id, state_id, metadata) in rows {
+        let state = if state_id.is_some() {
+            let metadata = metadata.ok_or(PipelineError::MissingTableState)?;
+            serde_json::from_value::<TableState>(metadata)
+                .map_err(PipelineError::InvalidTableState)?
+        } else {
+            // A newly published table has no stored state yet. Treat it as Init so
+            // its first initial sync triggers a VPA reset before the worker starts.
+            TableState::Init
+        };
+
+        if state.as_type().would_perform_table_sync() {
+            tables_to_sync.push(table_id.0);
+        }
+    }
+
+    Ok(tables_to_sync)
+}
 
 #[derive(Debug, Clone)]
 pub struct Pipeline {

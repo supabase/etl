@@ -64,7 +64,7 @@ pub(super) fn run_migrations(args: &[String]) -> Result<()> {
 }
 
 /// Runs database migrations with extra environment variables.
-pub(super) fn run_migrations_with_env<'a>(
+pub(crate) fn run_migrations_with_env<'a>(
     args: &[String],
     envs: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Result<()> {

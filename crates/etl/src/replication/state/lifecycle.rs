@@ -12,7 +12,7 @@ use crate::{
     schema::{IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableSchema},
 };
 
-/// Compact durable form of [`crate::replication::TableDecodingState`] stored at
+/// Compact durable form of `crate::replication::TableDecodingState` stored at
 /// `SyncDone`.
 ///
 /// The three fields are serialized together inside
@@ -260,7 +260,7 @@ impl TableState {
     /// Returns the state type enum and serialized JSON metadata for persisting
     /// to the state store. Returns an error for in-memory-only states that
     /// cannot be persisted.
-    pub(crate) fn to_storage_format(&self) -> EtlResult<(StoredTableStateType, serde_json::Value)> {
+    pub fn to_storage_format(&self) -> EtlResult<(StoredTableStateType, serde_json::Value)> {
         let state_type = self.as_type();
         if !state_type.should_store() {
             bail!(
@@ -703,18 +703,20 @@ mod tests {
         let completed_states = [TableStateType::SyncDone, TableStateType::Ready];
         assert!(completed_states.iter().all(TableStateType::has_completed_table_sync));
 
-        let states_that_repeat_copy = [
+        let states_that_repeat_sync = [
             TableStateType::Init,
             TableStateType::DataSync,
             TableStateType::FinishedCopy,
             TableStateType::SyncWait,
             TableStateType::Catchup,
         ];
-        assert!(states_that_repeat_copy.iter().all(TableStateType::would_perform_table_sync));
+        assert!(states_that_repeat_sync.iter().all(TableStateType::would_perform_table_sync));
 
-        let states_that_preserve_copy =
+        let states_that_do_not_repeat_sync =
             [TableStateType::SyncDone, TableStateType::Ready, TableStateType::Errored];
-        assert!(states_that_preserve_copy.iter().all(|state| !state.would_perform_table_sync()));
+        assert!(
+            states_that_do_not_repeat_sync.iter().all(|state| !state.would_perform_table_sync())
+        );
     }
 
     #[test]

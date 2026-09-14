@@ -1,6 +1,7 @@
+use etl::store::TableState;
 use etl_api::{
     configs::{
-        pipeline::{ReplicatorResourcesConfig, UpdateApiPipelineConfig},
+        pipeline::{PipelineReplicatorResourceOverrideConfig, UpdateApiPipelineConfig},
         update::UpdateField,
     },
     k8s::PodStatus,
@@ -9,8 +10,8 @@ use etl_api::{
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
-            RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, RollbackType,
-            SimpleTableState, TableStatus, UpdatePipelineRequest, UpdatePipelineVersionRequest,
+            RollbackTablesRequest, RollbackTablesResponse, RollbackTablesTarget, SimpleTableState,
+            TableStatus, UpdatePipelineRequest, UpdatePipelineVersionRequest,
             ValidatePipelineRequest, ValidatePipelineResponse,
         },
     },
@@ -21,7 +22,7 @@ use etl_config::shared::{
     BatchConfig, MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig,
     ReplicationSlotConfig, TableSyncCopyConfig,
 };
-use etl_postgres::sqlx::test_utils::drop_pg_database;
+use etl_postgres::{sqlx::test_utils::drop_pg_database, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::quote_identifier;
 use reqwest::StatusCode;
@@ -134,6 +135,10 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     // We run the migrations to create all the tables used by `etl`.
     run_etl_migrations_on_source_database(&source_db_config).await;
 
+    // Match the default pipeline publication; tests add their tables explicitly.
+    source_db_pool.execute("create schema test").await.unwrap();
+    source_db_pool.execute("create publication publication").await.unwrap();
+
     (app, tenant_id, pipeline_id, source_db_pool, source_db_config)
 }
 
@@ -145,7 +150,7 @@ async fn create_table_with_state_chain(
     table_name: &str,
     state_chain: &[(&str, &str)],
 ) -> Oid {
-    let table_oid = create_test_table(source_db_pool, table_name).await;
+    let table_oid = create_published_test_table(source_db_pool, table_name).await;
 
     let mut prev_id: Option<i64> = None;
     for (i, (state, metadata)) in state_chain.iter().enumerate() {
@@ -181,7 +186,7 @@ async fn create_tables_with_states(
     let mut results = Vec::new();
 
     for (table_name, state, metadata) in tables {
-        let table_oid = create_test_table(source_db_pool, table_name).await;
+        let table_oid = create_published_test_table(source_db_pool, table_name).await;
 
         sqlx::query(
             "insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, \
@@ -209,7 +214,6 @@ async fn test_rollback(
     tenant_id: &str,
     pipeline_id: i64,
     table_oid: Oid,
-    rollback_type: RollbackType,
     expected_status: StatusCode,
 ) -> Option<RollbackTablesResponse> {
     let response = app
@@ -218,7 +222,6 @@ async fn test_rollback(
             pipeline_id,
             &RollbackTablesRequest {
                 target: RollbackTablesTarget::SingleTable { table_id: table_oid.0 },
-                rollback_type,
             },
         )
         .await;
@@ -228,6 +231,20 @@ async fn test_rollback(
     if expected_status.is_success() { Some(response.json().await.unwrap()) } else { None }
 }
 
+/// Creates a table and explicitly adds it to the pipeline publication.
+async fn create_published_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
+    let table_oid = create_test_table(source_db_pool, table_name).await;
+    sqlx::query(AssertSqlSafe(format!(
+        "alter publication publication add table test.{}",
+        quote_identifier(table_name)
+    )))
+    .execute(source_db_pool)
+    .await
+    .unwrap();
+    table_oid
+}
+
+/// Creates a table without changing publication membership.
 async fn create_test_table(source_db_pool: &PgPool, table_name: &str) -> Oid {
     sqlx::query("create schema if not exists test").execute(source_db_pool).await.unwrap();
 
@@ -319,10 +336,9 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
     let destination_id = create_destination(&app, tenant_id).await;
 
     let mut config = new_pipeline_config();
-    config.replicator_resources = Some(ReplicatorResourcesConfig {
+    config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(750),
         memory_request_mib: Some(1536),
-        ..ReplicatorResourcesConfig::default()
     });
 
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
@@ -336,21 +352,19 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
         response.json().await.expect("failed to deserialize response");
     assert_eq!(
         response.config.replicator_resources,
-        Some(ReplicatorResourcesConfig {
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 
     let response = app.start_pipeline(tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        k8s_state.last_replicator_resources().await,
-        Some(ReplicatorResourcesConfig {
+        k8s_state.last_replicator_resource_override().await,
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(750),
             memory_request_mib: Some(1536),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -855,10 +869,9 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
 
     let create_calls_before = k8s_state.create_calls();
     let mut updated_pipeline_config = updated_pipeline_config();
-    updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
+    updated_pipeline_config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(900),
         memory_request_mib: Some(2048),
-        ..ReplicatorResourcesConfig::default()
     });
     let update_request = UpdatePipelineRequest {
         source_id,
@@ -871,17 +884,16 @@ async fn updating_a_running_pipeline_reapplies_replicator_resources() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(k8s_state.create_calls() > create_calls_before);
     assert_eq!(
-        k8s_state.last_replicator_resources().await,
-        Some(ReplicatorResourcesConfig {
+        k8s_state.last_replicator_resource_override().await,
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(900),
             memory_request_mib: Some(2048),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn updating_a_running_pipeline_resets_vpa_when_table_copy_will_repeat() {
+async fn updating_a_running_pipeline_resets_vpa_when_table_sync_will_repeat() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -913,6 +925,7 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     init_test_tracing();
     let k8s_state = MockK8sState::default();
     k8s_state.set_pod_status(PodStatus::Stopped).await;
+    k8s_state.set_stateful_set_active(false);
     let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
     create_default_image(&app).await;
     let tenant_id = &create_tenant(&app).await;
@@ -926,10 +939,9 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
     let pipeline_id = response.id;
 
     let mut updated_pipeline_config = updated_pipeline_config();
-    updated_pipeline_config.replicator_resources = Some(ReplicatorResourcesConfig {
+    updated_pipeline_config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(333),
         memory_request_mib: Some(444),
-        ..ReplicatorResourcesConfig::default()
     });
     let update_request = UpdatePipelineRequest {
         source_id,
@@ -941,17 +953,16 @@ async fn updating_a_stopped_pipeline_only_persists_replicator_resources() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(k8s_state.create_calls(), 0);
-    assert_eq!(k8s_state.last_replicator_resources().await, None);
+    assert_eq!(k8s_state.last_replicator_resource_override().await, None);
 
     let response = app.read_pipeline(tenant_id, pipeline_id).await;
     let response: ReadPipelineResponse =
         response.json().await.expect("failed to deserialize response");
     assert_eq!(
         response.config.replicator_resources,
-        Some(ReplicatorResourcesConfig {
+        Some(PipelineReplicatorResourceOverrideConfig {
             cpu_request_millicores: Some(333),
             memory_request_mib: Some(444),
-            ..ReplicatorResourcesConfig::default()
         })
     );
 }
@@ -966,10 +977,9 @@ async fn invalid_replicator_resources_are_rejected() {
     let destination_id = create_destination(&app, tenant_id).await;
 
     let mut config = new_pipeline_config();
-    config.replicator_resources = Some(ReplicatorResourcesConfig {
+    config.replicator_resources = Some(PipelineReplicatorResourceOverrideConfig {
         cpu_request_millicores: Some(0),
         memory_request_mib: Some(100),
-        ..ReplicatorResourcesConfig::default()
     });
     let pipeline = CreatePipelineRequest { source_id, destination_id, config };
 
@@ -1387,6 +1397,7 @@ async fn pipeline_version_update_skips_k8s_reconcile_when_pipeline_is_stopped() 
     // Arrange
     let k8s_state = MockK8sState::default();
     k8s_state.set_pod_status(PodStatus::Stopped).await;
+    k8s_state.set_stateful_set_active(false);
     let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
     let tenant_id = create_tenant(&app).await;
     let source_id = create_source(&app, &tenant_id).await;
@@ -1545,27 +1556,41 @@ async fn a_running_pipeline_can_be_restarted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restarting_pipeline_resets_vpa_when_table_copy_will_repeat() {
+async fn restarting_pipeline_resets_vpa_when_table_sync_will_repeat() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
     create_tables_with_states(
         &source_db_pool,
         pipeline_id,
-        &[("test_users", "data_sync", r#"{"type": "data_sync"}"#)],
+        &[("test_users", "init", r#"{"type": "init"}"#)],
     )
     .await;
 
-    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    // Finishing the copy does not complete initial sync; catchup must also finish.
+    for state in ["init", "data_sync", "finished_copy"] {
+        sqlx::query(
+            "update etl.replication_state set state = $1::text::etl.table_state, metadata = \
+             jsonb_build_object('type', $1::text) where pipeline_id = $2",
+        )
+        .bind(state)
+        .bind(pipeline_id)
+        .execute(&source_db_pool)
+        .await
+        .unwrap();
+        let delete_calls_before = app.k8s_state.vpa_delete_calls();
 
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+        let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(app.k8s_state.vpa_delete_calls() - delete_calls_before, 1);
+    }
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn restarting_pipeline_preserves_vpa_when_no_table_copy_will_repeat() {
+async fn restarting_pipeline_preserves_vpa_when_no_table_sync_will_repeat() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1589,6 +1614,343 @@ async fn restarting_pipeline_preserves_vpa_when_no_table_copy_will_repeat() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
 
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_a_new_explicitly_published_table() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool
+        .execute("create publication publication for table test.test_users")
+        .await
+        .unwrap();
+
+    // An unrelated new table must not reset the VPA until it joins this
+    // publication.
+    create_test_table(&source_db_pool, "test_events").await;
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    source_db_pool
+        .execute("alter publication publication add table test.test_events")
+        .await
+        .unwrap();
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_a_new_table_in_a_published_schema() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let server_version_num: i32 =
+        sqlx::query_scalar("select current_setting('server_version_num')::int")
+            .fetch_one(&source_db_pool)
+            .await
+            .unwrap();
+    if server_version_num < POSTGRES_15 {
+        drop_pg_database(&source_db_config).await;
+        return;
+    }
+
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool
+        .execute("create publication publication for tables in schema test")
+        .await
+        .unwrap();
+    create_test_table(&source_db_pool, "test_events").await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_a_new_table_in_an_all_table_publication() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool.execute("create publication publication for all tables").await.unwrap();
+    sqlx::query(
+        "insert into etl.replication_state (pipeline_id, table_id, state, metadata) select $1, \
+         relid, 'ready', '{\"type\":\"ready\"}'::jsonb from \
+         pg_get_publication_tables('publication')",
+    )
+    .bind(pipeline_id)
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    create_test_table(&source_db_pool, "test_users").await;
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_for_published_tables_without_any_state() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_published_test_table(&source_db_pool, "test_users").await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_for_sync_states_outside_the_publication() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[
+            ("test_users", "ready", r#"{"type": "ready"}"#),
+            ("test_events", "data_sync", r#"{"type": "data_sync"}"#),
+        ],
+    )
+    .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+    source_db_pool
+        .execute("create publication publication for table test.test_users")
+        .await
+        .unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_uses_only_current_state_for_its_pipeline() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[("data_sync", r#"{"type": "data_sync"}"#), ("ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    // A different pipeline's completed sync cannot suppress this pipeline's sync.
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id + 1,
+        &[("test_events", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_when_a_published_table_is_recreated() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let tables = create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    source_db_pool.execute("drop table test.test_users").await.unwrap();
+    let new_table_id = create_published_test_table(&source_db_pool, "test_users").await;
+    assert_ne!(tables[0].0, new_table_id);
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_respects_partition_root_publication_settings() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    source_db_pool
+        .execute("create table test.test_events (id int primary key) partition by range (id)")
+        .await
+        .unwrap();
+    source_db_pool
+        .execute(
+            "create table test.test_events_1 partition of test.test_events for values from (0) to \
+             (100)",
+        )
+        .await
+        .unwrap();
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_events", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    source_db_pool
+        .execute("alter publication publication set (publish_via_partition_root = true)")
+        .await
+        .unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    // Publishing leaves exposes a table without state even though its root is
+    // ready.
+    source_db_pool
+        .execute("alter publication publication set (publish_via_partition_root = false)")
+        .await
+        .unwrap();
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 1);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_resets_vpa_even_when_table_copy_is_skipped() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "ready", r#"{"type": "ready"}"#)],
+    )
+    .await;
+    let new_table_id = create_published_test_table(&source_db_pool, "test_events").await;
+    let pipeline = app.read_pipeline(&tenant_id, pipeline_id).await;
+    let pipeline: ReadPipelineResponse = pipeline.json().await.unwrap();
+
+    // Both global and per-table copy exclusions still require initial sync.
+    for table_sync_copy in [
+        TableSyncCopyConfig::SkipAllTables,
+        TableSyncCopyConfig::SkipTables { table_ids: vec![new_table_id.0] },
+    ] {
+        let response = app
+            .update_pipeline(
+                &tenant_id,
+                pipeline_id,
+                &UpdatePipelineRequest {
+                    source_id: pipeline.source_id,
+                    destination_id: pipeline.destination_id,
+                    config: UpdateApiPipelineConfig {
+                        table_sync_copy: UpdateField::Set(table_sync_copy),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let delete_calls_before = app.k8s_state.vpa_delete_calls();
+
+        let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(app.k8s_state.vpa_delete_calls() - delete_calls_before, 1);
+    }
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_when_publication_inspection_fails() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_tables_with_states(
+        &source_db_pool,
+        pipeline_id,
+        &[("test_users", "data_sync", r#"{"type": "data_sync"}"#)],
+    )
+    .await;
+    source_db_pool.execute("drop publication publication").await.unwrap();
+
+    let response = app.restart_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_pipeline_preserves_vpa_when_source_lock_times_out() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    create_published_test_table(&source_db_pool, "test_users").await;
+
+    // Hold the lock until the source connection's lock timeout cancels inspection.
+    let mut transaction = source_db_pool.begin().await.unwrap();
+    sqlx::query("lock table etl.replication_state in access exclusive mode")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let create_calls_before = app.k8s_state.create_calls();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        app.restart_pipeline(&tenant_id, pipeline_id),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(app.k8s_state.create_calls() > create_calls_before);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+
+    transaction.rollback().await.unwrap();
     drop_pg_database(&source_db_config).await;
 }
 
@@ -1641,6 +2003,7 @@ async fn a_stopped_pipeline_cannot_be_restarted() {
     init_test_tracing();
     let k8s_state = MockK8sState::default();
     k8s_state.set_pod_status(PodStatus::Stopped).await;
+    k8s_state.set_stateful_set_active(false);
     let app = spawn_test_app_with_k8s_state(None, k8s_state.clone()).await;
     create_default_image(&app).await;
     let tenant_id = create_tenant(&app).await;
@@ -1683,7 +2046,8 @@ async fn an_existing_pipeline_can_be_stopped() {
     let response = app.stop_pipeline(tenant_id, pipeline_id).await;
 
     // Assert
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(!app.k8s_state.waited_for_deletion());
     assert_eq!(k8s_state.vpa_delete_calls(), 1);
 }
 
@@ -1707,7 +2071,8 @@ async fn all_pipelines_can_be_stopped() {
     let response = app.stop_all_pipelines(tenant_id).await;
 
     // Assert
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(!app.k8s_state.waited_for_deletion());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1778,50 +2143,62 @@ async fn pipeline_replication_status_returns_table_states_and_names() {
     drop_pg_database(&source_db_config).await;
 }
 
+/// Reset accepts terminal errors without requiring a previous state.
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_tables_succeeds_for_any_error_type() {
+async fn rollback_tables_without_history_resets_no_retry_error() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create a state chain with a previous state so rollback has something to
-    // rollback to
     let table_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
         "test_users",
-        &[
-            ("ready", r#"{"type": "ready"}"#),
-            (
-                "errored",
-                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "no_retry"}}"#,
-            ),
-        ],
+        &[(
+            "errored",
+            r#"{"type":"errored","reason":"connection failed","retry_policy":{"type":"no_retry"}}"#,
+        )],
     )
     .await;
 
-    // Rollback should succeed even for no_retry errors
-    let response = test_rollback(
-        &app,
-        &tenant_id,
-        pipeline_id,
-        table_oid,
-        RollbackType::Individual,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap();
+    // Reset does not depend on a retry policy or a previous state.
+    let response =
+        test_rollback(&app, &tenant_id, pipeline_id, table_oid, StatusCode::OK).await.unwrap();
 
-    // Verify we rolled back to the ready state (maps to FollowingWal)
+    // Every successful reset returns the initial state.
     assert_eq!(response.tables.len(), 1);
     assert_eq!(response.tables[0].table_id, table_oid.0);
-    assert!(matches!(response.tables[0].new_state, SimpleTableState::FollowingWal));
+    assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
 
     drop_pg_database(&source_db_config).await;
 }
 
+/// Reset reports a missing target before stopping the pipeline runtime.
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_tables_with_full_reset_succeeds() {
+async fn rollback_tables_returns_not_found_for_missing_table_state() {
+    let (app, tenant_id, pipeline_id, _source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let delete_calls_before = app.k8s_state.vpa_delete_calls();
+
+    let response = app
+        .rollback_tables(
+            &tenant_id,
+            pipeline_id,
+            &RollbackTablesRequest {
+                target: RollbackTablesTarget::SingleTable { table_id: u32::MAX },
+            },
+        )
+        .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), delete_calls_before);
+
+    drop_pg_database(&source_db_config).await;
+}
+
+/// Reset replaces state history while preserving destination identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_replaces_history_and_preserves_schemas_and_metadata() {
     init_test_tracing();
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
@@ -1896,25 +2273,26 @@ async fn rollback_tables_with_full_reset_succeeds() {
     assert_eq!(metadata_count_before, 1);
 
     let response =
-        test_rollback(&app, &tenant_id, pipeline_id, table_oid, RollbackType::Full, StatusCode::OK)
-            .await
-            .unwrap();
+        test_rollback(&app, &tenant_id, pipeline_id, table_oid, StatusCode::OK).await.unwrap();
 
     assert_eq!(response.pipeline_id, pipeline_id);
     assert_eq!(response.tables.len(), 1);
     assert_eq!(response.tables[0].table_id, table_oid.0);
     assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
 
-    // Verify only one row exists (the reset init state)
-    let count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.replication_state where pipeline_id = $1 and table_id = $2",
+    let rows: Vec<(Option<i64>, bool, serde_json::Value)> = sqlx::query_as(
+        "select prev, is_current, metadata from etl.replication_state where pipeline_id = $1 and \
+         table_id = $2 order by id",
     )
     .bind(pipeline_id)
     .bind(table_oid)
-    .fetch_one(&source_db_pool)
+    .fetch_all(&source_db_pool)
     .await
     .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, None);
+    assert!(rows[0].1);
+    assert_eq!(rows[0].2, serde_json::to_value(TableState::Init).unwrap());
 
     // Verify table schema was preserved (schemas are no longer deleted during
     // reset)
@@ -1939,197 +2317,6 @@ async fn rollback_tables_with_full_reset_succeeds() {
     .await
     .unwrap();
     assert_eq!(metadata_count_after, 1);
-
-    drop_pg_database(&source_db_config).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_init_keeps_schemas_and_metadata() {
-    init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
-        setup_pipeline_with_source_db().await;
-
-    // Create state chain: init -> errored (rollback target is init)
-    let table_oid = create_table_with_state_chain(
-        &source_db_pool,
-        pipeline_id,
-        "test_users",
-        &[
-            ("init", r#"{"type": "init"}"#),
-            (
-                "errored",
-                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
-            ),
-        ],
-    )
-    .await;
-
-    // Insert table schema and destination table metadata.
-    let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
-         ($1, $2, 'test', 'test_users') returning id",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .fetch_one(&source_db_pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
-         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
-         false, 1, 1)",
-    )
-    .bind(table_schema_id)
-    .execute(&source_db_pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
-         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
-         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .execute(&source_db_pool)
-    .await
-    .unwrap();
-
-    // Do individual rollback (not full reset)
-    let response = test_rollback(
-        &app,
-        &tenant_id,
-        pipeline_id,
-        table_oid,
-        RollbackType::Individual,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(response.tables.len(), 1);
-    assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
-
-    // Verify table schema was preserved (schemas are no longer deleted during
-    // rollback)
-    let schema_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .fetch_one(&source_db_pool)
-    .await
-    .unwrap();
-    assert_eq!(schema_count, 1);
-
-    // Verify destination table metadata was not deleted.
-    let metadata_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
-         = $2",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .fetch_one(&source_db_pool)
-    .await
-    .unwrap();
-    assert_eq!(metadata_count, 1);
-
-    drop_pg_database(&source_db_config).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn rollback_to_non_starting_state_keeps_schemas_and_metadata() {
-    init_test_tracing();
-    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
-        setup_pipeline_with_source_db().await;
-
-    // Create state chain: ready -> errored (rollback target is ready, not a
-    // starting state)
-    let table_oid = create_table_with_state_chain(
-        &source_db_pool,
-        pipeline_id,
-        "test_users",
-        &[
-            ("ready", r#"{"type": "ready"}"#),
-            (
-                "errored",
-                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "manual_retry"}}"#,
-            ),
-        ],
-    )
-    .await;
-
-    // Insert table schema and destination table metadata.
-    let table_schema_id: i64 = sqlx::query_scalar(
-        "insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name) values \
-         ($1, $2, 'test', 'test_users') returning id",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .fetch_one(&source_db_pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "insert into etl.table_columns (table_schema_id, column_name, column_type, type_modifier, \
-         nullable, ordinal_position, primary_key_ordinal_position) values ($1, 'id', 'INT4', -1, \
-         false, 1, 1)",
-    )
-    .bind(table_schema_id)
-    .execute(&source_db_pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "insert into etl.destination_tables_metadata (pipeline_id, table_id, \
-         destination_table_id, snapshot_id, schema_status, replication_mask) values ($1, $2, \
-         'dest_test_users', '0/0'::pg_lsn, 'applied', '\\x01')",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .execute(&source_db_pool)
-    .await
-    .unwrap();
-
-    // Do individual rollback (not full reset)
-    let response = test_rollback(
-        &app,
-        &tenant_id,
-        pipeline_id,
-        table_oid,
-        RollbackType::Individual,
-        StatusCode::OK,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(response.tables.len(), 1);
-    assert!(matches!(response.tables[0].new_state, SimpleTableState::FollowingWal));
-
-    // Verify table schema was NOT deleted (because we rolled back to ready, not a
-    // starting state)
-    let schema_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.table_schemas where pipeline_id = $1 and table_id = $2",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .fetch_one(&source_db_pool)
-    .await
-    .unwrap();
-    assert_eq!(schema_count, 1);
-
-    // Verify destination table metadata was NOT deleted.
-    let metadata_count: i64 = sqlx::query_scalar(
-        "select count(*) from etl.destination_tables_metadata where pipeline_id = $1 and table_id \
-         = $2",
-    )
-    .bind(pipeline_id)
-    .bind(table_oid)
-    .fetch_one(&source_db_pool)
-    .await
-    .unwrap();
-    assert_eq!(metadata_count, 1);
 
     drop_pg_database(&source_db_config).await;
 }
@@ -2379,7 +2566,7 @@ async fn rollback_tables_all_errored_succeeds() {
     )
     .await;
 
-    // table2: errored with manual_retry (should be rolled back)
+    // table2: errored with a timed retry.
     let table2_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -2388,14 +2575,14 @@ async fn rollback_tables_all_errored_succeeds() {
             ("data_sync", r#"{"type": "data_sync"}"#),
             (
                 "errored",
-                r#"{"type": "errored", "reason": "schema mismatch", "retry_policy": {"type": "manual_retry"}}"#,
+                r#"{"type": "errored", "reason": "connection failed", "retry_policy": {"type": "timed_retry", "next_retry": "2099-01-01T00:00:00Z"}}"#,
             ),
         ],
     )
     .await;
 
     // table3: ready state (should NOT be rolled back - not errored)
-    create_table_with_state_chain(
+    let table3_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
         "test_products",
@@ -2424,10 +2611,7 @@ async fn rollback_tables_all_errored_succeeds() {
         .rollback_tables(
             &tenant_id,
             pipeline_id,
-            &RollbackTablesRequest {
-                target: RollbackTablesTarget::AllErroredTables,
-                rollback_type: RollbackType::Individual,
-            },
+            &RollbackTablesRequest { target: RollbackTablesTarget::AllErroredTables },
         )
         .await;
 
@@ -2438,27 +2622,25 @@ async fn rollback_tables_all_errored_succeeds() {
     // Now all 3 errored tables should be rolled back (including no_retry)
     assert_eq!(response.tables.len(), 3);
 
-    // Verify all errored tables were rolled back
-    let table1_result = response
-        .tables
-        .iter()
-        .find(|t| t.table_id == table1_oid.0)
-        .expect("table1 should be in response");
-    assert!(matches!(table1_result.new_state, SimpleTableState::FollowingWal));
+    let mut table_ids: Vec<_> = response.tables.iter().map(|table| table.table_id).collect();
+    table_ids.sort_unstable();
+    let mut expected = vec![table1_oid.0, table2_oid.0, table4_oid.0];
+    expected.sort_unstable();
+    assert_eq!(table_ids, expected);
+    assert!(
+        response.tables.iter().all(|table| matches!(table.new_state, SimpleTableState::Queued))
+    );
 
-    let table2_result = response
-        .tables
-        .iter()
-        .find(|t| t.table_id == table2_oid.0)
-        .expect("table2 should be in response");
-    assert!(matches!(table2_result.new_state, SimpleTableState::CopyingTable));
-
-    let table4_result = response
-        .tables
-        .iter()
-        .find(|t| t.table_id == table4_oid.0)
-        .expect("table4 should be in response");
-    assert!(matches!(table4_result.new_state, SimpleTableState::Queued));
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "select metadata from etl.replication_state where pipeline_id = $1 and table_id = $2 and \
+         is_current",
+    )
+    .bind(pipeline_id)
+    .bind(table3_oid)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(stored, serde_json::to_value(TableState::Ready).unwrap());
 
     drop_pg_database(&source_db_config).await;
 }
@@ -2491,96 +2673,235 @@ async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
         .rollback_tables(
             &tenant_id,
             pipeline_id,
-            &RollbackTablesRequest {
-                target: RollbackTablesTarget::AllErroredTables,
-                rollback_type: RollbackType::Individual,
-            },
+            &RollbackTablesRequest { target: RollbackTablesTarget::AllErroredTables },
         )
         .await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(response.text().await.unwrap().contains("No errored tables found"));
+    assert!(response.text().await.unwrap().contains("No tables matched the rollback target"));
 
     drop_pg_database(&source_db_config).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn rollback_tables_all_tables_succeeds() {
-    init_test_tracing();
+async fn rollback_tables_resets_non_errored_tables() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create multiple tables with different states - all should be rolled back
-    let table1_oid = create_table_with_state_chain(
+    for (index, state) in [
+        TableState::Init,
+        TableState::DataSync,
+        TableState::FinishedCopy,
+        TableState::SyncDone { lsn: "0/10".parse().unwrap(), table_decoding_state: None },
+        TableState::Ready,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let metadata = serde_json::to_string(&state).unwrap();
+        let state_name = state.as_type().to_string();
+        let table_oid = create_table_with_state_chain(
+            &source_db_pool,
+            pipeline_id,
+            &format!("test_table_{index}"),
+            &[("init", r#"{"type":"init"}"#), (&state_name, &metadata)],
+        )
+        .await;
+        let response =
+            test_rollback(&app, &tenant_id, pipeline_id, table_oid, StatusCode::OK).await.unwrap();
+        assert!(matches!(response.tables[0].new_state, SimpleTableState::Queued));
+        let state_rows: Vec<(Option<i64>, serde_json::Value)> = sqlx::query_as(
+            "select prev, metadata from etl.replication_state where pipeline_id = $1 and table_id \
+             = $2",
+        )
+        .bind(pipeline_id)
+        .bind(table_oid)
+        .fetch_all(&source_db_pool)
+        .await
+        .unwrap();
+        assert_eq!(state_rows, vec![(None, serde_json::to_value(TableState::Init).unwrap())]);
+    }
+
+    drop_pg_database(&source_db_config).await;
+}
+
+/// Batch reset accepts a mixture of healthy and errored tables.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_all_tables_succeeds() {
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let target = RollbackTablesRequest { target: RollbackTablesTarget::AllTables };
+    let response = app.rollback_tables(&tenant_id, pipeline_id, &target).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let tables = create_tables_with_states(
         &source_db_pool,
         pipeline_id,
-        "test_users",
-        &[("init", r#"{"type": "init"}"#), ("ready", r#"{"type": "ready"}"#)],
+        &[
+            ("test_users", "ready", r#"{"type":"ready"}"#),
+            ("test_orders", "data_sync", r#"{"type":"data_sync"}"#),
+            ("test_products", "errored", r#"{"type":"errored","reason":"connection failed","retry_policy":{"type":"manual_retry"}}"#),
+        ],
     )
     .await;
+    let response = app.rollback_tables(&tenant_id, pipeline_id, &target).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: RollbackTablesResponse = response.json().await.unwrap();
+    assert_eq!(response.tables.len(), tables.len());
+    for (table_oid, _) in tables {
+        let table = response.tables.iter().find(|table| table.table_id == table_oid.0).unwrap();
+        assert!(matches!(table.new_state, SimpleTableState::Queued));
+    }
+    let reset_count: i64 = sqlx::query_scalar(
+        "select count(*) from etl.replication_state where pipeline_id = $1 and is_current and \
+         state = 'init'",
+    )
+    .bind(pipeline_id)
+    .fetch_one(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(reset_count, 3);
+    drop_pg_database(&source_db_config).await;
+}
 
-    let table2_oid = create_table_with_state_chain(
+/// Batch reset rolls back every state replacement when one replacement fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_all_tables_is_transactional() {
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    app.k8s_state.set_pod_status(PodStatus::Started).await;
+    app.k8s_state.set_stateful_set_active(true);
+
+    create_tables_with_states(
         &source_db_pool,
         pipeline_id,
-        "test_orders",
         &[
-            ("data_sync", r#"{"type": "data_sync"}"#),
+            ("test_users", "ready", r#"{"type":"ready"}"#),
             (
+                "test_products",
                 "errored",
-                r#"{"type": "errored", "reason": "schema mismatch", "retry_policy": {"type": "manual_retry"}}"#,
+                r#"{"type":"errored","reason":"connection failed","retry_policy":{"type":"manual_retry"}}"#,
             ),
         ],
     )
     .await;
 
-    let table3_oid = create_table_with_state_chain(
-        &source_db_pool,
-        pipeline_id,
-        "test_products",
-        &[("init", r#"{"type": "init"}"#), ("data_sync", r#"{"type": "data_sync"}"#)],
+    sqlx::query(
+        r#"
+        create function fail_second_table_reset() returns trigger
+        language plpgsql
+        as $$
+        begin
+            if new.state = 'init'
+                and (
+                    select count(*)
+                    from etl.replication_state
+                    where pipeline_id = new.pipeline_id and state = 'init' and is_current
+                ) > 0
+            then
+                raise exception 'forced reset failure';
+            end if;
+            return new;
+        end;
+        $$
+        "#,
     )
-    .await;
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"
+        create trigger fail_second_table_reset
+        before insert on etl.replication_state
+        for each row execute function fail_second_table_reset()
+        "#,
+    )
+    .execute(&source_db_pool)
+    .await
+    .unwrap();
 
-    // Call rollback with all_tables - all tables should be rolled back regardless
-    // of state
+    let creates_before = app.k8s_state.create_calls();
     let response = app
         .rollback_tables(
             &tenant_id,
             pipeline_id,
-            &RollbackTablesRequest {
-                target: RollbackTablesTarget::AllTables,
-                rollback_type: RollbackType::Individual,
-            },
+            &RollbackTablesRequest { target: RollbackTablesTarget::AllTables },
         )
         .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let response: RollbackTablesResponse = response.json().await.unwrap();
+    let mut states: Vec<String> = sqlx::query_scalar(
+        "select state::text from etl.replication_state where pipeline_id = $1 and is_current",
+    )
+    .bind(pipeline_id)
+    .fetch_all(&source_db_pool)
+    .await
+    .unwrap();
+    states.sort();
+    assert_eq!(states, vec!["errored", "ready"]);
+    assert!(app.k8s_state.create_calls() > creates_before);
 
-    assert_eq!(response.pipeline_id, pipeline_id);
-    assert_eq!(response.tables.len(), 3);
+    drop_pg_database(&source_db_config).await;
+}
 
-    // Verify all tables were rolled back
-    let table1_result = response
-        .tables
-        .iter()
-        .find(|t| t.table_id == table1_oid.0)
-        .expect("table1 should be in response");
-    assert!(matches!(table1_result.new_state, SimpleTableState::Queued));
+/// Rollback waits for termination and follows the StatefulSet's desired state,
+/// independently of the lagging Pod status.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_recreates_only_active_pipelines() {
+    init_test_tracing();
+    for (pod_status, stateful_set_active) in [
+        (PodStatus::Started, true),
+        (PodStatus::Started, false),
+        (PodStatus::Stopping, false),
+        (PodStatus::Stopped, true),
+        (PodStatus::Failed, false),
+    ] {
+        let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+            setup_pipeline_with_source_db().await;
+        app.k8s_state.set_pod_status(pod_status).await;
+        app.k8s_state.set_stateful_set_active(stateful_set_active);
+        let table_id = create_table_with_state_chain(
+            &source_db_pool,
+            pipeline_id,
+            "test_users",
+            &[("ready", r#"{"type":"ready"}"#)],
+        )
+        .await;
+        let creates_before = app.k8s_state.create_calls();
+        test_rollback(&app, &tenant_id, pipeline_id, table_id, StatusCode::OK).await.unwrap();
+        assert!(app.k8s_state.waited_for_deletion());
+        assert_eq!(app.k8s_state.create_calls() > creates_before, stateful_set_active);
+        drop_pg_database(&source_db_config).await;
+    }
+}
 
-    let table2_result = response
-        .tables
-        .iter()
-        .find(|t| t.table_id == table2_oid.0)
-        .expect("table2 should be in response");
-    assert!(matches!(table2_result.new_state, SimpleTableState::CopyingTable));
-
-    let table3_result = response
-        .tables
-        .iter()
-        .find(|t| t.table_id == table3_oid.0)
-        .expect("table3 should be in response");
-    assert!(matches!(table3_result.new_state, SimpleTableState::Queued));
-
+/// A failed termination barrier must not reset state or create replacement
+/// resources.
+#[tokio::test(flavor = "multi_thread")]
+async fn rollback_tables_deletion_timeout_preserves_state() {
+    init_test_tracing();
+    let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
+        setup_pipeline_with_source_db().await;
+    let table_id = create_table_with_state_chain(
+        &source_db_pool,
+        pipeline_id,
+        "test_users",
+        &[("ready", r#"{"type":"ready"}"#)],
+    )
+    .await;
+    app.k8s_state.set_deletion_timeout(true);
+    let creates_before = app.k8s_state.create_calls();
+    test_rollback(&app, &tenant_id, pipeline_id, table_id, StatusCode::SERVICE_UNAVAILABLE).await;
+    assert!(app.k8s_state.waited_for_deletion());
+    assert_eq!(app.k8s_state.create_calls(), creates_before);
+    let states: Vec<String> = sqlx::query_scalar(
+        "select state::text from etl.replication_state where pipeline_id = $1 and table_id = $2",
+    )
+    .bind(pipeline_id)
+    .bind(table_id)
+    .fetch_all(&source_db_pool)
+    .await
+    .unwrap();
+    assert_eq!(states, vec!["ready"]);
     drop_pg_database(&source_db_config).await;
 }

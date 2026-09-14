@@ -58,7 +58,7 @@ use crate::{
         ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
         ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
         ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
-        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL,
+        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL, ddl_command_tag_label,
     },
     pipeline::PipelineId,
     postgres::{
@@ -79,10 +79,10 @@ use crate::{
         state::{TableState, TableStateType},
     },
     runtime::{
-        BatchBudgetController, CachedBatchBudget, MemoryMonitor, TableSyncWorker,
+        BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorker,
         TableSyncWorkerPool, TableSyncWorkerState,
         concurrency::{
-            BackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
+            MemoryBackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
         },
     },
@@ -116,6 +116,12 @@ const KEEP_ALIVE_DEADLINE_FRACTION: f64 = 0.6;
 /// deadline at that scale would make the apply loop spin sending forced keep
 /// alives, which is not operationally useful. We clamp to `100ms`.
 const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
+/// Maximum number of decoded event batches that may coexist for one apply loop.
+///
+/// One batch may be owned by a pending destination result while the apply loop
+/// accumulates the next batch. Register both positions so each receives a share
+/// of the configured decoded-batch capacity.
+const APPLY_LOOP_BATCH_SLOTS: usize = 2;
 /// Maximum number of table schema cleanups buffered per apply loop.
 ///
 /// Each queue entry contains one table identifier and one frozen retention
@@ -188,8 +194,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
     pub(crate) memory_monitor: MemoryMonitor,
-    /// Shared batch budget controller.
-    pub(crate) batch_budget: BatchBudgetController,
+    /// Shared decoded-batch memory governor.
+    pub(crate) batch_memory_governor: BatchMemoryGovernor,
 }
 
 /// Resources for the table sync worker during the apply loop.
@@ -208,8 +214,8 @@ pub(crate) struct TableSyncWorkerContext<S> {
 
 /// Context for the worker driving the apply loop.
 ///
-/// This enum replaces the [`ApplyLoopHook`] trait, providing direct access to
-/// worker-specific resources and enabling different behavior based on the
+/// This enum replaces the former `ApplyLoopHook` trait, providing direct access
+/// to worker-specific resources and enabling different behavior based on the
 /// worker type at various points in the replication cycle.
 #[derive(Debug)]
 pub(crate) enum WorkerContext<S, D> {
@@ -727,16 +733,21 @@ struct EventBatch {
     events: Vec<Event>,
     /// Tables whose schemas are communicated by relation events in the batch.
     relation_table_ids: HashSet<TableId>,
-    /// Decoded in-memory size estimate used only to decide when to flush.
+    /// Decoded in-memory size estimate for the accumulated events.
     size_hint_bytes: usize,
     /// PostgreSQL tuple bytes used for source metrics and usage accounting.
     ///
-    /// These are independent from the decoded [`SizeHint`] used to determine
-    /// when the batch is dispatched.
+    /// These are independent from the decoded [`crate::data::SizeHint`] used
+    /// to determine when the batch is dispatched.
     streaming_payload_metadata: StreamingPayloadMetadata,
 }
 
 impl EventBatch {
+    /// Creates an empty event batch.
+    fn empty() -> Self {
+        Self::default()
+    }
+
     /// Creates an empty event batch with the specified event capacity.
     fn with_capacity(capacity: usize) -> Self {
         Self {
@@ -753,9 +764,10 @@ impl EventBatch {
             self.relation_table_ids.insert(relation.replicated_table_schema.id());
         }
 
-        self.size_hint_bytes = self.size_hint_bytes.saturating_add(event.size_hint());
+        let event_size_hint_bytes = event.size_hint();
         self.streaming_payload_metadata.merge(streaming_payload_metadata);
         self.events.push(event);
+        self.size_hint_bytes = self.size_hint_bytes.saturating_add(event_size_hint_bytes);
     }
 
     /// Returns the number of events in the batch.
@@ -781,13 +793,6 @@ impl EventBatch {
         // enough event capacity for the next batch.
         let replacement_capacity = self.len();
         std::mem::replace(self, Self::with_capacity(replacement_capacity))
-    }
-
-    /// Splits the batch into its events and dispatch metadata.
-    fn into_parts(self) -> (Vec<Event>, usize, HashSet<TableId>, StreamingPayloadMetadata) {
-        let event_count = self.events.len();
-
-        (self.events, event_count, self.relation_table_ids, self.streaming_payload_metadata)
     }
 }
 
@@ -815,7 +820,8 @@ struct ApplyLoopState {
     /// The highest commit end LSN that should be attached to the next
     /// destination write.
     ///
-    /// This usually comes from the [`end_lsn`] field of a [`Commit`] message.
+    /// This usually comes from the `end_lsn` field of a PostgreSQL commit
+    /// message.
     /// If a destination accepts a write without making it durable, the write's
     /// commit end LSN is re-attached here so a later durable write can advance
     /// through it.
@@ -1000,15 +1006,23 @@ impl ApplyLoopState {
     /// PostgreSQL feedback keeps reporting the last flush LSN until a later
     /// durable write proves the carried LSN safe.
     ///
-    /// Ordinarily, if no later batch arrives, durability for the accepted
-    /// write is deferred until replay or the next batch. A terminal table-sync
-    /// catchup is the exception: once keepalive progress reaches its target,
-    /// ETL dispatches an empty required-durability write through the same
-    /// pending-result path.
+    /// When no later batch arrives, a keepalive can dispatch an empty
+    /// required-durability write through the same pending-result path. The
+    /// loop remains non-quiescent until that result confirms durability.
     fn is_quiescent(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
+    }
+
+    /// Returns whether a keepalive may settle an accepted commit without
+    /// interrupting a transaction or competing with buffered destination work.
+    fn can_settle_idle_durability(&self) -> bool {
+        self.exit_intent.is_none()
+            && !self.is_draining_for_shutdown()
+            && !self.handling_transaction()
+            && !self.has_unresolved_batch_work()
+            && self.last_commit_end_lsn.is_some()
     }
 
     /// Returns the checkpoint LSN to report to PostgreSQL.
@@ -1163,8 +1177,8 @@ pub(crate) struct ApplyLoop<S, D> {
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
     memory_monitor: MemoryMonitor,
-    /// Cached dynamic batch budget used to decide flushes by bytes.
-    cached_batch_budget: CachedBatchBudget,
+    /// Governor supplying the shared advisory batch-size target.
+    batch_memory_governor: BatchMemoryGovernor,
     /// Maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
     /// Deadline duration used before proactively sending a periodic status
@@ -1196,7 +1210,7 @@ where
         worker_context: WorkerContext<S, D>,
         shutdown_rx: ShutdownRx,
         memory_monitor: MemoryMonitor,
-        batch_budget: BatchBudgetController,
+        batch_memory_governor: BatchMemoryGovernor,
         initial_replicated_table_schema: Option<ReplicatedTableSchema>,
     ) -> EtlResult<ApplyLoopResult> {
         info!(
@@ -1268,6 +1282,10 @@ where
             );
         }
 
+        // Slot registration belongs to the apply loop because its state machine
+        // determines how many decoded batches can coexist. Keep the guard alive
+        // until the loop exits so both positions divide the shared target.
+        let _batch_slot_guard = batch_memory_governor.register_batch_slots(APPLY_LOOP_BATCH_SLOTS);
         let mut apply_loop = Self {
             config: Arc::clone(&config),
             schema_store,
@@ -1276,7 +1294,7 @@ where
             shutdown_rx,
             worker_context,
             memory_monitor,
-            cached_batch_budget: batch_budget.cached(),
+            batch_memory_governor,
             max_batch_fill_duration: Duration::from_millis(config.batch.max_fill_ms),
             keep_alive_deadline_duration,
             tasks,
@@ -1314,12 +1332,16 @@ where
             .await?;
 
         let replication_message_stream = ReplicationMessageStream::wrap(logical_replication_stream);
-        let replication_message_stream = BackpressureStream::wrap(
+        let replication_message_stream = MemoryBackpressureStream::wrap(
             replication_message_stream,
             self.worker_context.apply_stream_id(),
             self.memory_monitor.subscribe(),
         );
         pin!(replication_message_stream);
+        // Keep an independent subscription for flushing the apply loop's decoded
+        // batch. The source wrapper must remain free to stop PostgreSQL intake,
+        // while this subscription lets already-owned memory continue draining.
+        let mut batch_memory_subscription = self.memory_monitor.subscribe();
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
         loop {
@@ -1327,6 +1349,7 @@ where
                 self.run_draining_shutdown_iteration(
                     replication_message_stream.as_mut(),
                     &mut connection_updates_rx,
+                    &mut batch_memory_subscription,
                 )
                 .await
             } else {
@@ -1334,6 +1357,7 @@ where
                     replication_message_stream.as_mut(),
                     replication_client,
                     &mut connection_updates_rx,
+                    &mut batch_memory_subscription,
                 )
                 .await
             };
@@ -1356,9 +1380,10 @@ where
     /// 1. Shutdown requests.
     /// 2. PostgreSQL connection lifecycle updates.
     /// 3. Pending destination flush results.
-    /// 4. Batch flush deadline expiry.
-    /// 5. Incoming replication messages.
-    /// 6. Periodic heartbeats once the computed keep alive deadline expires.
+    /// 4. Memory-pressure batch flushing.
+    /// 5. Batch flush deadline expiry.
+    /// 6. Incoming replication messages.
+    /// 7. Periodic heartbeats once the computed keep alive deadline expires.
     ///
     /// PostgreSQL normally sends keep alives at roughly half of
     /// `wal_sender_timeout`. We wait a little longer than that before
@@ -1377,9 +1402,12 @@ where
     /// return yet.
     async fn run_active_iteration(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
         replication_client: &PgReplicationClient,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
+        batch_memory_subscription: &mut Option<MemoryMonitorSubscription>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         // Process quiescent coordination before waiting for another signal. The
         // next loop iteration observes progress made by whichever branch runs below.
@@ -1414,13 +1442,24 @@ where
                     .await?;
             }
 
-            // PRIORITY 4: Handle batch flush timer expiry.
+            // PRIORITY 4: Flush ETL-owned decoded memory as soon as emergency
+            // backpressure activates. Destination-result polling remains independent,
+            // so pausing source intake cannot prevent retained batches from draining.
+            backpressure_active = Self::wait_for_memory_update(batch_memory_subscription.as_mut()), if batch_memory_subscription.is_some() => {
+                match backpressure_active {
+                    Some(true) => self.flush_batch("memory backpressure activated").await?,
+                    Some(false) => {}
+                    None => *batch_memory_subscription = None,
+                }
+            }
+
+            // PRIORITY 5: Handle batch flush timer expiry.
             // This prevents buffered work from waiting forever when traffic is low.
             _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached").await?;
             }
 
-            // PRIORITY 5: Process incoming replication messages from PostgreSQL.
+            // PRIORITY 6: Process incoming replication messages from PostgreSQL.
             // New WAL messages are only accepted while the loop is still actively ingesting.
             maybe_message = replication_message_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
@@ -1431,7 +1470,7 @@ where
                 .await?;
             }
 
-            // PRIORITY 6: Emit a periodic status update once the computed keep alive deadline
+            // PRIORITY 7: Emit a periodic status update once the computed keep alive deadline
             // expires. This intentionally resends the same checkpoint LSN so PostgreSQL keeps
             // the standby connection open during long stalls, including cases where the loop is
             // paused behind an in-flight flush and therefore not making visible progress yet. This
@@ -1447,6 +1486,7 @@ where
 
                 self.state
                     .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+                self.maybe_settle_idle_durability().await?;
             }
         }
 
@@ -1461,8 +1501,9 @@ where
     /// Priority order:
     /// 1. PostgreSQL connection lifecycle updates.
     /// 2. Pending destination flush results.
-    /// 3. Batch flush deadline expiry.
-    /// 4. Periodic keep alive status updates.
+    /// 3. Memory-pressure batch flushing.
+    /// 4. Batch flush deadline expiry.
+    /// 5. Periodic keep alive status updates.
     ///
     /// Shutdown drain does not start new quiescent table-sync coordination. If
     /// permanent completion already started a required-durability barrier,
@@ -1475,8 +1516,11 @@ where
     /// after restart.
     async fn run_draining_shutdown_iteration(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
+        batch_memory_subscription: &mut Option<MemoryMonitorSubscription>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
@@ -1499,12 +1543,22 @@ where
                     .await?;
             }
 
-            // PRIORITY 3: Handle batch flush timer expiry.
+            // PRIORITY 3: Preserve the same pressure-drain behavior if shutdown wins
+            // the activation race and moves the loop into its draining state first.
+            backpressure_active = Self::wait_for_memory_update(batch_memory_subscription.as_mut()), if batch_memory_subscription.is_some() => {
+                match backpressure_active {
+                    Some(true) => self.flush_batch("memory backpressure activated during shutdown drain").await?,
+                    Some(false) => {}
+                    None => *batch_memory_subscription = None,
+                }
+            }
+
+            // PRIORITY 4: Handle batch flush timer expiry.
             _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached during shutdown drain").await?;
             }
 
-            // PRIORITY 4: Emit a periodic status update while shutdown is draining.
+            // PRIORITY 5: Emit a periodic status update while shutdown is draining.
             _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
                 self.send_status_update(
                     replication_message_stream.as_mut(),
@@ -1623,7 +1677,9 @@ where
     /// does not complete within an acceptable timeframe.
     async fn handle_shutdown_signal(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
     ) -> EtlResult<()> {
         let worker_type = self.worker_context.worker_type();
 
@@ -1663,7 +1719,9 @@ where
     /// is unresolved.
     async fn send_shutdown_flush_status_update(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
     ) -> EtlResult<()> {
         self.send_status_update(
             replication_message_stream.as_mut(),
@@ -1685,7 +1743,9 @@ where
     /// stream and the final shutdown update still use this same helper.
     async fn send_status_update(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<()> {
@@ -1876,6 +1936,16 @@ where
         }
     }
 
+    /// Waits for the next emergency memory-backpressure state transition.
+    async fn wait_for_memory_update(
+        memory_subscription: Option<&mut MemoryMonitorSubscription>,
+    ) -> Option<bool> {
+        match memory_subscription {
+            Some(memory_subscription) => memory_subscription.next().await,
+            None => std::future::pending().await,
+        }
+    }
+
     /// Handles a completed batch flush result.
     async fn handle_flush_result(
         &mut self,
@@ -1884,7 +1954,7 @@ where
         // We clear the state up front because this flush is no longer in flight.
         let processing_paused = self.state.resume_processing();
 
-        // Explode the result into parts which are used for handling the flush result.
+        // Decompose the completed result into its metadata, timing, and outcome.
         let (metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
         // If there was an error in the flushing, we return it immediately.
@@ -2032,12 +2102,13 @@ where
         // flushed now that the previous in-flight result has resolved.
         if processing_paused {
             if let Some(metadata) = metadata.as_ref() {
-                // A required-durability write is terminal, so `Complete` must have
-                // stopped intake before a successor batch could be queued behind it.
-                debug_assert_ne!(
-                    metadata.durability,
-                    WriteEventsDurability::RequireDurable,
-                    "required-durability write must not have a queued successor batch"
+                // A nonempty required-durability write is terminal and stops
+                // intake. An empty idle barrier may have a successor buffered
+                // while it confirms only its captured commit end LSN.
+                debug_assert!(
+                    metadata.durability != WriteEventsDurability::RequireDurable
+                        || metadata.event_count == 0,
+                    "terminal event write must not have a queued successor batch"
                 );
             }
 
@@ -2052,7 +2123,9 @@ where
     /// Processes the message and manages batch timing.
     async fn handle_stream_message(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
@@ -2100,7 +2173,9 @@ where
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<()> {
         let result =
@@ -2130,7 +2205,7 @@ where
         // We check for the batch flushing conditions before deciding whether to flush
         // or not.
         let batch_size_hint_bytes_reached = self.state.event_batch.size_hint_bytes()
-            >= self.cached_batch_budget.current_batch_size_bytes();
+            >= self.batch_memory_governor.batch_size_target_bytes();
         let early_flush_requested = result.end_batch;
         let should_flush = batch_size_hint_bytes_reached || early_flush_requested;
 
@@ -2168,26 +2243,50 @@ where
 
         let event_batch = self.state.event_batch.take();
 
-        self.dispatch_write_events(event_batch, reason).await
+        // A terminal batch must settle all accepted writes before completion.
+        let durability = match self.state.exit_intent {
+            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
+            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
+        };
+        self.dispatch_write_events(event_batch, durability, reason).await
+    }
+
+    /// Settles an idle accepted commit while leaving normal intake enabled.
+    ///
+    /// The empty write captures the carried commit in its result metadata.
+    /// Later events may fill the next batch, but cannot be dispatched until
+    /// this result completes. Shutdown never starts a new idle barrier.
+    async fn maybe_settle_idle_durability(&mut self) -> EtlResult<()> {
+        if !self.state.can_settle_idle_durability() {
+            return Ok(());
+        }
+
+        self.dispatch_write_events(
+            EventBatch::empty(),
+            WriteEventsDurability::RequireDurable,
+            "keepalive settling idle durability",
+        )
+        .await
     }
 
     /// Dispatches one streaming write through the shared async-result path.
     async fn dispatch_write_events(
         &mut self,
         event_batch: EventBatch,
+        durability: WriteEventsDurability,
         reason: &str,
     ) -> EtlResult<()> {
         debug_assert!(!self.state.has_pending_flush_result());
 
-        let (events, event_count, relation_table_ids, streaming_payload_metadata) =
-            event_batch.into_parts();
-        // `Complete` is terminal, so no later write is guaranteed to settle an
-        // `Accepted` result. Its final batch must confirm cumulative durability
-        // before the apply loop can complete.
-        let durability = match self.state.exit_intent {
-            Some(ExitIntent::Complete) => WriteEventsDurability::RequireDurable,
-            Some(ExitIntent::Pause) | None => WriteEventsDurability::MayDefer,
-        };
+        let EventBatch {
+            events,
+            relation_table_ids,
+            streaming_payload_metadata,
+            size_hint_bytes: _,
+        } = event_batch;
+        let event_count = events.len();
+
+        debug_assert!(event_count > 0 || durability == WriteEventsDurability::RequireDurable);
         debug!(
             worker_type = %self.worker_context.worker_type(),
             event_count,
@@ -2196,7 +2295,7 @@ where
         );
 
         // Capture dispatch-time metrics; they are carried through the result channel
-        // and recorded once the destination acknowledges the batch.
+        // and recorded once the destination result completes.
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             durability,
@@ -2213,12 +2312,8 @@ where
         self.destination.write_events(events, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
-        // We reset the deadline for the batch, since we are now flushing a new batch.
-        // The new deadline will start as soon as we process a new element.
-        //
-        // It's important to note that the deadline is removed only when the batch is
-        // flushed and not before this way, if a batch fails to flush due to
-        // inflight, it will be re-tried indefinitely until that finishes.
+        // Reset only after dispatch. A batch deferred behind an in-flight write
+        // keeps its deadline until that write completes and dispatch is retried.
         self.state.reset_flush_deadline();
 
         Ok(())
@@ -2227,7 +2322,9 @@ where
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
-        mut replication_message_stream: Pin<&mut BackpressureStream<ReplicationMessageStream>>,
+        mut replication_message_stream: Pin<
+            &mut MemoryBackpressureStream<ReplicationMessageStream>,
+        >,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
         counter!(
@@ -2303,6 +2400,7 @@ where
                 .await?;
 
                 self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
+                self.maybe_settle_idle_durability().await?;
 
                 Ok(HandleMessageResult::no_event())
             }
@@ -2414,7 +2512,7 @@ where
             );
         };
 
-        let content = message.content()?;
+        let content = std::str::from_utf8(message.content())?;
         let schema_change_message = match SchemaChangeMessage::from_str(content) {
             Ok(schema_change_message) => schema_change_message,
             Err(err) => {
@@ -2431,7 +2529,7 @@ where
         };
 
         let table_id = schema_change_message.table_id();
-        let command_tag = schema_change_message.command_tag.clone();
+        let command_tag = ddl_command_tag_label(&schema_change_message.command_tag);
         let column_count = schema_change_message.columns.len();
 
         if !schema_change_message.applies_to_publication(&self.config.publication_name) {
@@ -2490,7 +2588,7 @@ where
             counter!(
                 ETL_DDL_SCHEMA_CHANGES_TOTAL,
                 WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                COMMAND_TAG_LABEL => command_tag.clone(),
+                COMMAND_TAG_LABEL => command_tag,
                 OUTCOME_LABEL => "failed_store",
             )
             .increment(1);
@@ -2501,7 +2599,7 @@ where
         counter!(
             ETL_DDL_SCHEMA_CHANGES_TOTAL,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            COMMAND_TAG_LABEL => command_tag.clone(),
+            COMMAND_TAG_LABEL => command_tag,
             OUTCOME_LABEL => "applied",
         )
         .increment(1);
@@ -2509,7 +2607,7 @@ where
         histogram!(
             ETL_DDL_SCHEMA_CHANGE_COLUMNS,
             WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-            COMMAND_TAG_LABEL => command_tag.clone(),
+            COMMAND_TAG_LABEL => command_tag,
         )
         .record(column_count as f64);
 
@@ -3430,11 +3528,12 @@ where
             && self.state.last_commit_end_lsn.is_some()
             && self.table_sync_catchup_target_reached().await
         {
-            // Record completion before dispatch so intake stops and the empty write
-            // requires durability.
+            // Record completion before dispatch so intake stops until the
+            // terminal durability barrier settles.
             self.state.record_exit_intent(Some(ExitIntent::Complete));
             self.dispatch_write_events(
-                EventBatch::default(),
+                EventBatch::empty(),
+                WriteEventsDurability::RequireDurable,
                 "table sync catchup reached without a terminal event batch",
             )
             .await?;
@@ -4360,7 +4459,7 @@ mod apply_worker {
             ctx.shutdown_rx.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
-            ctx.batch_budget.clone(),
+            ctx.batch_memory_governor.clone(),
         )
     }
 
@@ -4594,6 +4693,18 @@ mod tests {
         )
     }
 
+    #[test]
+    fn event_batch_sums_event_size_hints() {
+        let mut batch = EventBatch::with_capacity(8);
+
+        let event = Event::Unsupported;
+        let event_size_hint_bytes = event.size_hint();
+        batch.push(event, StreamingPayloadMetadata::default());
+        batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+
+        assert_eq!(batch.size_hint_bytes(), 2 * event_size_hint_bytes);
+    }
+
     /// Returns the complete decoder captured by a test `SyncDone` state.
     fn sync_done_decoding_state(table_state: &TableState) -> (PgLsn, &StoredTableDecodingState) {
         let TableState::SyncDone { lsn, table_decoding_state: Some(table_decoding_state) } =
@@ -4700,5 +4811,50 @@ mod tests {
             pending,
             TableDecodingState::PendingRelation { previous_relation_masks: None, .. }
         ));
+    }
+
+    #[test]
+    fn idle_durability_requires_idle_accepted_work() {
+        let mut state = ApplyLoopState::new(
+            ReplicationProgress::new(100.into()),
+            ReplicationLagMetrics::new(100.into()),
+            Duration::from_secs(6),
+            SnapshotId::initial(),
+            "test_slot".to_owned(),
+        );
+
+        // Only accepted work at an idle boundary may start a durability barrier.
+        assert!(!state.can_settle_idle_durability());
+        state.update_last_commit_end_lsn(Some(200.into()));
+        assert!(state.can_settle_idle_durability());
+
+        state.remote_final_lsn = Some(300.into());
+        assert!(!state.can_settle_idle_durability());
+        state.remote_final_lsn = None;
+
+        state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+        assert!(!state.can_settle_idle_durability());
+        state.event_batch.take();
+
+        let (_result, pending) = WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: Some(200.into()),
+            durability: WriteEventsDurability::RequireDurable,
+            event_count: 0,
+            relation_table_ids: HashSet::new(),
+            streaming_payload_metadata: StreamingPayloadMetadata::default(),
+            dispatched_at: Instant::now(),
+        });
+        state.pending_flush_result = Some(pending);
+        assert!(!state.can_settle_idle_durability());
+        state.pending_flush_result = None;
+
+        for exit_intent in [ExitIntent::Pause, ExitIntent::Complete] {
+            state.exit_intent = Some(exit_intent);
+            assert!(!state.can_settle_idle_durability());
+        }
+        state.exit_intent = None;
+
+        state.start_draining_for_shutdown();
+        assert!(!state.can_settle_idle_durability());
     }
 }

@@ -1,13 +1,36 @@
-# `etl` - Replicator
+# `etl-replicator`
 
-Ready-made, long-lived application that runs one `etl` replication pipeline
-with a Postgres-backed state store and one configured built-in destination.
-BigQuery is the stable, recommended default. Compare all built-in modules in
-the [Destinations reference](https://supabase.github.io/etl/reference/destinations/).
+Ready-made, long-lived application that runs one [Supabase ETL](https://supabase.github.io/etl/)
+pipeline with a Postgres-backed state store and one configured built-in
+destination.
 
-For build instructions, a complete minimal configuration, credential handling,
-and production considerations, see the
-[Standalone Replicator guide](https://supabase.github.io/etl/guides/standalone-replicator/).
+| Feature | Destination | Status |
+| --- | --- | --- |
+| `clickhouse` | ClickHouse | In progress |
+| `bigquery` | Google BigQuery | Stable |
+| `ducklake` | DuckLake | In progress |
+| `snowflake` | Snowflake | In progress |
+| `iceberg` | Apache Iceberg | Deprecated |
+
+ClickHouse is the local default: `cargo x init` starts it, and `cargo x setup
+replicator` configures it. BigQuery is the most mature cloud destination.
+Compare maturity and limitations in the
+[Destinations reference](https://supabase.github.io/etl/reference/destinations/).
+For production configuration and credential handling, see the
+[Standalone Replicator](https://supabase.github.io/etl/guides/standalone-replicator/)
+guide.
+
+## Local development
+
+```bash
+cargo x setup replicator
+cargo x seed
+cargo x run replicator
+```
+
+Destinations: `bigquery`, `clickhouse`, `ducklake`, `iceberg`, `snowflake`.
+See [DEVELOPMENT.md](../../DEVELOPMENT.md). Do not commit
+`crates/etl-replicator/configuration/`.
 
 ## Configuration
 

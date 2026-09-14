@@ -5,6 +5,7 @@
 
 use duckdb::Connection;
 use etl::{
+    config::BatchConfig,
     event::EventType,
     pipeline::PipelineId,
     store::StateStore,
@@ -12,7 +13,7 @@ use etl::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, create_pipeline_with_batch_config},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
@@ -31,7 +32,7 @@ use crate::support::ducklake::{
     catalog_attach_target, create_test_lake, ducklake_load_sql, open_verification_connection,
 };
 
-/// Row size that exceeds the pipeline's default 8 MiB batch limit.
+/// Row size that exceeds the test's preferred 8 MiB batch limit.
 const OVERSIZED_COPY_ROW_BYTES: i32 = 9_000_000;
 
 /// Expected row shape after adding columns during replication.
@@ -532,7 +533,7 @@ async fn table_copy_and_streaming_with_restart() {
 }
 
 /// Copy chunks with identical contents must not collapse to one applied
-/// marker. Each row exceeds the default 8 MiB batch limit, forcing the source
+/// marker. Each row exceeds the test's 8 MiB batch limit, forcing the source
 /// copy stream to emit two separate batches.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_preserves_identical_oversized_rows_across_batches() {
@@ -581,12 +582,13 @@ async fn table_copy_preserves_identical_oversized_rows_across_batches() {
     let ducklake_table_name = table_name_to_ducklake_table_name(&source_table_name).unwrap();
     let store = NotifyingStore::new();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
-    let mut pipeline = create_pipeline(
+    let mut pipeline = create_pipeline_with_batch_config(
         &database.config,
         random(),
         publication_name.to_owned(),
         store.clone(),
         destination.clone(),
+        BatchConfig { max_fill_ms: 1000, memory_budget_ratio: 0.2, max_bytes: 8 * 1024 * 1024 },
     );
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 

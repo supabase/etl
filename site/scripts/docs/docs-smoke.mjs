@@ -153,6 +153,7 @@ async function checkSeoEndpoints() {
     '/explanation/architecture.md',
     '/explanation/schema-changes.md',
     '/reference/destinations.md',
+    '/reference/benchmarks.md',
     '/explanation/events.md',
     '/explanation/traits.md',
   ];
@@ -257,19 +258,9 @@ async function checkSeoEndpoints() {
   );
   assert(!homeText.includes('<div'), 'Homepage Markdown contains presentation-only HTML.');
   assert(!homeText.includes('PipelinesMark'), 'Homepage Markdown contains a UI component name.');
-  const canonicalHtmlUrls = [
-    `${canonicalBaseUrl}/`,
-    `${canonicalBaseUrl}/guides/first-pipeline/`,
-    `${canonicalBaseUrl}/guides/standalone-replicator/`,
-    `${canonicalBaseUrl}/guides/configure-postgres/`,
-    `${canonicalBaseUrl}/guides/custom-implementations/`,
-    `${canonicalBaseUrl}/explanation/concepts/`,
-    `${canonicalBaseUrl}/explanation/architecture/`,
-    `${canonicalBaseUrl}/explanation/schema-changes/`,
-    `${canonicalBaseUrl}/reference/destinations/`,
-    `${canonicalBaseUrl}/explanation/events/`,
-    `${canonicalBaseUrl}/explanation/traits/`,
-  ];
+  const canonicalHtmlUrls = markdownPaths.map((path) =>
+    `${canonicalBaseUrl}${path === '/index.md' ? '/' : path.replace(/\.md$/, '/')}`,
+  );
   assert(
     markdownTexts.every((text, index) =>
       text.includes(`Canonical HTML: ${canonicalHtmlUrls[index]}`),
@@ -301,7 +292,15 @@ async function checkSeoEndpoints() {
     markdownTexts.every((text) => !text.includes('<Callout')),
     'Agent-readable Markdown contains presentation-only callout markup.',
   );
-  const destinationsText = markdownTexts[8];
+  const benchmarksText = markdownTexts[markdownPaths.indexOf('/reference/benchmarks.md')];
+  assert(
+    /^> Performance differences/m.test(benchmarksText) &&
+      benchmarksText.replace(/^>\s?/gm, '').replace(/\s+/g, ' ').includes(
+        'Performance differences may also reflect configuration, workload, and deployment choices, rather than the CDC tools alone.',
+      ),
+    'The untitled benchmark callout is not preserved as a Markdown blockquote.',
+  );
+  const destinationsText = markdownTexts[markdownPaths.indexOf('/reference/destinations.md')];
   assert(
     destinationsText.includes('**Status: Stable**') &&
       destinationsText.match(/\*\*Status: In progress\*\*/g)?.length === 3 &&
@@ -762,9 +761,12 @@ async function checkDesktop(page) {
       (await page.locator('.etl-destination-status[data-status="deprecated"] svg').count()) === 1,
     'Destination maturity badges are missing their status icons.',
   );
+  const destinationsCopy = await page.locator('#nd-page').innerText();
   assert(
-    (await page.locator('#nd-page').innerText()).includes('BigQuery is the stable, recommended default.'),
-    'The Destinations reference does not identify BigQuery as the default.',
+    destinationsCopy.includes('ClickHouse is the easiest destination to start with locally') &&
+      destinationsCopy.includes('cargo x setup replicator') &&
+      destinationsCopy.includes('BigQuery is the most mature cloud destination.'),
+    'The Destinations reference does not identify ClickHouse as the local default.',
   );
   await page.route(`${baseUrl}/reference/destinations.md`, (route) =>
     route.fulfill({ status: 404, contentType: 'text/html', body: '<!doctype html><title>Missing</title>' }),

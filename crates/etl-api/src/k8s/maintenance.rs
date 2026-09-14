@@ -51,11 +51,13 @@ impl From<DuckLakeMaintenancePolicy> for DuckLakeMaintenanceConfig {
 /// Kubernetes materializer used by Supabase infrastructure.
 pub struct KubernetesMaintenanceMaterializer<'a> {
     k8s_client: &'a dyn K8sClient,
+    wait: bool,
 }
 
 impl<'a> KubernetesMaintenanceMaterializer<'a> {
-    pub fn new(k8s_client: &'a dyn K8sClient) -> Self {
-        Self { k8s_client }
+    /// Creates a materializer with a consistent deletion wait policy.
+    pub fn new(k8s_client: &'a dyn K8sClient, wait: bool) -> Self {
+        Self { k8s_client, wait }
     }
 }
 
@@ -90,7 +92,7 @@ impl MaintenanceMaterializer for KubernetesMaintenanceMaterializer<'_> {
         identity: MaintenanceIdentity,
     ) -> Result<(), MaintenanceMaterializationError> {
         self.k8s_client
-            .delete_ducklake_maintenance(&identity.resource_prefix)
+            .delete_ducklake_maintenance(&identity.resource_prefix, self.wait)
             .await
             .map_err(MaintenanceMaterializationError::kubernetes)?;
 

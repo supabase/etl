@@ -168,7 +168,7 @@ async fn validate_destination_fails_when_bigquery_source_table_has_no_primary_ke
 
     let primary_key_failure = failures
         .iter()
-        .find(|failure| failure.name == "Source Primary Keys Required")
+        .find(|failure| failure.name == "Primary Keys Required")
         .expect("Should fail when BigQuery source tables do not have primary keys");
     assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
@@ -176,9 +176,38 @@ async fn validate_destination_fails_when_bigquery_source_table_has_no_primary_ke
         "Failure reason should mention the table name"
     );
     assert!(
-        primary_key_failure.reason.contains("initial loads"),
+        primary_key_failure.reason.contains("initial sync"),
         "Failure reason should explain why BigQuery requires primary keys"
     );
+
+    drop_pg_database(&config).await;
+}
+
+#[tokio::test]
+async fn validate_destination_requires_primary_key_on_inheritance_child() {
+    let (ctx, pool, config) = create_validation_context_with_source().await;
+
+    pool.execute("create table inherited_parent (id bigint primary key, payload text)")
+        .await
+        .unwrap();
+    pool.execute("create table inherited_child (extra text) inherits (inherited_parent)")
+        .await
+        .unwrap();
+    pool.execute(
+        "create publication inherited_pub for table inherited_parent with (publish = 'insert')",
+    )
+    .await
+    .unwrap();
+
+    let pipeline_config = create_pipeline_config("inherited_pub");
+    let failures = validate_destination(&ctx, &create_bigquery_config(), Some(&pipeline_config))
+        .await
+        .unwrap();
+
+    let failure = failures.iter().find(|failure| failure.name == "Primary Keys Required").unwrap();
+    assert_eq!(failure.failure_type, FailureType::Critical);
+    assert!(failure.reason.contains("public.inherited_child"));
+    assert!(!failure.reason.contains("public.inherited_parent`"));
 
     drop_pg_database(&config).await;
 }
@@ -203,7 +232,7 @@ async fn validate_destination_fails_when_clickhouse_replacing_merge_tree_table_h
     .unwrap();
 
     let primary_key_failure =
-        failures.iter().find(|failure| failure.name == "Source Primary Keys Required").expect(
+        failures.iter().find(|failure| failure.name == "Primary Keys Required").expect(
             "Should fail when ClickHouse ReplacingMergeTree source tables have no primary keys",
         );
     assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
@@ -243,7 +272,7 @@ async fn validate_destination_allows_clickhouse_merge_tree_table_without_primary
     .unwrap();
 
     let primary_key_failure =
-        failures.iter().find(|failure| failure.name == "Source Primary Keys Required");
+        failures.iter().find(|failure| failure.name == "Primary Keys Required");
     assert!(
         primary_key_failure.is_none(),
         "ClickHouse MergeTree should allow source tables without primary keys"
@@ -291,7 +320,7 @@ async fn validate_destination_fails_when_bigquery_column_list_omits_primary_key_
 
     let primary_key_failure = failures
         .iter()
-        .find(|failure| failure.name == "Source Primary Key Columns Required")
+        .find(|failure| failure.name == "Primary Key Columns Missing From Publication")
         .expect("Should fail when BigQuery source primary-key columns are omitted");
     assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
@@ -348,7 +377,7 @@ async fn validate_destination_fails_when_clickhouse_merge_tree_omits_primary_key
 
     let primary_key_failure = failures
         .iter()
-        .find(|failure| failure.name == "Source Primary Key Columns Required")
+        .find(|failure| failure.name == "Primary Key Columns Missing From Publication")
         .expect("Should fail when ClickHouse source primary-key columns are omitted");
     assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(
@@ -380,7 +409,7 @@ async fn validate_destination_accepts_nested_partition_leaf_with_parent_primary_
         .unwrap();
 
     let primary_key_failure =
-        failures.iter().find(|failure| failure.name == "Source Primary Keys Required");
+        failures.iter().find(|failure| failure.name == "Primary Keys Required");
     assert!(
         primary_key_failure.is_none(),
         "Primary-key validation should use partition parent key metadata"
@@ -416,7 +445,7 @@ async fn validate_destination_fails_for_nested_partition_leaf_without_parent_pri
 
     let primary_key_failure = failures
         .iter()
-        .find(|failure| failure.name == "Source Primary Keys Required")
+        .find(|failure| failure.name == "Primary Keys Required")
         .expect("Should fail for nested partition leaves without parent primary keys");
     assert_eq!(primary_key_failure.failure_type, FailureType::Critical);
     assert!(

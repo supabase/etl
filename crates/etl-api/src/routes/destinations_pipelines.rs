@@ -457,9 +457,9 @@ pub(crate) async fn update_destination_and_pipeline(
         (status = 409, description = "Pipeline is active", body = ErrorMessage),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Source, pipeline, destination, or destination-pipeline link not found", body = ErrorMessage),
-        (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
-        (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
-        (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
+        (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
+        (status = 503, description = "Your database is unavailable", body = ErrorMessage),
+        (status = 504, description = "Request to your database timed out", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Destinations and Pipelines"

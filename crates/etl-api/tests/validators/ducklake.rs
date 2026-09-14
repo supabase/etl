@@ -46,6 +46,7 @@ fn create_ducklake_config(
         parquet_row_group_size: None,
         expire_snapshots_older_than: None,
         maintenance_mode: DuckLakeMaintenanceMode::Disabled,
+        copy_buffer: Default::default(),
         table_sorting: Default::default(),
     }
 }

@@ -27,7 +27,7 @@ use crate::{
         state::{TableError, TableRetryPolicy, TableState, TableStateType},
     },
     runtime::{
-        BatchBudgetController, MemoryMonitor, TableSyncWorkerPool,
+        BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
         concurrency::{ShutdownResult, ShutdownRx},
         error_policy::{RetryDirective, build_error_handling_policy},
         table_sync::TableSyncWorkerId,
@@ -324,7 +324,7 @@ pub(crate) struct TableSyncWorker<S, D> {
     shutdown_rx: ShutdownRx,
     run_permit: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
-    batch_budget: BatchBudgetController,
+    batch_memory_governor: BatchMemoryGovernor,
 }
 
 impl<S, D> TableSyncWorker<S, D> {
@@ -346,7 +346,7 @@ impl<S, D> TableSyncWorker<S, D> {
         shutdown_rx: ShutdownRx,
         run_permit: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
-        batch_budget: BatchBudgetController,
+        batch_memory_governor: BatchMemoryGovernor,
     ) -> Self {
         Self {
             pipeline_id,
@@ -358,7 +358,7 @@ impl<S, D> TableSyncWorker<S, D> {
             shutdown_rx,
             run_permit,
             memory_monitor,
-            batch_budget,
+            batch_memory_governor,
         }
     }
 }
@@ -370,7 +370,7 @@ where
 {
     /// Handles a table sync worker failure using the configured retry policy.
     ///
-    /// Returns [`Some(TableSyncWorkerResult)`] when error handling terminates
+    /// Returns `Some(TableSyncWorkerResult)` when error handling terminates
     /// the worker, [`None`] when the worker should retry, or [`Err`] when
     /// the failure cannot be handled and must be propagated.
     ///
@@ -709,7 +709,7 @@ where
             self.out_of_band_source_pool.clone(),
             attempt_shutdown_rx.clone(),
             self.memory_monitor.clone(),
-            self.batch_budget.clone(),
+            self.batch_memory_governor.clone(),
         )
         .await;
 
@@ -743,7 +743,6 @@ where
             state_store: self.store.clone(),
         });
 
-        let _apply_loop_stream_guard = self.batch_budget.register_stream_load(1);
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
@@ -755,7 +754,7 @@ where
             worker_context,
             attempt_shutdown_rx,
             self.memory_monitor.clone(),
-            self.batch_budget.clone(),
+            self.batch_memory_governor.clone(),
             Some(replicated_table_schema),
         )
         .await?;

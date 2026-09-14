@@ -1,14 +1,15 @@
-# `etl` Benchmarks
+# `etl-benchmarks`
 
-Performance benchmarks for ETL replication pipelines.
+Performance benchmarks for [Supabase ETL](https://supabase.github.io/etl/)
+replication pipelines.
 
 The preferred entrypoint is:
 
 ```bash
-cargo xtask benchmark
+cargo x benchmark
 ```
 
-`xtask` prepares the source Postgres database, loads TPC-C data when needed,
+`cargo x` prepares the source Postgres database, loads TPC-C data when needed,
 creates the publications, runs the benchmark binaries, and writes JSON reports.
 Use the direct benchmark binaries only when developing the benchmark code itself.
 
@@ -35,7 +36,7 @@ terminal output.
 Local runs need:
 
 - Rust from the repository `rust-toolchain.toml`.
-- Docker, for `cargo xtask postgres start`.
+- Docker, for `cargo x postgres start` (or `cargo x init` for the full local stack).
 - `go-tpc`, for preparing TPC-C data.
 
 Install the pinned `go-tpc` version used by CI:
@@ -59,7 +60,7 @@ The local benchmark source database defaults to:
 Start the local source Postgres instance:
 
 ```bash
-cargo xtask postgres start --shards 1 --base-port 5430 --source-only
+cargo x postgres start --shards 1 --base-port 5430 --source-only
 ```
 
 `xtask benchmark` creates the `bench` database if it does not exist. TPC-C data
@@ -70,18 +71,25 @@ smoke runs do not park behind local memory heuristics. Pass
 `--enable-memory-backpressure` when you explicitly want to include that behavior
 in a benchmark run.
 
-The stream batch memory budget is separate from backpressure and remains active
-by default. `--memory-budget-ratio` defaults to `0.2`, which means the ideal
-stream batch byte budget is computed as:
+Dynamic batch sizing is separate from emergency backpressure and remains active
+by default. `--memory-budget-ratio` defaults to `0.2`, which computes one global
+advisory decoded-batch target for each detected capacity snapshot as:
 
 ```text
-detected_memory_limit * 0.2 / active_streams
+detected_memory_capacity * 0.2
 ```
 
-The detector uses the cgroup memory limit when the benchmark is running inside a
-limited container, and host memory otherwise. If memory backpressure is enabled,
-it activates at 85% used memory and resumes at 75%, with memory refreshed every
-100ms.
+The runtime divides that target across registered batch slots, then caps each
+batch at 32 MiB. A slot is one position that may own an accumulating or in-flight
+decoded batch. The target is advisory: size is checked after decoding each item,
+so one indivisible row may exceed it. The detector uses the effective cgroup
+capacity visible to the process when it is running inside a limited container,
+and host memory otherwise.
+
+Emergency backpressure independently activates at 85% used memory and resumes
+below 75%, with one coherent memory snapshot every 100ms. This whole-process
+signal covers destination allocations and allocator-retained memory that the
+decoded batch estimate does not model.
 
 ## Quick Smoke Run
 
@@ -91,7 +99,7 @@ updates, and deletes, drains CDC, and writes reports under
 `target/bench-results-smoke/`.
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --warehouses 1 \
   --streaming-duration-seconds 10 \
   --batch-max-fill-ms 100 \
@@ -109,7 +117,7 @@ This is closer to the default CI-sized run, but still practical on a strong
 developer machine:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --force-prepare \
   --warehouses 10 \
   --streaming-duration-seconds 300 \
@@ -142,7 +150,7 @@ Override it only when the benchmark host and Postgres instance can sustain more
 workload concurrency:
 
 ```bash
-cargo xtask benchmark --warehouses 20 --tpcc-threads 64
+cargo x benchmark --warehouses 20 --tpcc-threads 64
 ```
 
 ## Controlling Row Counts
@@ -182,7 +190,7 @@ the requested target. The command also prints `pg_total_relation_size` so
 relation bloat and physical growth are visible during the run:
 
 ```bash
-cargo xtask pg-fill-table \
+cargo x pg-fill-table \
   --host my-db.example.com \
   --port 5432 \
   --database bench \
@@ -207,7 +215,7 @@ replication do not matter.
 Run only the table-copy benchmark:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --skip-table-streaming \
   --force-prepare \
   --warehouses 10 \
@@ -217,7 +225,7 @@ cargo xtask benchmark \
 Run only the table-streaming benchmark:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --skip-table-copy \
   --skip-prepare \
   --streaming-duration-seconds 300 \
@@ -229,7 +237,7 @@ cargo xtask benchmark \
 For BigQuery, provide destination configuration and service account credentials:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --destination bigquery \
   --bq-project-id my-gcp-project \
   --bq-dataset-id my_dataset \
@@ -250,7 +258,7 @@ Snowflake credentials are read from environment variables.
 Set `BENCH_SNOWFLAKE_CONNECTION` in `.env` (see `crates/etl-destinations/src/snowflake/README.md`):
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --destination snowflake \
   --warehouses 1 \
   --streaming-duration-seconds 10
@@ -275,7 +283,7 @@ to point at any other ClickHouse 23.5 or newer (required by the default
 Run the benchmark:
 
 ```bash
-cargo xtask benchmark \
+cargo x benchmark \
   --destination clickhouse \
   --warehouses 1 \
   --streaming-duration-seconds 10
@@ -325,8 +333,10 @@ Important workflow inputs:
 - `max_table_sync_workers`: table-copy worker parallelism.
 - `max_copy_connections_per_table`: per-table copy connection parallelism.
 - `batch_max_fill_ms`: stream batch fill timeout.
-- `memory_budget_ratio`: ratio of detected memory reserved for stream batch
-  bytes. Defaults to `0.2`.
+- `memory_budget_ratio`: maximum ratio of detected memory targeted globally for
+  decoded batches before division across registered batch slots. A slot is one
+  position that may own an accumulating or in-flight decoded batch. Defaults to
+  `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
 - `destination`: `null`, `bigquery`, `clickhouse`, or `snowflake`.
@@ -345,7 +355,7 @@ starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and po
 the benchmark at it (user `etl`, database `default`); no secrets are needed.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
-`cargo xtask benchmark` with three measured samples plus one warmup sample,
+`cargo x benchmark` with three measured samples plus one warmup sample,
 compares the median reports against the most recent successful
 `benchmark-results` artifact on the same ref, and uploads
 `target/bench-results/*.json`. The GitHub step summary contains the benchmark
@@ -364,7 +374,7 @@ benchmark.
 The comparison is also available locally when you have two result directories:
 
 ```bash
-cargo xtask benchmark-compare \
+cargo x benchmark-compare \
   --previous-dir target/bench-results-old \
   --current-dir target/bench-results \
   --output target/bench-results/benchmark-comparison.md
@@ -429,7 +439,7 @@ not raw WAL bytes, network bytes, or destination billing bytes.
 
 ## Direct Benchmark Binaries
 
-Prefer `cargo xtask benchmark`. Direct invocation expects that the database,
+Prefer `cargo x benchmark`. Direct invocation expects that the database,
 tables, publications, and table IDs already exist.
 
 To find TPC-C table IDs for a direct `table_copy` run:

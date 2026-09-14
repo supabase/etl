@@ -145,12 +145,12 @@ expression: "serde_json :: to_string_pretty(& stateful_set_json).unwrap()"
             ],
             "resources": {
               "limits": {
-                "cpu": "250m",
-                "memory": "768Mi"
+                "cpu": "125m",
+                "memory": "250Mi"
               },
               "requests": {
-                "cpu": "250m",
-                "memory": "768Mi"
+                "cpu": "125m",
+                "memory": "250Mi"
               }
             },
             "securityContext": {

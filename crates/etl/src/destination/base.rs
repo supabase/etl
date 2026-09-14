@@ -183,6 +183,12 @@ pub trait Destination {
     /// cumulative: it must mean that later write and all earlier `Accepted`
     /// writes in the same apply-loop stream are durable.
     ///
+    /// When a keepalive observes an accepted commit with no open transaction,
+    /// buffered events, or pending write result, ETL may issue an empty
+    /// required-durability write. It may buffer subsequent events while that
+    /// barrier is pending, but cannot dispatch them until the barrier
+    /// completes.
+    ///
     /// If no later streaming write is dispatched before shutdown, ETL normally
     /// exits without checkpointing accepted-but-not-durable work. Restart then
     /// replays from the last persisted checkpoint. A terminal table-sync

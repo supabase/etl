@@ -33,69 +33,39 @@ const fn default_table_sync_monitor_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS
 }
 
-const fn default_batch() -> BatchConfig {
-    BatchConfig {
-        max_fill_ms: BatchConfig::DEFAULT_MAX_FILL_MS,
-        memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
-        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
-    }
+/// Returns the canonical non-`None` default for omitted memory-backpressure
+/// fields.
+fn default_memory_backpressure_option() -> Option<MemoryBackpressureConfig> {
+    Some(MemoryBackpressureConfig::default())
 }
 
-const fn default_memory_backpressure() -> MemoryBackpressureConfig {
-    MemoryBackpressureConfig {
-        activate_threshold: MemoryBackpressureConfig::DEFAULT_ACTIVATE_THRESHOLD,
-        resume_threshold: MemoryBackpressureConfig::DEFAULT_RESUME_THRESHOLD,
-    }
-}
-
-const fn default_memory_backpressure_option() -> Option<MemoryBackpressureConfig> {
-    Some(default_memory_backpressure())
-}
-
-const fn default_table_sync_copy() -> TableSyncCopyConfig {
-    TableSyncCopyConfig::IncludeAllTables
-}
-
-const fn default_invalidated_slot_behavior() -> InvalidatedSlotBehavior {
-    InvalidatedSlotBehavior::Error
-}
-
-fn default_replication_slot() -> ReplicationSlotConfig {
-    ReplicationSlotConfig::default()
-}
-
+/// Optional pipeline-level overrides for replicator CPU and memory.
+///
+/// Requests inherit from the API-wide defaults when omitted.
+/// Supplying a request fixes that resource's VPA minimum and maximum to the
+/// same value. The generated StatefulSet always copies its resolved requests
+/// into its limits to preserve Guaranteed QoS.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
-pub struct ReplicatorResourcesConfig {
+pub struct PipelineReplicatorResourceOverrideConfig {
     /// CPU request for the replicator container, in millicores.
     ///
-    /// When unset, the replicator uses the default request from the ETL API
-    /// service configuration.
+    /// When unset, the replicator uses the API-wide default from the ETL API
+    /// service configuration. When set, this value becomes the startup CPU
+    /// allocation and both VPA CPU bounds.
     #[schema(example = 500)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_request_millicores: Option<i32>,
     /// Memory request for the replicator container, in MiB.
     ///
-    /// When unset, the replicator uses the default request from the ETL API
-    /// service configuration.
+    /// When unset, the replicator uses the API-wide default from the ETL API
+    /// service configuration. When set, this value becomes the startup memory
+    /// allocation and both VPA memory bounds.
     #[schema(example = 2000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_request_mib: Option<i32>,
-    /// CPU limit for the replicator container, in millicores.
-    ///
-    /// When unset, the ETL API uses the final CPU request as the CPU limit.
-    #[schema(example = 1000)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cpu_limit_millicores: Option<i32>,
-    /// Memory limit for the replicator container, in MiB.
-    ///
-    /// When unset, the ETL API uses the final memory request as the memory
-    /// limit.
-    #[schema(example = 2400)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory_limit_mib: Option<i32>,
 }
 
-impl ReplicatorResourcesConfig {
+impl PipelineReplicatorResourceOverrideConfig {
     /// Validates that configured resource overrides are positive.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(cpu_request_millicores) = self.cpu_request_millicores
@@ -108,18 +78,6 @@ impl ReplicatorResourcesConfig {
             && memory_request_mib <= 0
         {
             return Err("Replicator memory request must be greater than 0".to_owned());
-        }
-
-        if let Some(cpu_limit_millicores) = self.cpu_limit_millicores
-            && cpu_limit_millicores <= 0
-        {
-            return Err("Replicator cpu limit must be greater than 0".to_owned());
-        }
-
-        if let Some(memory_limit_mib) = self.memory_limit_mib
-            && memory_limit_mib <= 0
-        {
-            return Err("Replicator memory limit must be greater than 0".to_owned());
         }
 
         Ok(())
@@ -270,8 +228,11 @@ pub struct ApiPipelineConfig {
     pub table_sync_copy: Option<TableSyncCopyConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalidated_slot_behavior: Option<InvalidatedSlotBehavior>,
+    /// Optional fixed resource requests for this pipeline.
+    ///
+    /// Supplying a request fixes that resource's VPA bounds to the same value.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    pub replicator_resources: Option<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,8 +292,11 @@ pub struct UpdateApiPipelineConfig {
     pub table_sync_copy: UpdateField<TableSyncCopyConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub invalidated_slot_behavior: UpdateField<InvalidatedSlotBehavior>,
+    /// Patch for the pipeline's optional fixed resource requests.
+    ///
+    /// A resulting request fixes that resource's VPA bounds to the same value.
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
-    pub replicator_resources: UpdateField<ReplicatorResourcesConfig>,
+    pub replicator_resources: UpdateField<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub ducklake_maintenance: UpdateField<DuckLakeMaintenanceConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
@@ -395,8 +359,8 @@ impl UpdateApiPipelineConfig {
             )?,
             replication_slot: self
                 .replication_slot
-                .apply_to_value(stored.replication_slot, default_replication_slot),
-            batch: self.batch.apply_to_value(stored.batch, default_batch),
+                .apply_to_value(stored.replication_slot, ReplicationSlotConfig::default),
+            batch: self.batch.apply_to_value(stored.batch, BatchConfig::default),
             table_error_retry_delay_ms: self.table_error_retry_delay_ms.apply_to_value(
                 stored.table_error_retry_delay_ms,
                 default_table_error_retry_delay_ms,
@@ -422,16 +386,16 @@ impl UpdateApiPipelineConfig {
                     stored.table_sync_monitor_refresh_interval_ms,
                     default_table_sync_monitor_refresh_interval_ms,
                 ),
-            memory_backpressure: self
-                .memory_backpressure
-                .apply_to_defaulted_option(stored.memory_backpressure, default_memory_backpressure),
+            memory_backpressure: self.memory_backpressure.apply_to_defaulted_option(
+                stored.memory_backpressure,
+                MemoryBackpressureConfig::default,
+            ),
             table_sync_copy: self
                 .table_sync_copy
-                .apply_to_value(stored.table_sync_copy, default_table_sync_copy),
-            invalidated_slot_behavior: self.invalidated_slot_behavior.apply_to_value(
-                stored.invalidated_slot_behavior,
-                default_invalidated_slot_behavior,
-            ),
+                .apply_to_value(stored.table_sync_copy, TableSyncCopyConfig::default),
+            invalidated_slot_behavior: self
+                .invalidated_slot_behavior
+                .apply_to_value(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::default),
             replicator_resources: self
                 .replicator_resources
                 .apply_to_option(stored.replicator_resources),
@@ -487,7 +451,7 @@ pub struct StoredPipelineConfig {
     pub publication_name: String,
     #[serde(default)]
     pub replication_slot: ReplicationSlotConfig,
-    #[serde(default = "default_batch")]
+    #[serde(default)]
     pub batch: BatchConfig,
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
@@ -503,12 +467,15 @@ pub struct StoredPipelineConfig {
     pub table_sync_monitor_refresh_interval_ms: u64,
     #[serde(default = "default_memory_backpressure_option")]
     pub memory_backpressure: Option<MemoryBackpressureConfig>,
-    #[serde(default = "default_table_sync_copy")]
+    #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
-    #[serde(default = "default_invalidated_slot_behavior")]
+    #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
+    /// Optional fixed resource requests for this pipeline.
+    ///
+    /// Supplying a request fixes that resource's VPA bounds to the same value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replicator_resources: Option<ReplicatorResourcesConfig>,
+    pub replicator_resources: Option<PipelineReplicatorResourceOverrideConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ducklake_maintenance: Option<DuckLakeMaintenanceConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -548,12 +515,10 @@ impl Store for StoredPipelineConfig {}
 
 impl From<ApiPipelineConfig> for StoredPipelineConfig {
     fn from(value: ApiPipelineConfig) -> Self {
-        let batch = value.batch.unwrap_or_else(default_batch);
-
         Self {
             publication_name: value.publication_name,
             replication_slot: value.replication_slot.unwrap_or_default(),
-            batch,
+            batch: value.batch.unwrap_or_default(),
             table_error_retry_delay_ms: value
                 .table_error_retry_delay_ms
                 .unwrap_or(PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS),
@@ -573,10 +538,8 @@ impl From<ApiPipelineConfig> for StoredPipelineConfig {
                 .table_sync_monitor_refresh_interval_ms
                 .unwrap_or(PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS),
             memory_backpressure: value.memory_backpressure,
-            table_sync_copy: value.table_sync_copy.unwrap_or_else(default_table_sync_copy),
-            invalidated_slot_behavior: value
-                .invalidated_slot_behavior
-                .unwrap_or_else(default_invalidated_slot_behavior),
+            table_sync_copy: value.table_sync_copy.unwrap_or_default(),
+            invalidated_slot_behavior: value.invalidated_slot_behavior.unwrap_or_default(),
             replicator_resources: value.replicator_resources,
             ducklake_maintenance: value.ducklake_maintenance,
             log_level: value.log_level,
@@ -665,10 +628,9 @@ mod tests {
                 resume_threshold: 0.7,
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
-            replicator_resources: Some(ReplicatorResourcesConfig {
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..ReplicatorResourcesConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,
@@ -707,10 +669,9 @@ mod tests {
             memory_backpressure: None,
             table_sync_copy: None,
             invalidated_slot_behavior: None,
-            replicator_resources: Some(ReplicatorResourcesConfig {
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..ReplicatorResourcesConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: Some(LogLevel::Debug),
@@ -773,12 +734,19 @@ mod tests {
     }
 
     #[test]
-    fn stored_pipeline_config_defaults_replication_slot_for_existing_rows() {
+    fn stored_pipeline_config_uses_canonical_defaults_for_existing_rows() {
         let stored: StoredPipelineConfig =
             serde_json::from_value(serde_json::json!({ "publication_name": "publication" }))
                 .unwrap();
+        let batch = BatchConfig::default();
 
         assert_eq!(stored.replication_slot, ReplicationSlotConfig::default());
+        assert_eq!(stored.batch.max_fill_ms, batch.max_fill_ms);
+        assert_eq!(stored.batch.memory_budget_ratio, batch.memory_budget_ratio);
+        assert_eq!(stored.batch.max_bytes, batch.max_bytes);
+        assert_eq!(stored.memory_backpressure, Some(MemoryBackpressureConfig::default()));
+        assert_eq!(stored.table_sync_copy, TableSyncCopyConfig::default());
+        assert_eq!(stored.invalidated_slot_behavior, InvalidatedSlotBehavior::default());
     }
 
     #[test]
@@ -803,7 +771,7 @@ mod tests {
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
-            replicator_resources: Some(ReplicatorResourcesConfig::default()),
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig::default()),
             ducklake_maintenance: Some(DuckLakeMaintenanceConfig::default()),
             log_level: Some(LogLevel::Info),
         };
@@ -914,26 +882,35 @@ mod tests {
             max_copy_connections_per_table: None,
             memory_refresh_interval_ms: None,
             table_sync_monitor_refresh_interval_ms: None,
-            memory_backpressure: None,
-            table_sync_copy: None,
-            invalidated_slot_behavior: None,
+            memory_backpressure: Some(MemoryBackpressureConfig {
+                activate_threshold: 0.95,
+                resume_threshold: 0.9,
+            }),
+            table_sync_copy: Some(TableSyncCopyConfig::SkipAllTables),
+            invalidated_slot_behavior: Some(InvalidatedSlotBehavior::Recreate),
             replicator_resources: None,
             ducklake_maintenance: None,
             log_level: None,
         }
         .into();
         let update = UpdateApiPipelineConfig {
-            batch: UpdateField::Clear,
             replication_slot: UpdateField::Clear,
+            batch: UpdateField::Clear,
+            memory_backpressure: UpdateField::Clear,
+            table_sync_copy: UpdateField::Clear,
+            invalidated_slot_behavior: UpdateField::Clear,
             ..UpdateApiPipelineConfig::default()
         };
 
         let updated = update.merge_into_stored(stored).unwrap();
 
+        assert_eq!(updated.replication_slot, ReplicationSlotConfig::default());
         assert_eq!(updated.batch.max_fill_ms, BatchConfig::DEFAULT_MAX_FILL_MS);
         assert_eq!(updated.batch.memory_budget_ratio, BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO);
         assert_eq!(updated.batch.max_bytes, BatchConfig::DEFAULT_MAX_BYTES);
-        assert_eq!(updated.replication_slot, ReplicationSlotConfig::default());
+        assert_eq!(updated.memory_backpressure, Some(MemoryBackpressureConfig::default()));
+        assert_eq!(updated.table_sync_copy, TableSyncCopyConfig::default());
+        assert_eq!(updated.invalidated_slot_behavior, InvalidatedSlotBehavior::default());
     }
 
     #[test]
@@ -957,10 +934,9 @@ mod tests {
                 resume_threshold: 0.7,
             }),
             table_sync_copy: TableSyncCopyConfig::IncludeAllTables,
-            replicator_resources: Some(ReplicatorResourcesConfig {
+            replicator_resources: Some(PipelineReplicatorResourceOverrideConfig {
                 cpu_request_millicores: Some(500),
                 memory_request_mib: Some(2000),
-                ..ReplicatorResourcesConfig::default()
             }),
             ducklake_maintenance: None,
             log_level: None,
@@ -972,5 +948,37 @@ mod tests {
         let deserialized: StoredPipelineConfig = serde_json::from_value(json).unwrap();
 
         assert_eq!(deserialized.replicator_resources, None);
+    }
+
+    #[test]
+    fn api_pipeline_resource_override_ignores_removed_limit_keys() {
+        let request = serde_json::json!({
+            "publication_name": "publication",
+            "replicator_resources": {
+                "cpu_request_millicores": 500,
+                "memory_request_mib": 2000,
+                "cpu_limit_millicores": 1000,
+                "memory_limit_mib": 2400
+            }
+        });
+
+        let config: ApiPipelineConfig = serde_json::from_value(request).unwrap();
+
+        let resources = config.replicator_resources.unwrap();
+
+        assert_eq!(
+            resources,
+            PipelineReplicatorResourceOverrideConfig {
+                cpu_request_millicores: Some(500),
+                memory_request_mib: Some(2000),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(resources).unwrap(),
+            serde_json::json!({
+                "cpu_request_millicores": 500,
+                "memory_request_mib": 2000
+            })
+        );
     }
 }

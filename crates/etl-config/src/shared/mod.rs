@@ -16,10 +16,10 @@ pub use destination::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
     BigQueryTimePartitionGranularity, ClickHouseEngine, DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE,
     DEFAULT_DUCKLAKE_PARQUET_ROW_GROUP_SIZE_BYTES, DEFAULT_DUCKLAKE_TARGET_FILE_SIZE,
-    DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind, DuckLakeMaintenanceMode,
-    DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection, DuckLakeSortNulls,
-    DuckLakeTableSortConfig, DuckLakeTableSortingConfig, DuckLakeWriterConfig, IcebergConfig,
-    IcebergConfigWithoutSecrets,
+    DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind, DuckLakeCopyBufferConfig,
+    DuckLakeMaintenanceMode, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
+    DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, DuckLakeWriterConfig,
+    IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,
