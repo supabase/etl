@@ -394,15 +394,16 @@ pub(crate) async fn put_publication(
 
     validate_row_filters(table_configs)?;
 
-    let mut transaction = pool.begin().await?;
-    sqlx::query("set local standard_conforming_strings = on").execute(&mut *transaction).await?;
+    let mut source_txn = pool.begin().await?;
 
-    let existing = read_publication_catalog_row(&mut transaction, publication_name).await?;
+    sqlx::query("set local standard_conforming_strings = on").execute(&mut *source_txn).await?;
+
+    let existing = read_publication_catalog_row(&mut source_txn, publication_name).await?;
     let created = existing.is_none();
 
     if let Some(existing) = &existing {
         let has_schema_selection = existing.server_version_num >= POSTGRES_15
-            && publication_has_schema_selection(&mut transaction, publication_name).await?;
+            && publication_has_schema_selection(&mut source_txn, publication_name).await?;
         if existing.puballtables || has_schema_selection {
             return Err(PublicationsV2DbError::OpenEndedPublicationCannotBeUpdated);
         }
@@ -416,16 +417,16 @@ pub(crate) async fn put_publication(
         }
     }
 
-    let resolved_tables = resolve_table_references(&mut transaction, table_configs).await?;
+    let resolved_tables = resolve_table_references(&mut source_txn, table_configs).await?;
 
     if let Some(existing) = existing {
         let PublicationTableSelection::Tables { tables } = &config.table_selection else {
             return Err(PublicationsV2DbError::ExistingPublicationCannotBecomeOpenEnded);
         };
-        replace_explicit_tables(&mut transaction, publication_name, tables, &resolved_tables)
+        replace_explicit_tables(&mut source_txn, publication_name, tables, &resolved_tables)
             .await?;
         alter_publication_options(
-            &mut transaction,
+            &mut source_txn,
             publication_name,
             config,
             existing.server_version_num,
@@ -436,14 +437,14 @@ pub(crate) async fn put_publication(
         append_table_selection(&mut query, &config.table_selection, &resolved_tables);
         append_publication_options(&mut query, config);
 
-        sqlx::query(AssertSqlSafe(query)).execute(&mut *transaction).await?;
+        sqlx::query(AssertSqlSafe(query)).execute(&mut *source_txn).await?;
     }
 
-    let publication = read_publication_with_connection(&mut transaction, publication_name)
+    let publication = read_publication_with_connection(&mut source_txn, publication_name)
         .await?
         .ok_or(PublicationsV2DbError::CreatedPublicationNotFound)?;
 
-    transaction.commit().await?;
+    source_txn.commit().await?;
 
     Ok(PutPublicationResult { publication, created })
 }

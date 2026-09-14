@@ -1,12 +1,15 @@
 use etl::store::TableState;
 use etl_api::{
     configs::{
+        destination::UpdateApiDestinationConfig,
         pipeline::{PipelineReplicatorResourceOverrideConfig, UpdateApiPipelineConfig},
         update::UpdateField,
     },
     k8s::PodStatus,
     routes::{
         ErrorMessage,
+        destinations::UpdateDestinationRequest,
+        destinations_pipelines::UpdateDestinationPipelineRequest,
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
@@ -14,6 +17,7 @@ use etl_api::{
             TableStatus, UpdatePipelineRequest, UpdatePipelineVersionRequest,
             ValidatePipelineRequest, ValidatePipelineResponse,
         },
+        sources::UpdateSourceRequest,
     },
     startup::get_connection_pool,
     validation::FailureType,
@@ -35,10 +39,11 @@ use crate::support::{
     mocks::{
         create_default_image, create_image_with_name,
         destinations::{
-            create_destination, create_destination_with_config, new_ducklake_destination_config,
+            create_destination, create_destination_with_config, new_bigquery_destination_config,
+            new_ducklake_destination_config,
         },
         pipelines::{create_pipeline_with_config, new_pipeline_config, updated_pipeline_config},
-        sources::create_source,
+        sources::{create_source, new_source_config},
         tenants::{create_tenant, create_tenant_with_id_and_name},
     },
     test_app::{
@@ -358,6 +363,7 @@ async fn pipeline_replicator_resources_are_persisted_and_used_on_start() {
         })
     );
 
+    k8s_state.set_stateful_set_active(false);
     let response = app.start_pipeline(tenant_id, pipeline_id).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -1518,16 +1524,501 @@ async fn simulator_tenant_can_update_pipeline_to_registered_non_default_version(
     assert_eq!(version.new_version.map(|image| image.id), Some(default_image_id));
 }
 
+/// Repeated starts are idempotent even while Kubernetes is still starting.
 #[tokio::test(flavor = "multi_thread")]
-async fn an_existing_pipeline_can_be_started() {
-    init_test_tracing();
-    let (app, tenant_id, _source_id, _destination_id, pipeline_id) = setup_basic_pipeline().await;
+async fn starting_an_active_pipeline_does_not_replace_its_runtime() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    let creates_before = app.k8s_state.create_calls();
+    for status in [PodStatus::Starting, PodStatus::Started, PodStatus::Failed] {
+        app.k8s_state.set_pod_status(status).await;
+        assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
+    }
+    assert_eq!(app.k8s_state.create_calls(), creates_before);
+    assert!(!app.k8s_state.waited_for_deletion());
+    assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
+}
 
-    // Act
+/// Restart restores committed configuration after an update reached Kubernetes
+/// but failed before the API transaction committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_after_update_timeout_restores_committed_configuration() {
+    let (app, tenant_id, pipeline_id, source_pool, source_config) =
+        setup_pipeline_with_source_db().await;
+    assert_eq!(app.restart_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::ACCEPTED);
+    let committed_image = app.k8s_state.last_replicator_image().await.unwrap();
+    let committed_version: GetPipelineVersionResponse =
+        app.get_pipeline_version(&tenant_id, pipeline_id).await.json().await.unwrap();
+    let updated_image = "example.com/etl-replicator:updated".to_owned();
+    let updated_image_id = create_image_with_name(&app, updated_image.clone(), true).await;
+
+    // The template survives the timeout while the API image change rolls back.
+    app.k8s_state.set_restart_timeout(true);
+    let response = app
+        .update_pipeline_version(
+            &tenant_id,
+            pipeline_id,
+            &UpdatePipelineVersionRequest { version_id: updated_image_id },
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(app.k8s_state.last_replicator_image().await, Some(updated_image));
+    let persisted_version: GetPipelineVersionResponse =
+        app.get_pipeline_version(&tenant_id, pipeline_id).await.json().await.unwrap();
+    assert_eq!(persisted_version.version.id, committed_version.version.id);
+
+    app.k8s_state.set_restart_timeout(false);
+    assert_eq!(app.restart_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.k8s_state.last_replicator_image().await, Some(committed_image));
+
+    source_pool.close().await;
+    drop_pg_database(&source_config).await;
+}
+
+/// Unready current Pods can be replaced instead of being mistaken for pending
+/// restarts.
+#[tokio::test(flavor = "multi_thread")]
+async fn restarting_an_unready_current_pipeline_requests_a_new_restart() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    app.k8s_state.set_pod_status(PodStatus::Starting).await;
+    let creates_before = app.k8s_state.create_calls();
+    assert_eq!(app.restart_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::ACCEPTED);
+    assert!(app.k8s_state.create_calls() > creates_before);
+}
+
+/// A blocked Kubernetes action excludes mutations but leaves status responsive.
+#[tokio::test(flavor = "multi_thread")]
+async fn lifecycle_operations_exclude_overlaps_until_kubernetes_work_finishes() {
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+    app.k8s_state.set_stateful_set_active(false);
+    app.k8s_state.set_pod_status(PodStatus::Stopping).await;
+    let deletion = app.k8s_state.pause_deletion().await;
+    let creates_before = app.k8s_state.create_calls();
+    let (started, ()) = tokio::join!(app.start_pipeline(&tenant_id, pipeline_id), async {
+        deletion.wait_until_entered().await;
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            app.get_pipeline_status(&tenant_id, pipeline_id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+        let mut source_config = new_source_config();
+        // Lock contention must win over validation of an unreachable database.
+        source_config.host = "127.0.0.1".to_owned();
+        source_config.port = 1;
+        let destination_config =
+            UpdateApiDestinationConfig::from_api_config(new_bigquery_destination_config());
+        let responses = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            [
+                app.start_pipeline(&tenant_id, pipeline_id).await,
+                app.stop_pipeline(&tenant_id, pipeline_id).await,
+                app.restart_pipeline(&tenant_id, pipeline_id).await,
+                app.stop_all_pipelines(&tenant_id).await,
+                app.delete_pipeline(&tenant_id, pipeline_id).await,
+                app.delete_source(&tenant_id, source_id).await,
+                app.delete_destination(&tenant_id, destination_id).await,
+                app.delete_tenant(&tenant_id).await,
+                app.delete_destination_pipeline(&tenant_id, destination_id, pipeline_id).await,
+                app.update_source(
+                    &tenant_id,
+                    source_id,
+                    &UpdateSourceRequest {
+                        name: "Lock contention fixture".to_owned(),
+                        config: source_config,
+                    },
+                )
+                .await,
+                app.update_destination(
+                    &tenant_id,
+                    destination_id,
+                    &UpdateDestinationRequest {
+                        name: "Lock contention fixture".to_owned(),
+                        config: destination_config.clone(),
+                    },
+                )
+                .await,
+                app.update_destination_pipeline(
+                    &tenant_id,
+                    destination_id,
+                    pipeline_id,
+                    &UpdateDestinationPipelineRequest {
+                        destination_name: "Lock contention fixture".to_owned(),
+                        destination_config,
+                        source_id,
+                        pipeline_config: UpdateApiPipelineConfig::default(),
+                    },
+                )
+                .await,
+                app.update_pipeline_version(
+                    &tenant_id,
+                    pipeline_id,
+                    &UpdatePipelineVersionRequest { version_id: 1 },
+                )
+                .await,
+                app.update_pipeline(
+                    &tenant_id,
+                    pipeline_id,
+                    &UpdatePipelineRequest {
+                        source_id,
+                        destination_id,
+                        config: UpdateApiPipelineConfig::default(),
+                    },
+                )
+                .await,
+                app.rollback_tables(
+                    &tenant_id,
+                    pipeline_id,
+                    &RollbackTablesRequest { target: RollbackTablesTarget::AllTables },
+                )
+                .await,
+            ]
+        })
+        .await
+        .unwrap();
+        for response in responses {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let error: ErrorMessage = response.json().await.unwrap();
+            assert_eq!(
+                error.message,
+                format!(
+                    "Another operation is in progress for pipeline {pipeline_id}. Wait for it to \
+                     finish and retry."
+                )
+            );
+        }
+        assert_eq!(app.k8s_state.create_calls(), creates_before);
+        deletion.release();
+    });
+    assert_eq!(started.status(), StatusCode::OK);
+    assert_eq!(app.stop_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::ACCEPTED);
+}
+
+/// Bulk mutations acquire the full set before writing or touching Kubernetes.
+#[tokio::test(flavor = "multi_thread")]
+async fn bulk_pipeline_operations_release_partial_locks_without_side_effects() {
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+    let other_source = create_source(&app, &tenant_id).await;
+    let other_destination = create_destination(&app, &tenant_id).await;
+    let pool = get_connection_pool(app.database_config());
+    let image = etl_api::data::images::read_default_image(&pool).await.unwrap().unwrap();
+    // Bypass the default one-pipeline quota to exercise shared dependencies.
+    let mut api_txn = pool.begin().await.unwrap();
+
+    let mut other_pipelines = Vec::new();
+    for (source_id, destination_id) in
+        [(other_source, destination_id), (source_id, other_destination)]
+    {
+        other_pipelines.push(
+            etl_api::data::pipelines::create_pipeline(
+                &mut api_txn,
+                &tenant_id,
+                source_id,
+                destination_id,
+                image.id,
+                new_pipeline_config(),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+
+    api_txn.commit().await.unwrap();
+
+    let mut conflicting_txn = pool.begin().await.unwrap();
+
+    sqlx::query("select id from app.pipelines where id = any($1) order by id for update")
+        .bind(&other_pipelines)
+        .execute(&mut *conflicting_txn)
+        .await
+        .unwrap();
+    let creates_before = app.k8s_state.create_calls();
+    let deletes_before = app.k8s_state.vpa_delete_calls();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let responses = [
+            app.stop_all_pipelines(&tenant_id).await,
+            app.delete_tenant(&tenant_id).await,
+            app.update_source(
+                &tenant_id,
+                source_id,
+                &UpdateSourceRequest {
+                    name: "Updated shared source".to_owned(),
+                    config: new_source_config(),
+                },
+            )
+            .await,
+            app.update_destination(
+                &tenant_id,
+                destination_id,
+                &UpdateDestinationRequest {
+                    name: "Updated shared destination".to_owned(),
+                    config: UpdateApiDestinationConfig::from_api_config(
+                        new_bigquery_destination_config(),
+                    ),
+                },
+            )
+            .await,
+            app.update_destination_pipeline(
+                &tenant_id,
+                destination_id,
+                pipeline_id,
+                &UpdateDestinationPipelineRequest {
+                    destination_name: "Updated shared destination".to_owned(),
+                    destination_config: UpdateApiDestinationConfig::from_api_config(
+                        new_bigquery_destination_config(),
+                    ),
+                    source_id,
+                    pipeline_config: UpdateApiPipelineConfig::default(),
+                },
+            )
+            .await,
+        ];
+        for response in responses {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+        // Each aborted bulk operation released its already-acquired first lock.
+        // Independent pipelines in the same tenant remain usable.
+        assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
+    })
+    .await
+    .unwrap();
+    assert_eq!(app.k8s_state.create_calls(), creates_before);
+    assert_eq!(app.k8s_state.vpa_delete_calls(), deletes_before);
+    let names: (String, String) = sqlx::query_as(
+        "select s.name, d.name from app.sources s, app.destinations d where s.id = $1 and d.id = \
+         $2",
+    )
+    .bind(source_id)
+    .bind(destination_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(names.0, crate::support::mocks::sources::new_name());
+    assert_eq!(names.1, crate::support::mocks::destinations::new_name());
+
+    conflicting_txn.rollback().await.unwrap();
+
+    pool.close().await;
+}
+
+/// A combined update locks the shared destination's complete pipeline set
+/// before modifying configuration and restarts every active member.
+#[tokio::test(flavor = "multi_thread")]
+async fn destination_pipeline_update_locks_and_restarts_shared_pipelines() {
+    let (app, tenant_id, _, destination_id, other_pipeline_id) = setup_basic_pipeline().await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let pool = get_connection_pool(app.database_config());
+    let image = etl_api::data::images::read_default_image(&pool).await.unwrap().unwrap();
+    // Bypass the one-pipeline quota to verify isolation with a shared destination.
+    let mut api_txn = pool.begin().await.unwrap();
+
+    let pipeline_id = etl_api::data::pipelines::create_pipeline(
+        &mut api_txn,
+        &tenant_id,
+        source_id,
+        destination_id,
+        image.id,
+        new_pipeline_config(),
+    )
+    .await
+    .unwrap();
+
+    api_txn.commit().await.unwrap();
+
+    let mut conflicting_txn = pool.begin().await.unwrap();
+
+    sqlx::query("select id from app.pipelines where id = $1 for update")
+        .bind(other_pipeline_id)
+        .execute(&mut *conflicting_txn)
+        .await
+        .unwrap();
+
+    let workloads_before = app.k8s_state.stateful_set_apply_calls();
+    let update = UpdateDestinationPipelineRequest {
+        destination_name: "Updated shared destination".to_owned(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            new_bigquery_destination_config(),
+        ),
+        source_id,
+        pipeline_config: UpdateApiPipelineConfig::default(),
+    };
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        app.update_destination_pipeline(&tenant_id, destination_id, pipeline_id, &update),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let error: ErrorMessage = response.json().await.unwrap();
+    assert_eq!(
+        error.message,
+        format!(
+            "Another operation is in progress for pipeline {other_pipeline_id}. Wait for it to \
+             finish and retry."
+        )
+    );
+    assert_eq!(app.k8s_state.stateful_set_apply_calls(), workloads_before);
+
+    conflicting_txn.rollback().await.unwrap();
+
+    assert_eq!(
+        app.update_destination_pipeline(&tenant_id, destination_id, pipeline_id, &update)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(app.k8s_state.stateful_set_apply_calls(), workloads_before + 2);
+    pool.close().await;
+}
+
+/// Configuration writes on related resources do not impose lifecycle locks.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_operations_do_not_lock_related_resources() {
+    let app = spawn_test_app().await;
+    create_default_image(&app).await;
+    let tenant_id = create_tenant(&app).await;
+    let source_id = create_source(&app, &tenant_id).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pool = get_connection_pool(app.database_config());
+    let mut resource_txn = pool.begin().await.unwrap();
+
+    // These are the row locks taken by ordinary non-key configuration updates.
+    // Foreign-key checks remain compatible, but explicit share/update locks do not.
+    sqlx::query("select id from app.tenants where id = $1 for no key update")
+        .bind(&tenant_id)
+        .execute(&mut *resource_txn)
+        .await
+        .unwrap();
+    for query in [
+        "select id from app.sources where tenant_id = $1 for no key update",
+        "select id from app.destinations where tenant_id = $1 for no key update",
+    ] {
+        sqlx::query(query).bind(&tenant_id).execute(&mut *resource_txn).await.unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let response = app
+            .create_pipeline(
+                &tenant_id,
+                &CreatePipelineRequest { source_id, destination_id, config: new_pipeline_config() },
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let pipeline: CreatePipelineResponse = response.json().await.unwrap();
+        assert_eq!(app.start_pipeline(&tenant_id, pipeline.id).await.status(), StatusCode::OK);
+        assert_eq!(
+            app.update_pipeline(
+                &tenant_id,
+                pipeline.id,
+                &UpdatePipelineRequest {
+                    source_id,
+                    destination_id,
+                    config: UpdateApiPipelineConfig::default()
+                },
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    })
+    .await
+    .unwrap();
+
+    resource_txn.rollback().await.unwrap();
+
+    pool.close().await;
+}
+
+/// A pipeline lock never blocks lifecycle work for a different pipeline.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_lifecycle_locks_are_isolated_between_pipelines() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    let other_tenant =
+        create_tenant_with_id_and_name(&app, "other-tenant".to_owned(), "Other tenant".to_owned())
+            .await;
+    let other_source = create_source(&app, &other_tenant).await;
+    let other_destination = create_destination(&app, &other_tenant).await;
+    let other_pipeline = create_pipeline_with_config(
+        &app,
+        &other_tenant,
+        other_source,
+        other_destination,
+        new_pipeline_config(),
+    )
+    .await;
+    app.k8s_state.set_stateful_set_active(false);
+    let deletion = app.k8s_state.pause_deletion().await;
+    let (started, ()) = tokio::join!(app.start_pipeline(&tenant_id, pipeline_id), async {
+        deletion.wait_until_entered().await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.start_pipeline(&other_tenant, other_pipeline),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // An unrelated tenant must not learn that this pipeline is locked.
+        assert_eq!(
+            app.stop_pipeline(&other_tenant, pipeline_id).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(app.stop_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::CONFLICT);
+        deletion.release();
+    });
+    assert_eq!(started.status(), StatusCode::OK);
+}
+
+/// Stop retains exclusivity until Kubernetes has accepted its deletion.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_stop_holds_its_lock_until_deletion_is_accepted() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    let deletion = app.k8s_state.pause_deletion().await;
+    let (stopped, ()) = tokio::join!(app.stop_pipeline(&tenant_id, pipeline_id), async {
+        deletion.wait_until_entered().await;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            app.start_pipeline(&tenant_id, pipeline_id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        deletion.release();
+    });
+    assert_eq!(stopped.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
+}
+
+/// Starting after stop must finish shutdown before applying a replacement.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_pipeline_finishes_previous_shutdown() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    app.k8s_state.set_stateful_set_active(false);
+    app.k8s_state.set_pod_status(PodStatus::Stopping).await;
+    let creates_before = app.k8s_state.create_calls();
+
     let response = app.start_pipeline(&tenant_id, pipeline_id).await;
 
-    // Assert
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.k8s_state.waited_for_deletion());
+    assert!(app.k8s_state.create_calls() > creates_before);
+}
+
+/// A shutdown timeout must not report a successful start or apply new
+/// resources.
+#[tokio::test(flavor = "multi_thread")]
+async fn start_pipeline_deletion_timeout_does_not_recreate_runtime() {
+    let (app, tenant_id, _, _, pipeline_id) = setup_basic_pipeline().await;
+    app.k8s_state.set_stateful_set_active(false);
+    app.k8s_state.set_pod_status(PodStatus::Stopping).await;
+    app.k8s_state.set_deletion_timeout(true);
+    let creates_before = app.k8s_state.create_calls();
+
+    let response = app.start_pipeline(&tenant_id, pipeline_id).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(app.k8s_state.waited_for_deletion());
+    assert_eq!(app.k8s_state.create_calls(), creates_before);
+    // Failed operations release the database lock and can be retried.
+    app.k8s_state.set_deletion_timeout(false);
+    assert_eq!(app.start_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1934,6 +2425,7 @@ async fn restarting_pipeline_preserves_vpa_when_source_lock_times_out() {
 
     // Hold the lock until the source connection's lock timeout cancels inspection.
     let mut transaction = source_db_pool.begin().await.unwrap();
+
     sqlx::query("lock table etl.replication_state in access exclusive mode")
         .execute(&mut *transaction)
         .await
@@ -1951,6 +2443,7 @@ async fn restarting_pipeline_preserves_vpa_when_source_lock_times_out() {
     assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
 
     transaction.rollback().await.unwrap();
+
     drop_pg_database(&source_db_config).await;
 }
 
@@ -2319,6 +2812,221 @@ async fn rollback_tables_replaces_history_and_preserves_schemas_and_metadata() {
     assert_eq!(metadata_count_after, 1);
 
     drop_pg_database(&source_db_config).await;
+}
+
+/// The durable boundary at which a pipeline deletion fails.
+#[derive(Clone, Copy)]
+enum DeletionFailure {
+    /// Source metadata deletion fails when its transaction commits.
+    SourceCommit,
+    /// Slot cleanup fails after source metadata deletion commits.
+    SlotCleanup,
+    /// API deletion fails after all source cleanup succeeds.
+    ApiCommit,
+}
+
+/// Exercises both pipeline deletion endpoints at the same failure boundary.
+async fn assert_pipeline_deletion_can_be_retried(failure: DeletionFailure) {
+    for delete_destination in [false, true] {
+        let (app, tenant_id, original_pipeline_id, source_pool, source_config) =
+            setup_pipeline_with_source_db().await;
+        let api_pool = get_connection_pool(app.database_config());
+        // Slot names are cluster-wide, so each test needs a distinct pipeline ID.
+        let pipeline_id =
+            i64::try_from(uuid::Uuid::new_v4().as_u128() & ((1_u128 << 63) - 1)).unwrap();
+        sqlx::query("select setval(pg_get_serial_sequence('app.pipelines', 'id'), $1, false)")
+            .bind(pipeline_id)
+            .execute(&api_pool)
+            .await
+            .unwrap();
+        sqlx::query("update app.pipelines set id = default where id = $1")
+            .bind(original_pipeline_id)
+            .execute(&api_pool)
+            .await
+            .unwrap();
+        let pipeline: ReadPipelineResponse =
+            app.read_pipeline(&tenant_id, pipeline_id).await.json().await.unwrap();
+        let destination_id = pipeline.destination_id;
+        app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+        create_tables_with_states(
+            &source_pool,
+            pipeline_id,
+            &[("test_users", "ready", r#"{"type":"ready"}"#)],
+        )
+        .await;
+        let slot_name = format!("supabase_etl_apply_{pipeline_id}");
+        sqlx::query("select pg_create_logical_replication_slot($1, 'pgoutput')")
+            .bind(&slot_name)
+            .execute(&source_pool)
+            .await
+            .unwrap();
+
+        match failure {
+            DeletionFailure::SourceCommit => {
+                source_pool
+                    .execute(
+                        r#"
+                    create function public.reject_source_commit() returns trigger
+                    language plpgsql as $$
+                    begin
+                        raise exception 'Forced source commit failure';
+                    end;
+                    $$;
+                    create constraint trigger reject_source_commit
+                    after delete on etl.replication_state deferrable initially deferred
+                    for each row execute function public.reject_source_commit();
+                "#,
+                    )
+                    .await
+                    .unwrap();
+            }
+            DeletionFailure::SlotCleanup => {
+                // Shadow slot deletion only in this source database's new sessions.
+                // This fails after metadata commits without changing server privileges.
+                source_pool
+                    .execute(
+                        r#"
+                    create function public.pg_drop_replication_slot(name) returns void
+                    language plpgsql as $$
+                    begin
+                        raise exception 'Forced slot cleanup failure';
+                    end;
+                    $$;
+                "#,
+                    )
+                    .await
+                    .unwrap();
+                source_pool
+                    .execute(AssertSqlSafe(format!(
+                        "alter database {} set search_path = public, pg_catalog",
+                        quote_identifier(&source_config.name),
+                    )))
+                    .await
+                    .unwrap();
+            }
+            DeletionFailure::ApiCommit => {
+                api_pool
+                    .execute(
+                        r#"
+                    create function app.reject_pipeline_commit() returns trigger
+                    language plpgsql as $$
+                    begin
+                        raise exception 'Forced API commit failure';
+                    end;
+                    $$;
+                    create constraint trigger reject_pipeline_commit
+                    after delete on app.pipelines deferrable initially deferred
+                    for each row execute function app.reject_pipeline_commit();
+                "#,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let response = if delete_destination {
+            app.delete_destination_pipeline(&tenant_id, destination_id, pipeline_id).await
+        } else {
+            app.delete_pipeline(&tenant_id, pipeline_id).await
+        };
+        let expected_status = match failure {
+            DeletionFailure::SourceCommit | DeletionFailure::SlotCleanup => StatusCode::BAD_GATEWAY,
+            DeletionFailure::ApiCommit => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(app.read_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
+        assert_eq!(app.read_destination(&tenant_id, destination_id).await.status(), StatusCode::OK);
+        let state_count: i64 =
+            sqlx::query_scalar("select count(*) from etl.replication_state where pipeline_id = $1")
+                .bind(pipeline_id)
+                .fetch_one(&source_pool)
+                .await
+                .unwrap();
+        assert_eq!(state_count, i64::from(matches!(failure, DeletionFailure::SourceCommit)));
+        let slot_exists: bool = sqlx::query_scalar(
+            "select exists(select 1 from pg_replication_slots where slot_name = $1)",
+        )
+        .bind(&slot_name)
+        .fetch_one(&source_pool)
+        .await
+        .unwrap();
+        assert_eq!(slot_exists, !matches!(failure, DeletionFailure::ApiCommit));
+
+        match failure {
+            DeletionFailure::SourceCommit => {
+                source_pool
+                    .execute("drop trigger reject_source_commit on etl.replication_state")
+                    .await
+                    .unwrap();
+            }
+            DeletionFailure::SlotCleanup => {
+                source_pool
+                    .execute("drop function public.pg_drop_replication_slot(name)")
+                    .await
+                    .unwrap();
+            }
+            DeletionFailure::ApiCommit => {
+                api_pool
+                    .execute("drop trigger reject_pipeline_commit on app.pipelines")
+                    .await
+                    .unwrap();
+            }
+        }
+        let response = if delete_destination {
+            app.delete_destination_pipeline(&tenant_id, destination_id, pipeline_id).await
+        } else {
+            app.delete_pipeline(&tenant_id, pipeline_id).await
+        };
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            app.read_pipeline(&tenant_id, pipeline_id).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        let destination_status =
+            if delete_destination { StatusCode::NOT_FOUND } else { StatusCode::OK };
+        assert_eq!(
+            app.read_destination(&tenant_id, destination_id).await.status(),
+            destination_status
+        );
+        let state_count: i64 =
+            sqlx::query_scalar("select count(*) from etl.replication_state where pipeline_id = $1")
+                .bind(pipeline_id)
+                .fetch_one(&source_pool)
+                .await
+                .unwrap();
+        assert_eq!(state_count, 0);
+        let slot_exists: bool = sqlx::query_scalar(
+            "select exists(select 1 from pg_replication_slots where slot_name = $1)",
+        )
+        .bind(&slot_name)
+        .fetch_one(&source_pool)
+        .await
+        .unwrap();
+        assert!(!slot_exists);
+
+        api_pool.close().await;
+        source_pool.close().await;
+        drop_pg_database(&source_config).await;
+    }
+}
+
+/// A source commit failure must retain API records and allow deletion to be
+/// retried.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_deletion_source_commit_failure_preserves_api_state_for_retry() {
+    assert_pipeline_deletion_can_be_retried(DeletionFailure::SourceCommit).await;
+}
+
+/// A slot failure must retain API records even after source metadata is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_deletion_slot_cleanup_failure_preserves_api_state_for_retry() {
+    assert_pipeline_deletion_can_be_retried(DeletionFailure::SlotCleanup).await;
+}
+
+/// A failed API commit can be retried after both metadata and slots are gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_deletion_api_commit_failure_can_retry_cleaned_source() {
+    assert_pipeline_deletion_can_be_retried(DeletionFailure::ApiCommit).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -17,7 +17,7 @@ use etl_postgres::{
     store::{health, table_state},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, PgTransaction};
 use thiserror::Error;
 use tracing::{error, warn};
 use utoipa::ToSchema;
@@ -30,8 +30,9 @@ use crate::{
     },
     data,
     data::{
-        destinations::{DestinationsDbError, destination_exists},
+        destinations::DestinationsDbError,
         images::ImagesDbError,
+        locks::{lock_pipeline, lock_pipelines},
         pipelines::{
             MAX_PIPELINES_PER_TENANT, PipelinesDbError, delete_pipeline_api_state,
             delete_pipeline_replication_slots, delete_pipeline_source_state,
@@ -70,6 +71,10 @@ pub enum PipelineError {
 
     #[error("The pipeline with id {0} is not running; start it before restarting it")]
     InactivePipeline(i64),
+
+    /// Another request owns this pipeline's lifecycle transaction.
+    #[error("Another operation is in progress for pipeline {0}. Wait for it to finish and retry.")]
+    OperationInProgress(i64),
 
     #[error("The source with id {0} was not found")]
     SourceNotFound(i64),
@@ -303,6 +308,7 @@ impl IntoResponse for PipelineError {
             PipelineError::Validation(error) => route_utils::validation_error_status_code(error),
             PipelineError::ActivePipeline(_)
             | PipelineError::InactivePipeline(_)
+            | PipelineError::OperationInProgress(_)
             | PipelineError::DuplicatePipeline => StatusCode::CONFLICT,
             PipelineError::PipelineNotFound(_)
             | PipelineError::RollbackTableNotFound(_)
@@ -624,15 +630,26 @@ pub struct RollbackTablesResponse {
     pub tables: Vec<RolledBackTable>,
 }
 
+/// Observed pipeline runtime state, independent of table replication progress.
+///
+/// Starting includes automatic recovery and replacement. Failed reports a
+/// current runtime failure and does not imply that automatic recovery has
+/// stopped. Unknown means that the current runtime state cannot be established.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "name")]
 pub enum PipelineStatus {
+    /// The pipeline runtime is stopped.
     Stopped,
+    /// The pipeline runtime is starting or being replaced.
     Starting,
+    /// The current pipeline runtime has started.
     Started,
+    /// The pipeline runtime is shutting down.
     Stopping,
+    /// The pipeline runtime currently reports a failure.
     Failed,
+    /// The pipeline runtime state cannot currently be confirmed.
     Unknown,
 }
 
@@ -725,7 +742,6 @@ pub struct ValidatePipelineResponse {
 pub(crate) async fn create_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
-    Extension(encryption_key): Extension<Arc<EncryptionKeyring>>,
     feature_flags_client: Option<Extension<FeatureFlagsClient>>,
     pipeline: Json<CreatePipelineRequest>,
 ) -> Result<impl IntoResponse, PipelineError> {
@@ -733,35 +749,40 @@ pub(crate) async fn create_pipeline(
     let pipeline = pipeline.into_inner();
     validate_create_pipeline_request(&pipeline.config)?;
 
-    let mut txn = pool.begin().await?;
-
-    // Verify source exists
-    data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
-        .await?
-        .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
-
-    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
-        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
-    }
-
     let max_pipelines = get_max_pipelines_per_tenant(
         feature_flags_client.as_ref().map(|Extension(client)| client),
         tenant_id,
         MAX_PIPELINES_PER_TENANT,
     )
     .await;
+
+    let mut api_txn = pool.begin().await?;
+
+    if !data::sources::source_exists(api_txn.deref_mut(), tenant_id, pipeline.source_id).await? {
+        return Err(PipelineError::SourceNotFound(pipeline.source_id));
+    }
+    if !data::destinations::destination_exists(
+        api_txn.deref_mut(),
+        tenant_id,
+        pipeline.destination_id,
+    )
+    .await?
+    {
+        return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
+    }
+
     let pipeline_count =
-        data::pipelines::count_pipelines_for_tenant(txn.deref_mut(), tenant_id).await?;
+        data::pipelines::count_pipelines_for_tenant(api_txn.deref_mut(), tenant_id).await?;
     if pipeline_count >= max_pipelines {
         return Err(PipelineError::PipelineLimitReached { limit: max_pipelines });
     }
 
-    let image = data::images::read_default_image(txn.deref_mut())
+    let image = data::images::read_default_image(api_txn.deref_mut())
         .await?
         .ok_or(PipelineError::NoDefaultImageFound)?;
 
     let id = data::pipelines::create_pipeline(
-        &mut txn,
+        &mut api_txn,
         tenant_id,
         pipeline.source_id,
         pipeline.destination_id,
@@ -769,7 +790,8 @@ pub(crate) async fn create_pipeline(
         pipeline.config,
     )
     .await?;
-    txn.commit().await?;
+
+    api_txn.commit().await?;
 
     let response = CreatePipelineResponse { id };
 
@@ -833,7 +855,7 @@ pub(crate) async fn read_pipeline(
         (status = 200, description = "Pipeline updated successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline, source, or destination not found", body = ErrorMessage),
-        (status = 409, description = "Pipeline already exists for this source and destination", body = ErrorMessage),
+        (status = 409, description = "Pipeline already exists for this source and destination or another operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -856,19 +878,25 @@ pub(crate) async fn update_pipeline(
     let pipeline = pipeline.into_inner();
     validate_update_pipeline_request(&pipeline.config)?;
 
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
 
-    // Verify source exists
-    data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
-        .await?
-        .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+    lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
 
-    if !destination_exists(txn.deref_mut(), tenant_id, pipeline.destination_id).await? {
+    if !data::sources::source_exists(api_txn.deref_mut(), tenant_id, pipeline.source_id).await? {
+        return Err(PipelineError::SourceNotFound(pipeline.source_id));
+    }
+    if !data::destinations::destination_exists(
+        api_txn.deref_mut(),
+        tenant_id,
+        pipeline.destination_id,
+    )
+    .await?
+    {
         return Err(PipelineError::DestinationNotFound(pipeline.destination_id));
     }
 
     data::pipelines::update_pipeline(
-        txn.deref_mut(),
+        api_txn.deref_mut(),
         tenant_id,
         pipeline_id,
         pipeline.source_id,
@@ -879,7 +907,7 @@ pub(crate) async fn update_pipeline(
     .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     restart_replicator_if_running(
-        &mut txn,
+        &mut api_txn,
         tenant_id,
         pipeline_id,
         &encryption_key,
@@ -889,7 +917,7 @@ pub(crate) async fn update_pipeline(
     )
     .await?;
 
-    txn.commit().await?;
+    api_txn.commit().await?;
 
     Ok(StatusCode::OK)
 }
@@ -906,7 +934,7 @@ pub(crate) async fn update_pipeline(
     responses(
         (status = 200, description = "Pipeline deleted successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 409, description = "Pipeline is active", body = ErrorMessage),
+        (status = 409, description = "Pipeline is active or another operation is in progress", body = ErrorMessage),
         (status = 404, description = "Pipeline or source not found", body = ErrorMessage),
         (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your database is unavailable", body = ErrorMessage),
@@ -926,7 +954,10 @@ pub(crate) async fn delete_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let pipeline = read_pipeline_for_deletion(&pool, tenant_id, pipeline_id)
+    let mut api_txn = pool.begin().await?;
+
+    lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
+    let pipeline = read_pipeline_for_deletion(api_txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
     if is_replicator_active(k8s_client.as_ref(), tenant_id, pipeline.replicator_id).await? {
@@ -935,7 +966,7 @@ pub(crate) async fn delete_pipeline(
 
     let tls_config = source_tls_config.get_tls_config();
     let source = data::sources::read_source_connection(
-        &pool,
+        api_txn.deref_mut(),
         tenant_id,
         pipeline.source_id,
         &encryption_key,
@@ -961,22 +992,25 @@ pub(crate) async fn delete_pipeline(
             None
         }
     };
-    let mut api_txn = pool.begin().await?;
+    delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
     if let Some(source_pool) = source_pool {
         let mut source_txn = source_pool.begin().await.map_err(PipelineError::SourceDatabase)?;
-        delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
+
         delete_pipeline_source_state(source_txn.deref_mut(), pipeline.id)
             .await
             .map_err(PipelineError::SourcePipelineState)?;
-        api_txn.commit().await?;
+
         source_txn.commit().await.map_err(PipelineError::SourceDatabase)?;
+
         delete_pipeline_replication_slots(&source_pool, pipeline.id)
             .await
             .map_err(PipelineError::SourcePipelineState)?;
-    } else {
-        delete_pipeline_api_state(api_txn.deref_mut(), tenant_id, &pipeline).await?;
-        api_txn.commit().await?;
     }
+
+    // Retain control-plane records and the pipeline lock through source metadata
+    // and slot cleanup so failures leave enough information to reclaim source
+    // state. If this commit fails, a retry can repeat the idempotent cleanup.
+    api_txn.commit().await?;
 
     Ok(StatusCode::OK)
 }
@@ -1026,7 +1060,7 @@ pub(crate) async fn read_all_pipelines(
     post,
     path = "/pipelines/{pipeline_id}/start",
     summary = "Start a pipeline",
-    description = "Starts the pipeline by deploying its replicator.",
+    description = "Ensures the pipeline has an active replicator workload. Already active workloads are unchanged; use restart to replace a running replicator. HTTP 200 acknowledges desired state, not Pod readiness. If a previous stop is still completing, waits up to 30 seconds for runtime deletion before recreating it. Returns 503 if shutdown has not completed; retry after the pipeline stops.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1035,6 +1069,8 @@ pub(crate) async fn read_all_pipelines(
         (status = 200, description = "Pipeline started successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline, source, or destination not found", body = ErrorMessage),
+        (status = 503, description = "Previous pipeline shutdown is still completing", body = ErrorMessage),
+        (status = 409, description = "Another pipeline operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1052,9 +1088,20 @@ pub(crate) async fn start_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
+
+    lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
     let (pipeline, replicator, image, source, destination) =
-        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+        read_pipeline_components(&mut api_txn, tenant_id, pipeline_id, &encryption_key).await?;
+
+    // A successful stop response only acknowledges deletion. Finish removing
+    // an inactive runtime before applying resources that could still be deleted.
+    if should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await? {
+        api_txn.commit().await?;
+
+        return Ok(StatusCode::OK);
+    }
+    delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, true).await?;
 
     let tls_config = source_tls_config.get_tls_config();
 
@@ -1072,7 +1119,8 @@ pub(crate) async fn start_pipeline(
         true,
     )
     .await?;
-    txn.commit().await?;
+
+    api_txn.commit().await?;
 
     Ok(StatusCode::OK)
 }
@@ -1081,7 +1129,7 @@ pub(crate) async fn start_pipeline(
     post,
     path = "/pipelines/{pipeline_id}/restart",
     summary = "Restart a pipeline",
-    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. If current publication membership and durable state in your database indicate initial sync, the API resets the VPA to its configured bounds and initial update mode, including when copying existing rows is skipped. If no table needs initial sync or inspection fails, it preserves the VPA. This is a best-effort check, not a guarantee of memory allocation throughout initial sync: state can change after inspection, and internal pipeline retries, container restarts, and Kubernetes Pod replacements bypass the reset. Existing VPA recommendations may still apply, and deletion does not guarantee that the recommender forgets usage history.",
+    description = "Reconciles the pipeline's Kubernetes resources and restarts its replicator. Every explicit restart reapplies the configuration stored in the API database, including while a previous Pod replacement is pending. Retrying a restart can request another template revision. If current publication membership and durable state in your database indicate initial sync, the API resets the VPA to its configured bounds and initial update mode, including when copying existing rows is skipped. If no table needs initial sync or inspection fails, it preserves the VPA. This is a best-effort check, not a guarantee of memory allocation throughout initial sync: state can change after inspection, and internal pipeline retries, container restarts, and Kubernetes Pod replacements bypass the reset. Existing VPA recommendations may still apply, and deletion does not guarantee that the recommender forgets usage history.",
     params(
         ("pipeline_id" = i64, Path, description = "Unique ID of the pipeline"),
         ("tenant_id" = String, Header, description = "Tenant ID used to scope the request")
@@ -1090,7 +1138,7 @@ pub(crate) async fn start_pipeline(
         (status = 202, description = "Pipeline restart initiated successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline, source, or destination not found", body = ErrorMessage),
-        (status = 409, description = "Pipeline is not running", body = ErrorMessage),
+        (status = 409, description = "Pipeline is not running or another lifecycle operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1108,9 +1156,14 @@ pub(crate) async fn restart_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let mut connection = pool.acquire().await?;
+    let mut api_txn = pool.begin().await?;
+
+    lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
+    // A pending replacement may contain configuration from an API update that
+    // rolled back after Kubernetes accepted it. Reconcile stored configuration
+    // on every explicit restart, including while a replacement is pending.
     let restarted = restart_replicator_if_running(
-        &mut connection,
+        &mut api_txn,
         tenant_id,
         pipeline_id,
         &encryption_key,
@@ -1123,6 +1176,8 @@ pub(crate) async fn restart_pipeline(
     if !restarted {
         return Err(PipelineError::InactivePipeline(pipeline_id));
     }
+
+    api_txn.commit().await?;
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -1140,6 +1195,7 @@ pub(crate) async fn restart_pipeline(
         (status = 202, description = "Pipeline shutdown accepted; resources may still be terminating"),
         (status = 400, description = "Bad request", body = ErrorMessage),
         (status = 404, description = "Pipeline not found", body = ErrorMessage),
+        (status = 409, description = "Another pipeline operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1153,17 +1209,23 @@ pub(crate) async fn stop_pipeline(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let mut txn = pool.begin().await?;
-    data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    let mut api_txn = pool.begin().await?;
+
+    lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
+    data::pipelines::read_pipeline(api_txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
-    let replicator =
-        data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
-            .await?
-            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
-    txn.commit().await?;
+    let replicator = data::replicators::read_replicator_by_pipeline_id(
+        api_txn.deref_mut(),
+        tenant_id,
+        pipeline_id,
+    )
+    .await?
+    .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
 
     delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, false).await?;
+
+    api_txn.commit().await?;
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -1179,6 +1241,7 @@ pub(crate) async fn stop_pipeline(
     responses(
         (status = 202, description = "Pipeline shutdowns accepted; resources may still be terminating"),
         (status = 400, description = "Bad request", body = ErrorMessage),
+        (status = 409, description = "Another pipeline operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1190,13 +1253,24 @@ pub(crate) async fn stop_all_pipelines(
 ) -> Result<impl IntoResponse, PipelineError> {
     let tenant_id = extract_tenant_id(&headers)?;
 
-    let mut txn = pool.begin().await?;
-    let replicators = data::replicators::read_replicators(txn.deref_mut(), tenant_id).await?;
-    txn.commit().await?;
+    let mut api_txn = pool.begin().await?;
 
-    for replicator in replicators {
+    let pipelines = data::pipelines::read_all_pipelines(api_txn.deref_mut(), tenant_id).await?;
+    let pipeline_ids: Vec<_> = pipelines.iter().map(|pipeline| pipeline.id).collect();
+    lock_pipelines(&mut api_txn, tenant_id, &pipeline_ids).await?;
+    // Only stop the pipelines whose lifecycle locks were acquired above.
+    for pipeline in pipelines {
+        let replicator = data::replicators::read_replicator_by_pipeline_id(
+            api_txn.deref_mut(),
+            tenant_id,
+            pipeline.id,
+        )
+        .await?
+        .ok_or(PipelineError::ReplicatorNotFound(pipeline.id))?;
         delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, false).await?;
     }
+
+    api_txn.commit().await?;
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -1226,24 +1300,28 @@ pub(crate) async fn get_pipeline_version(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
 
-    data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    data::pipelines::read_pipeline(api_txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
-    let replicator =
-        data::replicators::read_replicator_by_pipeline_id(txn.deref_mut(), tenant_id, pipeline_id)
+    let replicator = data::replicators::read_replicator_by_pipeline_id(
+        api_txn.deref_mut(),
+        tenant_id,
+        pipeline_id,
+    )
+    .await?
+    .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+
+    let current_image =
+        data::images::read_image_by_replicator_id(api_txn.deref_mut(), replicator.id)
             .await?
-            .ok_or(PipelineError::ReplicatorNotFound(pipeline_id))?;
+            .ok_or(PipelineError::ImageNotFound(replicator.id))?;
 
-    let current_image = data::images::read_image_by_replicator_id(txn.deref_mut(), replicator.id)
-        .await?
-        .ok_or(PipelineError::ImageNotFound(replicator.id))?;
+    let default_image = data::images::read_default_image(api_txn.deref_mut()).await?;
 
-    let default_image = data::images::read_default_image(txn.deref_mut()).await?;
-
-    txn.commit().await?;
+    api_txn.commit().await?;
 
     let current_version =
         PipelineVersion { id: current_image.id, name: parse_docker_image_tag(&current_image.name) };
@@ -1336,20 +1414,24 @@ pub(crate) async fn get_pipeline_replication_status(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
 
     // Read the pipeline to ensure it exists and get the source configuration
-    let pipeline = data::pipelines::read_pipeline(txn.deref_mut(), tenant_id, pipeline_id)
+    let pipeline = data::pipelines::read_pipeline(api_txn.deref_mut(), tenant_id, pipeline_id)
         .await?
         .ok_or(PipelineError::PipelineNotFound(pipeline_id))?;
 
     // Get the source configuration
-    let source =
-        data::sources::read_source(txn.deref_mut(), tenant_id, pipeline.source_id, &encryption_key)
-            .await?
-            .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
+    let source = data::sources::read_source(
+        api_txn.deref_mut(),
+        tenant_id,
+        pipeline.source_id,
+        &encryption_key,
+    )
+    .await?
+    .ok_or(PipelineError::SourceNotFound(pipeline.source_id))?;
 
-    txn.commit().await?;
+    api_txn.commit().await?;
 
     // Connect to the source database to read the necessary state
     let tls_config = source_tls_config.get_tls_config();
@@ -1411,7 +1493,7 @@ pub(crate) async fn get_pipeline_replication_status(
 
 /// Replaces a table's state history with one canonical initial state.
 async fn reset_table_state(
-    txn: &mut Transaction<'_, Postgres>,
+    source_txn: &mut PgTransaction<'_>,
     pipeline_id: i64,
     table_id: TableId,
 ) -> Result<TableState, PipelineError> {
@@ -1419,7 +1501,7 @@ async fn reset_table_state(
     let (state_type, metadata) =
         initial_state.to_storage_format().map_err(PipelineError::TableStateEncoding)?;
 
-    table_state::replace_table_state_raw(txn, pipeline_id, table_id, state_type, metadata)
+    table_state::replace_table_state_raw(source_txn, pipeline_id, table_id, state_type, metadata)
         .await
         .map_err(PipelineError::SourceDatabase)?;
 
@@ -1443,6 +1525,7 @@ async fn reset_table_state(
         (status = 502, description = "Your database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your database is unavailable or pipeline shutdown has not completed", body = ErrorMessage),
         (status = 504, description = "Request to your database timed out", body = ErrorMessage),
+        (status = 409, description = "Another pipeline operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1461,12 +1544,12 @@ pub(crate) async fn rollback_tables(
     let tenant_id = extract_tenant_id(&headers)?;
     let pipeline_id = pipeline_id.into_inner();
 
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
+
+    lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
 
     let (pipeline, replicator, image, source, destination) =
-        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
-
-    txn.commit().await?;
+        read_pipeline_components(&mut api_txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     // Connect to the source database to perform rollback
     let tls_config = source_tls_config.get_tls_config();
@@ -1518,6 +1601,7 @@ pub(crate) async fn rollback_tables(
     // Release the source transaction before waiting for workers to finish their
     // writes.
     source_txn.commit().await.map_err(PipelineError::SourceDatabase)?;
+
     let resume =
         should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await?;
     delete_pipeline_runtime_in_k8s(k8s_client.as_ref(), tenant_id, &replicator, true).await?;
@@ -1585,6 +1669,8 @@ pub(crate) async fn rollback_tables(
         }
     };
 
+    api_txn.commit().await?;
+
     let response = RollbackTablesResponse { pipeline_id, tables: rolled_back_tables };
 
     Ok(Json(response))
@@ -1604,6 +1690,7 @@ pub(crate) async fn rollback_tables(
         (status = 200, description = "Pipeline version updated successfully"),
         (status = 400, description = "Bad request or pipeline not running", body = ErrorMessage),
         (status = 404, description = "Pipeline or version not found", body = ErrorMessage),
+        (status = 409, description = "Another pipeline operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage)
     ),
     tag = "Pipelines"
@@ -1623,15 +1710,17 @@ pub(crate) async fn update_pipeline_version(
     let pipeline_id = pipeline_id.into_inner();
     let update_request = update_request.into_inner();
 
-    let mut txn = pool.begin().await?;
+    let mut api_txn = pool.begin().await?;
+
+    lock_pipeline(&mut api_txn, tenant_id, pipeline_id).await?;
     let (_, replicator, current_image, _, destination) =
-        read_pipeline_components(&mut txn, tenant_id, pipeline_id, &encryption_key).await?;
+        read_pipeline_components(&mut api_txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     // For regular tenants, the requested image must be the current default;
     // rejecting any other id preserves the existing stale-client race guard.
     // Simulator tenants may additionally select a registered non-default image
     // without changing the global default.
-    let target_image = data::images::read_image(txn.deref_mut(), update_request.version_id)
+    let target_image = data::images::read_image(api_txn.deref_mut(), update_request.version_id)
         .await?
         .ok_or(PipelineError::ImageIdNotFound(update_request.version_id))?;
 
@@ -1642,7 +1731,7 @@ pub(crate) async fn update_pipeline_version(
     // If the image ids are different, we change the database entry.
     if target_image.id != current_image.id {
         data::replicators::update_replicator_image(
-            txn.deref_mut(),
+            api_txn.deref_mut(),
             tenant_id,
             replicator.id,
             target_image.id,
@@ -1659,13 +1748,13 @@ pub(crate) async fn update_pipeline_version(
     // external maintenance CR may be missing for pipelines created before that
     // resource existed.
     if image_name_unchanged && !matches!(destination_type, DestinationType::Ducklake) {
-        txn.commit().await?;
+        api_txn.commit().await?;
 
         return Ok(StatusCode::OK);
     }
 
     restart_replicator_if_running(
-        &mut txn,
+        &mut api_txn,
         tenant_id,
         pipeline_id,
         &encryption_key,
@@ -1675,7 +1764,7 @@ pub(crate) async fn update_pipeline_version(
     )
     .await?;
 
-    txn.commit().await?;
+    api_txn.commit().await?;
 
     Ok(StatusCode::OK)
 }

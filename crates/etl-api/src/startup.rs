@@ -22,7 +22,10 @@ use etl_config::{
 };
 use etl_telemetry::metrics::init_metrics_handle;
 use kube::config::KubeConfigOptions;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener as TokioTcpListener, TcpStream},
@@ -131,6 +134,12 @@ use crate::{
     sentry_scrubbing::{capture_server_errors, mark_sensitive_sentry_scope},
     span_builder,
 };
+
+/// Maximum execution time for one API metadata statement.
+const METADATA_STATEMENT_TIMEOUT: &str = "30s";
+
+/// Maximum time an API metadata statement may wait to acquire one lock.
+const METADATA_LOCK_TIMEOUT: &str = "10s";
 
 /// Running API server task.
 pub type Server = tokio::task::JoinHandle<io::Result<()>>;
@@ -368,7 +377,9 @@ impl Application {
     ///
     /// Applies all pending SQLx migrations from the migrations directory.
     pub async fn migrate_database(config: PgConnectionConfig) -> Result<(), anyhow::Error> {
-        let connection_pool = get_connection_pool(&config);
+        // Migrations retain inherited session settings because schema changes
+        // can legitimately exceed the runtime metadata query limits.
+        let connection_pool = PgPoolOptions::new().connect_lazy_with(config.with_db(None));
 
         sqlx::migrate!("./migrations").run(&connection_pool).await?;
 
@@ -465,12 +476,18 @@ fn decode_encryption_key(
 
 /// Creates a Postgres connection pool from the provided configuration.
 ///
-/// Connects to the API's own metadata database using server defaults (no custom
-/// options).
+/// Bounds statement execution and lock waits on every metadata connection.
+/// Other session settings remain inherited, including the idle-in-transaction
+/// timeout: API handlers can perform external work while a metadata transaction
+/// is open.
 pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
-    PgPoolOptions::new()
-        .min_connections(MIN_DATABASE_POOL_CONNECTIONS)
-        .connect_lazy_with(config.with_db(None))
+    let options: PgConnectOptions = config.with_db(None);
+    let options = options.options([
+        ("statement_timeout", METADATA_STATEMENT_TIMEOUT),
+        ("lock_timeout", METADATA_LOCK_TIMEOUT),
+    ]);
+
+    PgPoolOptions::new().min_connections(MIN_DATABASE_POOL_CONNECTIONS).connect_lazy_with(options)
 }
 
 /// Creates and configures the HTTP server with all routes and middleware.
@@ -647,8 +664,9 @@ pub fn run(
     // Routes in this scope can carry source/destination credentials,
     // connection config, table/publication metadata, replication config, or
     // source-derived data. Keep new routes here when their request, response,
-    // path/query values, validation errors, or Sentry extras may include secrets
-    // or customer data. Leave only low-sensitivity metadata routes outside.
+    // path/query values, validation errors, or Sentry extras may include
+    // secrets or customer data. Leave only low-sensitivity metadata routes
+    // outside.
     let sensitive_routes = Router::new()
         .route("/sources", post(create_source).get(read_all_sources))
         .route("/sources/validate", post(validate_source))

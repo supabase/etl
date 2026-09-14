@@ -39,8 +39,8 @@ destination's native coercion, rounding, canonicalization, and rejection
 behavior. These semantics apply consistently to initial copy, inserts, and
 updates.
 
-ETL returns a local error only when it cannot construct a faithful wire
-representation. Known destination differences do not add per-cell runtime
+For row values, ETL returns a local encoding error when it cannot construct a
+faithful wire representation. Known destination differences do not add per-cell runtime
 validation. Test destination-specific value semantics that matter to your
 workload.
 
@@ -104,8 +104,14 @@ destination:
 ```
 
 `table_id` is the source PostgreSQL table OID, matching the identifiers used by
-`table_sync_copy`; use the table IDs returned in the source publication
-response. Because the configuration follows the source table id rather than
+`table_sync_copy`. Find it in your database using the qualified table name:
+
+```sql
+SELECT 'public.events'::regclass::oid AS table_id;
+```
+
+Replace `public.events` with the table you want to configure. Because the
+configuration follows the source table ID rather than
 its name, renaming the source table does not detach its physical-layout
 settings, and destination metadata can continue pointing it at a different
 physical table. If a table is dropped and recreated, PostgreSQL assigns it a

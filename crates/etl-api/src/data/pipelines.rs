@@ -153,7 +153,7 @@ where
 }
 
 pub async fn create_pipeline(
-    txn: &mut PgTransaction<'_>,
+    api_txn: &mut PgTransaction<'_>,
     tenant_id: &str,
     source_id: i64,
     destination_id: i64,
@@ -162,7 +162,7 @@ pub async fn create_pipeline(
 ) -> Result<i64, PipelinesDbError> {
     let config = serialize(StoredPipelineConfig::from(config))?;
 
-    let replicator_id = create_replicator(txn.deref_mut(), tenant_id, image_id).await?;
+    let replicator_id = create_replicator(api_txn.deref_mut(), tenant_id, image_id).await?;
     let record = sqlx::query!(
         r#"
         insert into app.pipelines (tenant_id, source_id, destination_id, replicator_id, config)
@@ -175,7 +175,7 @@ pub async fn create_pipeline(
         replicator_id,
         config
     )
-    .fetch_one(txn.deref_mut())
+    .fetch_one(api_txn.deref_mut())
     .await?;
 
     Ok(record.id)

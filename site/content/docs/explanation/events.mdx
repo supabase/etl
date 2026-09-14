@@ -1,10 +1,10 @@
 ---
 title: Events
-description: Understand the events Supabase ETL delivers during ongoing replication.
+description: Understand the events Supabase ETL delivers during catch-up and ongoing replication.
 icon: ListTree
 ---
 
-During ongoing replication, Supabase ETL delivers events decoded from Postgres
+During catch-up and ongoing replication, Supabase ETL delivers events decoded from Postgres
 logical replication via `write_events()`. This page documents their Rust shapes
 and PostgreSQL semantics.
 
@@ -326,10 +326,12 @@ transaction. Preserve `RelationEvent` ordering directly as a schema barrier.
 equivalent to `(commit_lsn, tx_ordinal)`, together with the destination's table
 or row key when detecting replays. Do not use relation events as replay keys.
 
-**For checkpointing:** Store the highest `commit_lsn` you've processed. On
-restart, you can resume from that point. See
-[Logical Replication](/explanation/concepts/#lsn-log-sequence-number) for LSN
-background.
+**For checkpointing:** Let ETL advance its worker checkpoint after the
+corresponding destination work is durable. A row's `commit_lsn` alone does not
+prove that every event in that transaction has been delivered: batches can
+split transactions. Custom stores must implement the
+[replication checkpoint contract](/explanation/traits/#replication-checkpoint-methods);
+destinations must report durability through the supplied result handles.
 
 ## Event Batching
 
@@ -337,5 +339,6 @@ ETL batches events before calling `write_events()`. A batch may contain events f
 Schema changes do not end a batch: because batching is driven by size and time,
 one batch may contain multiple `Relation` events and multiple schema changes.
 
-**Ordering requirement:** Process events for the same destination row in order.
-Events for independent rows may be processed concurrently.
+**Ordering requirement:** Preserve per-table event order, including schema
+changes and truncates. Destinations may process independent work concurrently
+only when they preserve those barriers and the required durability ordering.

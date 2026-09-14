@@ -19,10 +19,11 @@ use crate::{
     },
     data,
     data::{
+        locks::lock_pipelines,
         pipelines::{
             PipelinesDbError, read_pipeline_ids_for_source, read_pipelines_for_source_for_deletion,
         },
-        sources::{SourcesDbError, source_exists},
+        sources::SourcesDbError,
     },
     k8s::{
         K8sClient, SourceTlsConfig,
@@ -91,17 +92,14 @@ impl SourceError {
 
 impl IntoResponse for SourceError {
     fn into_response(self) -> Response {
-        let status_code = match &self {
-            SourceError::Pipeline(PipelineError::InvalidPipelineRequest(_)) => {
-                StatusCode::BAD_REQUEST
-            }
+        let status_code = match self {
+            SourceError::Pipeline(error) => return error.into_response(),
             SourceError::SourceNotFound(_) => StatusCode::NOT_FOUND,
             SourceError::TenantId(_) => StatusCode::BAD_REQUEST,
-            SourceError::SourcesDb(_)
-            | SourceError::PipelinesDb(_)
-            | SourceError::K8sCore(_)
-            | SourceError::Pipeline(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SourceError::Validation(error) => utils::validation_error_status_code(error),
+            SourceError::SourcesDb(_) | SourceError::PipelinesDb(_) | SourceError::K8sCore(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            SourceError::Validation(ref error) => utils::validation_error_status_code(error),
             SourceError::ValidationFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
             SourceError::ActivePipeline(_) | SourceError::SourceInUse(_) => StatusCode::CONFLICT,
         };
@@ -342,6 +340,7 @@ pub(crate) async fn read_source(
         (status = 502, description = "Your source database returned an invalid response", body = ErrorMessage),
         (status = 503, description = "Your source database is unavailable", body = ErrorMessage),
         (status = 504, description = "Request to your source database timed out", body = ErrorMessage),
+        (status = 409, description = "Another pipeline operation is in progress", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
     tag = "Sources"
@@ -361,6 +360,13 @@ pub(crate) async fn update_source(
     let source_id = source_id.into_inner();
     let source = source.into_inner();
 
+    let mut api_txn = pool.begin().await.map_err(SourcesDbError::from)?;
+
+    // Report contention before source validation can perform network I/O.
+    let pipeline_ids =
+        read_pipeline_ids_for_source(api_txn.deref_mut(), tenant_id, source_id).await?;
+    lock_pipelines(&mut api_txn, tenant_id, &pipeline_ids).await?;
+
     validate_source_config(
         source.config.clone().into(),
         api_config.as_ref(),
@@ -368,10 +374,8 @@ pub(crate) async fn update_source(
     )
     .await?;
 
-    let mut txn = pool.begin().await.map_err(SourcesDbError::from)?;
-
     data::sources::update_source(
-        txn.deref_mut(),
+        api_txn.deref_mut(),
         tenant_id,
         &source.name,
         source_id,
@@ -381,10 +385,9 @@ pub(crate) async fn update_source(
     .await?
     .ok_or(SourceError::SourceNotFound(source_id))?;
 
-    let pipeline_ids = read_pipeline_ids_for_source(txn.deref_mut(), tenant_id, source_id).await?;
     for pipeline_id in pipeline_ids {
         common::restart_replicator_if_running(
-            txn.deref_mut(),
+            &mut api_txn,
             tenant_id,
             pipeline_id,
             &encryption_key,
@@ -395,7 +398,7 @@ pub(crate) async fn update_source(
         .await?;
     }
 
-    txn.commit().await.map_err(SourcesDbError::from)?;
+    api_txn.commit().await.map_err(SourcesDbError::from)?;
 
     Ok(StatusCode::OK)
 }
@@ -412,7 +415,7 @@ pub(crate) async fn update_source(
     responses(
         (status = 200, description = "Source deleted successfully"),
         (status = 400, description = "Bad request", body = ErrorMessage),
-        (status = 409, description = "Source has an active pipeline or is still used by pipelines", body = ErrorMessage),
+        (status = 409, description = "Source has an active pipeline, is still used by pipelines, or another operation is in progress", body = ErrorMessage),
         (status = 404, description = "Source not found", body = ErrorMessage),
         (status = 500, description = "Internal server error", body = ErrorMessage),
     ),
@@ -427,11 +430,12 @@ pub(crate) async fn delete_source(
     let tenant_id = extract_tenant_id(&headers)?;
     let source_id = source_id.into_inner();
 
-    if !source_exists(&pool, tenant_id, source_id).await? {
-        return Err(SourceError::SourceNotFound(source_id));
-    }
+    let mut api_txn = pool.begin().await.map_err(SourcesDbError::from)?;
 
-    let pipelines = read_pipelines_for_source_for_deletion(&pool, tenant_id, source_id).await?;
+    let pipelines =
+        read_pipelines_for_source_for_deletion(api_txn.deref_mut(), tenant_id, source_id).await?;
+    let pipeline_ids: Vec<_> = pipelines.iter().map(|pipeline| pipeline.id).collect();
+    lock_pipelines(&mut api_txn, tenant_id, &pipeline_ids).await?;
     if let Some(pipeline_id) =
         first_active_pipeline_id(k8s_client.as_ref(), tenant_id, &pipelines).await?
     {
@@ -442,14 +446,14 @@ pub(crate) async fn delete_source(
         return Err(SourceError::SourceInUse(source_id));
     }
 
-    // We intentionally keep this endpoint simple: the checks above provide the
-    // normal user-facing guard rails, but we do not try to serialize against
-    // concurrent pipeline creation here. A pipeline can still appear between
-    // the check and the final delete, in which case the database constraints
-    // are the last line of defense.
-    data::sources::delete_source(&pool, tenant_id, source_id)
+    // Pipeline locks protect the discovered set, but do not serialize concurrent
+    // pipeline creation or attachment. Database constraints remain the final
+    // guard against deleting a source that became referenced after the checks.
+    data::sources::delete_source(api_txn.deref_mut(), tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;
+
+    api_txn.commit().await.map_err(SourcesDbError::from)?;
 
     Ok(StatusCode::OK)
 }

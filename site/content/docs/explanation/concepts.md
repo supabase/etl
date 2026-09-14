@@ -60,12 +60,14 @@ CREATE PUBLICATION my_publication FOR ALL TABLES;
 ```
 
 When you create an ETL pipeline, you specify which publication to consume.
-**Only tables and operations selected by that publication are replicated.**
+The publication selects tables and columns for replication. Its operation
+settings filter subsequent changes; they do not filter the initial copy of
+existing rows.
 
 ### What Publications Control
 
 - **Which tables**: Only tables in the publication are replicated
-- **Which operations**: You can filter to only INSERT, UPDATE, or DELETE
+- **Which operations**: Select INSERT, UPDATE, DELETE, and TRUNCATE operations
 - **Which columns** (Postgres 15+): Replicate only specific columns
 - **Which rows** (Postgres 15+): Filter rows with a WHERE clause
 
@@ -92,9 +94,11 @@ ETL creates replication slots automatically:
 | Slot | Purpose |
 |------|---------|
 | `supabase_etl_apply_{pipeline_id}` | Main slot for ongoing replication |
-| `supabase_etl_table_sync_{pipeline_id}_{table_id}` | Temporary slots for initial sync |
+| `supabase_etl_table_sync_{pipeline_id}_{table_id}` | Per-table slots for initial sync |
 
-The Apply Worker uses one persistent slot. Table Sync Workers create temporary slots during initial sync, then delete them.
+Both kinds are persistent PostgreSQL slots. Table sync workers drop their
+slots after catch-up completes; a failed or interrupted sync can leave a slot
+behind. They are not session-scoped `TEMPORARY` slots.
 
 ### Slot Risks
 
@@ -139,7 +143,7 @@ So ETL first copies existing rows using Postgres's `COPY` command, then catches
 up WAL changes that arrived during the copy:
 
 1. Create a replication slot (captures a consistent snapshot point)
-2. `COPY` all rows from the table via `write_table_rows()`
+2. Copy existing rows selected by the publication via `write_table_rows()`
 3. Catch up later changes via `write_events()` until the table is ready
 
 The slot ensures **no changes are lost** between the snapshot and ongoing
@@ -209,9 +213,7 @@ metadata and do not have an event sequence key.
 
 ## Persisted State
 
-ETL persists the state needed to resume safely after a restart:
-
-ETL stores:
+A durable store persists the state needed to resume safely after a restart:
 
 | State | Purpose |
 |-------|---------|
@@ -224,7 +226,8 @@ The built-in `PostgresStore` persists to your Postgres database and runs its
 state-store migrations when it is created. If the pipeline reads from a
 read-only replica, configure `store_pg_connection` to point at a writable
 Postgres endpoint for this state. `MemoryStore` is for testing only - state is
-lost on restart. `Pipeline::start()` runs the ETL source migrations that install
-schema helpers and the DDL event trigger before replication begins. See
+lost on restart. By default, `Pipeline::start()` runs the ETL source migrations
+that install schema helpers and the DDL event trigger. For a read-only source
+replica or `run_source_migrations: false`, apply them on the primary beforehand. See
 [Architecture](/explanation/architecture/) for the worker lifecycle and
 [Configure Postgres](/guides/configure-postgres/) for production settings.

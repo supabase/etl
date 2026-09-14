@@ -185,23 +185,27 @@ impl From<&str> for PodPhase {
     }
 }
 
-/// The derived status of a replicator pod.
+/// The derived operational status of a replicator runtime.
 ///
-/// Combines the pod's phase, deletion timestamp, and exit status to determine
-/// the operational state from the API's perspective.
+/// Combines desired workload state, deletion intent, and observed process
+/// health. This is a recoverable observation, not a terminal state machine or a
+/// measure of replication progress. A failed runtime can recover to starting or
+/// started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodStatus {
-    /// Pod has successfully stopped and no longer exists.
+    /// No runtime exists, or the workload is scaled to zero with no remaining
+    /// Pod.
     Stopped,
-    /// Pod is pending or initializing.
+    /// The runtime is creating, initializing, or replacing its Pod.
     Starting,
-    /// Pod is running and ready.
+    /// The current runtime is running and Kubernetes reports it ready.
     Started,
-    /// Pod is terminating after a deletion request.
+    /// The runtime is being deleted, including any remaining Pod.
     Stopping,
-    /// Pod failed to start or exited with an error.
+    /// The current runtime reports a startup or execution failure.
     Failed,
-    /// Pod status could not be determined.
+    /// The observations are unknown, inconsistent, or outside the supported
+    /// architecture.
     Unknown,
 }
 
@@ -408,8 +412,8 @@ pub trait K8sClient: Send + Sync {
         wait: bool,
     ) -> Result<(), K8sError>;
 
-    /// Returns whether the replicator `StatefulSet` exists and is not being
-    /// deleted.
+    /// Returns whether the replicator `StatefulSet` exists, has at least one
+    /// desired replica, and is not being deleted.
     async fn replicator_stateful_set_is_active(
         &self,
         resource_prefix: &str,

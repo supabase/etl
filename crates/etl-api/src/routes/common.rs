@@ -68,13 +68,14 @@ async fn restart_would_perform_table_sync(
 ///
 /// Update endpoints that can change source, destination, pipeline, image, or
 /// runtime resource configuration should call this after writing the new API
-/// state through the supplied connection, including within an uncommitted
-/// transaction. The helper reads that state once and uses the same loaded
-/// pipeline and source configuration for both sync preflight and Kubernetes
-/// materialization. Updating the StatefulSet changes the pod template restart
-/// annotation and requests deletion of an outdated pod, including when an
-/// unready pod blocks the native rolling update. This does not wait for the
-/// replacement to become ready.
+/// state through the supplied API transaction. The caller must acquire all
+/// affected pipeline locks before writing state and retain them through this
+/// call. The helper reads that state once and uses the same loaded pipeline and
+/// source configuration for both sync preflight and Kubernetes materialization.
+/// Updating the StatefulSet changes the pod template restart annotation and
+/// requests deletion of an outdated pod, including when an unready pod blocks
+/// the native rolling update. This does not wait for the replacement to become
+/// ready.
 ///
 /// This forced recreation is part of the contract. The replicator loads its
 /// mounted config and secret-backed environment when the process starts, so a
@@ -101,7 +102,7 @@ async fn restart_would_perform_table_sync(
 /// Kubernetes resources, the call returns `false` without reconciling.
 /// Otherwise, it returns `true` after the Kubernetes resources are reconciled.
 pub(crate) async fn restart_replicator_if_running(
-    connection: &mut sqlx::PgConnection,
+    api_txn: &mut sqlx::PgTransaction<'_>,
     tenant_id: &str,
     pipeline_id: i64,
     encryption_key: &EncryptionKeyring,
@@ -110,7 +111,7 @@ pub(crate) async fn restart_replicator_if_running(
     api_config: &ApiConfig,
 ) -> Result<bool, PipelineError> {
     let (pipeline, replicator, image, source, destination) =
-        read_pipeline_components(connection, tenant_id, pipeline_id, encryption_key).await?;
+        read_pipeline_components(api_txn, tenant_id, pipeline_id, encryption_key).await?;
 
     if !should_reconcile_pipeline_runtime(k8s_client, tenant_id, replicator.id).await? {
         return Ok(false);

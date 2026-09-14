@@ -6,49 +6,25 @@ icon: Gauge
 
 ## Independent benchmark
 
-In Hardbyte's [July 22, 2026 CDC comparison](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady),
-Supabase ETL recorded the lowest tail latency and measured runtime memory use
-among six configurations: **~33× lower tail latency** and **~125× lower memory
-use** than Debezium Server.
+Hardbyte's independent CDC benchmarks compare six configurations across
+steady-state delivery, mixed-speed consumers, and consumer outages.
 
-The steady-state workload targeted **200 source changes/s to four fast HTTP
-consumers** on PostgreSQL 18.3. The table reproduces the published results;
-ETL's leading values are bold.
+The table shows **selected results from separate benchmark scenarios**, with
+all six configurations included. Each metric heading links to
+its source table. **Bold numbers mark the lowest reported value in each column,
+including ties at the published precision.**
 
-| CDC configuration | Tail latency ↓ | Measured runtime memory ↓ | Median delivery rate per consumer |
-| --- | ---: | ---: | ---: |
-| **Supabase ETL** | **26 ms** | **13.0 MB** | 200/s |
-| Raw pgoutput (SQL polling) | 70 ms | 59.7 MB | 200/s |
-| Debezium Server | 848 ms | 1,629.3 MB | 203/s |
-| Sequin | 33 ms | 595.2 MB | 200/s |
-| Sequin with message grouping | 33 ms | 624.3 MB | 200/s |
-| Debezium + Kafka | 961 ms | 1,385.4 MB | 203/s |
+| CDC configuration | [Fast-consumer tail latency](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady) | [Fast-consumer memory](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#fanout_steady) | [Mixed-speed tail latency](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-hetero/REPORT.md#fanout_steady) | [Source slot WAL during outage](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/REPORT.md#dead_consumer) |
+| --- | ---: | ---: | ---: | ---: |
+| **Supabase ETL** | **26 ms** | **13.0 MB** | 273 ms | 57.2 MB |
+| Debezium + Kafka | 961 ms | 1,385.4 MB | 1,074 ms | **11.0 MB** |
+| Debezium Server | 848 ms | 1,629.3 MB | 1,181 ms | 57.3 MB |
+| Raw pgoutput (SQL polling) | 70 ms | 59.7 MB | 267 ms | 56.6 MB |
+| Sequin | 33 ms | 595.2 MB | **33 ms** | 642.0 MB |
+| Sequin with message grouping | 33 ms | 624.3 MB | **33 ms** | 679.9 MB |
 
-### How to read the results
-
-- **Tail latency:** the worst consumer's median rolling 30-second p99.
-- **Delivery rate:** the median of the consumers' median sampled rates. This
-  was a fixed-rate test, not a measurement of maximum sustainable throughput.
-- **Memory:** the largest sum of sampled process or container peaks within
-  any phase of the run, in decimal MB. Measurements use native process RSS or
-  Docker memory; component peaks need not occur at the same time. They include
-  measured sidecars and broker components, but exclude source Postgres and the
-  harness.
-
-### Tested configuration
-
-ETL ran four pipelines in one Rust process, using a
-[custom `HttpDestination`](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/etl-cdc-bench/src/main.rs)
-and **`MemoryStore` for in-memory state and checkpoints**. This avoids the
-database round trips and persistent checkpoint writes of `PostgresStore`;
-built-in warehouse destinations were not tested.
-
-The adapter [pinned ETL](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/etl-cdc-bench/Cargo.toml)
-to [commit `d206d66e`](https://github.com/supabase/etl/commit/d206d66eabaa3cfd15872eba761c5131e22a7f75),
-with a 20 ms batch-fill timeout. Debezium Server used
-[3.1.3.Final](https://github.com/hardbyte/postgresql-job-queue-benchmarking/blob/7b2919a0fd668a84efc68500ac94cfbfbd3b7356/results/cdc-sweep-long/cdc-20260722T021356Z-dfe217/manifest.json)
-across four JVMs. These single-run results describe the tested versions and
-implementations, and do not measure subsequent improvements to ETL.
+For methodology, tested versions, configurations, and complete results, see
+[Hardbyte's benchmark repository](https://github.com/hardbyte/postgresql-job-queue-benchmarking/tree/7b2919a0fd668a84efc68500ac94cfbfbd3b7356).
 
 <Callout className="etl-callout" type="info">
   Performance differences may also reflect configuration, workload, and deployment

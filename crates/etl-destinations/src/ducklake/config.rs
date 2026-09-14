@@ -80,8 +80,10 @@ pub(super) fn resolve_expire_snapshots_older_than(
 pub(super) fn validate_expire_snapshots_older_than_sql(
     expire_snapshots_older_than: &str,
 ) -> String {
+    // Interval ordering treats months as 30 days, unlike timestamp arithmetic.
     format!(
-        "SELECT CAST({} AS INTERVAL) >= CAST({} AS INTERVAL);",
+        "select cast(now() as timestamp) - cast({} as interval) <= cast(now() as timestamp) - \
+         cast({} as interval);",
         quote_literal(expire_snapshots_older_than),
         quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN),
     )
@@ -1334,17 +1336,36 @@ mod tests {
         assert_eq!(resolve_expire_snapshots_older_than(Some("2 days")), "2 days");
     }
 
+    /// Checks actual elapsed retention across calendar and mixed-sign
+    /// intervals.
     #[test]
     fn validate_expire_snapshots_older_than_sql_checks_minimum_retention() {
-        let sql = validate_expire_snapshots_older_than_sql("2 days");
-        let quoted_interval = quote_literal("2 days");
-        let quoted_minimum = quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN);
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("create macro now() as timestamp '2026-03-01 12:00:00';").unwrap();
 
-        assert!(sql.contains("SELECT CAST("));
-        assert!(sql.contains(&quoted_interval));
-        assert!(sql.contains(">="));
-        assert!(sql.contains(&quoted_minimum));
-        assert!(sql.contains(" AS INTERVAL);"));
+        for (retention, expected) in [
+            ("1 day", true),
+            ("24 hours", true),
+            ("7 days", true),
+            ("1 month", true),
+            ("1 year", true),
+            ("2 days -12 hours", true),
+            ("0 seconds", false),
+            ("-1 day", false),
+            ("23 hours", false),
+            ("1 day -1 microsecond", false),
+            ("-1 year 361 days", false),
+            ("1 month -29 days", false),
+        ] {
+            let sql = validate_expire_snapshots_older_than_sql(retention);
+            let actual: bool = conn.query_row(&sql, [], |row| row.get(0)).unwrap();
+            assert_eq!(actual, expected, "retention: {retention}");
+        }
+
+        for retention in ["", "not an interval", "1 day'"] {
+            let sql = validate_expire_snapshots_older_than_sql(retention);
+            assert!(conn.query_row(&sql, [], |row| row.get::<_, bool>(0)).is_err());
+        }
     }
 
     #[test]
