@@ -310,7 +310,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: Postgres source with one row ---
+    // --- GIVEN: Postgres source with two rows ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("update_flow");
 
@@ -324,13 +324,13 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('before')",
+            "INSERT INTO {} (value) VALUES ('before'), ('mover')",
             table_name.as_quoted_identifier(),
         ))
         .await
         .unwrap();
 
-    // --- WHEN: pipeline copies data and an UPDATE is streamed ---
+    // --- WHEN: pipeline copies data and UPDATEs are streamed ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -352,12 +352,20 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
         .await;
 
+    // A plain non-key update and a primary-key change cover both update paths.
     database
         .run_sql(&format!(
-            "UPDATE {} SET id = 2, value = 'after' WHERE id = 1",
+            "UPDATE {} SET value = 'after' WHERE id = 1",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET id = 3, value = 'moved' WHERE id = 2",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -370,10 +378,12 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     let query = current_state_query(engine, UPDATE_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
 
-    // --- THEN: current state shows the updated value ---
-    assert_eq!(rows.len(), 1, "expected one current-state row after UPDATE");
-    assert_eq!(rows[0].id, 2);
+    // --- THEN: current state shows the updated value and the moved key ---
+    assert_eq!(rows.len(), 2, "expected two current-state rows after UPDATEs");
+    assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "after");
+    assert_eq!(rows[1].id, 3);
+    assert_eq!(rows[1].value, "moved");
 }
 
 /// Composite key changes use physical tuple positions even when the primary
