@@ -49,7 +49,7 @@ pub(super) struct SchemaCleanupRequest {
 }
 
 /// Runs best-effort schema cleanup until the queue closes and drains.
-async fn run<S>(
+async fn run_schema_cleanup<S>(
     schema_store: S,
     worker_type: WorkerType,
     mut schema_cleanup_rx: mpsc::Receiver<SchemaCleanupRequest>,
@@ -122,7 +122,7 @@ async fn run<S>(
 }
 
 /// Starts the worker that serially prunes requested table schema versions.
-pub(super) fn spawn<S>(
+pub(super) fn spawn_schema_cleanup_task<S>(
     schema_store: S,
     worker_type: WorkerType,
 ) -> (mpsc::Sender<SchemaCleanupRequest>, JoinHandle<()>)
@@ -130,7 +130,7 @@ where
     S: SchemaStore + Send + 'static,
 {
     let (schema_cleanup_tx, schema_cleanup_rx) = mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
-    let task = tokio::spawn(run(schema_store, worker_type, schema_cleanup_rx));
+    let task = tokio::spawn(run_schema_cleanup(schema_store, worker_type, schema_cleanup_rx));
     (schema_cleanup_tx, task)
 }
 

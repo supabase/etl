@@ -12,7 +12,7 @@ use crate::error::EtlResult;
 /// The stream supplies a fallible future, but its task has a unit result like
 /// the other apply-loop tasks. The next feedback enqueue detects the closed
 /// channel and fails the apply loop through its normal retry policy.
-pub(super) fn spawn<F>(feedback_sender_future: F) -> JoinHandle<()>
+pub(super) fn spawn_feedback_task<F>(feedback_sender_future: F) -> JoinHandle<()>
 where
     F: Future<Output = EtlResult<()>> + Send + 'static,
 {

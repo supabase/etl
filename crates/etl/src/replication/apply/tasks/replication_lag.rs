@@ -22,13 +22,6 @@ use crate::{
     replication::WorkerType,
 };
 
-/// Tracks replication lag measurements shared with the sampler task.
-#[derive(Debug, Clone)]
-pub(in crate::replication::apply) struct ReplicationLagMetrics {
-    /// Shared atomic LSN positions used for lag gauges.
-    inner: Arc<ReplicationLagMetricsInner>,
-}
-
 /// Atomic replication lag positions shared by the apply loop and sampler task.
 #[derive(Debug)]
 struct ReplicationLagMetricsInner {
@@ -45,9 +38,16 @@ struct ReplicationLagMetricsInner {
     last_checkpoint_lsn: AtomicU64,
 }
 
+/// Tracks replication lag measurements shared with the sampler task.
+#[derive(Debug, Clone)]
+pub(crate) struct ReplicationLagMetrics {
+    /// Shared atomic LSN positions used for lag gauges.
+    inner: Arc<ReplicationLagMetricsInner>,
+}
+
 impl ReplicationLagMetrics {
     /// Creates replication lag metrics initialized to the given LSN.
-    pub(in crate::replication::apply) fn new(initial_lsn: PgLsn) -> Self {
+    pub(crate) fn new(initial_lsn: PgLsn) -> Self {
         let initial_lsn = u64::from(initial_lsn);
 
         Self {
@@ -61,7 +61,7 @@ impl ReplicationLagMetrics {
     }
 
     /// Updates lag metric positions derived from apply-loop progress.
-    pub(in crate::replication::apply) fn update_progress(
+    pub(crate) fn update_progress(
         &self,
         last_received_lsn: PgLsn,
         last_flush_lsn: PgLsn,
@@ -118,7 +118,7 @@ impl ReplicationLagMetrics {
 }
 
 /// Runs the best-effort replication lag sampler.
-async fn run(
+async fn run_replication_lag_metrics(
     out_of_band_source_pool: OutOfBandSourcePool,
     replication_lag_metrics: ReplicationLagMetrics,
     worker_type: WorkerType,
@@ -146,13 +146,13 @@ async fn run(
 }
 
 /// Starts the replication lag sampler for an apply loop.
-pub(super) fn spawn(
+pub(super) fn spawn_replication_lag_metrics_task(
     out_of_band_source_pool: OutOfBandSourcePool,
     replication_lag_metrics: ReplicationLagMetrics,
     worker_type: WorkerType,
     table_sync_monitor_refresh_interval: Duration,
 ) -> JoinHandle<()> {
-    tokio::spawn(run(
+    tokio::spawn(run_replication_lag_metrics(
         out_of_band_source_pool,
         replication_lag_metrics,
         worker_type,

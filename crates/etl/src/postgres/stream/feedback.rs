@@ -51,8 +51,7 @@ const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 enum StatusUpdateType {
     /// Represents an update in response to a keep alive from Postgres.
     KeepAlive,
-    /// Represents a periodic heartbeat sent while the apply loop is idle or
-    /// waiting for work to complete.
+    /// Represents a heartbeat sent after an interval without outgoing feedback.
     ///
     /// Unlike the WAL receiver's ordinary periodic status reports, this
     /// fallback requests a reply. PostgreSQL's response can drive idle
@@ -94,64 +93,6 @@ struct StatusUpdateRequest {
     flush_lsn: PgLsn,
     /// Whether this update must bypass debouncing.
     force: bool,
-}
-
-/// Independent channel handle for submitting replication status updates.
-///
-/// The caller owns the sender future returned alongside this handle and must
-/// spawn and stop it for the lifetime of replication.
-#[derive(Debug)]
-pub struct FeedbackHandle {
-    /// A bounded queue that applies backpressure if the transport cannot send.
-    requests_tx: mpsc::Sender<StatusUpdateRequest>,
-}
-
-impl FeedbackHandle {
-    /// Creates a channel handle and the [`FeedbackSender`] future.
-    ///
-    /// The caller must spawn and own the returned future; the handle only
-    /// submits requests and never writes to the transport itself.
-    pub(crate) fn create<S>(
-        sink: S,
-        keep_alive_deadline_duration: Duration,
-    ) -> (Self, impl Future<Output = EtlResult<()>>)
-    where
-        S: Sink<Bytes> + Unpin,
-        S::Error: Into<EtlError>,
-    {
-        let (requests_tx, requests_rx) = mpsc::channel(1);
-        let feedback_sender = FeedbackSender {
-            sink,
-            requests_rx,
-            last_update: None,
-            write_lsn: 0.into(),
-            flush_lsn: 0.into(),
-            last_sent_flush_lsn: None,
-        };
-
-        (Self { requests_tx }, feedback_sender.run(keep_alive_deadline_duration))
-    }
-
-    /// Enqueues safe progress, failing when the feedback sender has stopped.
-    ///
-    /// Waits only for queue capacity, not transmission. Reports unavailable
-    /// feedback so the worker can retry replication when the sender stops.
-    pub async fn enqueue_status_update(
-        &self,
-        write_lsn: PgLsn,
-        flush_lsn: PgLsn,
-        force: bool,
-    ) -> EtlResult<()> {
-        self.requests_tx.send(StatusUpdateRequest { write_lsn, flush_lsn, force }).await.map_err(
-            |error| {
-                etl_error!(
-                    ErrorKind::ReplicationFeedbackUnavailable,
-                    "Replication feedback sender is unavailable",
-                    source: error
-                )
-            },
-        )
-    }
 }
 
 /// Background sender that owns the transport, safe positions, and keep-alive
@@ -202,8 +143,8 @@ where
                 // An expired deadline cannot be starved by optional requests.
                 _ = tokio::time::sleep_until(deadline) => {
                     // Keep the connection alive even while intake is backpressured.
-                    // This only repeats supplied safe positions; it does not wake
-                    // the apply loop to publish fresh progress or settle durability.
+                    // Repeat only supplied safe positions. The requested reply
+                    // can drive idle processing once intake resumes.
                     self.send_status_update(0.into(), 0.into(), true, StatusUpdateType::PeriodicKeepAlive).await?;
 
                     // Fault injection may suppress a send. Still space retries
@@ -280,8 +221,7 @@ where
         let write_lsn = self.write_lsn;
         let flush_lsn = self.flush_lsn;
 
-        // This invariant is important since if `flush_lsn` becomes bigger, it means
-        // that there was a problem during replication.
+        // A durable checkpoint cannot cover WAL the apply loop has not consumed.
         debug_assert!(write_lsn >= flush_lsn);
 
         // Debounce only optional replies. PostgreSQL may generate many primary
@@ -377,6 +317,64 @@ where
     }
 }
 
+/// Independent channel handle for submitting replication status updates.
+///
+/// The caller owns the sender future returned alongside this handle and must
+/// spawn and stop it for the lifetime of replication.
+#[derive(Debug)]
+pub struct FeedbackHandle {
+    /// A bounded queue that applies backpressure if the transport cannot send.
+    requests_tx: mpsc::Sender<StatusUpdateRequest>,
+}
+
+impl FeedbackHandle {
+    /// Creates a channel handle and the [`FeedbackSender`] future.
+    ///
+    /// The caller must spawn and own the returned future; the handle only
+    /// submits requests and never writes to the transport itself.
+    pub(crate) fn create<S>(
+        sink: S,
+        keep_alive_deadline_duration: Duration,
+    ) -> (Self, impl Future<Output = EtlResult<()>>)
+    where
+        S: Sink<Bytes> + Unpin,
+        S::Error: Into<EtlError>,
+    {
+        let (requests_tx, requests_rx) = mpsc::channel(1);
+        let feedback_sender = FeedbackSender {
+            sink,
+            requests_rx,
+            last_update: None,
+            write_lsn: 0.into(),
+            flush_lsn: 0.into(),
+            last_sent_flush_lsn: None,
+        };
+
+        (Self { requests_tx }, feedback_sender.run(keep_alive_deadline_duration))
+    }
+
+    /// Enqueues safe progress, failing when the feedback sender has stopped.
+    ///
+    /// Waits only for queue capacity, not transmission. Reports unavailable
+    /// feedback so the worker can retry replication when the sender stops.
+    pub(crate) async fn enqueue_status_update(
+        &self,
+        write_lsn: PgLsn,
+        flush_lsn: PgLsn,
+        force: bool,
+    ) -> EtlResult<()> {
+        self.requests_tx.send(StatusUpdateRequest { write_lsn, flush_lsn, force }).await.map_err(
+            |error| {
+                etl_error!(
+                    ErrorKind::ReplicationFeedbackUnavailable,
+                    "Replication feedback sender is unavailable",
+                    source: error
+                )
+            },
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::{Buf, Bytes};
@@ -397,13 +395,16 @@ mod tests {
     fn spawn_feedback_sender()
     -> (FeedbackHandle, UnboundedReceiver<Bytes>, JoinHandle<EtlResult<()>>) {
         let (tx, messages) = tokio::sync::mpsc::unbounded_channel();
-        let sink =
-            Box::pin(futures::sink::unfold(tx, |tx, message| async move {
-                tx.send(message).map_err(|error| etl_error!(
-                ErrorKind::SourceConnectionFailed, "Test feedback sink closed", source: error
-            ))?;
-                Ok::<_, crate::error::EtlError>(tx)
-            }));
+        let sink = Box::pin(futures::sink::unfold(tx, |tx, message| async move {
+            tx.send(message).map_err(|error| {
+                etl_error!(
+                    ErrorKind::SourceConnectionFailed,
+                    "Test feedback sink closed",
+                    source: error
+                )
+            })?;
+            Ok::<_, crate::error::EtlError>(tx)
+        }));
         let (feedback_handle, feedback_sender_future) =
             FeedbackHandle::create(sink, Duration::from_secs(10));
         (feedback_handle, messages, tokio::spawn(feedback_sender_future))

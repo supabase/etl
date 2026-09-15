@@ -656,7 +656,7 @@ impl ApplyLoopState {
     ///
     /// Starting new work after a quiescent checkpoint can make this computed
     /// value lower than a value already reported on the connection. The
-    /// replication stream keeps PostgreSQL feedback monotonic, so the
+    /// feedback sender keeps PostgreSQL feedback monotonic, so the
     /// wire-level checkpoint never moves backward.
     fn checkpoint_lsn(&self) -> PgLsn {
         if self.is_quiescent() {

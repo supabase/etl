@@ -28,11 +28,22 @@ fn decode_message(bytes: Bytes) -> EtlResult<ReplicationMessage<LogicalReplicati
     })?;
 
     match message {
-        ReplicationMessage::XLogData(body) => Ok(ReplicationMessage::XLogData(
-            body.map_data(|bytes| LogicalReplicationMessage::parse(&bytes))
-                .map_err(|error| etl_error!(ErrorKind::DeserializationError, "Failed to decode logical replication message", source: error))?,
-        )),
-        ReplicationMessage::PrimaryKeepAlive(body) => Ok(ReplicationMessage::PrimaryKeepAlive(body)),
+        ReplicationMessage::XLogData(body) => {
+            let body = body.map_data(|bytes| LogicalReplicationMessage::parse(&bytes)).map_err(
+                |error| {
+                    etl_error!(
+                        ErrorKind::DeserializationError,
+                        "Failed to decode logical replication message",
+                        source: error
+                    )
+                },
+            )?;
+
+            Ok(ReplicationMessage::XLogData(body))
+        }
+        ReplicationMessage::PrimaryKeepAlive(body) => {
+            Ok(ReplicationMessage::PrimaryKeepAlive(body))
+        }
         _ => Err(etl_error!(ErrorKind::DeserializationError, "Unsupported replication message")),
     }
 }
