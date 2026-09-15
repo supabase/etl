@@ -1263,14 +1263,15 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
     assert_eq!(rows, vec![RecoveryMaskRow { id: 1, name: Some("Alice".to_owned()) }]);
 }
 
-/// Builds the id/value schema used by the dispatch lifecycle tests.
+/// Builds an id/value schema with an explicit table ID for tests that need
+/// several independent tables.
 ///
 /// `table` must not contain underscores so the ClickHouse table name stays
 /// the predictable `public_<table>`.
-fn lifecycle_schema(table: &str) -> ReplicatedTableSchema {
+fn lifecycle_schema_with_id(table: &str, table_id: u32) -> ReplicatedTableSchema {
     assert!(!table.contains('_'), "table name would change the ClickHouse name mapping");
     let table_schema = Arc::new(TableSchema::new(
-        TableId::new(7100),
+        TableId::new(table_id),
         TableName::new("public".to_owned(), table.to_owned()),
         vec![
             ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
@@ -1279,6 +1280,11 @@ fn lifecycle_schema(table: &str) -> ReplicatedTableSchema {
     ));
 
     ReplicatedTableSchema::all(table_schema)
+}
+
+/// Builds the id/value schema used by the dispatch lifecycle tests.
+fn lifecycle_schema(table: &str) -> ReplicatedTableSchema {
+    lifecycle_schema_with_id(table, 7100)
 }
 
 /// Builds one streaming insert event for the lifecycle schema.
@@ -1565,4 +1571,62 @@ async fn aborted_write_replays_to_converged_state_merge_tree() {
 #[tokio::test(flavor = "multi_thread")]
 async fn aborted_write_replays_to_converged_state_replacing_merge_tree() {
     aborted_write_replays_to_converged_state_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// A write dispatched during a table reset is admitted only after the reset
+/// completes and publishes its result.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_admission_waits_for_table_reset() {
+    // GIVEN: a delayed table and an undelayed bystander table.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let gated_schema = lifecycle_schema_with_id("gated", 7100);
+    let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&gated_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
+    install_insert_delay(&clickhouse_db, "public_gated", 2).await;
+
+    // WHEN: a reset starts behind a delayed write, and a bystander write is
+    // dispatched while the reset holds the task registry.
+    let probe =
+        DispatchTimingProbe { inner: destination.clone(), write_events_dispatch: Mutex::new(None) };
+    let gated_write = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&gated_schema, 1, "landed")],
+    );
+    let reset = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop_table_for_copy_via_trait(&destination, &gated_schema).await
+    };
+    let bystander_write = async {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        write_events_via_trait(
+            &probe,
+            WriteEventsDurability::MayDefer,
+            vec![lifecycle_insert(&bystander_schema, 7, "after")],
+        )
+        .await
+    };
+    let (gated_status, reset_result, bystander_status) =
+        tokio::join!(gated_write, reset, bystander_write);
+
+    // THEN: every operation succeeded, and the bystander dispatch stayed
+    // blocked until the reset released the registry.
+    assert_eq!(gated_status.unwrap(), DestinationWriteStatus::Durable);
+    reset_result.unwrap();
+    assert_eq!(bystander_status.unwrap(), DestinationWriteStatus::Durable);
+    let dispatch = probe.write_events_dispatch.lock().unwrap();
+    assert!(
+        dispatch >= Duration::from_secs(1),
+        "bystander write was admitted during the reset: {dispatch:?}"
+    );
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
+        vec![(7, "after".to_owned())]
+    );
 }
