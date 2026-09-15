@@ -1729,3 +1729,52 @@ async fn require_durable_writes_report_durable() {
     assert_eq!(barrier_status, DestinationWriteStatus::Durable);
     assert_eq!(clickhouse_db.query::<i64>("select id from \"public_barrier\"").await, vec![1]);
 }
+
+/// A table reset drains cleanly after a failed write, and admission stays
+/// usable afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_reset_succeeds_after_failed_write() {
+    // GIVEN: a write already rejected by a server constraint.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let failing_schema = lifecycle_schema_with_id("failing", 7100);
+    let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&failing_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
+    clickhouse_db
+        .db_client()
+        .query("alter table \"public_failing\" add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+    let error = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&failing_schema, 2, "rejected")],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+
+    // WHEN: the failed table is reset and a bystander write follows.
+    let reset_result = drop_table_for_copy_via_trait(&destination, &failing_schema).await;
+    let bystander_status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&bystander_schema, 7, "after")],
+    )
+    .await;
+
+    // THEN: the reset drained the failed task without resurfacing its error
+    // and later admission completed durably.
+    reset_result.unwrap();
+    assert_eq!(bystander_status.unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
+        vec![(7, "after".to_owned())]
+    );
+}
