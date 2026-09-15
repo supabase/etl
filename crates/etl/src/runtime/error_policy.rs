@@ -52,6 +52,7 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
         | ErrorKind::DestinationTimeout
+        | ErrorKind::DestinationShutdown
         | ErrorKind::SourceDatabaseShutdown
         | ErrorKind::SourceDatabaseInRecovery => {
             ErrorHandlingPolicy::new(RetryDirective::Timed, None)
@@ -165,5 +166,15 @@ mod tests {
         let solution = policy.solution().expect("replica identity errors should have a solution");
         assert!(solution.contains("least costly replica identity"));
         assert!(solution.contains("REPLICA IDENTITY FULL only"));
+    }
+
+    #[test]
+    fn destination_shutdown_errors_retry_on_a_timer() {
+        let error = EtlError::from((ErrorKind::DestinationShutdown, "Destination stopped"));
+
+        let policy = build_error_handling_policy(&error);
+
+        assert_eq!(policy.retry_directive(), RetryDirective::Timed);
+        assert!(policy.solution().is_none());
     }
 }

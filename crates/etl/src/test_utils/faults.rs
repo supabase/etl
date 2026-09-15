@@ -3,9 +3,10 @@
 //! Destinations report through two channels: the method return value
 //! (dispatch) and the async result handle (completion). Faults target either
 //! channel: [`FaultAction::Reject`] refuses work before the inner destination
-//! runs, while the response actions let the inner destination run and then
-//! fail, hold, or delay what the apply loop observes. Faults are queued FIFO
-//! per operation and consumed one per call; an empty queue means fully
+//! runs, [`FaultAction::HoldDispatch`] blocks it there until a test resumes or
+//! refuses it, while the response actions let the inner destination run and
+//! then fail, hold, or delay what the apply loop observes. Faults are queued
+//! FIFO per operation and consumed one per call; an empty queue means fully
 //! transparent behavior.
 
 use std::{
@@ -73,6 +74,11 @@ pub enum FaultAction {
     /// The inner destination does the work, then never answers until the
     /// paired [`HoldHandle`] releases the response.
     HoldResponse(HoldGate),
+    /// The destination blocks before doing the work until the paired
+    /// [`HoldHandle`] releases it: [`HoldHandle::release_ok`] lets the inner
+    /// destination run and answer as usual, [`HoldHandle::release_err`] makes
+    /// the method return the injected error without running it.
+    HoldDispatch(HoldGate),
     /// The inner destination does the work; its response is delayed by the
     /// duration and then passes through unchanged.
     RespondSlowly(Duration),
@@ -96,13 +102,20 @@ impl FaultAction {
     /// test-controlled: the handle observes when the operation is held and
     /// chooses the outcome on release.
     pub fn hold() -> (Self, HoldHandle) {
-        let (reached_tx, reached_rx) = watch::channel(false);
-        let (release_tx, release_rx) = oneshot::channel();
+        let (gate, handle) = HoldGate::new();
 
-        let action = Self::HoldResponse(HoldGate { reached_tx, release_rx });
-        let handle = HoldHandle { reached_rx: Mutex::new(reached_rx), release_tx };
+        (Self::HoldResponse(gate), handle)
+    }
 
-        (action, handle)
+    /// Creates a dispatch hold and the handle that releases it.
+    ///
+    /// Unlike [`FaultAction::hold`], the hold happens before the inner
+    /// destination runs, so a test can fail the method itself at a chosen
+    /// moment, for example once pipeline shutdown has been requested.
+    pub fn hold_dispatch() -> (Self, HoldHandle) {
+        let (gate, handle) = HoldGate::new();
+
+        (Self::HoldDispatch(gate), handle)
     }
 }
 
@@ -121,6 +134,17 @@ pub struct HoldGate {
 }
 
 impl HoldGate {
+    /// Creates a gate and the handle that observes and releases it.
+    fn new() -> (Self, HoldHandle) {
+        let (reached_tx, reached_rx) = watch::channel(false);
+        let (release_tx, release_rx) = oneshot::channel();
+
+        let gate = Self { reached_tx, release_rx };
+        let handle = HoldHandle { reached_rx: Mutex::new(reached_rx), release_tx };
+
+        (gate, handle)
+    }
+
     /// Holds `inner_result` until the paired handle releases it.
     ///
     /// On [`HoldHandle::release_ok`] the inner destination's captured result
@@ -150,8 +174,9 @@ pub struct HoldHandle {
 }
 
 impl HoldHandle {
-    /// Waits until the held operation has completed on the inner destination
-    /// and its result is being withheld.
+    /// Waits until the hold point is reached: the withheld response of a
+    /// [`FaultAction::HoldResponse`], or the blocked method of a
+    /// [`FaultAction::HoldDispatch`].
     ///
     /// # Panics
     ///
@@ -191,7 +216,9 @@ pub async fn apply_response_fault<T>(
         Some(FaultAction::Reject(injected) | FaultAction::FailAfterWrite(injected)) => {
             Err(injected.to_etl_error())
         }
-        Some(FaultAction::HoldResponse(gate)) => gate.apply(inner_result).await,
+        Some(FaultAction::HoldResponse(gate) | FaultAction::HoldDispatch(gate)) => {
+            gate.apply(inner_result).await
+        }
         Some(FaultAction::RespondSlowly(duration)) => {
             sleep(duration).await;
             inner_result

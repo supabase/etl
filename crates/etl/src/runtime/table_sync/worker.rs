@@ -28,7 +28,7 @@ use crate::{
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::{ShutdownResult, ShutdownRx},
+        concurrency::{ShutdownResult, ShutdownRx, is_shutdown_requested},
         error_policy::{RetryDirective, build_error_handling_policy},
         table_sync::TableSyncWorkerId,
     },
@@ -384,6 +384,23 @@ where
         shutdown_rx: &mut ShutdownRx,
         err: EtlError,
     ) -> EtlResult<Option<TableSyncWorkerResult>> {
+        // A destination that stops with the pipeline reports `DestinationShutdown` for
+        // the work it abandons. While shutdown is in progress that failure is the
+        // shutdown reaching this worker through the destination, so the worker stops
+        // as the signal would have stopped it and persists nothing: a stored `Errored`
+        // state would stall the table until a manual retry, although the next start
+        // can simply copy it again.
+        if err.kind() == ErrorKind::DestinationShutdown && is_shutdown_requested(shutdown_rx) {
+            info!(
+                table_id = table_id.0,
+                "table sync worker stopped after the destination shut down"
+            );
+
+            state.lock().await.reset_retry_attempts();
+
+            return Ok(Some(TableSyncWorkerResult::Shutdown));
+        }
+
         error!(table_id = table_id.0, error = %err, "table sync worker failed");
 
         // Build a retry policy from the shared classifier. The concrete retry timestamp

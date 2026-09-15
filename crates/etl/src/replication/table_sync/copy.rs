@@ -49,7 +49,8 @@ use crate::{
     runtime::{
         BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
-            MemoryBatchStream, ShutdownResult, ShutdownRx, table_sync_worker_copy_stream_id,
+            MemoryBatchStream, ShutdownResult, ShutdownRx, is_shutdown_requested,
+            table_sync_worker_copy_stream_id,
         },
     },
     schema::{ReplicatedTableSchema, TableId},
@@ -217,11 +218,6 @@ fn partitions_for_table_weight(
     let partition_count = weighted_partitions.min(block_count).min(u128::from(u16::MAX)).max(1);
 
     u16::try_from(partition_count).expect("clamped partition count should fit in u16")
-}
-
-/// Returns true when the table copy should stop for shutdown.
-fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
-    shutdown_rx.has_changed().unwrap_or(true)
 }
 
 /// Copies a table through ctid work items, using worker child connections.

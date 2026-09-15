@@ -245,10 +245,22 @@ impl<D> TestDestinationWrapper<D> {
         handle
     }
 
-    /// Consumes the next fault for the operation, applying rejections here.
+    /// Holds the next call of the given operation before it reaches the inner
+    /// destination and returns the handle that observes and releases it.
+    pub async fn hold_next_dispatch(&self, op: FaultyOp) -> HoldHandle {
+        let (action, handle) = FaultAction::hold_dispatch();
+        self.faults.inject(op, action).await;
+        handle
+    }
+
+    /// Consumes the next fault for the operation, applying rejections and
+    /// dispatch holds here.
     async fn take_fault(&self, op: FaultyOp) -> EtlResult<Option<FaultAction>> {
         match self.faults.next(op).await {
             Some(FaultAction::Reject(injected)) => Err(injected.to_etl_error()),
+            // A held dispatch resumes transparently on `release_ok` and fails the
+            // method on `release_err`.
+            Some(FaultAction::HoldDispatch(gate)) => gate.apply(Ok(())).await.map(|()| None),
             fault => Ok(fault),
         }
     }
