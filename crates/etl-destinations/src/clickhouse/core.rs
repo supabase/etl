@@ -721,15 +721,20 @@ where
         self.writer.write_table_rows_inner(schema, table_rows).await
     }
 
-    /// Writes a streaming event batch directly to the destination, awaiting
-    /// the write inline instead of reporting through the trait's async
-    /// completion result.
+    /// Dispatches a streaming event batch through the [`Destination`] trait
+    /// and awaits its asynchronous completion.
     ///
-    /// Test-only entrypoint for exercising the production write path without
+    /// Test-only entrypoint for exercising the production dispatch path,
+    /// including task admission and the async result channel, without
     /// pipeline plumbing.
     #[cfg(feature = "test-utils")]
-    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.writer.write_events_inner(events).await
+    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()>
+    where
+        S: 'static,
+    {
+        etl::test_utils::destination::write_events(self, WriteEventsDurability::MayDefer, events)
+            .await
+            .map(|_| ())
     }
 }
 

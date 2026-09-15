@@ -23,23 +23,33 @@
 //! `1900-01-01..=2299-12-31`. Out-of-range values are covered separately by
 //! the loud-rejection property.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicI64, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
     data::{ArrayCell, Cell, PgNumeric, TableRow},
-    destination::DestinationTableMetadata,
+    destination::{
+        Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+    },
     error::{ErrorKind, EtlError, EtlResult},
-    event::{Event, RelationEvent},
+    event::{Event, InsertEvent, RelationEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
     },
     store::{MemoryStore, SchemaStore, StateStore},
     test_utils::{
+        destination::{
+            drop_table_for_copy as drop_table_for_copy_via_trait,
+            write_events as write_events_via_trait,
+        },
         notifying_store::NotifyingStore,
         property::{
             any_f32, any_f64, block_on, f32_matches, f64_matches, opt_f32_matches, opt_f64_matches,
@@ -57,11 +67,12 @@ use etl_destinations::clickhouse::{
     },
 };
 use etl_telemetry::tracing::init_test_tracing;
+use parking_lot::Mutex;
 use proptest::{option, prelude::*};
 use url::Url;
 use uuid::Uuid;
 
-use crate::support::crypto::install_crypto_provider;
+use crate::support::{clickhouse::install_insert_delay, crypto::install_crypto_provider};
 
 /// One ClickHouse table receiving generated rows through the production
 /// destination write path.
@@ -1247,4 +1258,243 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         .query(&format!("SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"))
         .await;
     assert_eq!(rows, vec![RecoveryMaskRow { id: 1, name: Some("Alice".to_owned()) }]);
+}
+
+/// Builds the id/value schema used by the dispatch lifecycle tests.
+///
+/// `table` must not contain underscores so the ClickHouse table name stays
+/// the predictable `public_<table>`.
+fn lifecycle_schema(table: &str) -> ReplicatedTableSchema {
+    assert!(!table.contains('_'), "table name would change the ClickHouse name mapping");
+    let table_schema = Arc::new(TableSchema::new(
+        TableId::new(7100),
+        TableName::new("public".to_owned(), table.to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+        ],
+    ));
+
+    ReplicatedTableSchema::all(table_schema)
+}
+
+/// Builds one streaming insert event for the lifecycle schema.
+fn lifecycle_insert(schema: &ReplicatedTableSchema, id: i64, value: &str) -> Event {
+    Event::Insert(InsertEvent {
+        commit_lsn: PgLsn::from(1000),
+        tx_ordinal: 0,
+        replicated_table_schema: schema.clone(),
+        table_row: TableRow::new(vec![Cell::I64(id), Cell::String(value.to_owned())]),
+    })
+}
+
+/// Records how long the `write_events` trait dispatch itself takes,
+/// independent of when its asynchronous result completes.
+struct DispatchTimingProbe<D> {
+    inner: D,
+    write_events_dispatch: Mutex<Option<Duration>>,
+}
+
+impl<D> Destination for DispatchTimingProbe<D>
+where
+    D: Destination + Send + Sync,
+{
+    fn name() -> &'static str {
+        D::name()
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        self.inner
+            .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
+            .await
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        let started = Instant::now();
+        let result = self.inner.write_events(events, durability, async_result).await;
+        *self.write_events_dispatch.lock() = Some(started.elapsed());
+        result
+    }
+}
+
+/// The trait dispatch returns while a delayed insert is still pending, and
+/// the asynchronous result reports `Durable` only after the insert lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_dispatch_returns_while_insert_is_pending() {
+    // GIVEN: a destination table whose inserts are delayed by one second.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("deferred");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    install_insert_delay(&clickhouse_db, "public_deferred", 1).await;
+
+    // WHEN: one insert event batch is dispatched through the trait.
+    let probe = DispatchTimingProbe { inner: destination, write_events_dispatch: Mutex::new(None) };
+    let started = Instant::now();
+    let status = write_events_via_trait(
+        &probe,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&schema, 1, "delayed")],
+    )
+    .await
+    .unwrap();
+    let completion = started.elapsed();
+
+    // THEN: dispatch returned while the result was pending, and completion
+    // reported Durable only after the delayed insert landed.
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    let dispatch = probe.write_events_dispatch.lock().unwrap();
+    assert!(completion >= Duration::from_secs(1), "insert was not delayed: {completion:?}");
+    assert!(dispatch < Duration::from_millis(500), "dispatch awaited the write: {dispatch:?}");
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_deferred\"").await, vec![1]);
+}
+
+/// A destructive table reset drains the admitted write before dropping the
+/// table, so the delayed insert lands and the drop waits for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_waits_for_admitted_write() {
+    // GIVEN: a destination table whose inserts are delayed by two seconds.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("resetrace");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    install_insert_delay(&clickhouse_db, "public_resetrace", 2).await;
+
+    // WHEN: a table reset starts while the delayed write is admitted.
+    let started = Instant::now();
+    let write = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&schema, 1, "landed")],
+    );
+    let reset = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let result = drop_table_for_copy_via_trait(&destination, &schema).await;
+        (result, started.elapsed())
+    };
+    let (write_status, (drop_result, drop_elapsed)) = tokio::join!(write, reset);
+
+    // THEN: the write completed durably before the drop, and the drop waited
+    // for the delayed insert instead of racing it.
+    assert_eq!(write_status.unwrap(), DestinationWriteStatus::Durable);
+    drop_result.unwrap();
+    assert!(drop_elapsed >= Duration::from_millis(1500), "reset raced the write: {drop_elapsed:?}");
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() and name = \
+                 'public_resetrace'",
+            )
+            .await,
+        Vec::<String>::new()
+    );
+}
+
+/// Shutdown aborts an admitted write promptly and the pending result reports
+/// the aborted task as an error instead of a silent success.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_aborts_admitted_write_without_silent_success() {
+    // GIVEN: a destination table whose inserts are delayed by three seconds.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("aborted");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    install_insert_delay(&clickhouse_db, "public_aborted", 3).await;
+
+    // WHEN: shutdown runs while the delayed write is admitted.
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "aborted")],
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let started = Instant::now();
+    Destination::shutdown(&destination).await.unwrap();
+
+    // THEN: shutdown did not wait out the delayed insert, and the aborted
+    // write surfaced as an error rather than a fabricated success.
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let error = write_handle.await.unwrap().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationError);
+}
+
+/// An insert rejected by the server reaches the caller through the async
+/// result channel, and the destination keeps admitting later work.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_reports_insert_failure_through_async_result() {
+    // GIVEN: a destination table with a constraint that rejects one key.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("rejected");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    clickhouse_db
+        .db_client()
+        .query("alter table \"public_rejected\" add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a rejected insert and then an accepted insert are dispatched.
+    let error = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&schema, 2, "rejected")],
+    )
+    .await
+    .unwrap_err();
+    let status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&schema, 1, "accepted")],
+    )
+    .await
+    .unwrap();
+
+    // THEN: the failure carried the typed insert error and later admission
+    // still succeeded.
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_rejected\"").await, vec![1]);
 }

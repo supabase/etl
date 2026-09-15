@@ -21,7 +21,10 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 use crate::support::{
-    clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query},
+    clickhouse::{
+        AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query,
+        install_insert_delay,
+    },
     crypto::install_crypto_provider,
 };
 
@@ -374,6 +377,91 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     assert_eq!(rows.len(), 1, "expected one current-state row after UPDATE");
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "after");
+}
+
+/// A slow destination insert must not stall the pipeline: dispatch returns
+/// after admission so later transactions keep streaming, and shutdown drains
+/// the pending write to durability.
+#[tokio::test(flavor = "multi_thread")]
+async fn delayed_inserts_keep_streaming_and_shut_down_cleanly_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: a copied table whose destination inserts are delayed.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("slowsink");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .unwrap();
+    let publication_name = "test_pub_clickhouse_slowsink";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('first')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+    install_insert_delay(&clickhouse_db, "test_slowsink", 1).await;
+
+    // WHEN: two transactions stream through the delayed destination.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+        ])
+        .await;
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('second')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET value = 'third' WHERE id = 1",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    events_notify.notified().await;
+
+    // THEN: shutdown drains the pending delayed write and both transactions
+    // are durably visible.
+    pipeline.shutdown_and_wait().await.unwrap();
+    let query = current_state_query(
+        ClickHouseEngine::MergeTree,
+        "test_slowsink",
+        ID_VALUE_PROJECTION,
+        &["id"],
+        "id",
+    );
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].value, "third");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].value, "second");
 }
 
 /// Tests that edge-case values survive the Postgres -> ClickHouse pipeline

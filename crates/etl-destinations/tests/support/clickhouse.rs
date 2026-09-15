@@ -1,6 +1,35 @@
 #![allow(dead_code)]
 
 use etl_config::shared::ClickHouseEngine;
+use etl_destinations::clickhouse::test_utils::ClickHouseTestDatabase;
+
+/// Delays every INSERT into `table` by `seconds` per row.
+///
+/// Installs a materialized view whose SELECT sleeps before writing to a Null
+/// sink; ClickHouse runs the view synchronously with the INSERT, so the
+/// insert acknowledgement is deferred by the sleep. `seconds` must stay
+/// within ClickHouse's 3-second `sleepEachRow` limit.
+pub(crate) async fn install_insert_delay(
+    database: &ClickHouseTestDatabase,
+    table: &str,
+    seconds: u32,
+) {
+    database
+        .db_client()
+        .query(&format!("create table {table}__delay_sink (s UInt8) engine = Null"))
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query(&format!(
+            "create materialized view {table}__delay to {table}__delay_sink as select \
+             sleepEachRow({seconds}) as s from \"{table}\""
+        ))
+        .execute()
+        .await
+        .unwrap();
+}
 
 /// A row read back from the ClickHouse `all_types_encoding` test table.
 ///
