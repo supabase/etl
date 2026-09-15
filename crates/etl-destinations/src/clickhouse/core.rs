@@ -559,6 +559,27 @@ impl std::fmt::Display for ClickHouseOperationKind {
 /// see [`ClickHouseEngine`] for the engine-specific layouts.
 #[derive(Clone)]
 pub struct ClickHouseDestination<S> {
+    /// Write-path state and operations shared by all destination entrypoints.
+    writer: DestinationWriter<S>,
+}
+
+/// Applied ClickHouse table state cached for the insert hot path.
+#[derive(Clone)]
+struct ClickHouseTableCacheEntry {
+    /// Destination table name selected by durable metadata.
+    table_name: String,
+    /// Exact applied schema endpoint validated before this entry was inserted.
+    metadata: DestinationTableMetadata,
+    /// Per-column nullable flags, including the trailing CDC columns.
+    nullable_flags: Arc<[bool]>,
+}
+
+/// Execution context that owns the ClickHouse write path.
+///
+/// Holds the client, inserter configuration, metadata store, and per-table
+/// caches needed to execute writes and schema operations.
+#[derive(Clone)]
+struct DestinationWriter<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
     client: ClickHouseClient,
     /// Per-INSERT byte budget; gates intermediate flushes within a single
@@ -588,17 +609,6 @@ pub struct ClickHouseDestination<S> {
     /// `parking_lot::Mutex` and grows at most one entry per replicated
     /// table.
     create_locks: Arc<Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>>,
-}
-
-/// Applied ClickHouse table state cached for the insert hot path.
-#[derive(Clone)]
-struct ClickHouseTableCacheEntry {
-    /// Destination table name selected by durable metadata.
-    table_name: String,
-    /// Exact applied schema endpoint validated before this entry was inserted.
-    metadata: DestinationTableMetadata,
-    /// Per-column nullable flags, including the trailing CDC columns.
-    nullable_flags: Arc<[bool]>,
 }
 
 impl<S> ClickHouseDestination<S>
@@ -648,21 +658,54 @@ where
     ) -> Self {
         register_metrics();
         Self {
-            client,
-            inserter_config,
-            store: Arc::new(store),
-            table_cache: Arc::new(RwLock::new(HashMap::new())),
-            create_locks: Arc::new(Mutex::new(HashMap::new())),
+            writer: DestinationWriter {
+                client,
+                inserter_config,
+                store: Arc::new(store),
+                table_cache: Arc::new(RwLock::new(HashMap::new())),
+                create_locks: Arc::new(Mutex::new(HashMap::new())),
+            },
         }
     }
 
     /// Probes the server version and rejects unsupported engine/version pairs.
     /// Currently the only gate: ReplacingMergeTree requires CH >= 23.5.
     pub async fn validate_engine_support(&self) -> EtlResult<()> {
-        let server_version = self.client.server_version().await?;
-        ensure_engine_supported(self.inserter_config.engine, server_version)
+        let server_version = self.writer.client.server_version().await?;
+        ensure_engine_supported(self.writer.inserter_config.engine, server_version)
     }
 
+    /// Writes an initial-copy batch directly to the destination table,
+    /// awaiting the write inline instead of reporting through the trait's
+    /// async completion result.
+    ///
+    /// Test-only entrypoint for exercising the production write path without
+    /// pipeline plumbing.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_table_rows(
+        &self,
+        schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.writer.write_table_rows_inner(schema, table_rows).await
+    }
+
+    /// Writes a streaming event batch directly to the destination, awaiting
+    /// the write inline instead of reporting through the trait's async
+    /// completion result.
+    ///
+    /// Test-only entrypoint for exercising the production write path without
+    /// pipeline plumbing.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
+        self.writer.write_events_inner(events).await
+    }
+}
+
+impl<S> DestinationWriter<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
     /// Creates a ClickHouse table for a never-before-seen `table_id`,
     /// bracketing the DDL with `DestinationTableMetadata` writes so the
     /// operation is crash-recoverable.
@@ -1034,32 +1077,6 @@ where
         self.table_cache.write().remove(&schema.id());
 
         Ok(())
-    }
-
-    /// Writes an initial-copy batch directly to the destination table,
-    /// awaiting the write inline instead of reporting through the trait's
-    /// async completion result.
-    ///
-    /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing.
-    #[cfg(feature = "test-utils")]
-    pub async fn write_table_rows(
-        &self,
-        schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        self.write_table_rows_inner(schema, table_rows).await
-    }
-
-    /// Writes a streaming event batch directly to the destination, awaiting
-    /// the write inline instead of reporting through the trait's async
-    /// completion result.
-    ///
-    /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing.
-    #[cfg(feature = "test-utils")]
-    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events_inner(events).await
     }
 
     async fn write_table_rows_inner(
@@ -1978,7 +1995,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
+        let result = self.writer.drop_table_for_copy_inner(replicated_table_schema).await;
         async_result.send(result);
         Ok(())
     }
@@ -1990,7 +2007,7 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows_inner(replicated_table_schema, table_rows).await;
+        let result = self.writer.write_table_rows_inner(replicated_table_schema, table_rows).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
@@ -2001,7 +2018,7 @@ where
         _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        let result = self.write_events_inner(events).await;
+        let result = self.writer.write_events_inner(events).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
