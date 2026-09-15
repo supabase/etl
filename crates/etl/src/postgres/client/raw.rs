@@ -32,7 +32,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    postgres::ReplicationMessageStream,
+    postgres::{FeedbackHandle, ReplicationMessageStream},
     schema::{TableId, TableName},
 };
 
@@ -676,7 +676,8 @@ impl PgReplicationClient {
     ///
     /// The stream will begin reading changes from the provided `start_lsn`.
     /// Supplying `keep_alive_deadline_duration` enables status feedback and
-    /// returns the feedback sender future for the caller to spawn and own.
+    /// returns its independent handle and sender future for the caller to own
+    /// and spawn. The reader does not own or submit feedback.
     /// `None` disables all feedback, allowing protocol tests to read and replay
     /// without acknowledging WAL.
     pub async fn start_logical_replication(
@@ -687,7 +688,7 @@ impl PgReplicationClient {
         keep_alive_deadline_duration: Option<Duration>,
     ) -> EtlResult<(
         ReplicationMessageStream,
-        Option<impl Future<Output = EtlResult<()>> + Send + 'static>,
+        Option<(FeedbackHandle, impl Future<Output = EtlResult<()>> + Send + 'static)>,
     )> {
         info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 

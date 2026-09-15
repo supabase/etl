@@ -100,11 +100,6 @@ impl<S: Stream> MemoryBackpressureStream<S> {
     ) -> Self {
         Self { stream, stream_id: stream_id.into(), memory_subscription, paused_for_memory: false }
     }
-
-    /// Returns a pinned mutable reference to the wrapped stream.
-    pub(crate) fn stream_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
-        self.project().stream
-    }
 }
 
 impl<S: Stream> Stream for MemoryBackpressureStream<S> {

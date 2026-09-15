@@ -31,6 +31,9 @@ use crate::{
     },
 };
 
+/// PostgreSQL wire tag for a standby status update.
+const STANDBY_STATUS_UPDATE_TAG: u8 = b'r';
+
 /// Minimum interval between non-forced status updates when the flush frontier
 /// has not advanced.
 ///
@@ -93,9 +96,12 @@ struct StatusUpdateRequest {
     force: bool,
 }
 
-/// Channel handle for submitting status updates to the [`FeedbackSender`].
+/// Independent channel handle for submitting replication status updates.
+///
+/// The caller owns the sender future returned alongside this handle and must
+/// spawn and stop it for the lifetime of replication.
 #[derive(Debug)]
-pub(super) struct FeedbackHandle {
+pub struct FeedbackHandle {
     /// A bounded queue that applies backpressure if the transport cannot send.
     requests_tx: mpsc::Sender<StatusUpdateRequest>,
 }
@@ -105,12 +111,12 @@ impl FeedbackHandle {
     ///
     /// The caller must spawn and own the returned future; the handle only
     /// submits requests and never writes to the transport itself.
-    pub(super) fn create<S>(
+    pub(crate) fn create<S>(
         sink: S,
         keep_alive_deadline_duration: Duration,
-    ) -> (Self, impl Future<Output = EtlResult<()>> + Send + 'static)
+    ) -> (Self, impl Future<Output = EtlResult<()>>)
     where
-        S: Sink<Bytes> + Unpin + Send + 'static,
+        S: Sink<Bytes> + Unpin,
         S::Error: Into<EtlError>,
     {
         let (requests_tx, requests_rx) = mpsc::channel(1);
@@ -126,25 +132,22 @@ impl FeedbackHandle {
         (Self { requests_tx }, feedback_sender.run(keep_alive_deadline_duration))
     }
 
-    /// Enqueues safe progress for the [`FeedbackSender`].
+    /// Enqueues safe progress, failing when the feedback sender has stopped.
     ///
-    /// Completion means the request entered the bounded queue, not that it
-    /// reached the transport or PostgreSQL. A full queue applies backpressure.
-    /// If the sender fails, its channel closes and the next enqueue fails the
-    /// apply loop. Teardown may discard requests still queued or being sent;
-    /// restart safety depends on persisted checkpoints, not final feedback.
-    pub(super) async fn enqueue_status_update(
+    /// Waits only for queue capacity, not transmission. Reports unavailable
+    /// feedback so the worker can retry replication when the sender stops.
+    pub async fn enqueue_status_update(
         &self,
         write_lsn: PgLsn,
         flush_lsn: PgLsn,
         force: bool,
     ) -> EtlResult<()> {
         self.requests_tx.send(StatusUpdateRequest { write_lsn, flush_lsn, force }).await.map_err(
-            |_| {
+            |error| {
                 etl_error!(
-                    ErrorKind::SourceConnectionFailed,
-                    "Cannot send replication status update because the feedback sender task \
-                     stopped"
+                    ErrorKind::ReplicationFeedbackUnavailable,
+                    "Replication feedback sender is unavailable",
+                    source: error
                 )
             },
         )
@@ -210,6 +213,7 @@ where
 
                 request = self.requests_rx.recv() => {
                     let Some(request) = request else { return Ok(()); };
+
                     if self.send_status_update(request.write_lsn, request.flush_lsn, request.force, StatusUpdateType::KeepAlive).await? {
                         deadline = Instant::now() + keep_alive_deadline_duration;
                     }
@@ -341,7 +345,7 @@ where
         let request_reply: u8 = status_update_type.request_reply().into();
         // CopyBoth supplies the framing; this is the standby-status payload.
         let mut message = BytesMut::with_capacity(34);
-        message.put_u8(b'r');
+        message.put_u8(STANDBY_STATUS_UPDATE_TAG);
         message.put_u64(write_lsn.into());
         message.put_u64(flush_lsn.into());
         message.put_u64(flush_lsn.into());
@@ -518,45 +522,14 @@ mod tests {
             feedback_sender_task.await.unwrap().unwrap_err().kind(),
             ErrorKind::SourceConnectionFailed
         );
-        let error =
-            feedback_handle.enqueue_status_update(100.into(), 80.into(), true).await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
-    }
-
-    /// Enqueueing waits only for queue capacity and fails if the sender stops.
-    #[tokio::test(start_paused = true)]
-    async fn enqueue_only_waits_for_queue_capacity() {
-        let (messages_tx, mut messages) = tokio::sync::mpsc::unbounded_channel();
-        let sink =
-            Box::pin(futures::sink::unfold(messages_tx, |messages_tx, message| async move {
-                messages_tx.send(message).unwrap();
-                std::future::pending::<EtlResult<()>>().await?;
-                Ok::<_, crate::error::EtlError>(messages_tx)
-            }));
-        let (feedback_handle, feedback_sender_future) =
-            FeedbackHandle::create(sink, Duration::from_secs(10));
-        let feedback_sender_task = tokio::spawn(feedback_sender_future);
-        feedback_handle
-            .enqueue_status_update(100.into(), 80.into(), true)
-            .now_or_never()
-            .unwrap()
-            .unwrap();
-        assert_feedback(messages.recv().await.unwrap(), 100, 80, false);
-        assert!(!feedback_sender_task.is_finished());
-
-        // The sender is blocked in the sink, so one more request fills the queue.
-        feedback_handle
-            .enqueue_status_update(200.into(), 90.into(), true)
-            .now_or_never()
-            .unwrap()
-            .unwrap();
-        let mut queued =
-            Box::pin(feedback_handle.enqueue_status_update(300.into(), 100.into(), true));
-        assert!(queued.as_mut().now_or_never().is_none());
-
-        feedback_sender_task.abort();
-        assert!(feedback_sender_task.await.unwrap_err().is_cancelled());
-        assert_eq!(queued.await.unwrap_err().kind(), ErrorKind::SourceConnectionFailed);
+        assert_eq!(
+            feedback_handle
+                .enqueue_status_update(100.into(), 80.into(), true)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ReplicationFeedbackUnavailable
+        );
     }
 
     /// A heartbeat failure closes the channel, failing the next apply request.
@@ -571,12 +544,43 @@ mod tests {
             feedback_sender_task.await.unwrap().unwrap_err().kind(),
             ErrorKind::SourceConnectionFailed
         );
-        let error =
-            feedback_handle.enqueue_status_update(100.into(), 80.into(), true).await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
-        assert!(error.to_string().contains(
-            "Cannot send replication status update because the feedback sender task stopped"
-        ));
+        assert_eq!(
+            feedback_handle
+                .enqueue_status_update(100.into(), 80.into(), true)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::ReplicationFeedbackUnavailable
+        );
         drop(feedback_handle);
+    }
+
+    /// Enqueueing waits only for queue capacity, then wakes with a retryable
+    /// error if the sender fails in the transport.
+    #[tokio::test]
+    async fn enqueue_waits_only_for_capacity_and_wakes_on_sender_failure() {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let sink = Box::pin(futures::sink::unfold(
+            (entered_tx, release_rx),
+            |(entered_tx, release_rx), _| async move {
+                entered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                Err(etl_error!(ErrorKind::InvalidState, "Test feedback failure"))
+            },
+        ));
+        let (handle, sender) = FeedbackHandle::create(sink, Duration::from_secs(10));
+        let task = tokio::spawn(sender);
+        handle.enqueue_status_update(100.into(), 80.into(), true).now_or_never().unwrap().unwrap();
+        entered_rx.await.unwrap();
+
+        // Fill the queue while its consumer is suspended in the transport.
+        handle.enqueue_status_update(200.into(), 90.into(), true).now_or_never().unwrap().unwrap();
+        let mut blocked = Box::pin(handle.enqueue_status_update(300.into(), 100.into(), true));
+        assert!(blocked.as_mut().now_or_never().is_none());
+
+        release_tx.send(()).unwrap();
+        assert_eq!(blocked.await.unwrap_err().kind(), ErrorKind::ReplicationFeedbackUnavailable);
+        assert_eq!(task.await.unwrap().unwrap_err().kind(), ErrorKind::InvalidState);
     }
 }

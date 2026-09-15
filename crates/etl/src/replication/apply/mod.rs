@@ -9,31 +9,25 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    future::Future,
     pin::Pin,
     str::FromStr,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use etl_config::shared::PipelineConfig;
 use futures::StreamExt;
-use metrics::{counter, gauge, histogram};
+use metrics::{counter, histogram};
 use postgres_replication::{
     protocol,
     protocol::{LogicalReplicationMessage, ReplicationMessage},
 };
 use tokio::{
     pin,
-    sync::{Semaphore, mpsc, watch},
-    task::JoinHandle,
-    time::MissedTickBehavior,
+    sync::{Semaphore, watch},
 };
 use tokio_postgres::types::PgLsn;
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active_for_parameter};
@@ -49,16 +43,13 @@ use crate::{
     etl_error,
     event::{Event, RelationEvent},
     observability::{
-        CDC_REPLICATION_PATH, COMMAND_TAG_LABEL, CONFIRMATION_LABEL,
-        ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
-        ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
-        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL,
-        ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS, ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
+        CDC_REPLICATION_PATH, COMMAND_TAG_LABEL, CONFIRMATION_LABEL, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
+        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
+        ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
         ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-        ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
-        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
-        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL, ddl_command_tag_label,
+        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_SIZE,
+        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
+        WRITE_STATUS_LABEL, ddl_command_tag_label,
     },
     pipeline::PipelineId,
     postgres::{
@@ -76,13 +67,14 @@ use crate::{
     },
     replication::{
         PreviousRelationMasks, TableDecodingState, WorkerType,
-        state::{TableState, TableStateType},
+        apply::tasks::{ApplyLoopTasks, ReplicationLagMetrics},
+        state::TableState,
     },
     runtime::{
-        BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorker,
-        TableSyncWorkerPool, TableSyncWorkerState,
+        BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
+        TableSyncWorkerState,
         concurrency::{
-            MemoryBackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
+            MemoryBackpressureStream, ShutdownRx, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
         },
     },
@@ -90,8 +82,10 @@ use crate::{
         IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },
     source_payload_metadata::StreamingPayloadMetadata,
-    store::{PipelineStore, SchemaStore, SharedStateStore, StateStore},
+    store::{PipelineStore, StateStore},
 };
+
+mod tasks;
 
 /// Default keep alive value if it can't be fetched from Postgres.
 ///
@@ -122,15 +116,6 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// accumulates the next batch. Register both positions so each receives a share
 /// of the configured decoded-batch capacity.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
-/// Maximum number of table schema cleanups buffered per apply loop.
-///
-/// Each queue entry contains one table identifier and one frozen retention
-/// boundary. A capacity of 1024 accommodates large bursts of relation messages
-/// while keeping queue memory bounded. Queueing is non-blocking, so additional
-/// candidates remain pending in the apply loop and are retried after a later
-/// durable flush result.
-const SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY: usize = 1024;
-
 /// Result type for the apply loop execution.
 ///
 /// Indicates the reason why the apply loop terminated, enabling appropriate
@@ -287,96 +272,6 @@ impl ReplicationProgress {
     }
 }
 
-/// Tracks replication lag measurements shared with the sampler task.
-#[derive(Debug, Clone)]
-struct ReplicationLagMetrics {
-    /// Shared atomic LSN positions used for lag gauges.
-    inner: Arc<ReplicationLagMetricsInner>,
-}
-
-/// Atomic replication lag positions shared by the apply loop and sampler task.
-#[derive(Debug)]
-struct ReplicationLagMetricsInner {
-    /// Last source WAL LSN observed by the out-of-band sampler.
-    last_source_current_lsn: AtomicU64,
-    /// The highest LSN received from PostgreSQL so far.
-    last_received_lsn: AtomicU64,
-    /// The highest LSN whose destination write completed durably.
-    last_flush_lsn: AtomicU64,
-    /// The highest safe frontier selected from received-or-flushed progress.
-    ///
-    /// PostgreSQL feedback uses this quiescent-or-flushed selection rule.
-    /// Durable ETL checkpoints advance only after destination flushes.
-    last_checkpoint_lsn: AtomicU64,
-}
-
-impl ReplicationLagMetrics {
-    /// Creates replication lag metrics initialized to the given LSN.
-    fn new(initial_lsn: PgLsn) -> Self {
-        let initial_lsn = u64::from(initial_lsn);
-
-        Self {
-            inner: Arc::new(ReplicationLagMetricsInner {
-                last_source_current_lsn: AtomicU64::new(initial_lsn),
-                last_received_lsn: AtomicU64::new(initial_lsn),
-                last_flush_lsn: AtomicU64::new(initial_lsn),
-                last_checkpoint_lsn: AtomicU64::new(initial_lsn),
-            }),
-        }
-    }
-
-    /// Updates the last source current LSN if it advanced.
-    fn update_last_source_current_lsn(&self, lsn: PgLsn) {
-        Self::update_lsn(&self.inner.last_source_current_lsn, lsn);
-    }
-
-    /// Updates lag metric positions derived from apply-loop progress.
-    fn update_from_progress(&self, progress: ReplicationProgress, checkpoint_lsn: PgLsn) {
-        Self::update_lsn(&self.inner.last_received_lsn, progress.last_received_lsn());
-        Self::update_lsn(&self.inner.last_flush_lsn, progress.last_flush_lsn());
-        Self::update_lsn(&self.inner.last_checkpoint_lsn, checkpoint_lsn);
-    }
-
-    /// Emits lag gauges from the current atomic progress positions.
-    fn emit_lag_metrics(&self, worker_type: WorkerType) {
-        let last_source_current_lsn = self.inner.last_source_current_lsn.load(Ordering::Relaxed);
-        let last_received_lsn = self.inner.last_received_lsn.load(Ordering::Relaxed);
-        let last_flush_lsn = self.inner.last_flush_lsn.load(Ordering::Relaxed);
-        let last_checkpoint_lsn = self.inner.last_checkpoint_lsn.load(Ordering::Relaxed);
-
-        let worker_type = worker_type.as_str();
-
-        gauge!(
-            ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_source_current_lsn.saturating_sub(last_received_lsn) as f64);
-        gauge!(
-            ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_received_lsn.saturating_sub(last_checkpoint_lsn) as f64);
-        gauge!(
-            ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_received_lsn.saturating_sub(last_flush_lsn) as f64);
-        gauge!(
-            ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_source_current_lsn.saturating_sub(last_checkpoint_lsn) as f64);
-    }
-
-    /// Updates a stored LSN monotonically.
-    fn update_lsn(stored_lsn: &AtomicU64, lsn: PgLsn) {
-        let new_lsn = u64::from(lsn);
-        let _ = stored_lsn.try_update(Ordering::Relaxed, Ordering::Relaxed, |current_lsn| {
-            (new_lsn > current_lsn).then_some(new_lsn)
-        });
-    }
-}
-
 /// Row-decoding schema resolved for a DML message.
 #[derive(Debug)]
 struct ResolvedTableSchema {
@@ -450,29 +345,6 @@ impl HandleMessageResult {
     }
 }
 
-/// Immutable retention boundary for one asynchronous table schema cleanup.
-///
-/// The apply loop builds this request immediately after persisting
-/// commit-boundary progress and reading destination metadata. The background
-/// worker must use this frozen boundary rather than reloading newer state:
-/// arbitrary queue delay can then only make the request conservative.
-///
-/// Concurrent schema insertion is also safe: ordered replication cannot later
-/// introduce a schema at or below persisted progress, and pruning always
-/// preserves every snapshot newer than the frozen boundary.
-///
-/// Pruning is idempotent and does not rely on request order. Each boundary
-/// preserves the greatest schema snapshot at or below it and every newer
-/// snapshot, so replaying a request—or processing an older request after a
-/// newer one—cannot remove a schema retained by the newer boundary.
-#[derive(Debug)]
-struct SchemaCleanupRequest {
-    /// Table whose obsolete schema versions may be pruned.
-    table_id: TableId,
-    /// Inclusive retention boundary captured at the durable flush result.
-    retention_snapshot_id: SnapshotId,
-}
-
 /// Returns the earliest safe schema-cleanup boundary.
 ///
 /// A persisted checkpoint at LSN `X` covers every transaction committed
@@ -485,294 +357,6 @@ fn schema_cleanup_retention_snapshot_id(
     destination_retention_snapshot_id: SnapshotId,
 ) -> SnapshotId {
     SnapshotId::at_lsn(persisted_checkpoint_lsn).min(destination_retention_snapshot_id)
-}
-
-/// Background tasks owned by an apply loop invocation.
-#[derive(Debug)]
-struct ApplyLoopTasks {
-    /// Sender for serialized background schema cleanup requests.
-    schema_cleanup_tx: Option<mpsc::Sender<SchemaCleanupRequest>>,
-    /// Background worker that serially processes schema cleanup requests.
-    schema_cleanup_worker_task: JoinHandle<()>,
-    /// Background replication lag sampler task owned by this apply loop.
-    replication_lag_sampler_task: JoinHandle<()>,
-    /// Sole feedback writer owned for the entire apply-loop invocation.
-    feedback_sender_task: JoinHandle<()>,
-}
-
-impl ApplyLoopTasks {
-    /// Creates task ownership and starts background workers.
-    fn start<S, F>(
-        schema_store: S,
-        out_of_band_source_pool: OutOfBandSourcePool,
-        replication_lag_metrics: ReplicationLagMetrics,
-        worker_type: WorkerType,
-        table_sync_monitor_refresh_interval: Duration,
-        feedback_sender_future: F,
-    ) -> Self
-    where
-        S: SchemaStore + Send + Sync + 'static,
-        F: Future<Output = EtlResult<()>> + Send + 'static,
-    {
-        let (schema_cleanup_tx, schema_cleanup_rx) =
-            mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
-        let schema_cleanup_worker_task =
-            Self::spawn_schema_cleanup_worker(schema_store, schema_cleanup_rx, worker_type);
-
-        let replication_lag_sampler_task = Self::spawn_replication_lag_sampler(
-            out_of_band_source_pool,
-            replication_lag_metrics,
-            worker_type,
-            table_sync_monitor_refresh_interval,
-        );
-
-        Self {
-            schema_cleanup_tx: Some(schema_cleanup_tx),
-            schema_cleanup_worker_task,
-            replication_lag_sampler_task,
-            feedback_sender_task: Self::spawn_feedback_sender(feedback_sender_future, worker_type),
-        }
-    }
-
-    /// Spawns the feedback sender and logs any failure with its original cause.
-    ///
-    /// Ownership remains here so cancellation and teardown always stop the
-    /// writer. Failure closes the request channel; the next feedback request
-    /// fails the apply loop without interrupting an unrelated await.
-    fn spawn_feedback_sender<F>(
-        feedback_sender_future: F,
-        worker_type: WorkerType,
-    ) -> JoinHandle<()>
-    where
-        F: Future<Output = EtlResult<()>> + Send + 'static,
-    {
-        tokio::spawn(
-            async move {
-                if let Err(error) = feedback_sender_future.await {
-                    error!(error = %error, "replication feedback sender task failed; subsequent status updates will fail");
-                }
-            }
-            .instrument(info_span!("replication_feedback_sender", %worker_type)),
-        )
-    }
-
-    /// Tries to queue a schema cleanup request for one table.
-    ///
-    /// Returns `false` when the bounded queue is full or the background worker
-    /// has stopped. This method never waits for queue capacity.
-    fn try_queue_schema_cleanup(
-        &self,
-        table_id: TableId,
-        retention_snapshot_id: SnapshotId,
-    ) -> bool {
-        let Some(schema_cleanup_tx) = &self.schema_cleanup_tx else {
-            return false;
-        };
-
-        let request = SchemaCleanupRequest { table_id, retention_snapshot_id };
-        match schema_cleanup_tx.try_send(request) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => false,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                error!("schema cleanup worker stopped before accepting cleanup request");
-
-                false
-            }
-        }
-    }
-
-    /// Starts the worker that serially prunes requested table schema versions.
-    fn spawn_schema_cleanup_worker<S>(
-        schema_store: S,
-        mut schema_cleanup_rx: mpsc::Receiver<SchemaCleanupRequest>,
-        worker_type: WorkerType,
-    ) -> JoinHandle<()>
-    where
-        S: SchemaStore + Send + Sync + 'static,
-    {
-        tokio::spawn(async move {
-            while let Some(request) = schema_cleanup_rx.recv().await {
-                // Coalesce up to one bounded batch of available requests to
-                // retain batched store cleanup without making the apply loop
-                // wait for it.
-                let mut retention_snapshot_ids = BTreeMap::new();
-                retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
-
-                for _ in 1..SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
-                    let Ok(request) = schema_cleanup_rx.try_recv() else {
-                        break;
-                    };
-
-                    retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
-                }
-
-                let table_count = retention_snapshot_ids.len() as u64;
-                match schema_store.prune_table_schemas(retention_snapshot_ids).await {
-                    Ok(pruned_count) => {
-                        counter!(
-                            ETL_SCHEMA_CLEANUPS_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(1);
-
-                        counter!(
-                            ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(table_count);
-
-                        counter!(
-                            ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(pruned_count);
-
-                        if pruned_count > 0 {
-                            info!(
-                                %worker_type,
-                                pruned_count,
-                                "obsolete table schema cleanup completed"
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        // Cleanup is best-effort. Do not block later requests behind a
-                        // permanently failing one: a later relation for the table,
-                        // including its first relation after restart, will enqueue a
-                        // fresh cleanup attempt.
-                        counter!(
-                            ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(1);
-
-                        error!(
-                            %worker_type,
-                            error = %err,
-                            "failed to clean up obsolete table schemas"
-                        );
-                    }
-                };
-            }
-        })
-    }
-
-    /// Aborts and joins the replication lag sampler task.
-    async fn handle_replication_lag_sampler_task_result(&mut self) {
-        // We abort the task, so that awaiting on the handle is as quick as possible.
-        //
-        // It's fine to abort this task midway, since it's not going to affect
-        // consistency.
-        self.replication_lag_sampler_task.abort();
-
-        if let Err(err) = (&mut self.replication_lag_sampler_task).await
-            && !err.is_cancelled()
-        {
-            warn!(
-                error = %err,
-                "replication lag sampler task failed before completing"
-            );
-        }
-    }
-
-    /// Closes the cleanup queue and joins the worker after accepted work
-    /// finishes.
-    async fn handle_schema_cleanup_task_result(&mut self, worker_type: WorkerType) {
-        // Graceful teardown finishes accepted cleanup. If teardown itself is
-        // cancelled, Drop aborts the worker and unfinished cleanup can be retried.
-        self.schema_cleanup_tx.take();
-
-        if let Err(err) = (&mut self.schema_cleanup_worker_task).await {
-            counter!(
-                ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-                WORKER_TYPE_LABEL => worker_type.as_str(),
-            )
-            .increment(1);
-
-            error!(
-                %worker_type,
-                error = %err,
-                "schema cleanup worker task failed before completing"
-            );
-        }
-    }
-
-    /// Aborts and joins the feedback sender when the apply loop finishes or
-    /// fails.
-    async fn handle_feedback_sender_task_result(&mut self) {
-        // Feedback is best-effort and may be discarded during teardown.
-        // Destination durability and persisted checkpoints govern restart;
-        // a final status update is unnecessary and cannot confirm receipt.
-        self.feedback_sender_task.abort();
-        if let Err(error) = (&mut self.feedback_sender_task).await
-            && !error.is_cancelled()
-        {
-            warn!(error = %error, "replication feedback sender task failed before completing");
-        }
-    }
-
-    /// Stops and joins all owned background tasks.
-    async fn teardown(&mut self, worker_type: WorkerType) {
-        self.handle_feedback_sender_task_result().await;
-        self.handle_replication_lag_sampler_task_result().await;
-        self.handle_schema_cleanup_task_result(worker_type).await;
-    }
-
-    /// Starts the replication lag sampler for an apply loop.
-    fn spawn_replication_lag_sampler(
-        out_of_band_source_pool: OutOfBandSourcePool,
-        replication_lag_metrics: ReplicationLagMetrics,
-        worker_type: WorkerType,
-        table_sync_monitor_refresh_interval: Duration,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            Self::run_replication_lag_sampler(
-                out_of_band_source_pool,
-                replication_lag_metrics,
-                worker_type,
-                table_sync_monitor_refresh_interval,
-            )
-            .await;
-        })
-    }
-
-    /// Runs the best-effort replication lag sampler.
-    async fn run_replication_lag_sampler(
-        out_of_band_source_pool: OutOfBandSourcePool,
-        replication_lag_metrics: ReplicationLagMetrics,
-        worker_type: WorkerType,
-        table_sync_monitor_refresh_interval: Duration,
-    ) {
-        let mut interval = tokio::time::interval(table_sync_monitor_refresh_interval);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            interval.tick().await;
-
-            match out_of_band_source_pool.get_current_wal_lsn().await {
-                Ok(source_current_lsn) => {
-                    replication_lag_metrics.update_last_source_current_lsn(source_current_lsn);
-                    replication_lag_metrics.emit_lag_metrics(worker_type);
-                }
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "replication lag sampler failed to poll source database"
-                    );
-                }
-            }
-        }
-    }
-}
-
-impl Drop for ApplyLoopTasks {
-    fn drop(&mut self) {
-        // Cancellation skips async teardown, so stop every owned background task.
-        // Cleanup only prunes obsolete schemas; interrupted work may be retried.
-        self.schema_cleanup_worker_task.abort();
-        self.replication_lag_sampler_task.abort();
-        self.feedback_sender_task.abort();
-    }
 }
 
 /// A buffered batch of events waiting to be sent to the destination.
@@ -1017,8 +601,11 @@ impl ApplyLoopState {
 
     /// Snapshots apply-loop progress into the replication lag metrics.
     fn update_replication_lag_metrics_from_progress(&self) {
-        self.replication_lag_metrics
-            .update_from_progress(self.replication_progress, self.checkpoint_lsn());
+        self.replication_lag_metrics.update_progress(
+            self.replication_progress.last_received_lsn(),
+            self.replication_progress.last_flush_lsn(),
+            self.checkpoint_lsn(),
+        );
     }
 
     /// Returns the last received LSN that should be reported as written to the
@@ -1281,7 +868,7 @@ where
 
         let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
 
-        let (replication_message_stream, feedback_sender_future) = replication_client
+        let (replication_message_stream, feedback) = replication_client
             .start_logical_replication(
                 &config.publication_name,
                 &slot_name,
@@ -1289,9 +876,10 @@ where
                 Some(keep_alive_deadline_duration),
             )
             .await?;
+
         // Apply loops always supply a deadline; only protocol tests disable feedback.
-        let feedback_sender_future = feedback_sender_future
-            .expect("A keep-alive deadline must create a feedback sender future");
+        let (feedback_handle, feedback_sender_future) = feedback
+            .expect("A keep-alive deadline must create a feedback handle and sender future");
 
         let table_sync_monitor_refresh_interval =
             Duration::from_millis(config.table_sync_monitor_refresh_interval_ms);
@@ -1301,6 +889,7 @@ where
             replication_lag_metrics.clone(),
             worker_type,
             table_sync_monitor_refresh_interval,
+            feedback_handle,
             feedback_sender_future,
         );
 
@@ -1340,7 +929,9 @@ where
         };
 
         let result = apply_loop.run(replication_client, replication_message_stream).await;
+
         apply_loop.tasks.teardown(worker_type).await;
+
         result
     }
 
@@ -1357,6 +948,7 @@ where
             self.memory_monitor.subscribe(),
         );
         pin!(replication_message_stream);
+
         // Keep an independent subscription for flushing the apply loop's decoded
         // batch. The source wrapper must remain free to stop PostgreSQL intake,
         // while this subscription lets already-owned memory continue draining.
@@ -1406,7 +998,9 @@ where
     /// sending while any handler below is awaiting work. Incoming
     /// PostgreSQL keepalives drive idle durability settlement; while intake
     /// is backpressured, both settlement and publication of fresh progress
-    /// wait for intake to resume.
+    /// wait for intake to resume. A failed feedback sender is detected by the
+    /// next keepalive response enqueue or a source connection failure; it does
+    /// not interrupt an in-flight handler.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may
@@ -1474,7 +1068,6 @@ where
             // New WAL messages are only accepted while the loop is still actively ingesting.
             maybe_message = replication_message_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
-                    replication_message_stream.as_mut(),
                     maybe_message,
                     replication_client,
                 )
@@ -2021,9 +1614,6 @@ where
     /// Processes the message and manages batch timing.
     async fn handle_stream_message(
         &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
@@ -2037,8 +1627,7 @@ where
         // If the Postgres had an error, we want to raise it immediately.
         let message = message?;
 
-        self.handle_replication_message_and_flush(replication_message_stream.as_mut(), message)
-            .await
+        self.handle_replication_message_and_flush(message).await
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
@@ -2071,13 +1660,9 @@ where
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<()> {
-        let result =
-            self.handle_replication_message(replication_message_stream.as_mut(), message).await?;
+        let result = self.handle_replication_message(message).await?;
 
         if let Some((event, relation)) = result.event {
             // A schema snapshot that pgoutput did not accompany with a protocol
@@ -2227,7 +1812,6 @@ where
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
-        replication_message_stream: Pin<&mut MemoryBackpressureStream<ReplicationMessageStream>>,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
         counter!(
@@ -2304,8 +1888,7 @@ where
 
                 // Publish only the apply loop's safe frontier. Enqueueing does
                 // not wait for transmission; the sender alone owns wire sends.
-                replication_message_stream
-                    .stream_mut()
+                self.tasks
                     .enqueue_status_update(
                         self.state.last_received_lsn(),
                         self.state.checkpoint_lsn(),
@@ -3535,7 +3118,25 @@ where
 
 /// Functions specific to the apply worker.
 mod apply_worker {
-    use super::*;
+    use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+
+    use tokio_postgres::types::PgLsn;
+    use tracing::{debug, error, info};
+
+    use crate::{
+        destination::PipelineDestination,
+        error::EtlResult,
+        replication::{
+            TableDecodingState, WorkerType,
+            apply::{ApplyWorkerContext, ExitIntent, get_syncing_tables},
+            state::{TableState, TableStateType},
+        },
+        runtime::{
+            TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState, concurrency::ShutdownResult,
+        },
+        schema::TableId,
+        store::{PipelineStore, SchemaStore, SharedStateStore},
+    };
 
     /// Why the apply worker is waiting for table-sync catchup.
     #[derive(Debug)]
@@ -4402,7 +4003,20 @@ mod apply_worker {
 
 /// Functions specific to the table sync worker.
 mod table_sync_worker {
-    use super::*;
+    use tokio_postgres::types::PgLsn;
+    use tracing::{debug, info};
+
+    use crate::{
+        error::{ErrorKind, EtlResult},
+        etl_error,
+        replication::{
+            TableDecodingState, WorkerType,
+            apply::{ExitIntent, TableSyncWorkerContext},
+            state::TableState,
+        },
+        schema::TableId,
+        store::SharedStateStore,
+    };
 
     /// Returns whether the worker's catchup target has been received.
     pub(super) async fn catchup_target_reached<S>(
@@ -4576,84 +4190,28 @@ mod table_sync_worker {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc, time::Instant};
 
-    use tokio::sync::oneshot;
-    use tokio_postgres::types::Type;
+    use tokio_postgres::types::{PgLsn, Type};
 
-    use super::*;
     use crate::{
-        replication::state::StoredTableDecodingState,
-        schema::{ColumnSchema, TableName},
+        data::SizeHint,
+        destination::{ApplyLoopAsyncResultMetadata, WriteEventsDurability, WriteEventsResult},
+        event::Event,
+        replication::{
+            TableDecodingState,
+            apply::{
+                ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
+                schema_cleanup_retention_snapshot_id, tasks::ReplicationLagMetrics,
+            },
+            state::{StoredTableDecodingState, TableState},
+        },
+        schema::{
+            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+            TableId, TableName, TableSchema,
+        },
+        source_payload_metadata::StreamingPayloadMetadata,
     };
-
-    /// Creates background tasks for testing apply-loop ownership and teardown.
-    fn test_apply_loop_tasks(feedback_sender_task: JoinHandle<()>) -> ApplyLoopTasks {
-        let (cleanup_tx, mut cleanup_rx) = mpsc::channel(1);
-        ApplyLoopTasks {
-            schema_cleanup_tx: Some(cleanup_tx),
-            schema_cleanup_worker_task: tokio::spawn(async move {
-                while cleanup_rx.recv().await.is_some() {}
-            }),
-            replication_lag_sampler_task: tokio::spawn(std::future::pending()),
-            feedback_sender_task,
-        }
-    }
-
-    /// Spawns a task whose cancellation is observable without timing
-    /// assumptions.
-    fn pending_background_task() -> (JoinHandle<()>, oneshot::Receiver<()>) {
-        let (lifetime_tx, lifetime_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _lifetime = lifetime_tx;
-            std::future::pending::<()>().await;
-        });
-        (task, lifetime_rx)
-    }
-
-    /// Cancellation must not detach any background task from its apply loop.
-    #[tokio::test]
-    async fn dropping_apply_loop_tasks_aborts_all_background_tasks() {
-        let (schema_cleanup_worker_task, cleanup_lifetime_rx) = pending_background_task();
-        let (replication_lag_sampler_task, sampler_lifetime_rx) = pending_background_task();
-        let (lifetime_tx, lifetime_rx) = oneshot::channel::<()>();
-        let feedback_sender_task = ApplyLoopTasks::spawn_feedback_sender(
-            async move {
-                let _lifetime = lifetime_tx;
-                std::future::pending().await
-            },
-            WorkerType::Apply,
-        );
-        let tasks = ApplyLoopTasks {
-            schema_cleanup_tx: None,
-            schema_cleanup_worker_task,
-            replication_lag_sampler_task,
-            feedback_sender_task,
-        };
-        drop(tasks);
-        assert!(lifetime_rx.await.is_err());
-        assert!(cleanup_lifetime_rx.await.is_err());
-        assert!(sampler_lifetime_rx.await.is_err());
-    }
-
-    /// Teardown joins cancelled feedback and sampler tasks and drains cleanup.
-    #[tokio::test]
-    async fn apply_loop_teardown_joins_background_tasks() {
-        let (lifetime_tx, mut lifetime_rx) = oneshot::channel::<()>();
-        let feedback_sender_task = ApplyLoopTasks::spawn_feedback_sender(
-            async move {
-                let _lifetime = lifetime_tx;
-                std::future::pending().await
-            },
-            WorkerType::Apply,
-        );
-        let mut tasks = test_apply_loop_tasks(feedback_sender_task);
-        tasks.teardown(WorkerType::Apply).await;
-        assert!(tasks.feedback_sender_task.is_finished());
-        assert!(tasks.replication_lag_sampler_task.is_finished());
-        assert!(tasks.schema_cleanup_worker_task.is_finished());
-        assert!(matches!(lifetime_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)));
-    }
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {

@@ -227,11 +227,11 @@ async fn start_replayable_stream(
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name(slot_suffix);
     let start_lsn = client.create_slot(&slot_name, false).await.unwrap().consistent_point;
-    let (stream, feedback_sender_future) = client
+    let (stream, feedback) = client
         .start_logical_replication(publication_name, &slot_name, start_lsn, None)
         .await
         .unwrap();
-    assert!(feedback_sender_future.is_none());
+    assert!(feedback.is_none());
 
     (client, stream, slot_name, start_lsn)
 }

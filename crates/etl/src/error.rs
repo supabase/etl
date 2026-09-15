@@ -180,6 +180,8 @@ pub enum ErrorKind {
     StateRollbackError,
 
     // Replication Errors
+    /// Replication feedback is unavailable because its sender has stopped.
+    ReplicationFeedbackUnavailable,
     /// A required replication slot was not found.
     ReplicationSlotNotFound,
     /// A replication slot already exists.
