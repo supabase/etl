@@ -45,9 +45,11 @@ jobs:
 
       - name: Set Workspace Version (manual or bump)
         shell: bash
+        env:
+          MANUAL_RELEASE: ${{ inputs.release }}
+          BUMP: ${{ inputs.bump }}
         run: |
           set -euo pipefail
-          MANUAL_RELEASE="${{ inputs.release }}"
           if [[ -n "${MANUAL_RELEASE}" ]]; then
             # Validate SemVer (strict X.Y.Z numeric to align with repo conventions).
             if [[ ! "${MANUAL_RELEASE}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -57,8 +59,8 @@ jobs:
             echo "Setting workspace version to ${MANUAL_RELEASE} (manual)."
             cargo set-version --workspace "${MANUAL_RELEASE}"
           else
-            echo "Bumping workspace version by '${{ inputs.bump }}'."
-            cargo set-version --workspace --bump "${{ inputs.bump }}"
+            echo "Bumping workspace version by '${BUMP}'."
+            cargo set-version --workspace --bump "${BUMP}"
           fi
 
       - name: Read New Version
