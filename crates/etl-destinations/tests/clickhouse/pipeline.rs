@@ -310,7 +310,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: Postgres source with two rows ---
+    // GIVEN: a Postgres source with two rows.
     let database = spawn_source_database().await;
     let table_name = test_table_name("update_flow");
 
@@ -330,7 +330,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         .await
         .unwrap();
 
-    // --- WHEN: pipeline copies data and UPDATEs are streamed ---
+    // WHEN: the pipeline copies data and updates are streamed.
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -378,7 +378,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     let query = current_state_query(engine, UPDATE_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
 
-    // --- THEN: current state shows the updated value and the moved key ---
+    // THEN: current state shows the updated value and the moved key.
     assert_eq!(rows.len(), 2, "expected two current-state rows after UPDATEs");
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "after");
