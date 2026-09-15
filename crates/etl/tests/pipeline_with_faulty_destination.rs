@@ -510,6 +510,134 @@ async fn destination_shutdown_error_is_returned_by_shutdown_and_wait() {
     assert!(destination.shutdown_called().await);
 }
 
+/// Verifies that a copy write the destination fails because it is stopping,
+/// while pipeline shutdown is already in progress, leaves the table retryable
+/// instead of recording an error that only a manual retry would clear.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_destination_shutdown_during_pipeline_shutdown_keeps_table_retryable() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let hold = destination.hold_next_dispatch(FaultyOp::WriteTableRows).await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+    hold.wait_reached().await;
+
+    // The destination stops together with the pipeline: shutdown is requested
+    // first, then the destination fails the copy write it abandons.
+    pipeline.shutdown();
+    hold.release_err(ErrorKind::DestinationShutdown, "destination stopped");
+    pipeline.wait().await.unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert!(matches!(table_state, TableState::DataSync));
+}
+
+/// Verifies that a destination reporting it is stopping while the pipeline
+/// keeps running is retried on a timer, like a lost destination connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_destination_shutdown_without_pipeline_shutdown_is_retried() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    destination
+        .inject_fault(
+            FaultyOp::WriteTableRows,
+            FaultAction::reject(ErrorKind::DestinationShutdown, "destination stopped"),
+        )
+        .await;
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_errored_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    table_errored_notify.notified().await;
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert!(matches!(
+        table_state,
+        TableState::Errored { retry_policy: TableRetryPolicy::TimedRetry { .. }, .. }
+    ));
+
+    // The retried copy runs without faults and completes the table sync.
+    users_sync_complete_notify.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let table_rows = destination.get_table_rows().await;
+    assert_eq!(table_rows.get(&table_id).map(Vec::len), Some(1));
+}
+
+/// Verifies that a streaming write the destination fails because it is
+/// stopping, while pipeline shutdown drains that write, ends the pipeline
+/// without an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_destination_shutdown_during_pipeline_shutdown_is_not_an_error() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    pipeline.start().await.unwrap();
+    users_sync_complete_notify.notified().await;
+
+    let hold = destination.hold_next(FaultyOp::WriteEvents).await;
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+    hold.wait_reached().await;
+
+    // Shutdown drains the in-flight write, which the stopping destination fails.
+    pipeline.shutdown();
+    hold.release_err(ErrorKind::DestinationShutdown, "destination stopped");
+    pipeline.wait().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     init_test_tracing();

@@ -43,6 +43,13 @@ impl ShutdownTx {
 /// semantics.
 pub(crate) type ShutdownRx = SignalRx;
 
+/// Returns true once shutdown has been requested on the receiver's channel.
+///
+/// A dropped transmitter also counts as a shutdown request.
+pub(crate) fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
+    shutdown_rx.has_changed().unwrap_or(true)
+}
+
 /// Result type that distinguishes between normal operation and shutdown
 /// scenarios.
 ///

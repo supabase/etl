@@ -23,7 +23,7 @@ use crate::{
     replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext, WorkerType},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::ShutdownRx,
+        concurrency::{ShutdownRx, is_shutdown_requested},
         error_policy::{RetryDirective, build_error_handling_policy},
     },
     store::{PipelineStore, StateStore, TableStateLifecycleStore},
@@ -147,6 +147,15 @@ where
         retry_attempts: &mut u32,
         err: EtlError,
     ) -> EtlResult<bool> {
+        // A destination that stops with the pipeline reports `DestinationShutdown` for
+        // the work it abandons. While shutdown is in progress the worker stops as the
+        // signal would have stopped it, instead of reporting a failure.
+        if err.kind() == ErrorKind::DestinationShutdown && is_shutdown_requested(shutdown_rx) {
+            info!("apply worker stopped after the destination shut down");
+
+            return Ok(true);
+        }
+
         error!(error = %err, "apply worker failed");
 
         let policy = build_error_handling_policy(&err);

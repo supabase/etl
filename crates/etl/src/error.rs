@@ -100,6 +100,14 @@ pub enum ErrorKind {
     SourceLockTimeout,
     /// A destination operation exceeded its timeout.
     DestinationTimeout,
+    /// The destination is shutting down and did not apply the operation.
+    ///
+    /// A destination that stops on its own, for example with the process that
+    /// embeds ETL, reports this kind for the work it abandons. While pipeline
+    /// shutdown is in progress, ETL stops the affected worker as the shutdown
+    /// signal would, without recording a table or pipeline error. Otherwise it
+    /// retries the operation like a lost destination connection.
+    DestinationShutdown,
     /// A source operation was canceled by Postgres.
     SourceOperationCanceled,
 
