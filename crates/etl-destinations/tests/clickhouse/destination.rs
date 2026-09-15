@@ -1630,3 +1630,67 @@ async fn write_admission_waits_for_table_reset() {
         vec![(7, "after".to_owned())]
     );
 }
+
+/// Concurrently admitted writes complete independently, and a reset drains
+/// every in-flight task, not only the reset table's.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_writes_complete_independently_and_reset_drains_both() {
+    // GIVEN: two tables whose inserts are each delayed by two seconds.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let left_schema = lifecycle_schema_with_id("left", 7100);
+    let right_schema = lifecycle_schema_with_id("right", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&left_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&right_schema, vec![]).await.unwrap();
+    install_insert_delay(&clickhouse_db, "public_left", 2).await;
+    install_insert_delay(&clickhouse_db, "public_right", 2).await;
+
+    // WHEN: both writes are admitted before either completes, and a reset of
+    // the left table starts while both are in flight.
+    let started = Instant::now();
+    let left_write = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&left_schema, 3, "left")],
+    );
+    let right_write = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&right_schema, 7, "right")],
+    );
+    let reset = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let result = drop_table_for_copy_via_trait(&destination, &left_schema).await;
+        (result, started.elapsed())
+    };
+    let (left_status, right_status, (reset_result, reset_elapsed)) =
+        tokio::join!(left_write, right_write, reset);
+
+    // THEN: each write delivered its own durable result, the reset waited
+    // for both in-flight tasks, and the surviving row landed in its own
+    // table.
+    assert_eq!(left_status.unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(right_status.unwrap(), DestinationWriteStatus::Durable);
+    reset_result.unwrap();
+    assert!(
+        reset_elapsed >= Duration::from_millis(1500),
+        "reset raced the in-flight writes: {reset_elapsed:?}"
+    );
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_right\"").await,
+        vec![(7, "right".to_owned())]
+    );
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() and name = \
+                 'public_left'",
+            )
+            .await,
+        Vec::<String>::new()
+    );
+}
