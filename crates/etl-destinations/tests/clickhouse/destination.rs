@@ -1694,3 +1694,38 @@ async fn concurrent_writes_complete_independently_and_reset_drains_both() {
         Vec::<String>::new()
     );
 }
+
+/// RequireDurable writes, including the empty durability barrier, report
+/// Durable rather than Accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn require_durable_writes_report_durable() {
+    // GIVEN: a created destination table.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("barrier");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+
+    // WHEN: a nonempty RequireDurable write and an empty durability barrier
+    // are dispatched.
+    let write_status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![lifecycle_insert(&schema, 1, "kept")],
+    )
+    .await
+    .unwrap();
+    let barrier_status =
+        write_events_via_trait(&destination, WriteEventsDurability::RequireDurable, vec![])
+            .await
+            .unwrap();
+
+    // THEN: both report Durable, which the apply loop requires for
+    // RequireDurable calls, and the write landed.
+    assert_eq!(write_status, DestinationWriteStatus::Durable);
+    assert_eq!(barrier_status, DestinationWriteStatus::Durable);
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_barrier\"").await, vec![1]);
+}
