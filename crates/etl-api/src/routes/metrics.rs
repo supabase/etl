@@ -14,5 +14,9 @@ use metrics_exporter_prometheus::PrometheusHandle;
 pub(crate) async fn metrics(
     Extension(metrics_handle): Extension<PrometheusHandle>,
 ) -> impl IntoResponse {
-    metrics_handle.render()
+    #[cfg(feature = "hotpath")]
+    let rendered = etl_telemetry::profiling::render_metrics(&metrics_handle, &[]).await;
+    #[cfg(not(feature = "hotpath"))]
+    let rendered = metrics_handle.render();
+    ([(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], rendered)
 }

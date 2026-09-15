@@ -61,11 +61,14 @@ RUN RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo chef cook --releas
 # The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3.
 # ENABLE_EGRESS: set to "true" to enable egress metrics logging.
 ARG ENABLE_EGRESS="false"
+# ENABLE_HOTPATH: set to "true" to compile in Hotpath profiling and Prometheus metrics.
+ARG ENABLE_HOTPATH="false"
 COPY . .
 RUN sed -i '\#"crates/xtask"#d' Cargo.toml && rm -rf crates/xtask
-RUN FEATURES=""; \
-    if [ "$ENABLE_EGRESS" = "true" ]; then FEATURES="--features egress"; fi && \
-    RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo build --release -p etl-replicator $FEATURES && \
+RUN set --; \
+    if [ "$ENABLE_EGRESS" = "true" ]; then set -- "$@" --features egress; fi && \
+    if [ "$ENABLE_HOTPATH" = "true" ]; then set -- "$@" --features hotpath; fi && \
+    RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo build --release -p etl-replicator "$@" && \
     strip target/release/etl-replicator target/release/etl-ducklake-maintenance
 
 # Runtime stage with distroless for security.

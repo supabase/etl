@@ -30,6 +30,7 @@ use etl_config::{
         DuckLakeSortNulls, DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
     },
 };
+use hotpath::wrap::parking_lot::{Mutex as ProfiledMutex, RwLock as ProfiledRwLock};
 use metrics::gauge;
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -454,13 +455,18 @@ impl DuckLakePools {
 /// Atomically replaceable DuckLake pool pair shared by destination clones.
 struct DuckLakePoolHandle {
     /// Currently installed pools, or `None` after a failed maintenance refresh.
-    current: ParkingLotRwLock<Option<DuckLakePools>>,
+    current: ProfiledRwLock<Option<DuckLakePools>>,
 }
 
 impl DuckLakePoolHandle {
     /// Creates a handle with an initialized pool pair.
     fn new(pools: DuckLakePools) -> Self {
-        Self { current: ParkingLotRwLock::new(Some(pools)) }
+        Self {
+            current: hotpath::rw_lock!(
+                ParkingLotRwLock::new(Some(pools)),
+                label = "ducklake_pools"
+            ),
+        }
     }
 
     /// Returns the currently installed streaming pool.
@@ -531,7 +537,7 @@ pub struct DuckLakeDestination<S> {
     /// Desired per-table sort orders indexed by source schema and table.
     table_sorting: Arc<HashMap<DuckLakeTableName, DuckLakeSortBy>>,
     table_creation_slots: Arc<Semaphore>,
-    table_write_slots: Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    table_write_slots: Arc<ProfiledMutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     /// Experimental initial-copy buffering policy.
     copy_buffer_config: DuckLakeCopyBufferConfig,
     /// Process-wide capacity for accepted but not durably committed copy rows.
@@ -544,7 +550,7 @@ pub struct DuckLakeDestination<S> {
     /// Admission permits for connection-pinned initial-copy sessions.
     copy_session_slots: Arc<Semaphore>,
     /// Live connection-local buffers keyed by destination table.
-    copy_buffers: Arc<Mutex<HashMap<DuckLakeTableName, Arc<DuckLakeCopyBufferHandle>>>>,
+    copy_buffers: Arc<ProfiledMutex<HashMap<DuckLakeTableName, Arc<DuckLakeCopyBufferHandle>>>>,
     /// Attempts invalidated by a staging or flush failure until table reset.
     failed_copy_buffers: Arc<Mutex<HashSet<DuckLakeTableName>>>,
     /// Shared-instance tables currently forced to write COPY rows to Parquet.
@@ -765,7 +771,7 @@ impl Default for DuckLakeExternalMaintenanceConfig {
 
 /// Returns the table-local semaphore shared by concurrent foreground writes.
 fn table_write_slot(
-    table_write_slots: &Arc<Mutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
+    table_write_slots: &Arc<ProfiledMutex<HashMap<DuckLakeTableName, Arc<Semaphore>>>>,
     table_name: &DuckLakeTableName,
 ) -> Arc<Semaphore> {
     let mut slots = table_write_slots.lock();
@@ -2018,13 +2024,19 @@ where
             metadata_pg_pool: metadata_pg_pool.clone(),
             table_sorting,
             table_creation_slots,
-            table_write_slots: Arc::default(),
+            table_write_slots: Arc::new(hotpath::mutex!(
+                Mutex::new(HashMap::new()),
+                label = "ducklake_table_write_slots"
+            )),
             copy_buffer_config,
             copy_buffer_capacity: Arc::new(Semaphore::new(copy_buffer_max_permits)),
             copy_buffer_max_permits,
             copy_buffer_peak_staged_bytes: Arc::new(AtomicU64::new(0)),
             copy_session_slots: Arc::new(Semaphore::new(copy_session_permits)),
-            copy_buffers: Arc::new(Mutex::new(HashMap::with_capacity(copy_session_permits))),
+            copy_buffers: Arc::new(hotpath::mutex!(
+                Mutex::new(HashMap::with_capacity(copy_session_permits)),
+                label = "ducklake_copy_buffers"
+            )),
             failed_copy_buffers: Arc::default(),
             copy_direct_to_parquet_tables: Arc::default(),
             store,
@@ -2458,13 +2470,18 @@ where
             move |conn, _operation_context| {
                 #[cfg(feature = "test-utils")]
                 wait_if_copy_append_paused_for_tests();
-                let mut accumulator = blocking_handle.accumulator.lock();
-                let appended = accumulator.append(conn, prepared_batch)?;
-                let flushed = appended && accumulator.staged_bytes() >= target_bytes;
-                if flushed {
-                    accumulator.flush(conn, None)?;
-                }
-                Ok((appended, flushed))
+                let mut accumulator = hotpath::measure_block!(
+                    "ducklake_copy_append_lock_wait",
+                    blocking_handle.accumulator.lock()
+                );
+                hotpath::measure_block!("ducklake_copy_append_lock_hold", {
+                    let appended = accumulator.append(conn, prepared_batch)?;
+                    let flushed = appended && accumulator.staged_bytes() >= target_bytes;
+                    if flushed {
+                        accumulator.flush(conn, None)?;
+                    }
+                    Ok((appended, flushed))
+                })
             },
         )
         .await;
@@ -2545,6 +2562,7 @@ where
 
     /// Reserves process-wide accepted-copy capacity, flushing the current
     /// table first when its existing staged rows are preventing progress.
+    #[hotpath::measure]
     async fn reserve_copy_buffer_capacity(
         &self,
         table_name: &DuckLakeTableName,
@@ -2617,7 +2635,14 @@ where
             connection,
             Arc::clone(&self.blocking_slots),
             move |conn, _operation_context| {
-                blocking_handle.accumulator.lock().flush(conn, copy_complete)
+                let mut accumulator = hotpath::measure_block!(
+                    "ducklake_copy_flush_lock_wait",
+                    blocking_handle.accumulator.lock()
+                );
+                hotpath::measure_block!(
+                    "ducklake_copy_flush_lock_hold",
+                    accumulator.flush(conn, copy_complete)
+                )
             },
         )
         .await
@@ -3103,6 +3128,7 @@ where
     /// connection per retry attempt, and acknowledged through one per-table
     /// streaming replay watermark so retries can safely detect already
     /// committed work.
+    #[hotpath::measure]
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -3787,6 +3813,7 @@ where
     }
 
     /// Serializes table-local truncate and CDC mutation writes.
+    #[hotpath::measure]
     async fn acquire_table_write_slot(
         &self,
         table_name: &DuckLakeTableName,
@@ -3880,6 +3907,7 @@ where
 
     /// Acquires shared mutation access so exclusive external maintenance cannot
     /// start in the middle of a foreground write sequence.
+    #[hotpath::measure]
     async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
         Arc::clone(&self.checkpoint_gate).read_owned().await
     }
@@ -4385,7 +4413,12 @@ mod tests {
 
     #[test]
     fn invalidated_connection_pools_return_destination_connection_error() {
-        let pools = DuckLakePoolHandle { current: ParkingLotRwLock::new(None) };
+        let pools = DuckLakePoolHandle {
+            current: hotpath::rw_lock!(
+                ParkingLotRwLock::new(None),
+                label = "ducklake_pools_unavailable_test"
+            ),
+        };
 
         for result in [pools.streaming(), pools.copy()] {
             let Err(error) = result else {

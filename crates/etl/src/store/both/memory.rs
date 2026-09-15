@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use tokio::sync::Mutex;
+use hotpath::wrap::tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
 
 use crate::{
@@ -48,7 +48,7 @@ struct Inner {
 /// All state information, including table states, schema
 /// definitions, and destination table metadata are stored in memory and will be
 /// lost on process restart.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,
 }
@@ -68,7 +68,18 @@ impl MemoryStore {
             replication_checkpoints: HashMap::new(),
         };
 
-        Self { inner: Arc::new(Mutex::new(inner)) }
+        Self {
+            inner: Arc::new(hotpath::mutex!(
+                tokio::sync::Mutex::new(inner),
+                label = "memory_store"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Debug for MemoryStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryStore").finish_non_exhaustive()
     }
 }
 

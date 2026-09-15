@@ -22,6 +22,7 @@ impl ShutdownTx {
     /// This method broadcasts a shutdown signal to all workers that have
     /// subscribed to this shutdown channel. Workers should respond by
     /// completing their current operations gracefully and terminating.
+    #[hotpath::measure(label = "shutdown_signal_send")]
     pub fn shutdown(&self) -> Result<(), watch::error::SendError<()>> {
         self.0.send(())
     }
@@ -32,7 +33,7 @@ impl ShutdownTx {
     /// used to detect when shutdown has been requested. Multiple receivers
     /// can be created from the same transmitter.
     pub(crate) fn subscribe(&self) -> ShutdownRx {
-        self.0.subscribe()
+        SignalRx::new(self.0.subscribe())
     }
 }
 

@@ -738,6 +738,7 @@ pub struct ValidatePipelineResponse {
     ),
     tag = "Pipelines"
 )]
+#[hotpath::measure]
 pub(crate) async fn create_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
@@ -1074,6 +1075,7 @@ pub(crate) async fn read_all_pipelines(
     ),
     tag = "Pipelines"
 )]
+#[hotpath::measure]
 pub(crate) async fn start_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
@@ -1141,6 +1143,7 @@ pub(crate) async fn start_pipeline(
     ),
     tag = "Pipelines"
 )]
+#[hotpath::measure]
 pub(crate) async fn restart_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
@@ -1354,6 +1357,7 @@ pub(crate) async fn get_pipeline_version(
     ),
     tag = "Pipelines"
 )]
+#[hotpath::measure]
 pub(crate) async fn get_pipeline_status(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
@@ -1399,6 +1403,7 @@ pub(crate) async fn get_pipeline_status(
     ),
     tag = "Pipelines"
 )]
+#[hotpath::measure]
 pub(crate) async fn get_pipeline_replication_status(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
@@ -1784,6 +1789,7 @@ pub(crate) async fn update_pipeline_version(
     ),
     tag = "Pipelines"
 )]
+#[hotpath::measure]
 pub(crate) async fn validate_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,

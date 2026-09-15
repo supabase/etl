@@ -67,7 +67,10 @@ impl TableSyncMonitor {
 
                                 // Ignore send errors: if the receiver was already
                                 // dropped, the copy has already finished on its own.
-                                let _ = slot_invalidated_tx.send(true);
+                                let _ = hotpath::measure_block!(
+                                    "slot_invalidation_signal_send",
+                                    slot_invalidated_tx.send(true)
+                                );
 
                                 break;
                             }
@@ -81,7 +84,10 @@ impl TableSyncMonitor {
                                 );
 
                                 // A missing slot is just as unusable as an invalidated slot.
-                                let _ = slot_invalidated_tx.send(true);
+                                let _ = hotpath::measure_block!(
+                                    "slot_invalidation_signal_send",
+                                    slot_invalidated_tx.send(true)
+                                );
 
                                 break;
                             }
@@ -107,6 +113,7 @@ impl TableSyncMonitor {
     /// without ever observing an invalidation (e.g. from shutdown), so callers
     /// should race this against other completion conditions rather than
     /// awaiting it alone.
+    #[hotpath::measure(label = "slot_invalidation_signal_wait")]
     pub(crate) async fn wait_for_slot_invalidated(&mut self) {
         loop {
             if self.slot_invalidated_rx.changed().await.is_err() {

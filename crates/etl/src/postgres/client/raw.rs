@@ -183,11 +183,17 @@ where
         match result {
             Err(err) => {
                 let error_message = err.to_string();
-                let _ = updates_tx.send(PostgresConnectionUpdate::errored(error_message.clone()));
+                let _ = hotpath::measure_block!(
+                    "postgres_connection_update_send",
+                    updates_tx.send(PostgresConnectionUpdate::errored(error_message.clone()))
+                );
                 error!(error = %error_message, "postgres connection error");
             }
             Ok(()) => {
-                let _ = updates_tx.send(PostgresConnectionUpdate::Terminated);
+                let _ = hotpath::measure_block!(
+                    "postgres_connection_update_send",
+                    updates_tx.send(PostgresConnectionUpdate::Terminated)
+                );
                 info!("postgres connection terminated");
             }
         }

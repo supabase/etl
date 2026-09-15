@@ -107,6 +107,9 @@ fn try_main() -> ReplicatorResult<()> {
     // We initialize the Prometheus recorder.
     init::init_metrics(&replicator_config)?;
 
+    #[cfg(feature = "hotpath")]
+    let _hotpath = etl_telemetry::profiling::init().map_err(ReplicatorError::config)?;
+
     debug!("starting tokio runtime");
 
     // Phase 2: start Tokio only once synchronous bootstrap has succeeded.
@@ -132,6 +135,7 @@ async fn async_main(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
+    hotpath::tokio_runtime!();
     // Keep the feature flags client alive for the full async runtime lifetime.
     let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
 

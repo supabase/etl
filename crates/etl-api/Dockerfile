@@ -54,9 +54,13 @@ RUN cargo chef cook --release --recipe-path recipe.json
 
 # Build application with optimizations.
 # The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3.
+# ENABLE_HOTPATH: set to "true" to compile in Hotpath profiling and Prometheus metrics.
+ARG ENABLE_HOTPATH="false"
 COPY . .
 ENV SQLX_OFFLINE=true
-RUN cargo build --release -p etl-api && \
+RUN set --; \
+    if [ "$ENABLE_HOTPATH" = "true" ]; then set -- "$@" --features hotpath; fi && \
+    cargo build --release -p etl-api "$@" && \
     strip target/release/etl-api
 
 # Runtime stage with distroless for security.

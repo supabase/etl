@@ -33,6 +33,7 @@ impl IntoResponse for AuthError {
 /// Compares the provided token against the configured API key using
 /// constant-time comparison to prevent timing attacks. Returns authentication
 /// errors for invalid tokens.
+#[hotpath::measure]
 pub async fn auth_validator(
     State(api_config): State<Arc<ApiConfig>>,
     request: Request,

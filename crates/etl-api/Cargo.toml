@@ -24,6 +24,7 @@ clickhouse = ["etl-destinations/clickhouse"]
 ducklake = ["etl-destinations/ducklake"]
 iceberg = ["etl-destinations/iceberg"]
 snowflake = ["etl-destinations/snowflake"]
+hotpath = ["etl/hotpath", "etl-destinations/hotpath", "etl-telemetry/hotpath", "hotpath/hotpath", "hotpath/axum-0-8", "hotpath/tokio"]
 
 [dependencies]
 
@@ -41,6 +42,7 @@ etl-destinations = { workspace = true, features = ["tls-rustls-ring"] }
 etl-maintenance = { workspace = true, features = ["tls-rustls-ring"] }
 etl-postgres = { workspace = true, features = ["store", "tls-rustls-ring"] }
 etl-telemetry = { workspace = true }
+hotpath = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["runtime", "derive", "client", "rustls-tls"] }
 metrics = { workspace = true }
