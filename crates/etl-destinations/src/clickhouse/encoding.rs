@@ -26,7 +26,7 @@ pub(crate) enum ClickHouseValue {
     /// tombstone.
     UInt8(u8),
     UInt32(u32),
-    /// Unsigned 64-bit integer, used for the MergeTree `cdc_lsn` column.
+    /// Unsigned 64-bit integer, used for MergeTree ordering metadata.
     UInt64(u64),
     /// Unsigned 128-bit integer, used for the ReplacingMergeTree `_etl_version`
     /// column (the packed `EventSequenceKey`).

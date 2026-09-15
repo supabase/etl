@@ -30,10 +30,10 @@ use std::sync::{
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
-    data::{ArrayCell, Cell, PgNumeric, TableRow},
+    data::{ArrayCell, Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
     destination::DestinationTableMetadata,
     error::{ErrorKind, EtlError, EtlResult},
-    event::{Event, RelationEvent},
+    event::{Event, InsertEvent, RelationEvent, UpdateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
@@ -49,7 +49,7 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
-    ClickHouseClientConfig, ClickHouseDestination,
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
     client::ClickHouseClient,
     test_utils::{
         ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
@@ -61,7 +61,7 @@ use proptest::{option, prelude::*};
 use url::Url;
 use uuid::Uuid;
 
-use crate::support::crypto::install_crypto_provider;
+use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
 /// One ClickHouse table receiving generated rows through the production
 /// destination write path.
@@ -845,6 +845,310 @@ async fn clickhouse_column_default_expression(
         .fetch_optional::<String>()
         .await
         .unwrap()
+}
+
+/// Stores the source schema shared by upgrade and replay scenarios.
+async fn store_id_value_schema(store: &MemoryStore, table: &str) -> ReplicatedTableSchema {
+    let schema = store
+        .store_table_schema(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), table.to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        ))
+        .await
+        .unwrap();
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Legacy MergeTree writes fail without repair or data loss, then resume after
+/// the documented manual upgrade while preserving existing metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
+    // GIVEN: a legacy MergeTree table with retained rows and metadata.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+
+    // Use the previous release's DDL, not the current schema generator.
+    database
+        .db_client()
+        .query(
+            "create table retained_rows (id Int64, value String, cdc_operation String, cdc_lsn \
+             UInt64) engine = MergeTree() order by tuple()",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a new destination attempts to write without upgrading the table.
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let error = destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(2), Cell::String("rejected".to_owned())])],
+        )
+        .await
+        .unwrap_err();
+
+    // THEN: the write fails without changing rows, columns, or metadata.
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+    drop(destination);
+
+    assert_eq!(
+        database.query::<(i64, String)>("select id, value from retained_rows").await,
+        vec![(1, "retained".to_owned())]
+    );
+    assert_eq!(
+        database
+            .query::<String>(
+                "select name from system.columns where database = currentDatabase() and table = \
+                 'retained_rows' order by position",
+            )
+            .await,
+        vec!["id", "value", "cdc_operation", "cdc_lsn"]
+    );
+    assert_eq!(
+        store.get_destination_table_metadata(schema.id()).await.unwrap(),
+        Some(metadata.clone())
+    );
+
+    // WHEN: the ordinal column is added and the destination restarts.
+    database
+        .db_client()
+        .query("alter table retained_rows add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn")
+        .execute()
+        .await
+        .unwrap();
+    let restarted =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    restarted
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 7,
+            replicated_table_schema: schema.clone(),
+            table_row: TableRow::new(vec![Cell::I64(2), Cell::String("resumed".to_owned())]),
+        })])
+        .await
+        .unwrap();
+    drop(restarted);
+
+    // THEN: old rows keep ordinal zero and new rows use their event ordinal.
+    assert_eq!(
+        database
+            .query::<(i64, String, u64, u64)>(
+                "select id, value, cdc_lsn, cdc_tx_ordinal from retained_rows order by id",
+            )
+            .await,
+        vec![(1, "retained".to_owned(), 10, 0), (2, "resumed".to_owned(), 100, 7)]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
+}
+
+/// The previous ReplacingMergeTree layout and current-state view remain usable
+/// without ALTER or recopy when a new destination loads retained metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
+    // GIVEN: an existing ReplacingMergeTree table, view, and retained metadata.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+
+    database
+        .db_client()
+        .query(
+            "create table retained_rows (id Int64, value String, _etl_version UInt128, \
+             _etl_deleted UInt8) engine = ReplacingMergeTree(_etl_version, _etl_deleted) order by \
+             id",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query(
+            "create view retained_rows__current as select id, value from retained_rows final \
+             where _etl_deleted = 0",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'old', 0, 0), (2, 'retained', 0, 0)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a new destination writes an update without changing the layout.
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_events(vec![Event::Update(UpdateEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 7,
+            replicated_table_schema: schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("updated".to_owned()),
+            ])),
+            old_table_row: None,
+        })])
+        .await
+        .unwrap();
+    drop(destination);
+
+    // THEN: the view shows the update and retained row, and metadata is unchanged.
+    assert_eq!(
+        database
+            .query::<(i64, String)>("select id, value from retained_rows__current order by id")
+            .await,
+        vec![(1, "updated".to_owned()), (2, "retained".to_owned())]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
+}
+
+/// Builds a replayable key change with an ordinal within the same transaction.
+fn replay_key_change(
+    schema: &ReplicatedTableSchema,
+    old_id: i64,
+    new_id: i64,
+    value: &str,
+    tx_ordinal: u64,
+) -> Event {
+    Event::Update(UpdateEvent {
+        commit_lsn: PgLsn::from(100),
+        tx_ordinal,
+        replicated_table_schema: schema.clone(),
+        updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+            Cell::I64(new_id),
+            Cell::String(value.to_owned()),
+        ])),
+        old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I64(old_id)]))),
+    })
+}
+
+/// A partial INSERT failure can persist the old-key tombstone before rejecting
+/// its replacement. Restart and at-least-once replay must converge, including
+/// when a later event in the same transaction reuses the original key.
+async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
+    // GIVEN: copied rows, single-row inserts, and a rejecting constraint.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "replay").await;
+    let config = ClickHouseInserterConfig { engine, max_bytes_per_insert: 1 };
+    let destination = database.build_destination_with_config(store.clone(), config).await;
+    destination
+        .write_table_rows(
+            &schema,
+            vec![
+                TableRow::new(vec![Cell::I64(1), Cell::String("original".to_owned())]),
+                TableRow::new(vec![Cell::I64(9), Cell::String("unaffected".to_owned())]),
+            ],
+        )
+        .await
+        .unwrap();
+    let current_query = current_state_query(engine, "public_replay", "id, value", &["id"], "id");
+
+    // One row per INSERT makes the server accept the tombstone before the
+    // constraint rejects the replacement, without timing or network races.
+    database
+        .db_client()
+        .query("alter table public_replay add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a key change fails after writing its old-key tombstone.
+    let error = destination
+        .write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)])
+        .await
+        .unwrap_err();
+
+    // THEN: the failure is retryable and only the unaffected row remains.
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    drop(destination);
+
+    assert_eq!(
+        database.query::<(i64, String)>(&current_query).await,
+        vec![(9, "unaffected".to_owned())]
+    );
+    let tombstone_query = match engine {
+        ClickHouseEngine::MergeTree => {
+            "select id from public_replay where cdc_operation = 'DELETE'"
+        }
+        ClickHouseEngine::ReplacingMergeTree => {
+            "select id from public_replay where _etl_deleted = 1"
+        }
+    };
+    assert_eq!(database.query::<i64>(tombstone_query).await, vec![1]);
+
+    // WHEN: the constraint is removed and the key change replays on restart.
+    database
+        .db_client()
+        .query("alter table public_replay drop constraint reject_two")
+        .execute()
+        .await
+        .unwrap();
+    let restarted = database.build_destination_with_config(store, config).await;
+    restarted.write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)]).await.unwrap();
+
+    // THEN: replay restores the moved row and preserves the unaffected row.
+    assert_eq!(
+        database.query::<(i64, String)>(&current_query).await,
+        vec![(2, "moved".to_owned()), (9, "unaffected".to_owned())]
+    );
+
+    // WHEN: a later event reuses the original key before stale replay.
+    restarted.write_events(vec![replay_key_change(&schema, 2, 1, "reused", 8)]).await.unwrap();
+    restarted.write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)]).await.unwrap();
+    drop(restarted);
+
+    // THEN: the reused key survives and the stale replacement stays absent.
+    assert_eq!(
+        database.query::<(i64, String)>(&current_query).await,
+        vec![(1, "reused".to_owned()), (9, "unaffected".to_owned())]
+    );
+}
+
+/// MergeTree current state converges despite duplicate replayed log entries.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_key_change_restart_replay_merge_tree() {
+    partial_key_change_restart_replay_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree versions preserve later key reuse across stale replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_key_change_restart_replay_replacing_merge_tree() {
+    partial_key_change_restart_replay_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

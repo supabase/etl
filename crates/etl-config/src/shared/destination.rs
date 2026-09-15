@@ -236,7 +236,8 @@ pub enum BigQueryTimePartitionGranularity {
 ///
 /// `ReplacingMergeTree` (default) gives current-state reads via `FINAL` and
 /// reclaims deleted rows on `OPTIMIZE ... FINAL CLEANUP`. `MergeTree` is an
-/// append-only event-log layout retained for PK-less source tables.
+/// append-only event-log layout retained for PK-less source tables. It stores
+/// source ordering in `cdc_lsn` and `cdc_tx_ordinal`.
 ///
 /// Applied only when a table is created or recreated. ClickHouse cannot
 /// alter a table's engine, so a mismatch against an existing table is a
