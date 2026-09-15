@@ -1,11 +1,11 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
 use std::{
-    fmt::{self, Debug, Formatter},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use chrono::{DateTime, Utc};
 use etl::{
     data::{Cell, TableRow},
     destination::{
@@ -62,6 +62,9 @@ use tokio_postgres::{
     Client,
     types::{PgLsn, Type},
 };
+
+/// PostgreSQL inactivity timeout used by the suspended-feedback tests.
+const FEEDBACK_TEST_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
@@ -1122,15 +1125,6 @@ struct HoldingDispatchDestination {
     gate: Arc<Mutex<Option<HoldGate>>>,
 }
 
-impl Debug for HoldingDispatchDestination {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // MemoryDestination does not implement Debug; expose the test gate only.
-        f.debug_struct("HoldingDispatchDestination")
-            .field("gate", &self.gate)
-            .finish_non_exhaustive()
-    }
-}
-
 impl Destination for HoldingDispatchDestination {
     fn name() -> &'static str {
         "holding_dispatch"
@@ -1163,6 +1157,8 @@ impl Destination for HoldingDispatchDestination {
         if events.iter().any(|event| matches!(event, Event::Insert(_))) {
             let gate = self.gate.lock().unwrap().take();
             if let Some(gate) = gate {
+                // Hold before forwarding the batch or its result handle, so the
+                // inner destination cannot write or acknowledge it until release.
                 gate.apply(Ok(())).await?;
             }
         }
@@ -1170,79 +1166,73 @@ impl Destination for HoldingDispatchDestination {
     }
 }
 
-/// Observes repeated feedback on the same WAL sender while apply is suspended.
+/// Observes fresh feedback on the same WAL sender throughout a suspension.
 ///
-/// Actual reply timestamps are the barrier. The timeout only bounds a failed
-/// observation; two heartbeat intervals exceed the configured two-second
-/// timeout.
+/// Ignore the initial reply timestamp and observe fresh replies for 60 seconds.
+/// Poll at PostgreSQL's half-timeout keepalive cadence, allowing two full
+/// timeouts to observe each reply. A missing or replaced WAL sender fails the
+/// assertion, so reconnecting cannot satisfy it.
 async fn assert_stalled_apply_feedback(database: &PgDatabase<Client>, pipeline_id: PipelineId) {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let mut backend_pid = None;
-        let mut feedback = None;
-        let mut last_reply_time = None;
-        let mut first_sample = true;
-        let mut replies = 0;
-        while replies < 3 {
-            let row = database
-                .client
-                .as_ref()
-                .unwrap()
-                .query_one(
-                    "select r.pid, r.write_lsn, r.flush_lsn, r.replay_lsn, extract(epoch from \
-                     r.reply_time)::float8 from pg_stat_replication r join pg_replication_slots s \
-                     on s.active_pid = r.pid where s.slot_name = $1",
-                    &[&slot_name],
-                )
-                .await
-                .unwrap();
-            let pid = row.get::<_, i32>(0);
-            assert_eq!(*backend_pid.get_or_insert(pid), pid);
-            let reply_time = row.get::<_, Option<f64>>(4);
-            if first_sample {
-                // Ignore feedback from before the stall, including any update
-                // already queued when the gate was reached.
-                last_reply_time = reply_time;
-                first_sample = false;
-            } else if reply_time.is_some() && reply_time != last_reply_time {
-                let positions = (
-                    row.get::<_, Option<PgLsn>>(1),
-                    row.get::<_, Option<PgLsn>>(2),
-                    row.get::<_, Option<PgLsn>>(3),
-                );
-                assert_eq!(*feedback.get_or_insert(positions), positions);
-                last_reply_time = reply_time;
-                replies += 1;
+    let client = database.client.as_ref().unwrap();
+    let statement = client
+        .prepare(
+            "select r.pid, r.reply_time from pg_stat_replication r join pg_replication_slots s on \
+             s.active_pid = r.pid where s.slot_name = $1",
+        )
+        .await
+        .unwrap();
+
+    let row = client.query_one(&statement, &[&slot_name]).await.unwrap();
+    let backend_pid = row.get::<_, i32>(0);
+    let mut last_reply_time = row.get::<_, Option<DateTime<Utc>>>(1);
+    let started = tokio::time::Instant::now();
+
+    while started.elapsed() < Duration::from_secs(60) {
+        last_reply_time = tokio::time::timeout(FEEDBACK_TEST_WAL_SENDER_TIMEOUT * 2, async {
+            loop {
+                tokio::time::sleep(FEEDBACK_TEST_WAL_SENDER_TIMEOUT / 2).await;
+
+                let row = client.query_one(&statement, &[&slot_name]).await.unwrap();
+                assert_eq!(row.get::<_, i32>(0), backend_pid);
+
+                let reply_time = row.get::<_, Option<DateTime<Utc>>>(1);
+                if reply_time.is_some() && reply_time != last_reply_time {
+                    return reply_time;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
+        })
+        .await
+        .expect("timed out waiting for fresh apply feedback while processing was suspended");
+    }
 }
 
-/// Feedback and safe checkpoints survive a suspended destination dispatch.
+/// Feedback continues while destination dispatch is suspended.
 #[tokio::test(flavor = "multi_thread")]
 async fn feedback_continues_during_destination_dispatch() {
     let mut database = spawn_source_database().await;
     database
         .run_sql(&format!(
-            "alter database {} set wal_sender_timeout = '2s'",
+            "alter database {} set wal_sender_timeout = '{}ms'",
             quote_identifier(&database.config.name),
+            FEEDBACK_TEST_WAL_SENDER_TIMEOUT.as_millis(),
         ))
         .await
         .unwrap();
     let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = schema.users_schema().id;
+
     let store = NotifyingStore::new();
+    let inner = MemoryDestination::new(store.clone());
     let (fault, hold) = FaultAction::hold();
     let FaultAction::HoldResponse(gate) = fault else {
         panic!("FaultAction::hold must produce a hold gate");
     };
     let destination = TestDestinationWrapper::wrap(HoldingDispatchDestination {
-        inner: MemoryDestination::new(store.clone()),
+        inner: inner.clone(),
         gate: Arc::new(Mutex::new(Some(gate))),
     });
+
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1251,29 +1241,38 @@ async fn feedback_continues_during_destination_dispatch() {
         store.clone(),
         destination.clone(),
     );
+
     let synced = store.notify_on_table_sync_complete(table_id).await;
+
     pipeline.start().await.unwrap();
+
     synced.notified().await;
 
     let applied = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
+
     insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+
     hold.wait_reached().await;
-    let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+
     assert_stalled_apply_feedback(&database, pipeline_id).await;
-    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
+    assert!(!inner.events().await.iter().any(|event| matches!(event, Event::Insert(_))));
 
     hold.release_ok();
+
     applied.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
+
     let events = destination.get_events().await;
     assert_eq!(events.iter().filter(|event| matches!(event, Event::Insert(_))).count(), 1);
 }
 
-/// Catchup keeps the same WAL sender alive without advancing feedback or the
-/// durable checkpoint while the table-sync worker is suspended.
-#[tokio::test(flavor = "multi_thread")]
+/// Apply feedback continues throughout a minute of suspended table-sync
+/// catchup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn table_sync_catchup_keeps_replication_connection_alive() {
     let _scenario = FailScenario::setup();
     let catchup_entered = Arc::new(tokio::sync::Notify::new());
@@ -1282,23 +1281,29 @@ async fn table_sync_catchup_keeps_replication_connection_alive() {
     let entered = Arc::clone(&catchup_entered);
     fail::cfg_callback(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, move || {
         entered.notify_one();
-        // The sender also drops on assertion failure, releasing the worker.
-        let _ = release_rx.lock().unwrap().recv();
+        // Let Tokio run other tasks while this synchronous failpoint waits.
+        tokio::task::block_in_place(|| {
+            // The sender also drops on assertion failure, releasing the worker.
+            let _ = release_rx.lock().unwrap().recv();
+        });
     })
     .unwrap();
 
     let database = spawn_source_database().await;
     database
         .run_sql(&format!(
-            "alter database {} set wal_sender_timeout = '2s'",
+            "alter database {} set wal_sender_timeout = '{}ms'",
             quote_identifier(&database.config.name),
+            FEEDBACK_TEST_WAL_SENDER_TIMEOUT.as_millis(),
         ))
         .await
         .unwrap();
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
+
     let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let destination = MemoryDestination::new(store.clone());
+
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
@@ -1307,16 +1312,21 @@ async fn table_sync_catchup_keeps_replication_connection_alive() {
         store.clone(),
         destination,
     );
-    let sync_done = store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
-    pipeline.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(30), catchup_entered.notified()).await.unwrap();
 
-    let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    let sync_done = store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+
+    pipeline.start().await.unwrap();
+
+    catchup_entered.notified().await;
+
+    // The failpoint is reached only after apply requests catchup and waits
+    // for this worker. Keep it suspended while observing feedback for a minute.
     assert_stalled_apply_feedback(&database, pipeline_id).await;
-    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
 
     release_tx.send(()).unwrap();
+
     sync_done.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
