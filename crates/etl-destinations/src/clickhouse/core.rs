@@ -2040,6 +2040,46 @@ fn validate_clickhouse_update_without_old_row(
     }
 }
 
+/// IEEE float scalar compared with PostgreSQL key equality semantics.
+trait PostgresFloat: PartialEq + Copy {
+    /// Returns whether the value is `NaN`.
+    fn is_nan(self) -> bool;
+}
+
+impl PostgresFloat for f32 {
+    fn is_nan(self) -> bool {
+        f32::is_nan(self)
+    }
+}
+
+impl PostgresFloat for f64 {
+    fn is_nan(self) -> bool {
+        f64::is_nan(self)
+    }
+}
+
+/// Compares two float key values using PostgreSQL equality semantics, which
+/// treat `NaN` values as equal.
+fn postgres_float_equal<T: PostgresFloat>(old_value: T, new_value: T) -> bool {
+    old_value == new_value || (old_value.is_nan() && new_value.is_nan())
+}
+
+/// Compares two float array key values element-wise using
+/// [`postgres_float_equal`] for present elements.
+fn postgres_float_array_equal<T: PostgresFloat>(
+    old_values: &[Option<T>],
+    new_values: &[Option<T>],
+) -> bool {
+    old_values.len() == new_values.len()
+        && old_values.iter().zip(new_values).all(|(old_value, new_value)| {
+            match (old_value, new_value) {
+                (Some(old_value), Some(new_value)) => postgres_float_equal(*old_value, *new_value),
+                (None, None) => true,
+                _ => false,
+            }
+        })
+}
+
 /// Compares two key values using PostgreSQL equality semantics.
 ///
 /// - Treats floating-point `NaN` values as equal, including values inside
@@ -2052,31 +2092,17 @@ fn postgres_key_cell_equal(old_value: &Cell, new_value: &Cell) -> bool {
     }
 
     match (old_value, new_value) {
-        (Cell::F32(old_value), Cell::F32(new_value)) => old_value.is_nan() && new_value.is_nan(),
-        (Cell::F64(old_value), Cell::F64(new_value)) => old_value.is_nan() && new_value.is_nan(),
+        (Cell::F32(old_value), Cell::F32(new_value)) => {
+            postgres_float_equal(*old_value, *new_value)
+        }
+        (Cell::F64(old_value), Cell::F64(new_value)) => {
+            postgres_float_equal(*old_value, *new_value)
+        }
         (Cell::Array(ArrayCell::F32(old_values)), Cell::Array(ArrayCell::F32(new_values))) => {
-            old_values.len() == new_values.len()
-                && old_values.iter().zip(new_values).all(|(old_value, new_value)| {
-                    match (old_value, new_value) {
-                        (Some(old_value), Some(new_value)) => {
-                            old_value == new_value || (old_value.is_nan() && new_value.is_nan())
-                        }
-                        (None, None) => true,
-                        _ => false,
-                    }
-                })
+            postgres_float_array_equal(old_values, new_values)
         }
         (Cell::Array(ArrayCell::F64(old_values)), Cell::Array(ArrayCell::F64(new_values))) => {
-            old_values.len() == new_values.len()
-                && old_values.iter().zip(new_values).all(|(old_value, new_value)| {
-                    match (old_value, new_value) {
-                        (Some(old_value), Some(new_value)) => {
-                            old_value == new_value || (old_value.is_nan() && new_value.is_nan())
-                        }
-                        (None, None) => true,
-                        _ => false,
-                    }
-                })
+            postgres_float_array_equal(old_values, new_values)
         }
         _ => false,
     }
