@@ -7,6 +7,7 @@ use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{info, warn};
 
 use crate::{
+    constants::DEFAULT_CHANNEL_CAPACITY,
     observability::{
         ETL_SCHEMA_CLEANUP_ERRORS_TOTAL, ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
         ETL_SCHEMA_CLEANUP_TABLES_TOTAL, ETL_SCHEMA_CLEANUPS_TOTAL, WORKER_TYPE_LABEL,
@@ -15,15 +16,6 @@ use crate::{
     schema::{SnapshotId, TableId},
     store::SchemaStore,
 };
-
-/// Maximum number of table schema cleanups buffered per apply loop.
-///
-/// Each queue entry contains one table identifier and one frozen retention
-/// boundary. A capacity of 1024 accommodates large bursts of relation messages
-/// while keeping queue memory bounded. Queueing is non-blocking, so additional
-/// candidates remain pending in the apply loop and are retried after a later
-/// durable flush result.
-const SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY: usize = 1024;
 
 /// Immutable retention boundary for one asynchronous table schema cleanup.
 ///
@@ -63,7 +55,7 @@ async fn run_schema_cleanup<S>(
         let mut retention_snapshot_ids = BTreeMap::new();
         retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
 
-        for _ in 1..SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
+        for _ in 1..DEFAULT_CHANNEL_CAPACITY {
             let Ok(request) = schema_cleanup_rx.try_recv() else {
                 break;
             };
@@ -122,6 +114,11 @@ async fn run_schema_cleanup<S>(
 }
 
 /// Starts the worker that serially prunes requested table schema versions.
+///
+/// Each queue entry contains one table identifier and one frozen retention
+/// boundary. Buffering accommodates bursts of relation messages. Queueing is
+/// non-blocking, so excess candidates remain pending in the apply loop and
+/// are retried after a later durable flush result.
 pub(super) fn spawn_schema_cleanup_task<S>(
     schema_store: S,
     worker_type: WorkerType,
@@ -129,7 +126,7 @@ pub(super) fn spawn_schema_cleanup_task<S>(
 where
     S: SchemaStore + Send + 'static,
 {
-    let (schema_cleanup_tx, schema_cleanup_rx) = mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
+    let (schema_cleanup_tx, schema_cleanup_rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
     let task = tokio::spawn(run_schema_cleanup(schema_store, worker_type, schema_cleanup_rx));
     (schema_cleanup_tx, task)
 }

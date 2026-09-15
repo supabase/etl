@@ -1181,7 +1181,8 @@ impl Destination for HoldingDmlDispatchDestination {
 
 /// Observes fresh feedback on the same WAL sender throughout a suspension.
 ///
-/// Ignore the initial reply timestamp and observe fresh replies for 60 seconds.
+/// Ignore the initial reply timestamp and observe fresh replies across three
+/// PostgreSQL timeout periods.
 /// Poll at PostgreSQL's half-timeout keepalive cadence, allowing two full
 /// timeouts to observe each reply. A missing or replaced WAL sender fails the
 /// assertion, so reconnecting cannot satisfy it. When DML dispatch is held,
@@ -1207,7 +1208,7 @@ async fn assert_apply_feedback_during_stall(
     let mut last_reply_time = row.get::<_, Option<DateTime<Utc>>>(1);
     let started = tokio::time::Instant::now();
 
-    while started.elapsed() < Duration::from_secs(60) {
+    while started.elapsed() < FEEDBACK_TEST_WAL_SENDER_TIMEOUT * 3 {
         last_reply_time = tokio::time::timeout(FEEDBACK_TEST_WAL_SENDER_TIMEOUT * 2, async {
             loop {
                 tokio::time::sleep(FEEDBACK_TEST_WAL_SENDER_TIMEOUT / 2).await;
@@ -1297,8 +1298,8 @@ async fn feedback_continues_during_destination_dispatch() {
     assert_eq!(events.iter().filter(|event| matches!(event, Event::Insert(_))).count(), 1);
 }
 
-/// Apply feedback continues throughout a minute of suspended table-sync
-/// catchup.
+/// Apply feedback continues across multiple PostgreSQL timeout periods while
+/// table-sync catchup is suspended.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn apply_feedback_continues_during_table_sync_catchup() {
     let _scenario = FailScenario::setup();
@@ -1347,7 +1348,7 @@ async fn apply_feedback_continues_during_table_sync_catchup() {
     tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, catchup_entered.notified()).await.unwrap();
 
     // The failpoint is reached only after apply requests catchup and waits
-    // for this worker. Keep it suspended while observing feedback for a minute.
+    // for this worker. Keep it suspended across multiple PostgreSQL timeouts.
     assert_apply_feedback_during_stall(&database, pipeline_id, None).await;
 
     release_tx.send(()).unwrap();

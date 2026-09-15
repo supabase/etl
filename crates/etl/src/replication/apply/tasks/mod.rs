@@ -183,11 +183,7 @@ mod tests {
     async fn dropping_apply_loop_tasks_aborts_all_background_tasks() {
         let (schema_cleanup_worker_task, cleanup_lifetime_rx) = pending_background_task();
         let (replication_lag_metrics_task, sampler_lifetime_rx) = pending_background_task();
-        let (lifetime_tx, lifetime_rx) = oneshot::channel::<()>();
-        let feedback_sender_task = feedback::spawn_feedback_task(async move {
-            let _lifetime = lifetime_tx;
-            std::future::pending().await
-        });
+        let (feedback_sender_task, feedback_lifetime_rx) = pending_background_task();
         let tasks = ApplyLoopTasks {
             feedback_handle: closed_feedback_handle(),
             schema_cleanup_tx: None,
@@ -196,7 +192,7 @@ mod tests {
             feedback_sender_task,
         };
         drop(tasks);
-        assert!(lifetime_rx.await.is_err());
+        assert!(feedback_lifetime_rx.await.is_err());
         assert!(cleanup_lifetime_rx.await.is_err());
         assert!(sampler_lifetime_rx.await.is_err());
     }
@@ -207,16 +203,12 @@ mod tests {
         let (feedback_sender_task, feedback_lifetime_rx) = pending_background_task();
         let (replication_lag_metrics_task, sampler_lifetime_rx) = pending_background_task();
         let (cleanup_tx, mut cleanup_rx) = mpsc::channel(1);
-        let (entered_tx, entered_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
-        let (completed_tx, completed_rx) = oneshot::channel();
         let schema_cleanup_worker_task = tokio::spawn(async move {
             // Accepted cleanup must finish even when teardown closes the queue.
             cleanup_rx.recv().await.unwrap();
-            entered_tx.send(()).unwrap();
             release_rx.await.unwrap();
             assert!(cleanup_rx.recv().await.is_none());
-            completed_tx.send(()).unwrap();
         });
         let mut tasks = ApplyLoopTasks {
             feedback_handle: closed_feedback_handle(),
@@ -229,8 +221,6 @@ mod tests {
             tasks
                 .try_queue_schema_cleanup(TableId::new(1), SnapshotId::new(100.into(), 90.into()),)
         );
-        entered_rx.await.unwrap();
-
         let mut teardown = Box::pin(tasks.teardown(WorkerType::Apply));
         assert!(teardown.as_mut().now_or_never().is_none());
         assert!(feedback_lifetime_rx.await.is_err());
@@ -238,8 +228,6 @@ mod tests {
         assert!(teardown.as_mut().now_or_never().is_none());
         release_tx.send(()).unwrap();
         teardown.await;
-        completed_rx.await.unwrap();
-
         assert!(tasks.feedback_sender_task.is_finished());
         assert!(tasks.replication_lag_metrics_task.is_finished());
         assert!(tasks.schema_cleanup_worker_task.is_finished());

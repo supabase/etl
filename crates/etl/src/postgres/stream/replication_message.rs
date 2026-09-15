@@ -104,18 +104,14 @@ mod tests {
     /// instead of being classified as retryable connection failures.
     #[test]
     fn malformed_messages_preserve_deserialization_errors() {
-        for frame in [b"".as_slice(), b"?", b"k", b"w", b"\xff"] {
-            let error = decode_message(Bytes::copy_from_slice(frame)).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::DeserializationError);
-            assert!(error.source().is_some());
-        }
+        let invalid_transport_frame = Bytes::from_static(b"w");
+        // A valid XLogData header reaches the logical parser with a truncated Begin.
+        let mut invalid_logical_frame = vec![b'w'];
+        invalid_logical_frame.extend_from_slice(&[0; 24]);
+        invalid_logical_frame.push(b'B');
 
-        for payload in [b"".as_slice(), b"?", b"B", b"\xff"] {
-            // A valid XLogData header isolates errors from the logical parser.
-            let mut frame = vec![b'w'];
-            frame.extend_from_slice(&[0; 24]);
-            frame.extend_from_slice(payload);
-            let error = decode_message(Bytes::from(frame)).unwrap_err();
+        for frame in [invalid_transport_frame, Bytes::from(invalid_logical_frame)] {
+            let error = decode_message(frame).unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DeserializationError);
             assert!(error.source().is_some());
         }

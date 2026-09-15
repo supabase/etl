@@ -23,6 +23,7 @@ use tracing::warn;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
+    constants::DEFAULT_CHANNEL_CAPACITY,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     observability::{
@@ -332,6 +333,8 @@ impl FeedbackHandle {
     ///
     /// The caller must spawn and own the returned future; the handle only
     /// submits requests and never writes to the transport itself.
+    /// Buffering small LSN/urgency requests lets the apply loop continue while
+    /// the sender debounces, encodes, and submits feedback to the transport.
     pub(crate) fn create<S>(
         sink: S,
         keep_alive_deadline_duration: Duration,
@@ -340,7 +343,7 @@ impl FeedbackHandle {
         S: Sink<Bytes> + Unpin,
         S::Error: Into<EtlError>,
     {
-        let (requests_tx, requests_rx) = mpsc::channel(1);
+        let (requests_tx, requests_rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
         let feedback_sender = FeedbackSender {
             sink,
             requests_rx,
@@ -378,7 +381,6 @@ impl FeedbackHandle {
 #[cfg(test)]
 mod tests {
     use bytes::{Buf, Bytes};
-    use futures::FutureExt;
     use tokio::{
         sync::mpsc::UnboundedReceiver,
         task::JoinHandle,
@@ -554,34 +556,5 @@ mod tests {
             ErrorKind::ReplicationFeedbackUnavailable
         );
         drop(feedback_handle);
-    }
-
-    /// Enqueueing waits only for queue capacity, then wakes with a retryable
-    /// error if the sender fails in the transport.
-    #[tokio::test]
-    async fn enqueue_waits_only_for_capacity_and_wakes_on_sender_failure() {
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        let sink = Box::pin(futures::sink::unfold(
-            (entered_tx, release_rx),
-            |(entered_tx, release_rx), _| async move {
-                entered_tx.send(()).unwrap();
-                release_rx.await.unwrap();
-                Err(etl_error!(ErrorKind::InvalidState, "Test feedback failure"))
-            },
-        ));
-        let (handle, sender) = FeedbackHandle::create(sink, Duration::from_secs(10));
-        let task = tokio::spawn(sender);
-        handle.enqueue_status_update(100.into(), 80.into(), true).now_or_never().unwrap().unwrap();
-        entered_rx.await.unwrap();
-
-        // Fill the queue while its consumer is suspended in the transport.
-        handle.enqueue_status_update(200.into(), 90.into(), true).now_or_never().unwrap().unwrap();
-        let mut blocked = Box::pin(handle.enqueue_status_update(300.into(), 100.into(), true));
-        assert!(blocked.as_mut().now_or_never().is_none());
-
-        release_tx.send(()).unwrap();
-        assert_eq!(blocked.await.unwrap_err().kind(), ErrorKind::ReplicationFeedbackUnavailable);
-        assert_eq!(task.await.unwrap().unwrap_err().kind(), ErrorKind::InvalidState);
     }
 }
