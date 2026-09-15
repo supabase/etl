@@ -4,8 +4,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
+        WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -557,10 +557,21 @@ impl std::fmt::Display for ClickHouseOperationKind {
 ///
 /// The table engine is configured via [`ClickHouseInserterConfig::engine`];
 /// see [`ClickHouseEngine`] for the engine-specific layouts.
-#[derive(Clone)]
 pub struct ClickHouseDestination<S> {
     /// Write-path state and operations shared by all destination entrypoints.
     writer: DestinationWriter<S>,
+    /// Lifecycle registry for background event-write tasks.
+    ///
+    /// [`Destination::write_events`] admits its work here and returns;
+    /// destructive table resets drain the registry to fence admitted work.
+    tasks: TaskSet,
+}
+
+// Manual impl: `S` sits behind `Arc`, so cloning must not require `S: Clone`.
+impl<S> Clone for ClickHouseDestination<S> {
+    fn clone(&self) -> Self {
+        Self { writer: self.writer.clone(), tasks: self.tasks.clone() }
+    }
 }
 
 /// Applied ClickHouse table state cached for the insert hot path.
@@ -574,11 +585,17 @@ struct ClickHouseTableCacheEntry {
     nullable_flags: Arc<[bool]>,
 }
 
-/// Execution context that owns the ClickHouse write path.
+/// Execution context captured by ClickHouse background event tasks.
 ///
-/// Holds the client, inserter configuration, metadata store, and per-table
-/// caches needed to execute writes and schema operations.
-#[derive(Clone)]
+/// Before resetting a table, [`ClickHouseDestination`] retains exclusive
+/// access to its [`TaskSet`] while waiting for every admitted event task to
+/// finish. A task that captured the complete destination could later access
+/// that same task registry, causing the reset to wait for the task while the
+/// task waits for the reset-held registry.
+///
+/// This type contains the state needed to execute writes but deliberately
+/// omits [`TaskSet`], making that recursive registry access unavailable
+/// through the task's execution context.
 struct DestinationWriter<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
     client: ClickHouseClient,
@@ -609,6 +626,19 @@ struct DestinationWriter<S> {
     /// `parking_lot::Mutex` and grows at most one entry per replicated
     /// table.
     create_locks: Arc<Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+// Manual impl: `S` sits behind `Arc`, so cloning must not require `S: Clone`.
+impl<S> Clone for DestinationWriter<S> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            inserter_config: self.inserter_config,
+            store: Arc::clone(&self.store),
+            table_cache: Arc::clone(&self.table_cache),
+            create_locks: Arc::clone(&self.create_locks),
+        }
+    }
 }
 
 impl<S> ClickHouseDestination<S>
@@ -665,6 +695,7 @@ where
                 table_cache: Arc::new(RwLock::new(HashMap::new())),
                 create_locks: Arc::new(Mutex::new(HashMap::new())),
             },
+            tasks: TaskSet::new(),
         }
     }
 
@@ -1975,28 +2006,42 @@ fn default_cell(typ: &Type) -> Cell {
 
 impl<S> Destination for ClickHouseDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Send + Sync + 'static,
 {
     fn name() -> &'static str {
         etl_config::shared::DestinationKind::ClickHouse.as_str()
     }
 
-    // The trait methods below intentionally do not use `?` on the inner work.
-    // Errors must reach the caller via `async_result.send(result)`, not via the
-    // outer `EtlResult<()>`; using `?` would short-circuit before `send` runs
-    // and leave the receiver waiting. The outer return value just signals
-    // "work accepted, watch the channel for completion". `AsyncResult::send`
-    // itself returns `()`, and its `Drop` impl synthesizes a "dropped without
-    // sending" error if the path ever skips `send`, so the receiver is never
-    // silently abandoned.
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.tasks.shutdown().await
+    }
+
+    // The trait methods below use `?` only for lifecycle failures raised
+    // before work is admitted (task reaping and registry draining). Errors
+    // from admitted work must reach the caller via `async_result.send(result)`;
+    // using `?` there would short-circuit before `send` runs and leave the
+    // receiver waiting. `AsyncResult::send` itself returns `()`, and its
+    // `Drop` impl synthesizes a "dropped without sending" error if a path
+    // (including an aborted background task) skips `send`, so the receiver is
+    // never silently abandoned.
 
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
+        // Acquire the task registry before any client work. Event tasks have
+        // no registry access, so they can finish while the reset waits for
+        // them; their inserts and DDL all carry client-side timeouts, so the
+        // drain cannot wait unboundedly.
+        let task_guard = self.tasks.drain().await?;
+
         let result = self.writer.drop_table_for_copy_inner(replicated_table_schema).await;
+
+        // Publish the remote result before allowing another event task to run.
         async_result.send(result);
+        drop(task_guard);
+
         Ok(())
     }
 
@@ -2018,8 +2063,22 @@ where
         _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        let result = self.writer.write_events_inner(events).await;
-        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+        // Surface panics from previously admitted event tasks before
+        // admitting more work.
+        self.tasks.try_reap().await?;
+
+        // Durability needs no branch: the task completes only after every
+        // INSERT in the batch is acknowledged under `wait_for_async_insert=1`,
+        // so each result is already `Durable` and `RequireDurable` calls are
+        // satisfied by construction. `Accepted` is never reported.
+        let writer = self.writer.clone();
+        self.tasks
+            .spawn_with(move || async move {
+                let result = writer.write_events_inner(events).await;
+                async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+            })
+            .await;
+
         Ok(())
     }
 }
