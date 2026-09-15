@@ -59,7 +59,7 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
-    ClickHouseClientConfig, ClickHouseDestination,
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
     client::ClickHouseClient,
     test_utils::{
         ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
@@ -72,7 +72,10 @@ use proptest::{option, prelude::*};
 use url::Url;
 use uuid::Uuid;
 
-use crate::support::{clickhouse::install_insert_delay, crypto::install_crypto_provider};
+use crate::support::{
+    clickhouse::{current_state_query, install_insert_delay},
+    crypto::install_crypto_provider,
+};
 
 /// One ClickHouse table receiving generated rows through the production
 /// destination write path.
@@ -1497,4 +1500,69 @@ async fn write_events_reports_insert_failure_through_async_result() {
     assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
     assert_eq!(status, DestinationWriteStatus::Durable);
     assert_eq!(clickhouse_db.query::<i64>("select id from \"public_rejected\"").await, vec![1]);
+}
+
+/// A write aborted mid-batch replays to a converged current state after a
+/// destination restart.
+async fn aborted_write_replays_to_converged_state_inner(engine: ClickHouseEngine) {
+    // GIVEN: single-row INSERT statements delayed by one second each, so
+    // shutdown aborts between the statements of one admitted batch.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("replayed");
+    let store = MemoryStore::new();
+    let config = ClickHouseInserterConfig { engine, max_bytes_per_insert: 1 };
+    let destination = clickhouse_db.build_destination_with_config(store.clone(), config).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    install_insert_delay(&clickhouse_db, "public_replayed", 1).await;
+    let batch = || {
+        vec![
+            lifecycle_insert(&schema, 1, "one"),
+            lifecycle_insert(&schema, 2, "two"),
+            lifecycle_insert(&schema, 3, "three"),
+        ]
+    };
+
+    // WHEN: shutdown aborts the admitted batch mid-statement and a restarted
+    // destination replays the identical batch.
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let events = batch();
+        async move {
+            write_events_via_trait(&destination, WriteEventsDurability::MayDefer, events).await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    Destination::shutdown(&destination).await.unwrap();
+    let error = write_handle.await.unwrap().unwrap_err();
+
+    // The surviving statement prefix is deliberately unasserted: the abort
+    // can land before or after any single statement's server-side apply.
+    clickhouse_db.db_client().query("drop view public_replayed__delay").execute().await.unwrap();
+    let restarted = clickhouse_db.build_destination_with_config(store, config).await;
+    let status =
+        write_events_via_trait(&restarted, WriteEventsDurability::MayDefer, batch()).await.unwrap();
+
+    // THEN: the abort surfaced as an error and the replay converged on
+    // exactly the batch contents.
+    assert_eq!(error.kind(), ErrorKind::DestinationError);
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    let query = current_state_query(engine, "public_replayed", "id, value", &["id"], "id");
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>(&query).await,
+        vec![(1, "one".to_owned()), (2, "two".to_owned()), (3, "three".to_owned())]
+    );
+}
+
+/// MergeTree event logs converge across an aborted-batch replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_replays_to_converged_state_merge_tree() {
+    aborted_write_replays_to_converged_state_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree versions converge across an aborted-batch replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_replays_to_converged_state_replacing_merge_tree() {
+    aborted_write_replays_to_converged_state_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
