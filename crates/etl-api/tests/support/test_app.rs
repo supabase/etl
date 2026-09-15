@@ -504,6 +504,19 @@ impl TestApp {
             .expect("Failed to execute request.")
     }
 
+    /// Reads runtime status independently of lifecycle operations.
+    pub(crate) async fn get_pipeline_status(
+        &self,
+        tenant_id: &str,
+        pipeline_id: i64,
+    ) -> reqwest::Response {
+        self.get_authenticated(format!("{}/v1/pipelines/{pipeline_id}/status", &self.address))
+            .header("tenant_id", tenant_id)
+            .send()
+            .await
+            .unwrap()
+    }
+
     pub(crate) async fn start_pipeline(
         &self,
         tenant_id: &str,

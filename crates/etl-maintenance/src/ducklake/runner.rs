@@ -1764,32 +1764,30 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
     Ok(())
 }
 
-/// Validates the configured snapshot-retention interval on DuckDB.
-async fn validate_expire_snapshots_older_than(
-    duckdb: &DuckDbMaintenanceExecutor,
-    older_than: &str,
-) -> EtlResult<()> {
+/// Computes a snapshot-expiration timestamp and checks its actual retention.
+///
+/// The returned timestamp must be used directly for expiration because calendar
+/// arithmetic can change an interval's effective retention between queries.
+fn expire_snapshots_cutoff(conn: &duckdb::Connection, older_than: &str) -> EtlResult<String> {
+    // Compare timestamps because interval ordering assumes every month has 30 days.
     let sql = format!(
-        "SELECT CAST({} AS INTERVAL) >= CAST({} AS INTERVAL);",
-        quote_literal(older_than),
+        "select cast(cutoff as varchar), cutoff <= cast(now() as timestamp) - cast({} as \
+         interval) from (select cast(now() as timestamp) - cast({} as interval) as cutoff);",
         quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN),
+        quote_literal(older_than),
     );
-    let older_than_for_error = older_than.to_owned();
-    let retention_is_safe = duckdb
-        .run(move |conn| -> EtlResult<bool> {
-            conn.query_row(&sql, [], |row| row.get(0)).map_err(|source| {
-                etl_error!(
-                    ErrorKind::ConfigError,
-                    "DuckLake expire_snapshots_older_than configuration failed",
-                    format!("Invalid expire_snapshots_older_than value `{older_than_for_error}`"),
-                    source: source
-                )
-            })
-        })
-        .await?;
+    let (cutoff, retention_is_safe): (String, bool) =
+        conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|source| {
+            etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake expire_snapshots_older_than configuration failed",
+                format!("Invalid expire_snapshots_older_than value `{older_than}`"),
+                source: source
+            )
+        })?;
 
     if retention_is_safe {
-        return Ok(());
+        return Ok(cutoff);
     }
 
     Err(etl_error!(
@@ -1800,6 +1798,15 @@ async fn validate_expire_snapshots_older_than(
             MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, older_than
         )
     ))
+}
+
+/// Validates the configured snapshot-retention interval on DuckDB.
+async fn validate_expire_snapshots_older_than(
+    duckdb: &DuckDbMaintenanceExecutor,
+    older_than: &str,
+) -> EtlResult<()> {
+    let older_than = older_than.to_owned();
+    duckdb.run(move |conn| expire_snapshots_cutoff(conn, &older_than).map(|_| ())).await
 }
 
 /// Opens initialized DuckDB connections for maintenance.
@@ -2510,11 +2517,11 @@ fn rewrite_data_files(
 
 /// Calls DuckLake snapshot expiration.
 fn expire_snapshots(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u64> {
+    let cutoff = expire_snapshots_cutoff(conn, older_than)?;
     let sql = format!(
-        "CALL ducklake_expire_snapshots({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
-         INTERVAL));",
+        "call ducklake_expire_snapshots({}, older_than => cast({} as timestamp));",
         quote_literal(LAKE_CATALOG),
-        quote_literal(older_than),
+        quote_literal(&cutoff),
     );
     count_maintenance_rows(conn, &sql, "DuckLake expire snapshots failed")
 }
@@ -3816,6 +3823,7 @@ mod tests {
         assert_eq!(parsed.get_ssl_mode(), SslMode::Prefer);
     }
 
+    /// Rejects unsafe or malformed intervals before maintenance starts.
     #[tokio::test]
     async fn validate_expire_snapshots_older_than_enforces_minimum_retention() {
         let executor = make_maintenance_test_executor();
@@ -3823,10 +3831,20 @@ mod tests {
         validate_expire_snapshots_older_than(&executor, "1 day").await.unwrap();
         validate_expire_snapshots_older_than(&executor, "7 days").await.unwrap();
 
-        for older_than in ["0 seconds", "-1 day", "23 hours"] {
-            let error = validate_expire_snapshots_older_than(&executor, older_than)
-                .await
-                .expect_err("unsafe retention should fail");
+        for older_than in [
+            "0 seconds",
+            "-1 day",
+            "23 hours",
+            "1 day -1 microsecond",
+            // DuckDB compares years as 12 * 30 days: -360 + 361 = 1 day,
+            // exactly the old minimum. Calendar subtraction instead moves the
+            // cutoff 4 or 5 days into the future.
+            "-1 year 361 days",
+            "",
+            "not an interval",
+        ] {
+            let error =
+                validate_expire_snapshots_older_than(&executor, older_than).await.unwrap_err();
 
             assert_eq!(error.kind(), ErrorKind::ConfigError);
             assert_eq!(
@@ -3834,6 +3852,62 @@ mod tests {
                 Some("DuckLake expire_snapshots_older_than configuration failed")
             );
         }
+    }
+
+    /// Passes the exact validated calendar cutoff, including fractional
+    /// seconds.
+    #[test]
+    fn expire_snapshots_uses_validated_cutoff() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create macro now() as timestamp '2026-03-01 12:00:00.123456';
+             create macro ducklake_expire_snapshots(catalog, older_than := null) as table
+                 select older_than where older_than = timestamp '2026-02-01 12:00:00.123456';",
+        )
+        .unwrap();
+
+        assert_eq!(expire_snapshots(&conn, "1 month").unwrap(), 1);
+    }
+
+    /// Rechecks calendar retention when expiration runs after initial
+    /// validation.
+    #[tokio::test]
+    async fn expire_snapshots_rechecks_retention_at_execution() {
+        let executor = make_maintenance_test_executor();
+        executor
+            .run(|conn| {
+                conn.execute_batch(
+                    "create macro now() as timestamp '2026-02-01 12:00:00';
+                     create macro ducklake_expire_snapshots(catalog, older_than := null)
+                         as table select older_than;",
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        validate_expire_snapshots_older_than(&executor, "1 month -29 days").await.unwrap();
+        executor
+            .run(|conn| {
+                conn.execute_batch(
+                    "create or replace macro now() as timestamp '2026-03-01 12:00:00';",
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let config = ExpireSnapshotsMaintenanceConfig {
+            enabled: true,
+            older_than: "1 month -29 days".to_owned(),
+        };
+        let mut outcome = DuckLakeMaintenanceOutcome::default();
+        let error = run_expire_snapshots(&executor, &config, &mut outcome).await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert_eq!(outcome.expired_snapshots, 0);
     }
 
     #[tokio::test]

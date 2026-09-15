@@ -70,8 +70,9 @@ jobs:
     steps:
       - name: Extract Image Name
         id: extract-name
+        env:
+          IMAGE: ${{ inputs.image }}
         run: |
-          IMAGE="${{ inputs.image }}"
           NAME="${IMAGE##*/}"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
@@ -140,8 +141,9 @@ jobs:
     steps:
       - name: Extract Image Name
         id: extract-name
+        env:
+          IMAGE: ${{ inputs.image }}
         run: |
-          IMAGE="${{ inputs.image }}"
           NAME="${IMAGE##*/}"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
 
@@ -178,8 +180,10 @@ jobs:
 
       - name: Create and Push Multi-Arch Manifest
         shell: bash
+        env:
+          IMAGE: ${{ inputs.image }}
+          VERSION: ${{ inputs.version }}
         run: |
-          IMAGE="${{ inputs.image }}"
           FULL_SHA=$(git rev-parse HEAD)
 
           # Prepare digest list for imagetools
@@ -198,14 +202,16 @@ jobs:
             docker buildx imagetools create -t "${IMAGE}:${FULL_SHA}" "${DIGEST_LIST[@]}"
 
             # Create manifest for version if needed
-            if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
-              docker buildx imagetools create -t "${IMAGE}:v${{ inputs.version }}" "${DIGEST_LIST[@]}"
+            if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${VERSION}" ]; then
+              docker buildx imagetools create -t "${IMAGE}:v${VERSION}" "${DIGEST_LIST[@]}"
             fi
           fi
 
       - name: Output Image Information
+        env:
+          IMAGE: ${{ inputs.image }}
+          VERSION: ${{ inputs.version }}
         run: |
-          IMAGE="${{ inputs.image }}"
           NAME="${IMAGE##*/}"
           FULL_SHA=$(git rev-parse HEAD)
           if [ "${{ inputs.experimental }}" = "true" ]; then
@@ -214,8 +220,8 @@ jobs:
           else
             TAGS="latest, ${FULL_SHA}"
             MODE="standard"
-            if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${{ inputs.version }}" ]; then
-              TAGS="${TAGS}, v${{ inputs.version }}"
+            if [ "${{ inputs.tag_with_version }}" = "true" ] && [ -n "${VERSION}" ]; then
+              TAGS="${TAGS}, v${VERSION}"
             fi
           fi
           echo "✅ Successfully built and pushed ${NAME} multi-arch image (${MODE} mode)"

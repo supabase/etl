@@ -37,6 +37,18 @@ Stop and stop-all return `202 Accepted` after Kubernetes accepts the deletion
 requests. Resources can still be terminating; poll pipeline status before assuming
 shutdown has completed.
 
+Start completes cleanup of an inactive runtime before recreating it, including
+when a preceding stop has only acknowledged deletion. If cleanup exceeds 30
+seconds, start returns `503 Service Unavailable` without applying new resources;
+retry after shutdown completes. An active runtime is left unchanged. A successful
+start does not wait for the new Pod to become ready.
+
+Pipeline status combines StatefulSet desired state with Pod health. An active
+StatefulSet with a missing or terminating Pod reports `starting` while Kubernetes
+replaces it. A terminating StatefulSet reports `stopping`. Without a StatefulSet,
+a terminating Pod reports `stopping`, while a non-terminating orphan Pod reports
+`unknown`. Once both are absent, status becomes `stopped`.
+
 `POST /v1/pipelines/{pipeline_id}/rollback-tables` restarts replication from scratch
 for a single table, all errored tables, or all tables. The request contains only
 `target`; legacy extra fields are ignored. Any table state can be targeted manually.
@@ -280,7 +292,101 @@ and the VPA's live policy govern those allocations. Deleting the VPA also does
 not guarantee that the recommender forgets usage history.
 
 Stopping and starting a pipeline still deletes the autoscaler resource: stop
-deletes the StatefulSet and VPA, and start always recreates both resources.
+deletes the StatefulSet and VPA, and starting a stopped pipeline recreates both
+resources. Starting an already active workload leaves it unchanged.
+
+## Pipeline lifecycle and runtime status
+
+Operations on existing pipelines use transaction-scoped PostgreSQL row locks
+across API instances. Overlapping operations return HTTP 409 so callers can
+retry; reads remain unblocked. Locks are released on commit or rollback.
+
+Pipeline operations lock their target. Source and destination changes lock all
+existing pipelines discovered for that resource; tenant deletion locks the
+pipelines discovered for that tenant. Configuration updates restart affected
+active pipelines and leave stopped pipelines stopped.
+
+This coordinates operations on discovered pipelines, but does not fully serialize
+concurrent pipeline creation or attachment. See [the locking module](src/data/locks.rs)
+for implementation details and limitations.
+
+### Deletion and retries
+
+Pipeline and tenant deletion clean up source metadata and replication slots
+before committing API deletion. Keeping API records until cleanup succeeds
+preserves the information needed to reclaim remaining source state. Cleanup is
+idempotent, so callers can retry if source cleanup succeeds but API deletion fails.
+
+If the initial source connection fails, deletion logs a warning and skips source
+cleanup. Once connected, cleanup failures retain API records for retry. API,
+source-database, and Kubernetes changes do not share an atomic transaction.
+
+### Lifecycle responses
+
+- Start returns HTTP 200 after ensuring a workload exists; an already active
+  workload is unchanged. If previous shutdown is still pending, HTTP 503 means
+  the caller should retry.
+- Stop returns HTTP 202 after Kubernetes accepts deletion; shutdown may continue
+  after the response.
+- Restart returns HTTP 202 after requesting replacement. Stopped or stopping
+  pipelines return HTTP 409. Every explicit restart reapplies the configuration
+  stored in the API database, including when a previous replacement is pending.
+  Retrying a restart can therefore request another template revision.
+- Table reset holds the pipeline lock through shutdown, source reset, and
+  restoration of an initially active workload.
+
+Poll runtime status to follow these transitions. `started` means the current
+Kubernetes workload is ready; initial-sync state and replication progress are
+reported separately.
+
+### How runtime status is observed
+
+The [status module](src/k8s/status.rs) derives the existing customer-facing states
+from the single-replica workload. It does not store another lifecycle state machine.
+The rules have explicit precedence:
+
+| Observation | State |
+| --- | --- |
+| Workload deletion requested, or zero desired replicas with a remaining Pod | `stopping` |
+| No workload or Pod; or zero desired replicas and no Pod | `stopped` |
+| Active workload with no Pod | `starting` |
+| Pod belongs to another workload incarnation | `unknown` |
+| Active workload with a terminating owned Pod | `starting` |
+| Restart annotation, observed generation, or revision is not current | `starting` |
+| Current Pod or container state is explicitly unknown | `unknown` |
+| Current Pod or application/init container reports a failure | `failed` |
+| Current replicator is running and ready and the Pod is ready | `started` |
+| Current process is still initializing, scheduling, or recovering | `starting` |
+
+A non-terminating orphan Pod, malformed workload metadata, or a workload scaled
+above one replica reports `unknown`. Observing ordinal zero cannot establish the
+health of multiple replicators. `failed` is an observation and can recover;
+`starting` and `stopping` do not promise completion within a fixed deadline.
+Historical container failures do not override successful recovery.
+
+Each observation reads the StatefulSet, then its Pod, then the StatefulSet again.
+If UID, generation, or deletion intent changed, it retries once using the newer
+workload. Continued changes return `unknown`. Ordinary controller status updates
+do not trigger retries. Kubernetes read errors remain API errors, never `stopped`.
+This costs three GETs normally and at most five during a lifecycle race.
+
+This is a bounded observation, not an atomic snapshot across Kubernetes resources.
+State can change after the final read, and node failure detection itself takes time.
+Mutation endpoints must retain their lifecycle locks and deletion barriers instead
+of treating a status response as authorization to change durable replication state.
+The check establishes runtime identity against the accepted Kubernetes workload;
+it does not certify that a failed API configuration update committed successfully.
+
+The implementation follows Kubernetes' [Pod lifecycle semantics](https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/)
+and the observed-generation/revision checks used by
+[`kubectl rollout status`](https://github.com/kubernetes/kubectl/blob/v0.35.0/pkg/polymorphichelpers/rollout_status.go).
+StatefulSets do not have the same rollout conditions as Deployments, and Pod phase
+alone is not a health summary. No application readiness probes are added here.
+
+Run the deterministic classification and HTTP interleaving tests with
+`cargo nextest run -p etl-api --no-default-features --lib 'k8s::status::'`.
+These tests model node loss, API failures, and lifecycle read interleavings
+without requiring a Kubernetes cluster.
 
 ### Encryption Keys
 

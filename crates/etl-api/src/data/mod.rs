@@ -1,6 +1,7 @@
 pub mod destinations;
 pub mod destinations_pipelines;
 pub mod images;
+pub(crate) mod locks;
 pub mod pipelines;
 pub mod publications;
 pub mod replicators;

@@ -9,12 +9,14 @@ use etl_api::{
             ReadTenantResponse, ReadTenantsResponse, UpdateTenantRequest,
         },
     },
+    startup::get_connection_pool,
 };
-use etl_config::SerializableSecretString;
+use etl_config::{SerializableSecretString, shared::PgConnectionConfig};
+use etl_postgres::sqlx::test_utils::drop_pg_database;
 use etl_telemetry::tracing::init_test_tracing;
 use reqwest::StatusCode;
 use secrecy::ExposeSecret;
-use sqlx::Executor;
+use sqlx::{Executor, PgPool};
 
 use crate::support::{
     database::{
@@ -44,6 +46,32 @@ async fn create_pipeline_for_source(
         response.json().await.expect("failed to deserialize response");
 
     response.id
+}
+
+/// Creates an inactive pipeline with durable state in a separate source
+/// database.
+async fn setup_tenant_with_source_state() -> (TestApp, String, i64, PgPool, PgConnectionConfig) {
+    let app = spawn_test_app().await;
+    let tenant_id = create_tenant(&app).await;
+    let (source_pool, source_id, source_config) =
+        create_test_source_database(&app, &tenant_id).await;
+    run_etl_migrations_on_source_database(&source_config).await;
+    create_default_image(&app).await;
+    let destination_id = create_destination(&app, &tenant_id).await;
+    let pipeline_id = create_pipeline_for_source(&app, &tenant_id, source_id, destination_id).await;
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+    sqlx::query(
+        r#"
+        insert into etl.replication_state (pipeline_id, table_id, state, metadata)
+        values ($1, 1, 'ready', '{"type":"ready"}')
+        "#,
+    )
+    .bind(pipeline_id)
+    .execute(&source_pool)
+    .await
+    .unwrap();
+
+    (app, tenant_id, pipeline_id, source_pool, source_config)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -381,6 +409,111 @@ async fn tenant_with_inactive_pipelines_can_be_deleted_and_uninstalls_source_sta
     drop_trusted_source_database(trusted_source).await;
 }
 
+/// Failed API commits leave the tenant discoverable for retry even after source
+/// cleanup has committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_deletion_api_commit_failure_keeps_tenant_discoverable_for_retry() {
+    let (app, tenant_id, pipeline_id, source_pool, source_config) =
+        setup_tenant_with_source_state().await;
+    let api_pool = get_connection_pool(app.database_config());
+    // Defer failure until commit to exercise the boundary after the API cascade.
+    api_pool
+        .execute(
+            r#"
+            create function app.reject_tenant_delete_commit() returns trigger
+            language plpgsql as $$
+            begin
+                raise exception 'Forced API commit failure';
+            end;
+            $$;
+            create constraint trigger reject_tenant_delete_commit
+            after delete on app.tenants deferrable initially deferred
+            for each row execute function app.reject_tenant_delete_commit();
+            "#,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(app.delete_tenant(&tenant_id).await.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(app.read_tenant(&tenant_id).await.status(), StatusCode::OK);
+    assert_eq!(app.read_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
+    let tenants: ReadTenantsResponse = app.read_all_tenants().await.json().await.unwrap();
+    assert!(tenants.tenants.iter().any(|tenant| tenant.id == tenant_id));
+    let source_state_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from pg_namespace where nspname = 'etl')")
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert!(!source_state_exists);
+
+    api_pool.execute("drop trigger reject_tenant_delete_commit on app.tenants").await.unwrap();
+    // Retry stop/delete with source state already gone.
+    assert_eq!(app.stop_all_pipelines(&tenant_id).await.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.delete_tenant(&tenant_id).await.status(), StatusCode::OK);
+    assert_eq!(app.read_tenant(&tenant_id).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(app.read_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::NOT_FOUND);
+    let source_state_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from pg_namespace where nspname = 'etl')")
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert!(!source_state_exists);
+
+    api_pool.close().await;
+    source_pool.close().await;
+    drop_pg_database(&source_config).await;
+}
+
+/// Source cleanup failure rolls back metadata changes and retains API records
+/// for another deletion attempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_deletion_source_cleanup_failure_preserves_tenant_for_retry() {
+    let (app, tenant_id, pipeline_id, source_pool, source_config) =
+        setup_tenant_with_source_state().await;
+    // Fail after metadata deletion to verify the source transaction rolls back.
+    source_pool
+        .execute(
+            r#"
+            create function public.reject_source_cleanup() returns event_trigger
+            language plpgsql as $$
+            begin
+                raise exception 'Forced source cleanup failure';
+            end;
+            $$;
+            create event trigger reject_source_cleanup on ddl_command_start
+            when tag in ('DROP SCHEMA') execute function public.reject_source_cleanup();
+            "#,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(app.delete_tenant(&tenant_id).await.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(app.read_tenant(&tenant_id).await.status(), StatusCode::OK);
+    assert_eq!(app.read_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::OK);
+    let state: String =
+        sqlx::query_scalar("select state::text from etl.replication_state where pipeline_id = $1")
+            .bind(pipeline_id)
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "ready");
+
+    source_pool.execute("drop event trigger reject_source_cleanup").await.unwrap();
+    assert_eq!(app.stop_all_pipelines(&tenant_id).await.status(), StatusCode::ACCEPTED);
+    assert_eq!(app.delete_tenant(&tenant_id).await.status(), StatusCode::OK);
+    assert_eq!(app.read_tenant(&tenant_id).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(app.read_pipeline(&tenant_id, pipeline_id).await.status(), StatusCode::NOT_FOUND);
+    let source_state_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from pg_namespace where nspname = 'etl')")
+            .fetch_one(&source_pool)
+            .await
+            .unwrap();
+    assert!(!source_state_exists);
+
+    source_pool.close().await;
+    drop_pg_database(&source_config).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tenant_with_unreachable_source_can_still_be_deleted() {
     init_test_tracing();
@@ -408,7 +541,7 @@ async fn tenant_with_unreachable_source_can_still_be_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tenant_with_source_terminated_during_cleanup_can_still_be_deleted() {
+async fn tenant_with_source_terminated_during_cleanup_retains_api_state_for_retry() {
     init_test_tracing();
 
     let trusted_source = create_trusted_source_database().await;
@@ -471,13 +604,22 @@ async fn tenant_with_source_terminated_during_cleanup_can_still_be_deleted() {
     app.k8s_state.set_pod_status(PodStatus::Stopped).await;
 
     let response = app.delete_tenant(tenant_id).await;
-    assert!(response.status().is_success());
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
     let tenant_response = app.read_tenant(tenant_id).await;
-    assert_eq!(tenant_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(tenant_response.status(), StatusCode::OK);
 
     let pipeline_response = app.read_pipeline(tenant_id, pipeline_id).await;
-    assert_eq!(pipeline_response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(pipeline_response.status(), StatusCode::OK);
+
+    trusted_source
+        .admin_pool
+        .execute("drop event trigger tenant_delete_kill_backend")
+        .await
+        .unwrap();
+    assert_eq!(app.delete_tenant(tenant_id).await.status(), StatusCode::OK);
+    assert_eq!(app.read_tenant(tenant_id).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(app.read_pipeline(tenant_id, pipeline_id).await.status(), StatusCode::NOT_FOUND);
 
     drop_trusted_source_database(trusted_source).await;
 }
