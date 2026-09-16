@@ -1479,11 +1479,12 @@ async fn drop_table_for_copy_waits_for_admitted_write() {
     );
 }
 
-/// Shutdown aborts an admitted write promptly and the pending result reports
-/// the aborted task as an error instead of a silent success.
+/// Shutdown aborts an admitted write and the pending result reports the
+/// aborted task as an error instead of a silent success.
 #[tokio::test(flavor = "multi_thread")]
 async fn shutdown_aborts_admitted_write_without_silent_success() {
-    // GIVEN: a destination table whose inserts are delayed by three seconds.
+    // GIVEN: a destination table and a write parked at its first INSERT
+    // statement.
     init_test_tracing();
     install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
@@ -1492,9 +1493,7 @@ async fn shutdown_aborts_admitted_write_without_silent_success() {
         .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
         .await;
     destination.write_table_rows(&schema, vec![]).await.unwrap();
-    install_insert_delay(&clickhouse_db, "public_aborted", 3).await;
-
-    // WHEN: shutdown runs while the delayed write is admitted.
+    let (reached, _release) = arm_pause_before_insert_statement_for_tests(0);
     let write_handle = tokio::spawn({
         let destination = destination.clone();
         let schema = schema.clone();
@@ -1507,15 +1506,19 @@ async fn shutdown_aborts_admitted_write_without_silent_success() {
             .await
         }
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let started = Instant::now();
+    reached.await.unwrap();
+
+    // WHEN: shutdown runs while the write is parked.
     Destination::shutdown(&destination).await.unwrap();
 
-    // THEN: shutdown did not wait out the delayed insert, and the aborted
-    // write surfaced as an error rather than a fabricated success.
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // THEN: the aborted write surfaced as an error rather than a fabricated
+    // success, and nothing reached the table.
     let error = write_handle.await.unwrap().unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationError);
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"public_aborted\"").await,
+        Vec::<i64>::new()
+    );
 }
 
 /// An insert rejected by the server reaches the caller through the async
