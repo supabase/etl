@@ -1,77 +1,14 @@
 //! Destination startup dispatch.
 
 use etl_config::shared::{DestinationKind, ReplicatorConfig};
+use tokio::sync::watch;
 
-use super::ReplicatorStore;
-use crate::error::ReplicatorResult;
+use crate::{
+    core::{PipelineState, ReplicatorStore},
+    error::ReplicatorResult,
+};
 
-/// Starts the configured destination pipeline.
-pub(super) async fn start(
-    replicator_config: ReplicatorConfig,
-    store: ReplicatorStore,
-) -> ReplicatorResult<()> {
-    #[cfg(not(feature = "any-destination"))]
-    let _ = &store;
-
-    match replicator_config.destination.kind() {
-        DestinationKind::BigQuery => {
-            #[cfg(feature = "bigquery")]
-            {
-                bigquery::start(replicator_config, store).await
-            }
-
-            #[cfg(not(feature = "bigquery"))]
-            {
-                Err(disabled_destination_error(DestinationKind::BigQuery))
-            }
-        }
-        DestinationKind::ClickHouse => {
-            #[cfg(feature = "clickhouse")]
-            {
-                clickhouse::start(replicator_config, store).await
-            }
-
-            #[cfg(not(feature = "clickhouse"))]
-            {
-                Err(disabled_destination_error(DestinationKind::ClickHouse))
-            }
-        }
-        DestinationKind::Ducklake => {
-            #[cfg(feature = "ducklake")]
-            {
-                ducklake::start(replicator_config, store).await
-            }
-
-            #[cfg(not(feature = "ducklake"))]
-            {
-                Err(disabled_destination_error(DestinationKind::Ducklake))
-            }
-        }
-        DestinationKind::Iceberg => {
-            #[cfg(feature = "iceberg")]
-            {
-                iceberg::start(replicator_config, store).await
-            }
-
-            #[cfg(not(feature = "iceberg"))]
-            {
-                Err(disabled_destination_error(DestinationKind::Iceberg))
-            }
-        }
-        DestinationKind::Snowflake => {
-            #[cfg(feature = "snowflake")]
-            {
-                snowflake::start(replicator_config, store).await
-            }
-
-            #[cfg(not(feature = "snowflake"))]
-            {
-                Err(disabled_destination_error(DestinationKind::Snowflake))
-            }
-        }
-    }
-}
-
+/// Reports a destination that was not enabled at compile time.
 #[cfg(any(
     not(feature = "bigquery"),
     not(feature = "clickhouse"),
@@ -93,14 +30,18 @@ mod bigquery {
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::bigquery::BigQueryDestination;
     use secrecy::ExposeSecret;
+    use tokio::sync::watch;
 
-    use super::super::{ReplicatorStore, pipeline};
-    use crate::error::ReplicatorResult;
+    use crate::{
+        core::{PipelineState, ReplicatorStore, pipeline},
+        error::ReplicatorResult,
+    };
 
     /// Starts the BigQuery destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
-        store: ReplicatorStore,
+        replicator_store: ReplicatorStore,
+        pipeline_state_tx: watch::Sender<PipelineState>,
     ) -> ReplicatorResult<()> {
         let pipeline_id = replicator_config.pipeline.id;
 
@@ -123,13 +64,13 @@ mod bigquery {
             *max_staleness_mins,
             *connection_pool_size,
             pipeline_id,
-            store.clone(),
+            replicator_store.clone(),
         )
         .await?
         .with_table_options(table_options.clone());
 
-        let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
-        pipeline::start(pipeline).await
+        let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
+        pipeline::start(pipeline, pipeline_state_tx).await
     }
 }
 
@@ -142,9 +83,12 @@ mod clickhouse {
         ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
     };
     use secrecy::ExposeSecret;
+    use tokio::sync::watch;
 
-    use super::super::{ReplicatorStore, pipeline};
-    use crate::error::ReplicatorResult;
+    use crate::{
+        core::{PipelineState, ReplicatorStore, pipeline},
+        error::ReplicatorResult,
+    };
 
     /// Returns whether a ClickHouse configuration requires public HTTPS
     /// enforcement.
@@ -155,7 +99,8 @@ mod clickhouse {
     /// Starts the ClickHouse destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
-        store: ReplicatorStore,
+        replicator_store: ReplicatorStore,
+        pipeline_state_tx: watch::Sender<PipelineState>,
     ) -> ReplicatorResult<()> {
         let DestinationConfig::ClickHouse { url, user, password, database, engine } =
             &replicator_config.destination
@@ -180,7 +125,7 @@ mod clickhouse {
                 database,
                 inserter_config,
                 client_config,
-                store.clone(),
+                replicator_store.clone(),
             )
             .await?
         } else {
@@ -191,13 +136,13 @@ mod clickhouse {
                 database,
                 inserter_config,
                 client_config,
-                store.clone(),
+                replicator_store.clone(),
             )?
         };
         destination.validate_engine_support().await?;
 
-        let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
-        pipeline::start(pipeline).await
+        let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
+        pipeline::start(pipeline, pipeline_state_tx).await
     }
 
     #[cfg(test)]
@@ -231,14 +176,18 @@ mod ducklake {
         S3Config as DucklakeS3Config,
     };
     use secrecy::ExposeSecret;
+    use tokio::sync::watch;
 
-    use super::super::{ReplicatorStore, pipeline};
-    use crate::error::{ReplicatorError, ReplicatorResult};
+    use crate::{
+        core::{PipelineState, ReplicatorStore, pipeline},
+        error::{ReplicatorError, ReplicatorResult},
+    };
 
     /// Starts the DuckLake destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
-        store: ReplicatorStore,
+        replicator_store: ReplicatorStore,
+        pipeline_state_tx: watch::Sender<PipelineState>,
     ) -> ReplicatorResult<()> {
         let pipeline_id = replicator_config.pipeline.id;
 
@@ -296,7 +245,7 @@ mod ducklake {
             parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
             parse_ducklake_s3_data_path(data_path).map_err(ReplicatorError::config)?,
             *pool_size,
-            store.clone(),
+            replicator_store.clone(),
         )
         .s3(s3_config)
         .metadata_schema(metadata_schema.clone())
@@ -310,8 +259,8 @@ mod ducklake {
         .build()
         .await?;
 
-        let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
-        pipeline::start(pipeline).await
+        let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
+        pipeline::start(pipeline, pipeline_state_tx).await
     }
 }
 
@@ -327,14 +276,33 @@ mod iceberg {
         S3_SECRET_ACCESS_KEY,
     };
     use secrecy::ExposeSecret;
+    use tokio::sync::watch;
 
-    use super::super::{ReplicatorStore, pipeline};
-    use crate::error::{ReplicatorError, ReplicatorResult};
+    use crate::{
+        core::{PipelineState, ReplicatorStore, pipeline},
+        error::{ReplicatorError, ReplicatorResult},
+    };
+
+    /// Creates Iceberg REST catalog S3 properties.
+    fn create_props(
+        s3_access_key_id: String,
+        s3_secret_access_key: String,
+        s3_endpoint: String,
+    ) -> HashMap<String, String> {
+        let mut props: HashMap<String, String> = HashMap::new();
+
+        props.insert(S3_ACCESS_KEY_ID.to_owned(), s3_access_key_id);
+        props.insert(S3_SECRET_ACCESS_KEY.to_owned(), s3_secret_access_key);
+        props.insert(S3_ENDPOINT.to_owned(), s3_endpoint);
+
+        props
+    }
 
     /// Starts the Iceberg destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
-        store: ReplicatorStore,
+        replicator_store: ReplicatorStore,
+        pipeline_state_tx: watch::Sender<PipelineState>,
     ) -> ReplicatorResult<()> {
         let client = match &replicator_config.destination {
             etl_config::shared::DestinationConfig::Iceberg {
@@ -399,25 +367,10 @@ mod iceberg {
                 }
             }
         };
-        let destination = IcebergDestination::new(client, namespace, store.clone());
+        let destination = IcebergDestination::new(client, namespace, replicator_store.clone());
 
-        let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
-        pipeline::start(pipeline).await
-    }
-
-    /// Creates Iceberg REST catalog S3 properties.
-    fn create_props(
-        s3_access_key_id: String,
-        s3_secret_access_key: String,
-        s3_endpoint: String,
-    ) -> HashMap<String, String> {
-        let mut props: HashMap<String, String> = HashMap::new();
-
-        props.insert(S3_ACCESS_KEY_ID.to_owned(), s3_access_key_id);
-        props.insert(S3_SECRET_ACCESS_KEY.to_owned(), s3_secret_access_key);
-        props.insert(S3_ENDPOINT.to_owned(), s3_endpoint);
-
-        props
+        let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
+        pipeline::start(pipeline, pipeline_state_tx).await
     }
 }
 
@@ -427,14 +380,18 @@ mod snowflake {
     use etl::pipeline::Pipeline;
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::snowflake as snowflake_destination;
+    use tokio::sync::watch;
 
-    use super::super::{ReplicatorStore, pipeline};
-    use crate::error::{ReplicatorError, ReplicatorResult};
+    use crate::{
+        core::{PipelineState, ReplicatorStore, pipeline},
+        error::{ReplicatorError, ReplicatorResult},
+    };
 
     /// Starts the Snowflake destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
-        store: ReplicatorStore,
+        replicator_store: ReplicatorStore,
+        pipeline_state_tx: watch::Sender<PipelineState>,
     ) -> ReplicatorResult<()> {
         let pipeline_id = replicator_config.pipeline.id;
 
@@ -461,9 +418,78 @@ mod snowflake {
             snowflake_destination::AuthManager::new(config).map_err(ReplicatorError::config)?,
         );
         let client = snowflake_destination::Client::new(auth, pipeline_id);
-        let destination = snowflake_destination::Destination::new(client, store.clone());
+        let destination = snowflake_destination::Destination::new(client, replicator_store.clone());
 
-        let pipeline = Pipeline::new(replicator_config.pipeline, store, destination);
-        pipeline::start(pipeline).await
+        let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
+        pipeline::start(pipeline, pipeline_state_tx).await
+    }
+}
+
+/// Starts the configured destination pipeline.
+#[cfg_attr(not(feature = "any-destination"), expect(clippy::unused_async))]
+pub(super) async fn start(
+    replicator_config: ReplicatorConfig,
+    replicator_store: ReplicatorStore,
+    pipeline_state_tx: watch::Sender<PipelineState>,
+) -> ReplicatorResult<()> {
+    #[cfg(not(feature = "any-destination"))]
+    let _ = (&replicator_store, &pipeline_state_tx);
+
+    match replicator_config.destination.kind() {
+        DestinationKind::BigQuery => {
+            #[cfg(feature = "bigquery")]
+            {
+                bigquery::start(replicator_config, replicator_store, pipeline_state_tx).await
+            }
+
+            #[cfg(not(feature = "bigquery"))]
+            {
+                Err(disabled_destination_error(DestinationKind::BigQuery))
+            }
+        }
+        DestinationKind::ClickHouse => {
+            #[cfg(feature = "clickhouse")]
+            {
+                clickhouse::start(replicator_config, replicator_store, pipeline_state_tx).await
+            }
+
+            #[cfg(not(feature = "clickhouse"))]
+            {
+                Err(disabled_destination_error(DestinationKind::ClickHouse))
+            }
+        }
+        DestinationKind::Ducklake => {
+            #[cfg(feature = "ducklake")]
+            {
+                ducklake::start(replicator_config, replicator_store, pipeline_state_tx).await
+            }
+
+            #[cfg(not(feature = "ducklake"))]
+            {
+                Err(disabled_destination_error(DestinationKind::Ducklake))
+            }
+        }
+        DestinationKind::Iceberg => {
+            #[cfg(feature = "iceberg")]
+            {
+                iceberg::start(replicator_config, replicator_store, pipeline_state_tx).await
+            }
+
+            #[cfg(not(feature = "iceberg"))]
+            {
+                Err(disabled_destination_error(DestinationKind::Iceberg))
+            }
+        }
+        DestinationKind::Snowflake => {
+            #[cfg(feature = "snowflake")]
+            {
+                snowflake::start(replicator_config, replicator_store, pipeline_state_tx).await
+            }
+
+            #[cfg(not(feature = "snowflake"))]
+            {
+                Err(disabled_destination_error(DestinationKind::Snowflake))
+            }
+        }
     }
 }

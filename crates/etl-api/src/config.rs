@@ -4,8 +4,8 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use etl_config::{
     Config,
     shared::{
-        DuckLakeCopyBufferConfig, PgConnectionConfig, SentryConfig, TlsConfig, Validate,
-        ValidationError,
+        DuckLakeCopyBufferConfig, PgConnectionConfig, ReplicatorHealthConfig, SentryConfig,
+        TlsConfig, Validate, ValidationError,
     },
 };
 use serde::{
@@ -85,6 +85,9 @@ impl From<String> for ApiConfigValidationError {
 /// Defaults applied to generated replicator configurations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ApiReplicatorConfig {
+    /// Optional replicator activity listener and Kubernetes probes.
+    #[serde(default)]
+    pub health: Option<ReplicatorHealthConfig>,
     /// Defaults grouped by destination kind.
     #[serde(default)]
     pub destination_defaults: DestinationDefaultsConfig,
@@ -270,6 +273,9 @@ impl ApiConfig {
         }
         self.k8s.vector_resources.validate()?;
         self.replicator.destination_defaults.ducklake.copy_buffer.validate()?;
+        if let Some(health) = &self.replicator.health {
+            health.validate()?;
+        }
 
         Ok(())
     }

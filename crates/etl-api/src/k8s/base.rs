@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use etl_config::shared::ReplicatorHealthConfig;
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use thiserror::Error;
 
@@ -95,6 +96,8 @@ pub struct DuckLakeMaintenanceResourceConfig {
 /// Input shared by the replicator StatefulSet and VPA materializers.
 #[derive(Debug, Clone)]
 pub struct ReplicatorWorkloadConfig {
+    /// Optional activity listener and probe configuration for this workload.
+    pub health: Option<ReplicatorHealthConfig>,
     /// Image for the replicator container.
     pub replicator_image: String,
     /// Optional pipeline-level replicator resource override.

@@ -167,6 +167,37 @@ The process runs until it receives a shutdown signal or encounters a terminal
 pipeline error. Run it under a service manager that restarts failed processes,
 preserves logs, and provides resource limits.
 
+## Activity probes
+
+Enable the optional HTTP listener with a top-level configuration block:
+
+```yaml title="base.yaml"
+health:
+  port: 9001
+  stall_timeout_ms: 600000
+```
+
+Omitting `health` disables it; `health: {}` uses these defaults. The listener
+binds to `0.0.0.0`. Use another port, such as `19001`, when running alongside
+the local Docker stack, which reserves port 9001 for ClickHouse.
+
+- `/livez`: returns 503 when monitored work stalls; otherwise 200, including
+  initialization, intentional waits, and graceful shutdown.
+- `/readyz`: returns 200 once the pipeline is running with monitored activity
+  and no stalls; otherwise 503. Initial sync need not be complete.
+
+Probes observe apply-loop iterations and table-copy work, not durable replication
+progress. Slot acquisition and intentional catchup waits are exempt. With no
+observations, the process stays live but unready. Apply loops allow the greater
+of `stall_timeout_ms` and PostgreSQL's `wal_sender_timeout` (60-second fallback
+when disabled or unavailable). Tune the stall timeout above expected copy batch
+and stage durations.
+
+For Kubernetes, use `/livez` for startup and liveness, and `/readyz` for readiness
+on the configured port. The optional ETL API accepts this block under
+`replicator.health` and generates the probes automatically; enable it only with
+a replicator image that supports these endpoints.
+
 ## Recovery and operations
 
 Validate destination behavior, resource limits, and recovery procedures in a

@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 mod copy;
 mod monitor;
@@ -17,6 +20,7 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::{
+    activity::{ActivityKind, ActivityRegistration},
     bail,
     destination::{
         DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
@@ -250,6 +254,10 @@ where
                 .create_slot_with_transaction(&slot_name, config.replication_slot.failover)
                 .await?;
 
+            let activity_registration =
+                ActivityRegistration::register(ActivityKind::InitialTableCopy);
+            let activity_handle = activity_registration.handle();
+
             // We copy the table schema and write it both to the state store and
             // destination.
             //
@@ -303,6 +311,8 @@ where
             let replicated_table_schema =
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
+            activity_handle.record(Instant::now());
+
             let mut total_table_copy_rows = 0_u64;
             let mut total_table_copy_duration_secs = 0.0;
             let mut table_copy_barrier_required = false;
@@ -310,6 +320,7 @@ where
             // We check if the table should be copied, or we can skip it.
             if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
                 let result = table_copy(
+                    activity_handle.clone(),
                     &replication_transaction,
                     table_id,
                     replicated_table_schema.clone(),
@@ -354,6 +365,7 @@ where
             // fail since no transactions can be running while replication is
             // started.
             replication_transaction.commit().await?;
+            activity_handle.record(Instant::now());
 
             // If no table rows were written, call the method nonetheless to kickstart
             // table creation. Additionally, if any copy write was only accepted (and not
@@ -371,7 +383,7 @@ where
                 };
 
                 match completed_flush_result.into_result()? {
-                    DestinationWriteStatus::Durable => {}
+                    DestinationWriteStatus::Durable => activity_handle.record(Instant::now()),
                     DestinationWriteStatus::Accepted => bail!(
                         ErrorKind::DestinationError,
                         "Table copy durability barrier did not confirm durability"

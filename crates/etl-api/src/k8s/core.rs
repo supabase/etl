@@ -2,7 +2,7 @@ use etl_config::{
     Environment,
     shared::{
         DuckLakeCopyBufferConfig, DuckLakeMaintenanceMode, ReplicatorConfigWithoutSecrets,
-        SupabaseConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
+        ReplicatorHealthConfig, SupabaseConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
     },
 };
 use etl_maintenance::{
@@ -127,6 +127,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     destination: Destination,
     supabase_api_url: Option<&str>,
     ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
+    health: Option<ReplicatorHealthConfig>,
     tls_config: TlsConfig,
     wait: bool,
 ) -> Result<(), K8sCoreError> {
@@ -165,6 +166,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         pipeline.config,
         supabase_config,
         ducklake_copy_buffer_default,
+        health,
         tls_config,
     )?;
 
@@ -209,6 +211,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         &resource_prefix,
         &identity,
         ReplicatorWorkloadConfig {
+            health,
             replicator_image,
             replicator_resource_override,
             destination_type,
@@ -405,6 +408,7 @@ fn build_secrets_from_configs(
 /// pipeline, source, and destination configurations. It uses the provided
 /// trusted root certificates for TLS configuration. Secrets are managed
 /// separately through Kubernetes secret resources.
+#[expect(clippy::too_many_arguments)]
 fn build_replicator_config_without_secrets(
     pipeline_id: u64,
     source_config: StoredSourceConfig,
@@ -412,10 +416,12 @@ fn build_replicator_config_without_secrets(
     pipeline_config: StoredPipelineConfig,
     supabase_config: SupabaseConfigWithoutSecrets,
     ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
+    health: Option<ReplicatorHealthConfig>,
     tls_config: TlsConfig,
 ) -> Result<ReplicatorConfigWithoutSecrets, ValidationError> {
     let pg_connection_config = source_config.into_connection_config(tls_config);
     let config = ReplicatorConfigWithoutSecrets {
+        health,
         destination: destination_config
             .into_etl_config_with_ducklake_copy_buffer_default(ducklake_copy_buffer_default)
             .into(),
@@ -669,7 +675,7 @@ mod tests {
         SerializableSecretString,
         shared::{
             BigQueryTableOptions, BigQueryTableOptionsConfig, ClickHouseEngine,
-            DestinationConfigWithoutSecrets,
+            DestinationConfigWithoutSecrets, ReplicatorHealthConfig,
         },
     };
 
@@ -810,6 +816,7 @@ mod tests {
             pipeline_config,
             supabase_config,
             DuckLakeCopyBufferConfig::default(),
+            None,
             TlsConfig::disabled(),
         )
         .unwrap_err();
@@ -845,9 +852,15 @@ mod tests {
                     api_url: None,
                 },
                 api_default,
+                Some(ReplicatorHealthConfig::default()),
                 TlsConfig::disabled(),
             )
             .unwrap();
+
+            assert_eq!(config.health, Some(ReplicatorHealthConfig::default()));
+            let serialized = serde_json::to_value(&config).unwrap();
+            assert_eq!(serialized["health"]["port"], 9001);
+            assert_eq!(serialized["health"]["stall_timeout_ms"], 600_000);
 
             let DestinationConfigWithoutSecrets::Ducklake { copy_buffer, .. } = config.destination
             else {
@@ -1128,6 +1141,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             ReplicatorWorkloadConfig {
+                health: None,
                 replicator_image: "etl-replicator:test".to_owned(),
                 replicator_resource_override: None,
                 destination_type: DestinationType::ClickHouse { password_secret_required: false },
@@ -1150,6 +1164,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             ReplicatorWorkloadConfig {
+                health: None,
                 replicator_image: "etl-replicator:test".to_owned(),
                 replicator_resource_override: Some(PipelineReplicatorResourceOverrideConfig {
                     cpu_request_millicores: Some(500),
@@ -1175,6 +1190,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             ReplicatorWorkloadConfig {
+                health: None,
                 replicator_image: "etl-replicator:test".to_owned(),
                 replicator_resource_override: Some(
                     PipelineReplicatorResourceOverrideConfig::default(),

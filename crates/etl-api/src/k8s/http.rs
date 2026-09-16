@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, time::Duration};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
-use etl_config::Environment;
+use etl_config::{Environment, shared::ReplicatorHealthConfig};
 #[cfg(test)]
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::{
@@ -786,7 +786,7 @@ impl K8sClient for HttpK8sClient {
         let volumes = create_volumes_json(resource_prefix, &environment);
         let volume_mounts = create_volume_mounts_json(&environment);
 
-        let stateful_set_json = create_replicator_stateful_set_json(
+        let mut stateful_set_json = create_replicator_stateful_set_json(
             &self.k8s_config,
             resource_prefix,
             identity,
@@ -800,6 +800,9 @@ impl K8sClient for HttpK8sClient {
             volume_mounts,
             &resource_requirements,
         );
+        if let Some(health) = workload_config.health {
+            configure_replicator_probes(&mut stateful_set_json, health);
+        }
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
@@ -1792,6 +1795,31 @@ fn create_replicator_stateful_set_json(
     })
 }
 
+/// Adds opt-in activity probes to a newly built replicator Pod template.
+fn configure_replicator_probes(
+    stateful_set: &mut serde_json::Value,
+    health: ReplicatorHealthConfig,
+) {
+    let container = &mut stateful_set["spec"]["template"]["spec"]["containers"][0];
+    container["ports"].as_array_mut().unwrap().push(json!({
+        "name": "health",
+        "containerPort": health.port,
+        "protocol": "TCP",
+    }));
+    for (name, path, period, failures) in [
+        ("startupProbe", "/livez", 5, 60),
+        ("livenessProbe", "/livez", 30, 3),
+        ("readinessProbe", "/readyz", 10, 3),
+    ] {
+        container[name] = json!({
+            "httpGet": { "path": path, "port": "health" },
+            "periodSeconds": period,
+            "timeoutSeconds": 2,
+            "failureThreshold": failures,
+        });
+    }
+}
+
 /// Builds a VPA creation document or a merge patch that preserves its mode.
 ///
 /// Supply the initial mode only for creation. An update must omit it entirely
@@ -1867,7 +1895,7 @@ mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
-        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        ReplicatorHealthConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::{assert_json_snapshot, assert_snapshot};
 
@@ -2485,6 +2513,7 @@ mod tests {
         let environment = Environment::Prod;
         let base_config = "";
         let replicator_config = ReplicatorConfig {
+            health: None,
             destination: DestinationConfig::BigQuery {
                 project_id: "project-id".to_owned(),
                 dataset_id: "dataset-id".to_owned(),
@@ -3014,6 +3043,50 @@ mod tests {
     }
 
     #[test]
+    fn replicator_activity_probes_are_opt_in_and_preserve_metrics_and_grace() {
+        let mut stateful_set = create_replicator_stateful_set_json(
+            &default_k8s_config(),
+            "tenant-1-42",
+            &pipeline_runtime_identity(),
+            "tenant-1-42-replicator",
+            "example.com/replicator:latest",
+            Vec::new(),
+            json!({}),
+            json!([]),
+            json!([]),
+            Vec::new(),
+            Vec::new(),
+            &test_resource_requirements(&Environment::Dev),
+        );
+        let container = &stateful_set["spec"]["template"]["spec"]["containers"][0];
+        for name in ["startupProbe", "livenessProbe", "readinessProbe"] {
+            assert!(container.get(name).is_none());
+        }
+        configure_replicator_probes(
+            &mut stateful_set,
+            ReplicatorHealthConfig { port: 19001, ..Default::default() },
+        );
+        let pod = &stateful_set["spec"]["template"]["spec"];
+        assert_eq!(pod["terminationGracePeriodSeconds"], 300);
+        let container = &pod["containers"][0];
+        assert_eq!(container["ports"][0]["containerPort"], 9000);
+        assert_eq!(container["ports"][1]["containerPort"], 19001);
+        for (name, path, period, failures) in [
+            ("startupProbe", "/livez", 5, 60),
+            ("livenessProbe", "/livez", 30, 3),
+            ("readinessProbe", "/readyz", 10, 3),
+        ] {
+            assert_eq!(
+                container[name],
+                json!({
+                    "httpGet": { "path": path, "port": "health" },
+                    "periodSeconds": period, "timeoutSeconds": 2, "failureThreshold": failures,
+                })
+            );
+        }
+    }
+
+    #[test]
     fn replicator_vertical_pod_autoscaler_starts_in_recommendation_only_mode() {
         let identity = replicator_identity_with("tenant-1", PIPELINE_ID, REPLICATOR_ID);
         let autoscaler = create_replicator_vertical_pod_autoscaler_json(
@@ -3180,6 +3253,7 @@ mod tests {
                 "tenant-1-42",
                 &identity,
                 &ReplicatorWorkloadConfig {
+                    health: None,
                     replicator_image: "etl-replicator:test".to_owned(),
                     replicator_resource_override: Some(PipelineReplicatorResourceOverrideConfig {
                         cpu_request_millicores: Some(900),
