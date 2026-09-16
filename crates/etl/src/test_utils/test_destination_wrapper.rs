@@ -289,9 +289,19 @@ where
         let (wrapped_drop_result, pending_drop_result) = DropTableForCopyResult::new(());
         destination.drop_table_for_copy(replicated_table_schema, wrapped_drop_result).await?;
 
+        // A wrapped destination that reports shutdown is forwarded unchanged: the
+        // operation was not applied, so there is nothing to record and no scripted
+        // response fault to apply.
+        let completed_drop_result = pending_drop_result.await;
+        if completed_drop_result.is_shutdown() {
+            async_result.shutdown();
+
+            return Ok(());
+        }
+
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = apply_response_fault(fault, pending_drop_result.await.into_result()).await;
+        let result = apply_response_fault(fault, completed_drop_result.into_result()).await;
         let should_record_drop = result.is_ok();
         async_result.send(result);
 
@@ -346,9 +356,17 @@ where
             )
             .await?;
 
+        // See `drop_table_for_copy` for why a shutdown outcome is forwarded as is.
+        let completed_flush_result = pending_flush_result.await;
+        if completed_flush_result.is_shutdown() {
+            async_result.shutdown();
+
+            return Ok(());
+        }
+
         // We send the result back before doing the internal checks for this utility, to
         // avoid checking before the apply loop received the result.
-        let result = apply_response_fault(fault, pending_flush_result.await.into_result()).await;
+        let result = apply_response_fault(fault, completed_flush_result.into_result()).await;
         let should_record_table_rows = result.is_ok();
         async_result.send(result);
 
@@ -403,10 +421,18 @@ where
         let inner = Arc::clone(&self.inner);
         self.tasks
             .spawn_with(move || async move {
+                // See `drop_table_for_copy` for why a shutdown outcome is forwarded as is.
+                let completed_flush_result = pending_flush_result.await;
+                if completed_flush_result.is_shutdown() {
+                    async_result.shutdown();
+
+                    return;
+                }
+
                 // We send the result back before doing the internal checks for this utility, to
                 // avoid checking before the apply loop received the result.
                 let result =
-                    apply_response_fault(fault, pending_flush_result.await.into_result()).await;
+                    apply_response_fault(fault, completed_flush_result.into_result()).await;
                 let should_record_events = result.is_ok();
                 async_result.send(result);
 

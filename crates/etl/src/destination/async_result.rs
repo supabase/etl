@@ -14,7 +14,7 @@ use tracing::debug;
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    runtime::concurrency::{ShutdownResult, ShutdownRx},
+    runtime::concurrency::{Shutdown, ShutdownResult},
     schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
@@ -156,15 +156,42 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     pub dispatched_at: Instant,
 }
 
+/// Outcome a destination reports through an [`AsyncResult`].
+#[derive(Debug)]
+pub(crate) enum AsyncOutcome<T> {
+    /// The destination finished the operation with this result.
+    Reported(EtlResult<T>),
+    /// The destination is shutting down and did not apply the operation.
+    Shutdown,
+}
+
+impl<T> AsyncOutcome<T> {
+    /// Returns the reported result, turning a shutdown outcome into an error.
+    ///
+    /// Only callers that cannot act on a destination shutdown reach this with
+    /// [`AsyncOutcome::Shutdown`], and for them a destination that answers
+    /// with a shutdown instead of a result did not do the work.
+    fn into_result(self) -> EtlResult<T> {
+        match self {
+            Self::Reported(result) => result,
+            Self::Shutdown => Err(etl_error!(
+                ErrorKind::DestinationError,
+                "Destination reported shutdown instead of a result"
+            )),
+        }
+    }
+}
+
 /// Sender half of a typed asynchronous completion result.
 ///
 /// Destinations receive this handle from ETL and complete it once the operation
-/// is truly done. The method return value is reserved for immediate dispatch or
-/// setup failures before work has been accepted. ETL may wait on the pending
-/// side immediately or later, depending on the method.
+/// is truly done, through [`AsyncResult::send`] or, when they are shutting
+/// down, through [`AsyncResult::shutdown`]. The method return value is reserved
+/// for immediate dispatch or setup failures before work has been accepted. ETL
+/// may wait on the pending side immediately or later, depending on the method.
 #[derive(Debug)]
 pub struct AsyncResult<T> {
-    tx: oneshot::Sender<(Instant, EtlResult<T>)>,
+    tx: oneshot::Sender<(Instant, AsyncOutcome<T>)>,
 }
 
 impl<T> AsyncResult<T> {
@@ -182,8 +209,26 @@ impl<T> AsyncResult<T> {
     /// Sends the final result to the waiting receiver and records its
     /// completion instant.
     pub fn send(self, result: EtlResult<T>) {
+        self.complete(AsyncOutcome::Reported(result));
+    }
+
+    /// Reports that the destination is shutting down without having applied
+    /// the operation.
+    ///
+    /// ETL requests pipeline shutdown when it receives this outcome, so a
+    /// destination that stops on its own, for example together with the process
+    /// that embeds ETL, stops the pipeline through the same path an external
+    /// shutdown request takes. ETL records no table error for the abandoned
+    /// operation, so the next start resumes the table from its persisted state.
+    pub fn shutdown(self) {
+        self.complete(AsyncOutcome::Shutdown);
+    }
+
+    /// Sends an outcome to the waiting receiver and records its completion
+    /// instant.
+    fn complete(self, outcome: AsyncOutcome<T>) {
         let completed_at = Instant::now();
-        if self.tx.send((completed_at, result)).is_err() {
+        if self.tx.send((completed_at, outcome)).is_err() {
             debug!("async result receiver was already closed");
         }
     }
@@ -196,7 +241,7 @@ pin_project! {
     pub(crate) struct PendingAsyncResult<T, M> {
         metadata: Option<M>,
         #[pin]
-        rx: oneshot::Receiver<(Instant, EtlResult<T>)>,
+        rx: oneshot::Receiver<(Instant, AsyncOutcome<T>)>,
     }
 }
 
@@ -207,18 +252,18 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
         let this = self.project();
 
         match this.rx.poll(cx) {
-            Poll::Ready(Ok((completed_at, result))) => Poll::Ready(CompletedAsyncResult {
+            Poll::Ready(Ok((completed_at, outcome))) => Poll::Ready(CompletedAsyncResult {
                 metadata: this.metadata.take(),
                 completed_at,
-                result,
+                outcome,
             }),
             Poll::Ready(Err(_)) => Poll::Ready(CompletedAsyncResult {
                 metadata: this.metadata.take(),
                 completed_at: Instant::now(),
-                result: Err(etl_error!(
+                outcome: AsyncOutcome::Reported(Err(etl_error!(
                     ErrorKind::DestinationError,
                     "Async result channel closed before sending"
-                )),
+                ))),
             }),
             Poll::Pending => Poll::Pending,
         }
@@ -226,18 +271,31 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
 }
 
 impl<T, M> PendingAsyncResult<T, M> {
-    /// Waits for completion or returns when shutdown is requested.
+    /// Waits for completion or returns when shutdown is requested by either
+    /// side.
+    ///
+    /// A destination that answers with [`AsyncResult::shutdown`] requests
+    /// pipeline shutdown here, so the caller stops the same way whether the
+    /// pipeline's own signal or the destination's outcome came first.
     pub(crate) async fn with_shutdown(
         self,
-        shutdown_rx: &mut ShutdownRx,
+        shutdown: &mut Shutdown,
     ) -> ShutdownResult<CompletedAsyncResult<T, M>, ()> {
-        tokio::select! {
+        let completed = tokio::select! {
             biased;
 
-            _ = shutdown_rx.changed() => ShutdownResult::Shutdown(()),
+            _ = shutdown.changed() => return ShutdownResult::Shutdown(()),
 
-            completed = self => ShutdownResult::Ok(completed),
+            completed = self => completed,
+        };
+
+        if completed.is_shutdown() {
+            shutdown.request();
+
+            return ShutdownResult::Shutdown(());
         }
+
+        ShutdownResult::Ok(completed)
     }
 }
 
@@ -248,19 +306,29 @@ pub(crate) struct CompletedAsyncResult<T, M> {
     metadata: Option<M>,
     /// Instant at which the sender reported completion.
     completed_at: Instant,
-    /// Final operation result.
-    result: EtlResult<T>,
+    /// Outcome reported by the destination.
+    outcome: AsyncOutcome<T>,
 }
 
 impl<T, M> CompletedAsyncResult<T, M> {
+    /// Returns true when the destination reported that it is shutting down.
+    pub(crate) fn is_shutdown(&self) -> bool {
+        matches!(self.outcome, AsyncOutcome::Shutdown)
+    }
+
     /// Returns the final result.
+    ///
+    /// Callers that act on a destination shutdown either check
+    /// [`Self::is_shutdown`] first or wait through
+    /// [`PendingAsyncResult::with_shutdown`], which resolves that outcome for
+    /// them.
     pub(crate) fn into_result(self) -> EtlResult<T> {
-        self.result
+        self.outcome.into_result()
     }
 
     /// Returns metadata, the completion instant, and the final result.
     pub(crate) fn into_parts_with_completion(self) -> (Option<M>, Instant, EtlResult<T>) {
-        (self.metadata, self.completed_at, self.result)
+        (self.metadata, self.completed_at, self.outcome.into_result())
     }
 }
 
@@ -309,7 +377,7 @@ mod tests {
         let mut pending_result =
             PendingAsyncResult::<u64, ApplyLoopAsyncResultMetadata> { metadata: None, rx };
 
-        result_tx.send((Instant::now(), Ok(7))).unwrap();
+        result_tx.send((Instant::now(), AsyncOutcome::Reported(Ok(7)))).unwrap();
 
         let completed = std::future::poll_fn(|cx| Pin::new(&mut pending_result).poll(cx)).await;
         let (metadata, _, result) = completed.into_parts_with_completion();
@@ -341,6 +409,30 @@ mod tests {
         let result = pending_result.with_shutdown(&mut shutdown_rx).await;
 
         assert!(matches!(result, ShutdownResult::Shutdown(())));
+    }
+
+    #[tokio::test]
+    async fn pending_async_result_requests_shutdown_when_the_destination_reports_it() {
+        let (_shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
+        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        result_tx.shutdown();
+
+        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
+
+        assert!(matches!(result, ShutdownResult::Shutdown(())));
+        assert!(shutdown_rx.is_requested());
+    }
+
+    #[tokio::test]
+    async fn reported_shutdown_surfaces_as_an_error_for_callers_that_ignore_it() {
+        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
+        result_tx.shutdown();
+
+        let completed = pending_result.await;
+
+        assert!(completed.is_shutdown());
+        let err = completed.into_result().unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DestinationError);
     }
 
     #[tokio::test]

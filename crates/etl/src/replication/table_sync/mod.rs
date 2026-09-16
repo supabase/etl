@@ -29,7 +29,7 @@ use crate::{
     replication::state::{TableState, TableStateType},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerState,
-        concurrency::{ShutdownResult, ShutdownRx},
+        concurrency::{Shutdown, ShutdownResult},
     },
     schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
     store::{PipelineStore, SchemaStore, StateStore},
@@ -104,7 +104,7 @@ pub(crate) async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     out_of_band_source_pool: OutOfBandSourcePool,
-    mut shutdown_rx: ShutdownRx,
+    mut shutdown: Shutdown,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableSyncResult>
@@ -212,7 +212,7 @@ where
                     .drop_table_for_copy(&current_replication_table_schema, drop_result)
                     .await?;
                 let ShutdownResult::Ok(completed_drop_result) =
-                    pending_drop_result.with_shutdown(&mut shutdown_rx).await
+                    pending_drop_result.with_shutdown(&mut shutdown).await
                 else {
                     return Ok(TableSyncResult::Stopped);
                 };
@@ -320,7 +320,7 @@ where
                     out_of_band_source_pool.clone(),
                     Duration::from_millis(config.table_sync_monitor_refresh_interval_ms),
                     config.batch.clone(),
-                    shutdown_rx.clone(),
+                    shutdown.clone(),
                     destination.clone(),
                     memory_monitor.clone(),
                     batch_memory_governor.clone(),
@@ -365,7 +365,7 @@ where
                     .write_table_rows(&replicated_table_schema, None, Vec::new(), flush_result)
                     .await?;
                 let ShutdownResult::Ok(completed_flush_result) =
-                    pending_flush_result.with_shutdown(&mut shutdown_rx).await
+                    pending_flush_result.with_shutdown(&mut shutdown).await
                 else {
                     return Ok(TableSyncResult::Stopped);
                 };
@@ -410,7 +410,7 @@ where
     // We also wait to be signaled to catch up with the main apply worker up to a
     // specific lsn.
     let result = table_sync_worker_state
-        .wait_for_state_type(&[TableStateType::Catchup], shutdown_rx.clone())
+        .wait_for_state_type(&[TableStateType::Catchup], shutdown.clone())
         .await;
 
     // If we are told to shut down while waiting for a state change, we will signal

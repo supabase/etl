@@ -23,7 +23,7 @@ use crate::{
     replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext, WorkerType},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::ShutdownRx,
+        concurrency::Shutdown,
         error_policy::{RetryDirective, build_error_handling_policy},
     },
     store::{PipelineStore, StateStore, TableStateLifecycleStore},
@@ -81,7 +81,7 @@ pub(crate) struct ApplyWorker<S, D> {
     store: S,
     destination: D,
     out_of_band_source_pool: OutOfBandSourcePool,
-    shutdown_rx: ShutdownRx,
+    shutdown: Shutdown,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -102,7 +102,7 @@ impl<S, D> ApplyWorker<S, D> {
         store: S,
         destination: D,
         out_of_band_source_pool: OutOfBandSourcePool,
-        shutdown_rx: ShutdownRx,
+        shutdown: Shutdown,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
     ) -> Self {
@@ -120,7 +120,7 @@ impl<S, D> ApplyWorker<S, D> {
             store,
             destination,
             out_of_band_source_pool,
-            shutdown_rx,
+            shutdown,
             table_sync_worker_permits,
             memory_monitor,
             batch_memory_governor,
@@ -143,7 +143,7 @@ where
     /// immediately propagated.
     async fn handle_apply_worker_error(
         config: &PipelineConfig,
-        shutdown_rx: &mut ShutdownRx,
+        shutdown: &mut Shutdown,
         retry_attempts: &mut u32,
         err: EtlError,
     ) -> EtlResult<bool> {
@@ -193,7 +193,7 @@ where
         tokio::select! {
             biased;
 
-            _ = shutdown_rx.changed() => {
+            _ = shutdown.changed() => {
                 info!("shutting down apply worker while waiting to retry");
                 Ok(true)
             }
@@ -231,7 +231,7 @@ where
     /// `table_error_retry_max_attempts`) so retry behavior is
     /// coherent across worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
-        let mut retry_shutdown_rx = self.shutdown_rx.clone();
+        let mut retry_shutdown = self.shutdown.clone();
         let mut retry_attempts: u32 = 0;
 
         loop {
@@ -241,7 +241,7 @@ where
                 Err(err) => {
                     let should_shutdown = Self::handle_apply_worker_error(
                         self.config.as_ref(),
-                        &mut retry_shutdown_rx,
+                        &mut retry_shutdown,
                         &mut retry_attempts,
                         err,
                     )
@@ -272,7 +272,7 @@ where
         )
         .await?;
 
-        let attempt_shutdown_rx = self.shutdown_rx.clone();
+        let attempt_shutdown = self.shutdown.clone();
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
             config: Arc::clone(&self.config),
@@ -280,7 +280,7 @@ where
             store: self.store.clone(),
             destination: self.destination.clone(),
             out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-            shutdown_rx: attempt_shutdown_rx.clone(),
+            shutdown: attempt_shutdown.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
             batch_memory_governor: self.batch_memory_governor.clone(),
@@ -295,7 +295,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            attempt_shutdown_rx,
+            attempt_shutdown,
             self.memory_monitor.clone(),
             self.batch_memory_governor.clone(),
             None,
