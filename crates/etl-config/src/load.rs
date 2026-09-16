@@ -263,9 +263,8 @@ mod tests {
             "json" => serde_json::to_string_pretty(&original_config).unwrap(),
             "yaml" | "yml" => {
                 // YAML serialization for externally tagged enums doesn't match
-                // what config crate expects For now, manually
-                // construct YAML that config
-                // crate can deserialize
+                // what config crate expects For now, manually construct YAML
+                // that config crate can deserialize
                 format!(
                     "name: \"{}\"\nmode:\n  disk:\n    path: \"{}\"\n    max_size: {}\n",
                     original_config.name,

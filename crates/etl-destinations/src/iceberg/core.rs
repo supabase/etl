@@ -45,9 +45,9 @@ fn iceberg_sequence_key(sequence_key: EventSequenceKey) -> String {
 
 /// Converts a source table name to an Iceberg changelog table name.
 ///
-/// Creates a standardized naming convention for Iceberg tables by combining
-/// the schema and table name with a `_changelog` suffix to distinguish
-/// CDC tables from regular data tables.
+/// Creates a standardized naming convention for Iceberg tables by combining the
+/// schema and table name with a `_changelog` suffix to distinguish CDC tables
+/// from regular data tables.
 pub fn table_name_to_iceberg_table_name(
     table_name: &TableName,
     single_destination_namespace: bool,
@@ -190,8 +190,8 @@ where
         // Check if metadata exists for this table.
         //
         // If no metadata exists, it means the table was never created in
-        // Iceberg (e.g., due to errors during copy). In this case, we
-        // skip the truncate since there's nothing to truncate.
+        // Iceberg (e.g., due to errors during copy). In this case, we skip the
+        // truncate since there's nothing to truncate.
         let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             warn!(
                 %table_id,
@@ -205,9 +205,9 @@ where
             }
             DestinationTableSchema::Creating { .. } => {
                 // A truncate-only replay reaches this path before any earlier
-                // DML can recover the marker. The drop/create
-                // pair below is itself the idempotent recovery
-                // operation for the recorded target.
+                // DML can recover the marker. The drop/create pair below is
+                // itself the idempotent recovery operation for the recorded
+                // target.
                 ensure_destination_schema_matches_metadata(
                     "Iceberg",
                     table_id,
@@ -245,9 +245,9 @@ where
         };
 
         // Persist a recovery marker before creating the intentional
-        // missing-table window. If replay reaches earlier DML first,
-        // normal Creating recovery recreates the table so the batch can
-        // advance to this truncate again.
+        // missing-table window. If replay reaches earlier DML first, normal
+        // Creating recovery recreates the table so the batch can advance to
+        // this truncate again.
         self.store.store_destination_table_metadata(table_id, recreating_metadata.clone()).await?;
 
         self.client
@@ -301,9 +301,9 @@ where
     /// Writes table-copy rows to the Iceberg destination as insert entries.
     ///
     /// Prepares the target table for streaming, augments each row with CDC
-    /// metadata (operation type and sequence number), and inserts the rows
-    /// into the Iceberg table. Table-copy rows are emitted as `Insert`
-    /// changelog entries in this context.
+    /// metadata (operation type and sequence number), and inserts the rows into
+    /// the Iceberg table. Table-copy rows are emitted as `Insert` changelog
+    /// entries in this context.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -311,8 +311,7 @@ where
     ) -> EtlResult<()> {
         let (namespace, iceberg_table_name) = {
             // We hold the lock for the entire preparation to avoid race
-            // conditions since the consistency of this code path is
-            // critical.
+            // conditions since the consistency of this code path is critical.
             let mut inner = self.inner.lock().await;
             self.prepare_table_for_writes(&mut inner, replicated_table_schema).await?
         };
@@ -334,16 +333,15 @@ where
     ///
     /// Handles a stream of CDC events by batching non-truncate events by table
     /// ID and processing them concurrently. Truncate events are processed
-    /// separately and deduplicated for efficiency. Each event is augmented
-    /// with CDC metadata including its operation type and DML event sequence
-    /// key.
+    /// separately and deduplicated for efficiency. Each event is augmented with
+    /// CDC metadata including its operation type and DML event sequence key.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut events_iter = events.into_iter().peekable();
 
         while events_iter.peek().is_some() {
             // Maps table ID to (schema, rows); schema is the first one seen for
-            // that table. Once schema change support is
-            // implemented, we will re-implement this.
+            // that table. Once schema change support is implemented, we will
+            // re-implement this.
             let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
                 HashMap::new();
 
@@ -433,9 +431,8 @@ where
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (namespace, iceberg_table_name) = {
                         // We hold the lock for the entire preparation to avoid
-                        // race conditions
-                        // since the consistency of this code path is
-                        // critical.
+                        // race conditions since the consistency of this code
+                        // path is critical.
                         let mut inner = self.inner.lock().await;
                         self.prepare_table_for_writes(&mut inner, &replicated_table_schema).await?
                     };
@@ -456,9 +453,9 @@ where
             // Collect and deduplicate schemas from all truncate events.
             //
             // This is done as an optimization since if we have multiple tables
-            // being truncated in a row without applying other
-            // events in the meanwhile, it doesn't make any sense to
-            // create new empty tables for each of them.
+            // being truncated in a row without applying other events in the
+            // meanwhile, it doesn't make any sense to create new empty tables
+            // for each of them.
             let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
 
             while let Some(Event::Truncate(_)) = events_iter.peek() {
@@ -567,9 +564,8 @@ where
         Ok((namespace, iceberg_table_name))
     }
 
-    /// Creates a namespace if it is missing in the destination.
-    /// Once created adds it to the created_namespaces HashSet to
-    /// avoid creating it again.
+    /// Creates a namespace if it is missing in the destination. Once created
+    /// adds it to the created_namespaces HashSet to avoid creating it again.
     async fn create_namespace_if_missing(
         &self,
         inner: &mut Inner,
@@ -649,8 +645,8 @@ where
     /// Writes table rows to the destination as upsert operations.
     ///
     /// Augments each row with CDC metadata and inserts them into the
-    /// corresponding Iceberg changelog table. All rows are treated
-    /// as upsert operations with generated sequence numbers.
+    /// corresponding Iceberg changelog table. All rows are treated as upsert
+    /// operations with generated sequence numbers.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -667,9 +663,9 @@ where
 
     /// Processes and writes CDC events to the destination tables.
     ///
-    /// Handles insert, update, delete, and truncate events by converting
-    /// them to appropriate Iceberg operations. Events are batched by table
-    /// and processed concurrently for optimal performance.
+    /// Handles insert, update, delete, and truncate events by converting them
+    /// to appropriate Iceberg operations. Events are batched by table and
+    /// processed concurrently for optimal performance.
     async fn write_events(
         &self,
         events: Vec<Event>,
@@ -806,11 +802,11 @@ fn find_unique_column_name(column_schemas: &[ColumnSchema], new_column_name: &st
     }
 }
 
-/// Converts a Postgres schema name to a S3 tables namespace
-/// such that the naming rules of the namespace are followed.
+/// Converts a Postgres schema name to a S3 tables namespace such that the
+/// naming rules of the namespace are followed.
 fn schema_to_namespace(schema: &str) -> String {
-    // Convert to lowercase and replace invalid characters with underscores.
-    // S3 Tables namespaces can only contain lowercase letters, numbers, and
+    // Convert to lowercase and replace invalid characters with underscores. S3
+    // Tables namespaces can only contain lowercase letters, numbers, and
     // underscores.
     let mut namespace: String = schema
         .to_lowercase()
@@ -877,8 +873,8 @@ mod tests {
     /// Creates a test column schema with common defaults.
     ///
     /// This helper simplifies column schema creation in tests by providing
-    /// sensible defaults for fields that are typically not relevant to the
-    /// test logic.
+    /// sensible defaults for fields that are typically not relevant to the test
+    /// logic.
     fn test_column(
         name: &str,
         typ: Type,
@@ -1152,8 +1148,8 @@ mod tests {
 
     #[test]
     fn schema_to_namespace_max_length() {
-        // PostgreSQL max identifier length is 63 bytes (NAMEDATALEN-1).
-        // Test with a 63-character schema name.
+        // PostgreSQL max identifier length is 63 bytes (NAMEDATALEN-1). Test
+        // with a 63-character schema name.
         let long_schema = "a".repeat(63);
         let result = schema_to_namespace(&long_schema);
         assert_eq!(result, long_schema);

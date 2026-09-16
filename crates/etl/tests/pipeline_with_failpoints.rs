@@ -676,8 +676,8 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     sync_done_notify.notified().await;
 
     // Make the first apply-owned table event a no-op DDL. ETL stores a new
-    // schema snapshot for its transactional DDL message, but pgoutput keeps
-    // the warmed relation cache and therefore emits no protocol relation.
+    // schema snapshot for its transactional DDL message, but pgoutput keeps the
+    // warmed relation cache and therefore emits no protocol relation.
     let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
 
     database
@@ -936,10 +936,10 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     pipeline.start().await.unwrap();
     finished_copy_notify.notified().await;
 
-    // Advance the physical schema while both logical connections are alive,
-    // but emit no DML that would make pgoutput send a new Relation. The DDL
-    // event trigger emits a transactional logical message. Keep the table-sync
-    // pause armed until the apply slot confirms a WAL frontier after that
+    // Advance the physical schema while both logical connections are alive, but
+    // emit no DML that would make pgoutput send a new Relation. The DDL event
+    // trigger emits a transactional logical message. Keep the table-sync pause
+    // armed until the apply slot confirms a WAL frontier after that
     // transaction, so the later catchup target must include the DDL.
     database
         .run_sql(&format!(
@@ -1183,12 +1183,11 @@ impl Destination for HoldingDmlDispatchDestination {
 /// Observes fresh feedback on the same WAL sender throughout a suspension.
 ///
 /// Ignore the initial reply timestamp and observe fresh replies across three
-/// PostgreSQL timeout periods.
-/// Poll at PostgreSQL's half-timeout keepalive cadence, allowing two full
-/// timeouts to observe each reply. A missing or replaced WAL sender fails the
-/// assertion, so reconnecting cannot satisfy it. When DML dispatch is held,
-/// every observed slot checkpoint must remain below the first held DML event's
-/// transaction commit LSN.
+/// PostgreSQL timeout periods. Poll at PostgreSQL's half-timeout keepalive
+/// cadence, allowing two full timeouts to observe each reply. A missing or
+/// replaced WAL sender fails the assertion, so reconnecting cannot satisfy it.
+/// When DML dispatch is held, every observed slot checkpoint must remain below
+/// the first held DML event's transaction commit LSN.
 async fn assert_apply_feedback_during_stall(
     database: &PgDatabase<Client>,
     pipeline_id: PipelineId,
@@ -1348,8 +1347,8 @@ async fn apply_feedback_continues_during_table_sync_catchup() {
 
     tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, catchup_entered.notified()).await.unwrap();
 
-    // The failpoint is reached only after apply requests catchup and waits
-    // for this worker. Keep it suspended across multiple PostgreSQL timeouts.
+    // The failpoint is reached only after apply requests catchup and waits for
+    // this worker. Keep it suspended across multiple PostgreSQL timeouts.
     assert_apply_feedback_during_stall(&database, pipeline_id, None).await;
 
     release_tx.send(()).unwrap();

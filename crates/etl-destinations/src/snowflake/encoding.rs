@@ -116,8 +116,8 @@ impl Serialize for CellSerializer<'_> {
                 ser.serialize_f64(*f)
             }
             Cell::Numeric(n) => serialize_pg_numeric(n, ser),
-            // collect_str: Display::fmt writes directly into the JSON serializer's
-            // output buffer, avoiding an intermediate String allocation.
+            // collect_str: Display::fmt writes directly into the JSON serializer's output buffer,
+            // avoiding an intermediate String allocation.
             Cell::Date(d) => ser.collect_str(&d.format(DATE_FORMAT)),
             Cell::Time(t) => ser.collect_str(&t.format(TIME_FORMAT)),
             Cell::TimeTz(t) => ser.collect_str(t),

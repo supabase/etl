@@ -563,8 +563,8 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
         .await;
 
     // Both schema versions occur in one transaction. On retry, the first
-    // Relation must resolve the pre-DDL schema instead of reusing the
-    // post-DDL runtime schema cached by the failed attempt.
+    // Relation must resolve the pre-DDL schema instead of reusing the post-DDL
+    // runtime schema cached by the failed attempt.
     let transaction = database.begin_transaction().await;
     transaction
         .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before", &1])

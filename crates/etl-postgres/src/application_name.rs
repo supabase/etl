@@ -2,9 +2,8 @@
 //!
 //! Worker connections are tagged as `{base}:apply:{pipeline_id}` and
 //! `{base}:table_sync:{pipeline_id}:{table_oid}` so they can be identified in
-//! `pg_stat_activity` and targeted individually (e.g. by
-//! `pg_terminate_backend` in tests). Connections not owned by a worker keep
-//! the plain base name.
+//! `pg_stat_activity` and targeted individually (e.g. by `pg_terminate_backend`
+//! in tests). Connections not owned by a worker keep the plain base name.
 
 use tracing::debug;
 
@@ -49,10 +48,10 @@ pub fn table_sync_worker_application_name(
 /// Appends a worker suffix to `base`, clamping `base` so the result fits the
 /// Postgres limit with the suffix intact.
 ///
-/// The suffix carries the worker identity that tests and operators match on,
-/// so on overflow the base is truncated instead of letting Postgres cut the
-/// tail. In-repo bases fit without clamping while pipeline id and table oid
-/// stay within 15 digits combined; beyond that the suffix still survives.
+/// The suffix carries the worker identity that tests and operators match on, so
+/// on overflow the base is truncated instead of letting Postgres cut the tail.
+/// In-repo bases fit without clamping while pipeline id and table oid stay
+/// within 15 digits combined; beyond that the suffix still survives.
 fn with_worker_suffix(base: &str, suffix: &str) -> String {
     let max_allowed_len = MAX_APPLICATION_NAME_LENGTH.saturating_sub(suffix.len());
     if base.len() > max_allowed_len {

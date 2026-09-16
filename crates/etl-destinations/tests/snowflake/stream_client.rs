@@ -216,8 +216,8 @@ async fn channel_reopen_prevents_previous_sequencer_from_committing() {
             build_batch(&columns, &[TableRow::new(vec![Cell::I32(2)])], &current_offset);
 
         // A fenced append may report a stale sequencer or be acknowledged as a
-        // no-op. Only durable status and table contents prove that its
-        // row could not commit.
+        // no-op. Only durable status and table contents prove that its row
+        // could not commit.
         match stream
             .insert_rows(
                 config.database(),

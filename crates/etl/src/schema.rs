@@ -56,8 +56,7 @@ fn validate_mask_column_names(
     Ok(())
 }
 
-/// Builds raw mask bytes from schema order and a validated set of column
-/// names.
+/// Builds raw mask bytes from schema order and a validated set of column names.
 fn build_mask_bytes(table_schema: &TableSchema, column_names: &HashSet<String>) -> Vec<u8> {
     table_schema
         .column_schemas
@@ -119,19 +118,18 @@ impl ReplicationMask {
         // where the schema has diverged, we cannot detect the difference.
         //
         // How schema divergence occurs: When progress tracking fails and the
-        // system restarts, we may receive a `Relation` message
-        // reflecting the *current* table schema rather than the schema
-        // at the time the in-flight events were emitted. This is how
-        // Postgres handles initial `Relation` messages on reconnection.
-        // It's not the wrong behavior since the data has the columns
-        // that it announces, but it conflicts with our schema
-        // management logic. TODO: We are still debugging this
+        // system restarts, we may receive a `Relation` message reflecting the
+        // *current* table schema rather than the schema at the time the
+        // in-flight events were emitted. This is how Postgres handles initial
+        // `Relation` messages on reconnection. It's not the wrong behavior
+        // since the data has the columns that it announces, but it conflicts
+        // with our schema management logic. TODO: We are still debugging this
         // case to validate when it happens, since it's hard to  reproduce.
         // Nonetheless, the error should be raised.
         //
         // Invariant: Our schema management assumes the schema in `Relation`
-        // messages is consistent with the schema under which the
-        // corresponding row events were produced.
+        // messages is consistent with the schema under which the corresponding
+        // row events were produced.
         //
         // In the future we might want to implement a system to go around this
         // edge case.
@@ -145,14 +143,14 @@ impl ReplicationMask {
     ///
     /// This method attempts to validate that all replicated column names exist
     /// in the schema. If validation succeeds, it builds a mask based on
-    /// matching columns. If validation fails (unknown columns are present),
-    /// it returns a mask with all columns marked as replicated.
+    /// matching columns. If validation fails (unknown columns are present), it
+    /// returns a mask with all columns marked as replicated.
     ///
     /// This fallback behavior handles the case where Postgres sends a
     /// `Relation` message on reconnection with the current schema, but the
-    /// stored schema is from an earlier point before DDL changes. Rather
-    /// than failing, we enable all columns and let the system converge when
-    /// the actual DDL message is replayed.
+    /// stored schema is from an earlier point before DDL changes. Rather than
+    /// failing, we enable all columns and let the system converge when the
+    /// actual DDL message is replayed.
     pub fn build_or_all(
         table_schema: &TableSchema,
         replicated_column_names: &HashSet<String>,
@@ -360,18 +358,18 @@ impl<I: Iterator> ExactSizeIterator for SizedIterator<I> {
 
 /// Maps exact PostgreSQL column names into a destination namespace.
 ///
-/// The mapping is idempotent and defines both the physical destination name
-/// and which source names collide there. Logical columns remain identified by
-/// their PostgreSQL ordinal positions. A rename with the same mapped name
-/// remains in the logical diff but requires no physical operation.
+/// The mapping is idempotent and defines both the physical destination name and
+/// which source names collide there. Logical columns remain identified by their
+/// PostgreSQL ordinal positions. A rename with the same mapped name remains in
+/// the logical diff but requires no physical operation.
 ///
 /// A mapping is an integration contract with a destination's identifier
-/// semantics, not a property discovered from each table. Initial creation,
-/// data writes, schema planning, and recovery must use the same mapping. If a
-/// destination release or configuration change alters those semantics,
-/// existing tables may need compatibility handling or a resync before this
-/// mapping can change safely. Otherwise the planner could reject a valid
-/// schema, miss a collision, or classify a required rename as a no-op.
+/// semantics, not a property discovered from each table. Initial creation, data
+/// writes, schema planning, and recovery must use the same mapping. If a
+/// destination release or configuration change alters those semantics, existing
+/// tables may need compatibility handling or a resync before this mapping can
+/// change safely. Otherwise the planner could reject a valid schema, miss a
+/// collision, or classify a required rename as a no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnNameMapping {
     /// Preserves the source name exactly.
@@ -430,8 +428,8 @@ pub struct ReplicatedTableSchema {
     replication_mask: ReplicationMask,
     /// Cached number of replicated columns.
     replicated_column_count: usize,
-    /// A bitmask where 1 indicates the column at that index is a replicated
-    /// row identity column used by logical replication.
+    /// A bitmask where 1 indicates the column at that index is a replicated row
+    /// identity column used by logical replication.
     identity_mask: IdentityMask,
     /// Cached number of replicated identity columns.
     identity_column_count: usize,
@@ -456,9 +454,9 @@ impl ReplicatedTableSchema {
     /// on PostgreSQL validating that the source identity is covered;
     /// insert-only publications do not need identity data.
     ///
-    /// This constructor infers the semantic identity type from the table
-    /// schema and supplied masks, and caches the derived column counts needed
-    /// by the iterator accessors.
+    /// This constructor infers the semantic identity type from the table schema
+    /// and supplied masks, and caches the derived column counts needed by the
+    /// iterator accessors.
     pub fn from_masks(
         table_schema: Arc<TableSchema>,
         replication_mask: ReplicationMask,
@@ -578,8 +576,8 @@ impl ReplicatedTableSchema {
     /// [`ExactSizeIterator`].
     pub fn column_schemas(&self) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
         // Assuming that the schema is created via the constructor, we can
-        // safely assume that the column schemas and replication mask
-        // are of the same length.
+        // safely assume that the column schemas and replication mask are of the
+        // same length.
         debug_assert!(
             self.replication_mask.len() == self.table_schema.column_schemas.len(),
             "the replication mask columns have a different len from the table schema columns, \
@@ -722,8 +720,8 @@ impl ReplicatedTableSchema {
 
         // Once ordered by `attnum`, one linear merge classifies the endpoint
         // difference. Planning happens afterward because a rename after-name
-        // may still be occupied by a higher-`attnum` column that is
-        // itself renamed or dropped by the same endpoint transition.
+        // may still be occupied by a higher-`attnum` column that is itself
+        // renamed or dropped by the same endpoint transition.
         let mut before_index = 0;
         let mut after_index = 0;
         let mut added_columns = Vec::new();
@@ -762,8 +760,8 @@ impl ReplicatedTableSchema {
                 }
                 Ordering::Equal => {
                     // Equal `attnum` means the same logical column. A rename
-                    // and its metadata changes therefore
-                    // stay grouped even when the endpoint name changed.
+                    // and its metadata changes therefore stay grouped even when
+                    // the endpoint name changed.
                     if let Some(change) = ColumnMetadataChange::between(before_column, after_column)
                     {
                         altered_columns.push(change);
@@ -862,8 +860,8 @@ impl ReplicatedTableSchema {
 
     /// Returns replicated columns with destination-mapped names.
     ///
-    /// Source schema metadata remains unchanged; callers should use these
-    /// owned columns whenever names cross a destination boundary.
+    /// Source schema metadata remains unchanged; callers should use these owned
+    /// columns whenever names cross a destination boundary.
     pub fn destination_column_schemas(
         &self,
         column_name_mapping: ColumnNameMapping,
@@ -871,8 +869,7 @@ impl ReplicatedTableSchema {
         self.column_schemas().map(move |column| column_name_mapping.map_column_schema(column))
     }
 
-    /// Builds the primary-key identity mask within the replicated schema
-    /// width.
+    /// Builds the primary-key identity mask within the replicated schema width.
     fn primary_key_identity_mask(
         table_schema: &TableSchema,
         replication_mask: &ReplicationMask,
@@ -899,8 +896,8 @@ impl ReplicatedTableSchema {
     ///
     /// The inference is structural: if the identity mask selects the same
     /// current replicated columns as the primary key mask, the result is
-    /// [`IdentityType::PrimaryKey`] even if the original source mode might
-    /// have been `USING INDEX`.
+    /// [`IdentityType::PrimaryKey`] even if the original source mode might have
+    /// been `USING INDEX`.
     fn infer_identity_type(
         table_schema: &TableSchema,
         replication_mask: &ReplicationMask,
@@ -941,8 +938,8 @@ impl ReplicatedTableSchema {
 
 /// One endpoint-to-endpoint metadata diff for an existing logical column.
 ///
-/// The endpoint schemas have the same PostgreSQL ordinal position, which is
-/// the logical-column identity used by diffing. Their exact source names and
+/// The endpoint schemas have the same PostgreSQL ordinal position, which is the
+/// logical-column identity used by diffing. Their exact source names and
 /// metadata remain unmodified by destination identifier rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnMetadataChange {
@@ -1610,8 +1607,7 @@ impl SchemaOperationPlanner {
                 };
 
                 // Consume the free after-name, release the before-name, and
-                // wake the rename waiting for that released
-                // name.
+                // wake the rename waiting for that released name.
                 let before_name = rename.before_column_schema.name.clone();
                 self.occupied_destination_names.remove(&before_name);
                 self.occupied_destination_names.insert(rename.after_name.clone());
@@ -1633,9 +1629,8 @@ impl SchemaOperationPlanner {
             }
 
             // With no free after-name, every valid remaining component is a
-            // cycle. Break the smallest-ordinal component with one
-            // reserved temporary name; ordinary ready processing
-            // then unwinds the cycle.
+            // cycle. Break the smallest-ordinal component with one reserved
+            // temporary name; ordinary ready processing then unwinds the cycle.
             let Some((&ordinal_position, rename)) = pending_renames.first_key_value() else {
                 break;
             };

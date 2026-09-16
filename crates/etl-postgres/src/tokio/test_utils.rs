@@ -285,8 +285,8 @@ impl<G: GenericClient> PgDatabase<G> {
 
     /// Inserts multiple rows using Postgres's `generate_series` function.
     ///
-    /// Generates and inserts rows with values created by `generate_series`
-    /// for efficient bulk data insertion during testing.
+    /// Generates and inserts rows with values created by `generate_series` for
+    /// efficient bulk data insertion during testing.
     pub async fn insert_generate_series(
         &self,
         table_name: TableName,
@@ -312,8 +312,8 @@ impl<G: GenericClient> PgDatabase<G> {
     /// Updates rows in the table with new values.
     ///
     /// Sets the specified columns to new values for rows matching the WHERE
-    /// clause. If no WHERE clause is provided, updates all rows in the
-    /// table. Returns the number of rows affected.
+    /// clause. If no WHERE clause is provided, updates all rows in the table.
+    /// Returns the number of rows affected.
     pub async fn update_values(
         &self,
         table_name: TableName,
@@ -368,8 +368,8 @@ impl<G: GenericClient> PgDatabase<G> {
     ///
     /// Sets columns using raw SQL expressions for rows matching the WHERE
     /// conditions. This is useful for updates like `age = age + 100` or
-    /// `description = description || '_updated'`. Returns the number of
-    /// rows affected.
+    /// `description = description || '_updated'`. Returns the number of rows
+    /// affected.
     pub async fn update_with_expressions(
         &self,
         table_name: TableName,
@@ -423,8 +423,8 @@ impl<G: GenericClient> PgDatabase<G> {
 
     /// Queries values from a single column with optional WHERE clause.
     ///
-    /// Returns all values from the specified column, optionally filtered
-    /// by the provided WHERE condition.
+    /// Returns all values from the specified column, optionally filtered by the
+    /// provided WHERE condition.
     pub async fn query_table<T>(
         &self,
         table_name: &TableName,
@@ -476,8 +476,8 @@ impl<G: GenericClient> PgDatabase<G> {
             return Ok(Some(ReplicationSlotState::Active));
         }
 
-        // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
-        // A slot is invalidated when wal_status is 'lost'
+        // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost' A
+        // slot is invalidated when wal_status is 'lost'
         let wal_status: Option<&str> = row.get(1);
         if wal_status == Some("lost") {
             Ok(Some(ReplicationSlotState::Invalidated))
@@ -489,9 +489,9 @@ impl<G: GenericClient> PgDatabase<G> {
     /// Waits for a replication slot to become inactive.
     ///
     /// Polls the slot status every 100ms until it becomes inactive,
-    /// invalidated, or no longer exists. This is useful in tests after
-    /// shutting down a pipeline to ensure the slot is released before
-    /// performing operations on it.
+    /// invalidated, or no longer exists. This is useful in tests after shutting
+    /// down a pipeline to ensure the slot is released before performing
+    /// operations on it.
     ///
     /// # Panics
     ///
@@ -605,8 +605,7 @@ impl<G: GenericClient> PgDatabase<G> {
         }
 
         // IMPORTANT: Reset config BEFORE returning to avoid invalidating new
-        // slots when the pipeline restarts and creates table sync
-        // slots.
+        // slots when the pipeline restarts and creates table sync slots.
         cleanup().await;
 
         if invalidated {
@@ -620,9 +619,8 @@ impl<G: GenericClient> PgDatabase<G> {
 impl PgDatabase<Client> {
     /// Creates a new test database with automatic cleanup.
     ///
-    /// Creates a new Postgres database and establishes a client connection.
-    /// The database will be dropped automatically when this instance is
-    /// dropped.
+    /// Creates a new Postgres database and establishes a client connection. The
+    /// database will be dropped automatically when this instance is dropped.
     pub async fn new(config: PgConnectionConfig) -> Self {
         let client = create_pg_database(&config).await;
 
@@ -699,8 +697,8 @@ impl PgDatabase<Client> {
     /// Begins a new database transaction.
     ///
     /// Returns a [`PgDatabase`] wrapping a [`Transaction`] for executing
-    /// queries within a transaction context. The transaction must be
-    /// committed or rolled back.
+    /// queries within a transaction context. The transaction must be committed
+    /// or rolled back.
     ///
     /// # Panics
     /// Panics if the client is not available or if starting the transaction
@@ -744,8 +742,8 @@ impl<G> Drop for PgDatabase<G> {
     fn drop(&mut self) {
         if self.destroy_on_drop {
             // To use `block_in_place,` we need a multithreaded runtime since
-            // when a blocking task is issued, the runtime will
-            // offload existing tasks to another worker.
+            // when a blocking task is issued, the runtime will offload existing
+            // tasks to another worker.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tokio::task::block_in_place(move || {
                     Handle::current().block_on(async move { drop_pg_database(&self.config).await });
@@ -824,8 +822,8 @@ async fn try_connect_with_config(
 
 /// Creates a new Postgres database and returns a connected client.
 ///
-/// Establishes connection to Postgres server, creates a new database,
-/// and returns a [`Client`] connected to the newly created database.
+/// Establishes connection to Postgres server, creates a new database, and
+/// returns a [`Client`] connected to the newly created database.
 ///
 /// # Panics
 /// Panics if connection or database creation fails.
@@ -872,12 +870,12 @@ pub async fn try_connect_to_pg_database(
 
 /// Drops a Postgres database and cleans up all resources.
 ///
-/// Terminates all active connections, drops replication slots, and removes
-/// the database. Used for thorough cleanup of test databases.
+/// Terminates all active connections, drops replication slots, and removes the
+/// database. Used for thorough cleanup of test databases.
 ///
-/// This function will not panic on errors - it logs them and continues.
-/// This ensures test cleanup doesn't fail when databases are already gone
-/// or connections can't be established.
+/// This function will not panic on errors - it logs them and continues. This
+/// ensures test cleanup doesn't fail when databases are already gone or
+/// connections can't be established.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database
     let admin_config: tokio_postgres::Config = config.without_db(None);

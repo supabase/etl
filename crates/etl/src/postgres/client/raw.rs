@@ -173,8 +173,7 @@ where
     T::Stream: Send + 'static,
 {
     // We use this watch channel to send connection updates without relying on
-    // the errors/terminations propagated by the active connection
-    // consumers.
+    // the errors/terminations propagated by the active connection consumers.
     let (updates_tx, updates_rx) = watch::channel(PostgresConnectionUpdate::Running);
 
     let span = tracing::Span::current();
@@ -196,8 +195,8 @@ where
     .instrument(span);
 
     // There is no need to track the connection task via the `JoinHandle` since
-    // the `Client`, which returned the connection, will automatically
-    // terminate the connection when dropped.
+    // the `Client`, which returned the connection, will automatically terminate
+    // the connection when dropped.
     tokio::spawn(task);
 
     updates_rx
@@ -414,11 +413,10 @@ impl PgReplicationClient {
     /// transaction pinned to the slot's snapshot.
     ///
     /// A `REPEATABLE READ` transaction is begun first, then the slot is created
-    /// with `USE_SNAPSHOT` which pins the transaction to the slot's
-    /// consistent snapshot. The transaction must be kept open for the
-    /// duration of any operations that depend on this snapshot (e.g. schema
-    /// fetches, table copies, or `pg_export_snapshot()` calls
-    /// for child connections).
+    /// with `USE_SNAPSHOT` which pins the transaction to the slot's consistent
+    /// snapshot. The transaction must be kept open for the duration of any
+    /// operations that depend on this snapshot (e.g. schema fetches, table
+    /// copies, or `pg_export_snapshot()` calls for child connections).
     ///
     /// `failover` requests PostgreSQL 17+ standby synchronization for this
     /// slot. The option applies only to this creation operation and is not
@@ -482,13 +480,12 @@ impl PgReplicationClient {
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
                 // wal_status can be: 'reserved', 'extended', 'unreserved', or
-                // 'lost' A slot is invalidated when wal_status
-                // is 'lost'
+                // 'lost' A slot is invalidated when wal_status is 'lost'
                 let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
 
                 // A NULL status means PostgreSQL cannot determine WAL
-                // availability from the slot's restart LSN, for
-                // example because the slot has not reserved WAL yet.
+                // availability from the slot's restart LSN, for example because
+                // the slot has not reserved WAL yet.
                 return match wal_status.as_deref() {
                     Some("lost") => Ok(SlotState::Invalidated),
                     Some(_) | None => Ok(SlotState::NotInvalidated),
@@ -586,8 +583,8 @@ impl PgReplicationClient {
 
     /// Deletes a replication slot with the specified name if it exists.
     ///
-    /// This method returns `Ok(())` when the slot is missing and propagates
-    /// any other error from [`PgReplicationClient::delete_slot`].
+    /// This method returns `Ok(())` when the slot is missing and propagates any
+    /// other error from [`PgReplicationClient::delete_slot`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
         self.delete_slot_internal(slot_name, false).await
     }
@@ -642,8 +639,8 @@ impl PgReplicationClient {
     /// # Errors
     ///
     /// Returns [`ErrorKind::ConfigError`] if the publication contains no
-    /// tables. This typically indicates a misconfigured publication that
-    /// won't replicate any data.
+    /// tables. This typically indicates a misconfigured publication that won't
+    /// replicate any data.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -680,9 +677,9 @@ impl PgReplicationClient {
     /// The stream will begin reading changes from the provided `start_lsn`.
     /// Supplying `keep_alive_deadline_duration` enables status feedback and
     /// returns its independent handle and sender future for the caller to own
-    /// and spawn. The reader does not own or submit feedback.
-    /// `None` disables all feedback, allowing protocol tests to read and replay
-    /// without acknowledging WAL.
+    /// and spawn. The reader does not own or submit feedback. `None` disables
+    /// all feedback, allowing protocol tests to read and replay without
+    /// acknowledging WAL.
     pub async fn start_logical_replication(
         &self,
         publication_name: &str,
@@ -717,8 +714,7 @@ impl PgReplicationClient {
     /// Begins a new transaction with repeatable read isolation level.
     ///
     /// The transaction doesn't make any assumptions about the snapshot in use,
-    /// since this is a concern of the statements issued within the
-    /// transaction.
+    /// since this is a concern of the statements issued within the transaction.
     pub(super) async fn begin_tx(&mut self) -> EtlResult<Transaction<'_>> {
         let transaction = self
             .client

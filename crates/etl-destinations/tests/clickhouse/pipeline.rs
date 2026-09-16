@@ -25,8 +25,8 @@ use crate::support::{
     crypto::install_crypto_provider,
 };
 
-/// User-column projection for the all-types test, with `uuid_col` rendered
-/// as a canonical lowercase UUID string via `toString()`.
+/// User-column projection for the all-types test, with `uuid_col` rendered as a
+/// canonical lowercase UUID string via `toString()`.
 const ALL_TYPES_PROJECTION: &str = concat!(
     "id, smallint_col, integer_col, bigint_col, real_col, double_col, ",
     "numeric_col, boolean_col, text_col, varchar_col, ",
@@ -45,8 +45,8 @@ struct IdValueRow {
     value: String,
 }
 
-/// Projection + table name + ORDER BY that drive `current_state_query` for
-/// each streaming test.
+/// Projection + table name + ORDER BY that drive `current_state_query` for each
+/// streaming test.
 const ID_VALUE_PROJECTION: &str = "id, value";
 const UPDATE_FLOW_TABLE: &str = "test_update__flow";
 const DELETE_FLOW_TABLE: &str = "test_delete__flow";
@@ -63,16 +63,15 @@ const DATE_2024_01_15_DAYS: i32 = 19737;
 /// Microseconds from epoch for `2024-01-15 12:00:00 UTC`.
 const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
 
-/// Tests that all supported Postgres column types round-trip
-/// correctly through the ClickHouse RowBinary encoding.
+/// Tests that all supported Postgres column types round-trip correctly through
+/// the ClickHouse RowBinary encoding.
 ///
 /// # GIVEN
 ///
 /// A Postgres table covering every supported column type -- scalars (integers,
 /// floats, numeric, boolean, text, varchar, date, timestamp, timestamptz, time,
-/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and array
-/// columns (`integer[]`, `text[]`). Two rows are inserted before the pipeline
-/// starts:
+/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and array columns
+/// (`integer[]`, `text[]`). Two rows are inserted before the pipeline starts:
 ///
 /// 1. Positive/typical values with **empty** arrays.
 /// 2. Boundary values (min-ints, negative floats) with **non-empty** arrays.
@@ -132,8 +131,8 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
                 ("interval_col", "interval not null"),
                 ("jsonb_col", "jsonb not null"),
                 ("json_col", "json not null"),
-                // Array columns are top-level non-nullable because ClickHouse cannot
-                // distinguish a NULL array from an empty array.
+                // Array columns are top-level non-nullable because ClickHouse cannot distinguish a
+                // NULL array from an empty array.
                 ("integer_array_col", "integer[] not null"),
                 ("text_array_col", "text[] not null"),
                 // Other types
@@ -784,20 +783,19 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].value, "keep_me");
 }
 
-/// Tests that a pipeline restart resumes CDC streaming without re-running
-/// the initial table copy.
+/// Tests that a pipeline restart resumes CDC streaming without re-running the
+/// initial table copy.
 ///
 /// # GIVEN
 ///
-/// A Postgres table with one row (`id=1, value='before_restart'`), copied
-/// to ClickHouse by a first pipeline run that then shuts down cleanly.
+/// A Postgres table with one row (`id=1, value='before_restart'`), copied to
+/// ClickHouse by a first pipeline run that then shuts down cleanly.
 ///
 /// # WHEN
 ///
-/// A new `ClickHouseDestination` and `Pipeline` are built with the same
-/// store and pipeline_id (simulating process restart), the pipeline is
-/// started, and a second row (`id=2, value='after_restart'`) is inserted
-/// into Postgres.
+/// A new `ClickHouseDestination` and `Pipeline` are built with the same store
+/// and pipeline_id (simulating process restart), the pipeline is started, and a
+/// second row (`id=2, value='after_restart'`) is inserted into Postgres.
 ///
 /// # THEN
 ///
@@ -1202,8 +1200,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
 ///
 /// # GIVEN
 ///
-/// Two Postgres tables in the same publication, each with one pre-existing
-/// row:
+/// Two Postgres tables in the same publication, each with one pre-existing row:
 /// - `multi_a` with `(id=1, value='init_a')`
 /// - `multi_b` with `(id=1, value='init_b')`
 ///
@@ -1327,8 +1324,8 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
     assert_eq!((rows_b[1].id, rows_b[1].value.as_str()), (2, "streamed_b"));
 }
 
-/// Current-state row for the wide default-identity delete test (user
-/// columns only).
+/// Current-state row for the wide default-identity delete test (user columns
+/// only).
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 struct DefaultIdentityRow {
     id: i64,
@@ -1529,8 +1526,8 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
 /// # THEN
 ///
 /// All 1024 rows arrive in ClickHouse. A sample of rows at known positions
-/// (first, last, powers of two, and a few interior points) are spot-checked
-/// for correct id and value.
+/// (first, last, powers of two, and a few interior points) are spot-checked for
+/// correct id and value.
 #[tokio::test(flavor = "multi_thread")]
 async fn exclusive_large_batch_table_copy_merge_tree() {
     exclusive_large_batch_table_copy_inner(ClickHouseEngine::MergeTree).await;
@@ -1606,8 +1603,8 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     }
 }
 
-/// Row struct for the ADD COLUMN test after schema change.
-/// Columns: id, name, age, email, score.
+/// Row struct for the ADD COLUMN test after schema change. Columns: id, name,
+/// age, email, score.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct AddColumnRow {
     id: i64,
@@ -1627,8 +1624,8 @@ struct DefaultedSchemaRow {
     active: Option<bool>,
 }
 
-/// Tests that ALTER TABLE ADD COLUMN in Postgres propagates to ClickHouse
-/// and subsequent inserts include the new column.
+/// Tests that ALTER TABLE ADD COLUMN in Postgres propagates to ClickHouse and
+/// subsequent inserts include the new column.
 ///
 /// # GIVEN
 ///
@@ -1638,8 +1635,8 @@ struct DefaultedSchemaRow {
 /// # WHEN
 ///
 /// A nullable `email text` column and a `score integer NOT NULL DEFAULT 0`
-/// column are added in Postgres, and a row ('Bob', 30, 'bob@example.com', 7)
-/// is inserted with the new schema.
+/// column are added in Postgres, and a row ('Bob', 30, 'bob@example.com', 7) is
+/// inserted with the new schema.
 ///
 /// # THEN
 ///

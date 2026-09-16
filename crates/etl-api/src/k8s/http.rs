@@ -53,8 +53,8 @@ const CLICKHOUSE_SECRET_NAME_SUFFIX: &str = "clickhouse-password";
 const CLICKHOUSE_PASSWORD_NAME: &str = "clickhouse-password";
 /// Name of the service account key in the BigQuery secret and its reference.
 const BQ_SERVICE_ACCOUNT_KEY_NAME: &str = "service-account-key";
-/// Secret name suffix for iceberg secrets (includes catalog token,
-/// s3 access key id and s3 secret access key)
+/// Secret name suffix for iceberg secrets (includes catalog token, s3 access
+/// key id and s3 secret access key)
 const ICEBERG_SECRET_NAME_SUFFIX: &str = "iceberg";
 /// Name of catalog token in the iceberg secret and its reference.
 const ICEBERG_CATALOG_TOKEN_KEY_NAME: &str = "catalog-token";
@@ -455,10 +455,9 @@ impl K8sClient for HttpK8sClient {
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
         // We are forcing the update since we are the field manager that should
-        // own the fields. If there is an override (likely during an
-        // incident or SREs intervention), we want to override their
-        // changes. The API database is the source of truth for
-        // credentials.
+        // own the fields. If there is an override (likely during an incident or
+        // SREs intervention), we want to override their changes. The API
+        // database is the source of truth for credentials.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -486,10 +485,9 @@ impl K8sClient for HttpK8sClient {
         let secret: Secret = serde_json::from_value(bq_secret_json)?;
 
         // We are forcing the update since we are the field manager that should
-        // own the fields. If there is an override (likely during an
-        // incident or SREs intervention), we want to override their
-        // changes. The API database is the source of truth for
-        // credentials.
+        // own the fields. If there is an override (likely during an incident or
+        // SREs intervention), we want to override their changes. The API
+        // database is the source of truth for credentials.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -516,10 +514,9 @@ impl K8sClient for HttpK8sClient {
             );
 
             // We are forcing the update since we are the field manager that
-            // should own the fields. If there is an override
-            // (likely during an incident or SREs intervention), we
-            // want to override their changes. The API database is
-            // the source of truth for credentials.
+            // should own the fields. If there is an override (likely during an
+            // incident or SREs intervention), we want to override their
+            // changes. The API database is the source of truth for credentials.
             let pp = PatchParams::apply(FIELD_MANAGER).force();
             self.secrets_api.patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret)).await?;
         }
@@ -555,10 +552,9 @@ impl K8sClient for HttpK8sClient {
         let secret: Secret = serde_json::from_value(iceberg_secret_json)?;
 
         // We are forcing the update since we are the field manager that should
-        // own the fields. If there is an override (likely during an
-        // incident or SREs intervention), we want to override their
-        // changes. The API database is the source of truth for
-        // credentials.
+        // own the fields. If there is an override (likely during an incident or
+        // SREs intervention), we want to override their changes. The API
+        // database is the source of truth for credentials.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -728,10 +724,9 @@ impl K8sClient for HttpK8sClient {
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
         // We are forcing the update since we are the field manager that should
-        // own the fields. If there is an override (likely during an
-        // incident or SREs intervention), we want to override their
-        // changes. The API database is the source of truth for
-        // configuration.
+        // own the fields. If there is an override (likely during an incident or
+        // SREs intervention), we want to override their changes. The API
+        // database is the source of truth for configuration.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
@@ -809,9 +804,8 @@ impl K8sClient for HttpK8sClient {
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
         // We are forcing the update since we are the field manager that should
-        // own the fields. If there is an override (likely during an
-        // incident or SREs intervention), we want to override their
-        // changes.
+        // own the fields. If there is an override (likely during an incident or
+        // SREs intervention), we want to override their changes.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         let applied = self
             .stateful_sets_api
@@ -857,8 +851,8 @@ impl K8sClient for HttpK8sClient {
         )?;
 
         // Merge leaves the mode untouched, including a concurrent controller
-        // promotion. Omitting it from server-side apply could delete a
-        // mode previously owned by us.
+        // promotion. Omitting it from server-side apply could delete a mode
+        // previously owned by us.
         let pp =
             PatchParams { field_manager: Some(FIELD_MANAGER.to_owned()), ..Default::default() };
         match self
@@ -1723,8 +1717,9 @@ fn create_replicator_stateful_set_json(
       },
       "spec": {
         "replicas": 1,
-        // Keep native rolling updates for API-driven template changes. VPA updates Pods in place
-        // when possible; otherwise the updater evicts and admission mutates the replacement Pod.
+        // Keep native rolling updates for API-driven template changes. VPA
+        // updates Pods in place when possible; otherwise the updater evicts and
+        // admission mutates the replacement Pod.
         "updateStrategy": {
           "type": "RollingUpdate"
         },
@@ -1749,8 +1744,9 @@ fn create_replicator_stateful_set_json(
             "volumes": volumes,
             "nodeSelector": node_selector,
             "tolerations": tolerations,
-            // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
-            // this way we let the system finish any in-flight transaction, if there are any.
+            // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to
+            // the containers, this way we let the system finish any in-flight
+            // transaction, if there are any.
             "terminationGracePeriodSeconds": 300,
             "initContainers": init_containers,
             "containers": [

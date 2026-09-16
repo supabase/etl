@@ -20,12 +20,12 @@
 //! controls against the container leaf in that arrangement and accounts for
 //! ancestors only when the runtime exposes them. An unconstrained Linux process
 //! instead uses host-wide memory, avoiding a misleading ratio based only on the
-//! process's leaf-cgroup charge divided by all host RAM.
-//! The full cgroup charge is used instead of resident set size because the
-//! kernel's memory controller also accounts for page cache, socket buffers,
-//! and kernel memory that contribute to the enforced limit. If a previously
-//! available cgroup read fails transiently, the last cgroup snapshot is kept
-//! rather than falling back to a potentially larger host limit.
+//! process's leaf-cgroup charge divided by all host RAM. The full cgroup charge
+//! is used instead of resident set size because the kernel's memory controller
+//! also accounts for page cache, socket buffers, and kernel memory that
+//! contribute to the enforced limit. If a previously available cgroup read
+//! fails transiently, the last cgroup snapshot is kept rather than falling back
+//! to a potentially larger host limit.
 //!
 //! Platforms without Linux memory cgroups, including macOS, use sysinfo's
 //! system-wide used and total memory readings. One shared sampler performs
@@ -33,10 +33,10 @@
 //! operating-system files themselves.
 //!
 //! Emergency backpressure pauses new source polling while destination results
-//! and already-owned batches continue to drain. Resume is deliberately based
-//! on the same full-domain measurement. If measured usage keeps that domain
-//! above the resume threshold, the pipeline stays paused rather than probing
-//! with more source data and risking an OOM kill.
+//! and already-owned batches continue to drain. Resume is deliberately based on
+//! the same full-domain measurement. If measured usage keeps that domain above
+//! the resume threshold, the pipeline stays paused rather than probing with
+//! more source data and risking an OOM kill.
 
 use std::{
     pin::Pin,
@@ -157,8 +157,8 @@ impl MemorySnapshot {
         }
 
         // Once the process cgroup has been observed, a missing read is treated
-        // as transient. Falling back to host memory could momentarily
-        // expand the batch budget far beyond the pod's actual limit.
+        // as transient. Falling back to host memory could momentarily expand
+        // the batch budget far beyond the pod's actual limit.
         if let Some(previous @ Self { source: MemorySnapshotSource::ProcessCgroup, .. }) = previous
         {
             trace!(
@@ -493,9 +493,8 @@ impl MemoryMonitor {
 
             // Wrapping is intentional. Governor readers compare revisions for
             // inequality, so `u64::MAX -> 0` still denotes a new snapshot.
-            // Update it while the snapshot is write-locked so
-            // readers cannot pair this snapshot with the preceding
-            // revision.
+            // Update it while the snapshot is write-locked so readers cannot
+            // pair this snapshot with the preceding revision.
             self.inner.snapshot_revision.fetch_add(1, Ordering::Relaxed);
 
             previous_source

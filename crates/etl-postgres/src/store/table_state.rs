@@ -135,9 +135,9 @@ pub async fn rollback_table_state(
 
     if let Some((current_id, Some(prev_id))) = current_row {
         // Delete the row we are rolling back from to avoid buildup.
-        // Technically, we could keep the previous row for tracking
-        // purposes, but especially during timed retries, we might end
-        // up with an infinite growth of the database.
+        // Technically, we could keep the previous row for tracking purposes,
+        // but especially during timed retries, we might end up with an infinite
+        // growth of the database.
         sqlx::query(
             r#"
             delete from etl.replication_state
@@ -180,8 +180,8 @@ pub async fn rollback_table_state(
 
 /// Replaces table state history with one fresh state within a transaction.
 ///
-/// Destination table metadata and stored schemas are intentionally preserved
-/// so callers can use them to delete the existing destination object before a
+/// Destination table metadata and stored schemas are intentionally preserved so
+/// callers can use them to delete the existing destination object before a
 /// fresh copy. Requiring an explicit transaction lets callers replace multiple
 /// table states as one atomic operation.
 pub async fn replace_table_state_raw(
@@ -221,8 +221,8 @@ pub async fn replace_table_state_raw(
 
 /// Deletes all table state entries for a pipeline.
 ///
-/// Removes all table state records including historical entries
-/// for the specified pipeline. Used during pipeline cleanup.
+/// Removes all table state records including historical entries for the
+/// specified pipeline. Used during pipeline cleanup.
 pub async fn delete_table_states<'c, E>(executor: E, pipeline_id: i64) -> sqlx::Result<u64>
 where
     E: PgExecutor<'c>,

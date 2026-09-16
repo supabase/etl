@@ -205,9 +205,9 @@ where
     /// Spawns the apply worker and returns a handle for monitoring.
     ///
     /// This method initializes the apply worker by determining the starting
-    /// LSN, creating coordination signals, and launching the main apply
-    /// loop. The worker runs asynchronously and can be monitored through
-    /// the returned handle.
+    /// LSN, creating coordination signals, and launching the main apply loop.
+    /// The worker runs asynchronously and can be monitored through the returned
+    /// handle.
     pub(crate) fn spawn(self) -> ApplyWorkerHandle {
         info!("starting apply worker");
 
@@ -228,8 +228,8 @@ where
     ///
     /// Timed retry scheduling intentionally reuses the same settings used by
     /// table sync workers (`table_error_retry_delay_ms` and
-    /// `table_error_retry_max_attempts`) so retry behavior is
-    /// coherent across worker types.
+    /// `table_error_retry_max_attempts`) so retry behavior is coherent across
+    /// worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
         let mut retry_shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
@@ -319,8 +319,8 @@ where
     }
 }
 
-/// Determines the position from which the apply worker should start reading
-/// the replication stream.
+/// Determines the position from which the apply worker should start reading the
+/// replication stream.
 ///
 /// This function implements critical replication consistency logic by managing
 /// the apply worker's replication slot. The slot serves as a persistent marker
@@ -349,9 +349,9 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     let worker_type = WorkerType::Apply;
 
     // Inspect the slot before creating it so a stale checkpoint from the
-    // previous lineage can be deleted first. Creating the slot before
-    // cleanup would leave a crash window where a later restart could pair
-    // the new slot with old persisted checkpoint.
+    // previous lineage can be deleted first. Creating the slot before cleanup
+    // would leave a crash window where a later restart could pair the new slot
+    // with old persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
         Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
@@ -365,8 +365,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     };
 
     // Once we have the slot, we determine the start lsn, which is the
-    // consistent point from which Postgres tells us to start streaming
-    // from.
+    // consistent point from which Postgres tells us to start streaming from.
     let slot_start_lsn = slot.get_start_lsn();
 
     match &slot {
@@ -415,9 +414,8 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     }
 
     // If the slot was created, we don't need an invalidation check. The
-    // previous lineage's persisted checkpoint was deleted before creation,
-    // so replication can start directly from the new slot's consistent
-    // point.
+    // previous lineage's persisted checkpoint was deleted before creation, so
+    // replication can start directly from the new slot's consistent point.
     if matches!(slot, GetOrCreateSlotResult::CreateSlot(_)) {
         return Ok(slot_start_lsn);
     }
@@ -430,8 +428,8 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     };
 
     // The two frontiers can legitimately differ because checkpoint persistence
-    // and PostgreSQL status feedback are separate operations. The checkpoint
-    // is selected from a completed destination flush boundary. PostgreSQL slot
+    // and PostgreSQL status feedback are separate operations. The checkpoint is
+    // selected from a completed destination flush boundary. PostgreSQL slot
     // feedback may advance farther while the loop is quiescent, so startup
     // chooses the later available frontier.
     let start_lsn = persisted_checkpoint_lsn.max(slot_start_lsn);

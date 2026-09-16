@@ -47,8 +47,8 @@ static PROMETHEUS_UPKEEP_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
     let mut prometheus_handle = PROMETHEUS_HANDLE
         .lock()
-        // We still get the poisoned lock since we assume that a poisoned lock doesn't
-        // invalidate the handle contents.
+        // We still get the poisoned lock since we assume that a poisoned lock doesn't invalidate
+        // the handle contents.
         .unwrap_or_else(PoisonError::into_inner);
 
     if let Some(handle) = &*prometheus_handle {

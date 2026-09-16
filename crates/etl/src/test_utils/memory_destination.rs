@@ -55,8 +55,8 @@ where
     /// Returns a copy of all events stored in this destination.
     ///
     /// This method is useful for testing and verification of pipeline behavior.
-    /// It provides access to all replication events that have been written
-    /// to this destination since creation or the last clear operation.
+    /// It provides access to all replication events that have been written to
+    /// this destination since creation or the last clear operation.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn events(&self) -> Vec<Event> {
         let inner = self.inner.lock().await;
@@ -66,8 +66,8 @@ where
     /// Returns a copy of all table rows stored in this destination.
     ///
     /// This method is useful for testing and verification of pipeline behavior.
-    /// It provides access to all table row data that has been written
-    /// to this destination, organized by table ID.
+    /// It provides access to all table row data that has been written to this
+    /// destination, organized by table ID.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn table_rows(&self) -> HashMap<TableId, Vec<TableRow>> {
         let inner = self.inner.lock().await;

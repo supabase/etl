@@ -60,9 +60,9 @@ pub(super) struct TableLifecycleGuard {
 ///
 /// [`Client::drop_detached_table_for_copy`] consumes the value outside that
 /// timeout to drop the Snowpipe channel and Snowflake table. This split keeps
-/// local draining and lock acquisition bounded without cancelling a remote
-/// drop whose outcome would then be unknown. The table lifecycle guard remains
-/// held through both phases, preventing setup from publishing a stale channel.
+/// local draining and lock acquisition bounded without cancelling a remote drop
+/// whose outcome would then be unknown. The table lifecycle guard remains held
+/// through both phases, preventing setup from publishing a stale channel.
 ///
 /// This value does not block event admission. The caller must retain its
 /// [`etl::destination::TaskSetDrainGuard`] until the remote drop returns.
@@ -617,9 +617,9 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             let mut guard = self.get_channel(table_id).await?.lock_owned().await;
 
             // A sender holds this channel lock until it records any accepted
-            // batch in `pending_durability`. If a sender finished
-            // after the wait above, release the channel and drain
-            // its batch before truncating.
+            // batch in `pending_durability`. If a sender finished after the
+            // wait above, release the channel and drain its batch before
+            // truncating.
             if self.pending_durability.lock().await.has_target(table_id) {
                 drop(guard);
                 continue;
@@ -628,8 +628,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             let table_name = guard.table_name().to_owned();
 
             // Open at the truncate offset before clearing the table. This waits
-            // for any in-flight rowset to commit and invalidates
-            // the previous owner's continuation token.
+            // for any in-flight rowset to commit and invalidates the previous
+            // owner's continuation token.
             let status = guard.open_at(truncate_offset).await?;
             let channel_created_on_ms = status.created_on_ms.ok_or_else(|| {
                 Error::Channel(
@@ -650,8 +650,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             self.sql_client.truncate_table(&table_name, request_id).await?;
 
             // TRUNCATE may invalidate that token, so reopen at the same offset
-            // before allowing another sender to acquire the channel
-            // lock.
+            // before allowing another sender to acquire the channel lock.
             guard.open_at(truncate_offset).await?;
             return Ok(());
         }
@@ -661,8 +660,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     ///
     /// Callers must first prevent new streaming tasks from being admitted and
     /// wait for previously admitted tasks to finish. The returned token can
-    /// then be used to perform the potentially slow remote drop without
-    /// leaving a pending target that refers to a removed channel.
+    /// then be used to perform the potentially slow remote drop without leaving
+    /// a pending target that refers to a removed channel.
     pub(super) async fn detach_table_for_copy(
         &self,
         table_id: TableId,

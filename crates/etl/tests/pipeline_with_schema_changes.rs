@@ -453,8 +453,8 @@ async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
     assert_eq!(truncate.truncated_tables[0].id(), table_id);
 
     // Insert after no-op DDL has no protocol relation, so apply emits the
-    // relation event from the pending schema snapshot. Truncate after no-op
-    // DDL receives a protocol relation first; apply does not synthesize one.
+    // relation event from the pending schema snapshot. Truncate after no-op DDL
+    // receives a protocol relation first; apply does not synthesize one.
     assert_eq!(
         insert.replicated_table_schema.inner().snapshot_id,
         insert_relation.replicated_table_schema.inner().snapshot_id

@@ -356,10 +356,10 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     assert_table_rows_equal_ignoring_size(&actual_orders, &expected_orders);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(&namespace, users_table).await.unwrap();
     client.drop_table_if_exists(&namespace, orders_table).await.unwrap();
     client.drop_namespace(&namespace).await.unwrap();

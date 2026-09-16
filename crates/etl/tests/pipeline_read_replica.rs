@@ -81,9 +81,10 @@ where
         select! {
             () = &mut future => return,
             _ = snapshot_interval.tick() => {
-                // Logical slot creation on a standby may wait for a running-xacts
-                // snapshot from the primary when the primary is otherwise idle,
-                // so keep nudging the primary while the pipeline starts.
+                // Logical slot creation on a standby may wait for a
+                // running-xacts snapshot from the primary when the primary is
+                // otherwise idle, so keep nudging the primary while the
+                // pipeline starts.
                 primary.log_standby_snapshot().await.unwrap();
             }
         }

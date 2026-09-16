@@ -57,10 +57,10 @@ async fn create_namespace() {
     assert!(client.namespace_exists(namespace).await.unwrap());
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
@@ -93,10 +93,10 @@ async fn create_hierarchical_namespace() {
     assert!(client.namespace_exists(child_namespace).await.unwrap());
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_namespace(child_namespace).await.unwrap();
     client.drop_namespace(root_namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -204,10 +204,10 @@ async fn create_table_if_missing() {
     assert!(client.table_exists(namespace, table_name.clone()).await.unwrap());
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -400,10 +400,10 @@ async fn insert_nullable_scalars() {
     assert_eq!(read_rows, table_rows);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -520,10 +520,10 @@ async fn insert_non_nullable_scalars() {
     assert_eq!(read_rows, table_rows);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -732,10 +732,10 @@ async fn insert_nullable_array() {
     assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -915,10 +915,10 @@ async fn insert_non_nullable_array() {
     assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
     // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
-    // the warehouse level This feature is planned for future releases.
-    // We'll start to use it when it becomes available. The cleanup is not
-    // in a Drop impl because each test has different number of object
-    // specitic to that test.
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();

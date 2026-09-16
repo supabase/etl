@@ -78,8 +78,8 @@ pub(crate) async fn read_pipeline_tables_to_sync(
                 .map_err(PipelineError::InvalidTableState)?
         } else {
             // A newly published table has no stored state yet. Treat it as Init
-            // so its first initial sync triggers a VPA reset before
-            // the worker starts.
+            // so its first initial sync triggers a VPA reset before the worker
+            // starts.
             TableState::Init
         };
 

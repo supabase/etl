@@ -463,8 +463,8 @@ async fn write_events_insert_update_delete() {
 
     harness.store.store_table_schema(table_schema).await.unwrap();
 
-    // Send Insert, Update (Full), Delete (Full) events.
-    // Poll and verify 3 rows with operations "insert", "update", "delete".
+    // Send Insert, Update (Full), Delete (Full) events. Poll and verify 3 rows
+    // with operations "insert", "update", "delete".
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         initialize_empty_table(&harness.destination, &schema).await;
 
@@ -516,8 +516,8 @@ async fn write_events_insert_update_delete() {
         .await;
         assert_eq!(rows.len(), 3, "expected 3 rows (insert + update + delete)");
 
-        // Column order: id, name, _cdc_operation, _cdc_sequence_number
-        // Rows ordered by _cdc_sequence_number.
+        // Column order: id, name, _cdc_operation, _cdc_sequence_number Rows
+        // ordered by _cdc_sequence_number.
         assert_eq!(rows[0][0], serde_json::json!("1"));
         assert_eq!(rows[0][1], serde_json::json!("Alice"));
         assert_eq!(rows[0][2], serde_json::json!("insert"));
@@ -637,8 +637,8 @@ async fn write_events_delete_key_only() {
 
     harness.store.store_table_schema(table_schema).await.unwrap();
 
-    // Delete event with `OldTableRow::Key`.
-    // Verify the delete row has PK value present but non-PK columns are NULL.
+    // Delete event with `OldTableRow::Key`. Verify the delete row has PK value
+    // present but non-PK columns are NULL.
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         initialize_empty_table(&harness.destination, &schema).await;
 
@@ -785,10 +785,9 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
     harness.store.store_table_schema(initial_schema.clone()).await.unwrap();
     harness.store.store_table_schema(evolved_schema.clone()).await.unwrap();
 
-    // Create table (write initial rows).
-    // Then add a column, then send a RelationEvent with the new schema.
-    // Finally, insert a row with the new column.
-    // Verify the new column exists in Snowflake.
+    // Create table (write initial rows). Then add a column, then send a
+    // RelationEvent with the new schema. Finally, insert a row with the new
+    // column. Verify the new column exists in Snowflake.
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         write_table_copy_and_wait(
             &harness.destination,

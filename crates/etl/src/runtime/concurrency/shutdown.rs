@@ -29,8 +29,8 @@ impl ShutdownTx {
     /// Creates a new shutdown receiver for worker subscription.
     ///
     /// Each worker should call this method to get its own receiver that can be
-    /// used to detect when shutdown has been requested. Multiple receivers
-    /// can be created from the same transmitter.
+    /// used to detect when shutdown has been requested. Multiple receivers can
+    /// be created from the same transmitter.
     pub(crate) fn subscribe(&self) -> ShutdownRx {
         self.0.subscribe()
     }

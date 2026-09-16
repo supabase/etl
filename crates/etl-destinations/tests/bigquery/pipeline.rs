@@ -684,8 +684,8 @@ async fn table_primary_key_update_rewrites_row() {
         .await;
 
     // With default primary-key replica identity, changing the source primary
-    // key is a valid PostgreSQL shape: the update carries an old key row plus
-    // a full new row image.
+    // key is a valid PostgreSQL shape: the update carries an old key row plus a
+    // full new row image.
     let updated_id = 10i64;
     let updated_name = "user_10".to_owned();
     let updated_age = 10i32;

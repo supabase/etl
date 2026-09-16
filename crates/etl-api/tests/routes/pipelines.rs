@@ -119,8 +119,7 @@ async fn setup_basic_pipeline() -> (TestApp, String, i64, i64, i64) {
     (app, tenant_id, source_id, destination_id, pipeline_id)
 }
 
-/// Creates a pipeline setup with a real source database for table state
-/// tests.
+/// Creates a pipeline setup with a real source database for table state tests.
 async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgConnectionConfig) {
     let app = spawn_test_app().await;
     create_default_image(&app).await;
@@ -148,8 +147,8 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     (app, tenant_id, pipeline_id, source_db_pool, source_db_config)
 }
 
-/// Creates a table with a chain of table states.
-/// Each state in the chain becomes the previous state of the next one.
+/// Creates a table with a chain of table states. Each state in the chain
+/// becomes the previous state of the next one.
 async fn create_table_with_state_chain(
     source_db_pool: &PgPool,
     pipeline_id: i64,
@@ -212,9 +211,8 @@ async fn create_tables_with_states(
     results
 }
 
-/// Tests rollback functionality and returns response if successful.
-/// Asserts the expected status code and returns the response for successful
-/// calls.
+/// Tests rollback functionality and returns response if successful. Asserts the
+/// expected status code and returns the response for successful calls.
 async fn test_rollback(
     app: &TestApp,
     tenant_id: &str,
@@ -636,10 +634,9 @@ async fn pipeline_reads_succeed_while_source_database_is_unreachable() {
     let pipeline_id =
         create_pipeline_with_config(&app, tenant_id, source_id, destination_id, config).await;
 
-    // Drop the source database entirely: pipeline reads must not depend on
-    // the source database being reachable, unlike endpoints that discover or
-    // resolve tables (source-table and publication reads, replication
-    // status).
+    // Drop the source database entirely: pipeline reads must not depend on the
+    // source database being reachable, unlike endpoints that discover or
+    // resolve tables (source-table and publication reads, replication status).
     drop(source_pool);
     drop_pg_database(&source_db_config).await;
 
@@ -2889,8 +2886,8 @@ async fn assert_pipeline_deletion_can_be_retried(failure: DeletionFailure) {
             }
             DeletionFailure::SlotCleanup => {
                 // Shadow slot deletion only in this source database's new
-                // sessions. This fails after metadata commits
-                // without changing server privileges.
+                // sessions. This fails after metadata commits without changing
+                // server privileges.
                 source_pool
                     .execute(
                         r#"
@@ -3266,8 +3263,8 @@ async fn rollback_tables_all_errored_succeeds() {
     let (app, tenant_id, pipeline_id, source_db_pool, source_db_config) =
         setup_pipeline_with_source_db().await;
 
-    // Create multiple tables with different states
-    // table1: errored with manual_retry (should be rolled back)
+    // Create multiple tables with different states table1: errored with
+    // manual_retry (should be rolled back)
     let table1_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,

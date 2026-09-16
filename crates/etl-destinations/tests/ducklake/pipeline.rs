@@ -278,8 +278,8 @@ fn query_publication_add_rows(
     result
 }
 
-/// Queries rows after an ordered name-reuse schema change using blocking
-/// DuckDB APIs.
+/// Queries rows after an ordered name-reuse schema change using blocking DuckDB
+/// APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
@@ -532,9 +532,9 @@ async fn table_copy_and_streaming_with_restart() {
     );
 }
 
-/// Copy chunks with identical contents must not collapse to one applied
-/// marker. Each row exceeds the test's 8 MiB batch limit, forcing the source
-/// copy stream to emit two separate batches.
+/// Copy chunks with identical contents must not collapse to one applied marker.
+/// Each row exceeds the test's 8 MiB batch limit, forcing the source copy
+/// stream to emit two separate batches.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_preserves_identical_oversized_rows_across_batches() {
     init_test_tracing();

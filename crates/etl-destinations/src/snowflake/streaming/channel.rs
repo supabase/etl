@@ -18,9 +18,9 @@ use crate::snowflake::{
 
 /// Interval between Snowflake channel commit-status checks.
 ///
-/// Defines how often do we retry/check.
-/// Durability barriers use this between status polls. Safe open/drop uses it
-/// between retries after Snowflake reports uncommitted channel data.
+/// Defines how often do we retry/check. Durability barriers use this between
+/// status polls. Safe open/drop uses it between retries after Snowflake reports
+/// uncommitted channel data.
 pub(crate) const DEFAULT_COMMIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Local polling and recovery budget for waiting until accepted rows commit.
@@ -32,14 +32,14 @@ pub(crate) const DEFAULT_COMMIT_WAIT_TIMEOUT: Duration = Duration::from_secs(180
 
 /// Maximum pending table-copy row batches before a durability wait.
 ///
-/// This matches streaming's 64-batch bound and forces periodic waits when
-/// small batches do not reach the byte bound.
+/// This matches streaming's 64-batch bound and forces periodic waits when small
+/// batches do not reach the byte bound.
 const COPY_PENDING_MAX_ROW_BATCHES: usize = 64;
 
 /// Maximum pending compressed table-copy bytes before a durability wait.
 ///
-/// This matches streaming's 256 MiB bound and limits unconfirmed data for
-/// large batches. It is not a Snowflake service limit.
+/// This matches streaming's 256 MiB bound and limits unconfirmed data for large
+/// batches. It is not a Snowflake service limit.
 const COPY_PENDING_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// Maximum channel reopens attempted for one logical append.
@@ -85,9 +85,9 @@ impl AcceptedRowBatch {
 
 /// Collapsed durability target for one Snowpipe channel.
 ///
-/// Snowflake committed offsets are cumulative, so multiple accepted row
-/// batches can be represented by the latest target offset plus aggregate row
-/// and byte counts.
+/// Snowflake committed offsets are cumulative, so multiple accepted row batches
+/// can be represented by the latest target offset plus aggregate row and byte
+/// counts.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingDurabilityTarget {
     /// Latest accepted offset for this channel.
@@ -221,9 +221,9 @@ impl ChannelProgress {
             )));
         }
 
-        // Snowflake does not document creation timestamps as unique.
-        // A changed value proves replacement, equal values still require the
-        // offset and counter checks below.
+        // Snowflake does not document creation timestamps as unique. A changed
+        // value proves replacement, equal values still require the offset and
+        // counter checks below.
         let lineage_changed = matches!(
             (self.created_on_ms, status.created_on_ms),
             (Some(previous), Some(current)) if previous != current

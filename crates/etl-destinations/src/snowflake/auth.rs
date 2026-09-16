@@ -146,8 +146,8 @@ impl AuthManager<HttpExchanger> {
 impl<E: TokenExchanger> AuthManager<E> {
     /// Build an `AuthManager` from Snowflake configuration.
     ///
-    /// The public-key fingerprint is derived and reused for every JWT.
-    /// Accepts PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
+    /// The public-key fingerprint is derived and reused for every JWT. Accepts
+    /// PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
     pub fn with_exchanger(mut config: Config, exchanger: E) -> Result<Self> {
         let account = config.account_id.to_uppercase();
         let user = config.username.to_uppercase();
@@ -230,15 +230,15 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
 
     /// Invalidate the cached scoped token.
     ///
-    /// The next call to [`TokenProvider::get_token`] will perform a fresh
-    /// token exchange.
+    /// The next call to [`TokenProvider::get_token`] will perform a fresh token
+    /// exchange.
     async fn invalidate_token(&self) {
         *self.cached_token.lock().await = None;
     }
 }
 
-/// Decode a PEM-encoded RSA private key, returning the PKCS#1 DER bytes
-/// (for jsonwebtoken) and a loaded `KeyPair` (for fingerprint derivation).
+/// Decode a PEM-encoded RSA private key, returning the PKCS#1 DER bytes (for
+/// jsonwebtoken) and a loaded `KeyPair` (for fingerprint derivation).
 ///
 /// Supports encrypted PKCS#8, plain PKCS#8, and PKCS#1 PEM formats.
 fn decode_and_load_rsa_key(

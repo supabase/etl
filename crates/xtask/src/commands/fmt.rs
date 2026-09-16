@@ -31,10 +31,9 @@ impl FmtArgs {
         let sh = Shell::new()?;
         let FmtArgs { check, args: _ } = self;
         // Clap gives us typed access to `--check`, but it does not preserve the
-        // literal `--` separator after parsing. Re-read the raw
-        // arguments so calls like `cargo x fmt -- --config
-        // max_width=100` keep matching the deleted shell scripts'
-        // passthrough behavior.
+        // literal `--` separator after parsing. Re-read the raw arguments so
+        // calls like `cargo x fmt -- --config max_width=100` keep matching the
+        // deleted shell scripts' passthrough behavior.
         let (cargo_fmt_args, rustfmt_args) = split_raw_passthrough_args(raw_fmt_args(), check);
         let toolchain = format!(
             "+{}",
@@ -70,8 +69,8 @@ fn split_raw_passthrough_args(
             continue;
         }
 
-        // `cargo x fmt --check` is an xtask convenience flag, so remove it
-        // from the Cargo side and inject it into the rustfmt side below.
+        // `cargo x fmt --check` is an xtask convenience flag, so remove it from
+        // the Cargo side and inject it into the rustfmt side below.
         if !rustfmt_separator_seen && check && !check_arg_removed && arg == OsStr::new(CHECK_ARG) {
             check_arg_removed = true;
             continue;

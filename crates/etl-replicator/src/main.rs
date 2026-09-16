@@ -26,8 +26,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ///   memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
 ///
-/// On Linux, this can be overridden via `MALLOC_CONF` env var.
-/// On macOS, use `_RJEM_MALLOC_CONF` (unprefixed symbols not supported).
+/// On Linux, this can be overridden via `MALLOC_CONF` env var. On macOS, use
+/// `_RJEM_MALLOC_CONF` (unprefixed symbols not supported).
 #[cfg(all(target_os = "linux", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]

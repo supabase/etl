@@ -115,9 +115,9 @@ where
     info!(table_id = table_id.0, "starting initial table sync");
 
     // We are safe to keep the lock only for this section, since we know that
-    // the state will be changed by the apply worker only if `SyncWait` is
-    // set, which is not the case if we arrive here, so we are good to
-    // reduce the length of the critical section.
+    // the state will be changed by the apply worker only if `SyncWait` is set,
+    // which is not the case if we arrive here, so we are good to reduce the
+    // length of the critical section.
     let state_type = {
         let inner = table_sync_worker_state.lock().await;
         let state_type = inner.table_state().as_type();
@@ -138,8 +138,8 @@ where
         }
 
         // In case the state is different from the standard states in which a
-        // table sync worker can perform table syncing, we want to
-        // return an error.
+        // table sync worker can perform table syncing, we want to return an
+        // error.
         if !matches!(
             state_type,
             TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy
@@ -182,8 +182,7 @@ where
     let (start_lsn, replicated_table_schema) = match state_type {
         TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy => {
             // We must drop the destination table before starting a copy to
-            // avoid data inconsistencies when there is a previous
-            // table.
+            // avoid data inconsistencies when there is a previous table.
             //
             // Example scenario:
             // 1. The source table has a single row (id = 1) that is copied to
@@ -224,8 +223,8 @@ where
             }
 
             // We try to delete the slot if it already exists, since we might be
-            // starting a table copy after a previous one was reset
-            // or didn't complete successfully.
+            // starting a table copy after a previous one was reset or didn't
+            // complete successfully.
             replication_client.delete_slot_if_exists(&slot_name).await?;
 
             // Prepare durable table-copy state only after the destination drop
@@ -245,13 +244,12 @@ where
             etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP)?;
 
             // We create the slot with a transaction, since we need to have a
-            // consistent snapshot of the database before copying
-            // the schema and tables.
+            // consistent snapshot of the database before copying the schema and
+            // tables.
             //
             // If a slot already exists at this point, we could delete it and
-            // try to recover, but it means that the state was
-            // somehow reset without the slot being deleted, and we
-            // want to surface this.
+            // try to recover, but it means that the state was somehow reset
+            // without the slot being deleted, and we want to surface this.
             let (replication_transaction, slot) = replication_client
                 .create_slot_with_transaction(&slot_name, config.replication_slot.failover)
                 .await?;
@@ -272,8 +270,8 @@ where
                 replication_transaction.get_table_schema_with_identity(table_id).await?;
 
             // We store the table schema in the schema store to be able to
-            // retrieve it even when the pipeline is restarted,
-            // since it's outside the lifecycle of the pipeline.
+            // retrieve it even when the pipeline is restarted, since it's
+            // outside the lifecycle of the pipeline.
             let table_schema = store.store_table_schema(table_schema).await?;
 
             // Get the names of columns being replicated based on the
@@ -291,8 +289,8 @@ where
 
             // Build and store the per-table protocol state for use during CDC.
             // We use `try_build` here because the schema was just loaded and
-            // should match the publication's column filter. Any
-            // mismatch indicates a schema inconsistency.
+            // should match the publication's column filter. Any mismatch
+            // indicates a schema inconsistency.
             let replication_mask =
                 ReplicationMask::try_build(&table_schema, &replicated_column_names).map_err(
                     |err: SchemaError| {
@@ -306,9 +304,9 @@ where
             let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask)?;
 
             // Create the replicated table schema with the exact runtime
-            // identity metadata so catchup and apply can continue
-            // decoding row events without waiting for a fresh
-            // relation message after restarts.
+            // identity metadata so catchup and apply can continue decoding row
+            // events without waiting for a fresh relation message after
+            // restarts.
             let replicated_table_schema =
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
@@ -360,15 +358,14 @@ where
             }
 
             // We commit the transaction before starting the apply loop,
-            // otherwise it will fail since no transactions can be
-            // running while replication is started.
+            // otherwise it will fail since no transactions can be running while
+            // replication is started.
             replication_transaction.commit().await?;
 
             // If no table rows were written, call the method nonetheless to
-            // kickstart table creation. Additionally, if any copy
-            // write was only accepted (and not durably committed),
-            // the empty write is also the terminal table-wide
-            // durability barrier.
+            // kickstart table creation. Additionally, if any copy write was
+            // only accepted (and not durably committed), the empty write is
+            // also the terminal table-wide durability barrier.
             if total_table_copy_rows == 0 || table_copy_barrier_required {
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 destination
@@ -409,9 +406,9 @@ where
     };
 
     // We mark this worker as `SyncWait` (in memory only) to signal the apply
-    // worker that we are ready to start catchup. We pass the snapshot LSN
-    // so the apply worker can use max(snapshot_lsn, current_lsn) when
-    // setting the Catchup LSN.
+    // worker that we are ready to start catchup. We pass the snapshot LSN so
+    // the apply worker can use max(snapshot_lsn, current_lsn) when setting the
+    // Catchup LSN.
     {
         let mut inner = table_sync_worker_state.lock().await;
         inner.set_and_store(TableState::SyncWait { lsn: start_lsn }, &store).await?;

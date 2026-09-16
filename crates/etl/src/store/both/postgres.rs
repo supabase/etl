@@ -99,10 +99,10 @@ struct Inner {
     /// Cached table schema snapshots.
     ///
     /// This cache is optimized for keeping the most actively used schemas in
-    /// memory, not all historical snapshots. Schemas are loaded on-demand
-    /// from the database when not found in cache. During normal operation,
-    /// this typically contains only the latest schema version for each
-    /// table, since that's what the replication pipeline actively uses.
+    /// memory, not all historical snapshots. Schemas are loaded on-demand from
+    /// the database when not found in cache. During normal operation, this
+    /// typically contains only the latest schema version for each table, since
+    /// that's what the replication pipeline actively uses.
     table_schemas: Arc<TableSchemaSnapshots>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
@@ -179,10 +179,9 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// Runs the Postgres store migrations, then creates a
-    /// lazily-connected pool with automatic idle timeout. Connections are
-    /// established on first use and automatically closed after
-    /// `IDLE_TIMEOUT` of inactivity.
+    /// Runs the Postgres store migrations, then creates a lazily-connected pool
+    /// with automatic idle timeout. Connections are established on first use
+    /// and automatically closed after `IDLE_TIMEOUT` of inactivity.
     pub async fn new(
         pipeline_id: PipelineId,
         connection_config: PgConnectionConfig,
@@ -204,9 +203,9 @@ impl PostgresStore {
 impl StateStore for PostgresStore {
     /// Retrieves the table state for a specific table from cache.
     ///
-    /// This method provides fast access to table states by reading
-    /// from the in-memory cache. The cache is populated during startup and
-    /// updated as states change during replication processing.
+    /// This method provides fast access to table states by reading from the
+    /// in-memory cache. The cache is populated during startup and updated as
+    /// states change during replication processing.
     async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         let inner = self.inner.lock().await;
 
@@ -226,10 +225,10 @@ impl StateStore for PostgresStore {
 
     /// Loads table states from Postgres into memory cache.
     ///
-    /// This method connects to the source database, retrieves all table
-    /// table state rows for this pipeline, deserializes the state
-    /// metadata, and populates the in-memory cache. It's typically called
-    /// during pipeline startup to restore state from previous runs.
+    /// This method connects to the source database, retrieves all table table
+    /// state rows for this pipeline, deserializes the state metadata, and
+    /// populates the in-memory cache. It's typically called during pipeline
+    /// startup to restore state from previous runs.
     async fn load_table_states(&self) -> EtlResult<usize> {
         debug!("loading table states from postgres state store");
 
@@ -255,8 +254,7 @@ impl StateStore for PostgresStore {
         Ok(table_states_len)
     }
 
-    /// Updates multiple table states atomically in both database
-    /// and cache.
+    /// Updates multiple table states atomically in both database and cache.
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         // Convert all states upfront to catch any conversion errors before
         // starting the transaction.

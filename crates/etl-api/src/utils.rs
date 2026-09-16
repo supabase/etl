@@ -75,8 +75,8 @@ where
 
 /// Deserializes and trims a Supabase project ref.
 ///
-/// Values that are not strict project refs are rejected.
-/// The project ref is interpolated into the Iceberg catalog URL.
+/// Values that are not strict project refs are rejected. The project ref is
+/// interpolated into the Iceberg catalog URL.
 pub fn trim_supabase_project_ref<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,

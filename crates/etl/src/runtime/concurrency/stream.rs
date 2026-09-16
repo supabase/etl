@@ -128,8 +128,8 @@ impl<S: Stream> Stream for MemoryBackpressureStream<S> {
 pin_project! {
     /// A stream adapter that batches fallible items based on a size target and timeout.
     ///
-    /// This stream buffers successful values and yields their decoded values. It
-    /// avoids buffering `Result<B, E>` values and then allocating a second
+    /// This stream buffers successful values and yields their decoded values.
+    /// It avoids buffering `Result<B, E>` values and then allocating a second
     /// vector to extract successful entries.
     #[must_use = "streams do nothing unless polled"]
     #[derive(Debug)]
@@ -203,9 +203,9 @@ where
             return Poll::Ready(None);
         }
 
-        // PRIORITY 1: Memory backpressure.
-        // If memory backpressure is active and there are buffered items, flush
-        // immediately to avoid accumulating more memory in this stream.
+        // PRIORITY 1: Memory backpressure. If memory backpressure is active and
+        // there are buffered items, flush immediately to avoid accumulating
+        // more memory in this stream.
         //
         // The subscription stream is polled once per outer poll rather than
         // once per item. The hot loop below still reads the current watch value
@@ -267,8 +267,7 @@ where
                     this.items.push(item);
 
                     // If backpressure activated while the source was ready,
-                    // flush the accumulated data before
-                    // pausing source intake.
+                    // flush the accumulated data before pausing source intake.
                     if let Some(memory_subscription) = this.memory_subscription.as_mut()
                         && memory_subscription.current_backpressure_active()
                     {
@@ -281,10 +280,10 @@ where
                     }
 
                     // Consult the shared target after every decoded item. A
-                    // PostgreSQL COPY stream can yield many
-                    // ready rows during one outer poll, so checking only
-                    // once per poll would delay adaptation to a changed cgroup
-                    // limit or active batch-slot count.
+                    // PostgreSQL COPY stream can yield many ready rows during
+                    // one outer poll, so checking only once per poll would
+                    // delay adaptation to a changed cgroup limit or active
+                    // batch-slot count.
                     if *this.batch_size_hint_bytes
                         >= this.batch_memory_governor.batch_size_target_bytes()
                     {
@@ -442,8 +441,8 @@ mod tests {
                 1 => {
                     self.memory.set_total_memory_bytes_for_test(500);
                     // Publishing a new coherent memory snapshot must refresh
-                    // the shared target while the outer
-                    // poll continues draining ready rows.
+                    // the shared target while the outer poll continues draining
+                    // ready rows.
                     SizedToken { value: 2, bytes: 100 }
                 }
                 2 => SizedToken { value: 3, bytes: 100 },
@@ -474,8 +473,8 @@ mod tests {
         }
     }
 
-    /// Returns a governor with a very high target so byte-based flushes do
-    /// not interfere.
+    /// Returns a governor with a very high target so byte-based flushes do not
+    /// interfere.
     fn test_batch_memory_governor(memory_monitor: &MemoryMonitor) -> BatchMemoryGovernor {
         memory_monitor.set_total_memory_bytes_for_test(10_000_000_000);
 

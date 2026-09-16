@@ -21,8 +21,8 @@ use crate::{
 
 /// Converts a Postgres text-format string to a typed [`Cell`] value.
 ///
-/// This method parses Postgres's text representation of various data types
-/// into strongly-typed [`Cell`] variants. It handles all major Postgres types
+/// This method parses Postgres's text representation of various data types into
+/// strongly-typed [`Cell`] variants. It handles all major Postgres types
 /// including arrays, and provides comprehensive error handling for malformed
 /// input.
 ///
@@ -139,10 +139,9 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
-        // [`Cell`] is only the internal Rust value representation. The source
-        // Postgres type is still available from the corresponding
-        // [`ColumnSchema`], so values that do not need a specialized Rust type
-        // preserve their Postgres text output here.
+        // [`Cell`] is only the internal Rust value representation. The source Postgres type is
+        // still available from the corresponding [`ColumnSchema`], so values that do not need a
+        // specialized Rust type preserve their Postgres text output here.
         _ if is_array_type(typ) => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(str.to_owned())),
@@ -154,15 +153,15 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
 
 /// Strips the explicit dimensions prefix from an array literal, if present.
 ///
-/// Postgres prefixes array output with dimensions whenever a lower bound is
-/// not 1, e.g. `[0:1]={7,8}`. [`ArrayCell`] stores one-dimensional arrays
-/// as ordered elements without subscript bounds, so the prefix syntax is
-/// validated and its bounds are intentionally discarded. More than one
-/// dimension group means a multidimensional value, which [`ArrayCell`]
-/// cannot represent and the codec rejects.
+/// Postgres prefixes array output with dimensions whenever a lower bound is not
+/// 1, e.g. `[0:1]={7,8}`. [`ArrayCell`] stores one-dimensional arrays as
+/// ordered elements without subscript bounds, so the prefix syntax is validated
+/// and its bounds are intentionally discarded. More than one dimension group
+/// means a multidimensional value, which [`ArrayCell`] cannot represent and the
+/// codec rejects.
 fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
-    // Skips an optionally negative ASCII integer, returning the index just
-    // past it, or `None` when no digits are present.
+    // Skips an optionally negative ASCII integer, returning the index just past
+    // it, or `None` when no digits are present.
     fn skip_integer(bytes: &[u8], mut index: usize) -> Option<usize> {
         if bytes.get(index) == Some(&b'-') {
             index += 1;
@@ -218,11 +217,10 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
 /// This function handles Postgres's array format with curly braces, comma
 /// separation, and proper quoting. It supports null values (unquoted "null"),
 /// escaped characters within quoted strings, an explicit dimensions prefix
-/// (e.g. `[0:1]={7,8}`), and delegates element parsing to the provided
-/// closure.
+/// (e.g. `[0:1]={7,8}`), and delegates element parsing to the provided closure.
 ///
-/// The parser correctly handles quote escaping, comma separation within
-/// quotes, and distinguishes between null values and the string "null".
+/// The parser correctly handles quote escaping, comma separation within quotes,
+/// and distinguishes between null values and the string "null".
 /// Multidimensional values are rejected because [`ArrayCell`] is
 /// one-dimensional.
 fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
@@ -264,9 +262,8 @@ where
                         in_quotes = !in_quotes;
                     }
                     '\\' => in_escape = true,
-                    // The outer braces are stripped before the loop, so an
-                    // unquoted brace in the body can only come from a nested
-                    // array, which `ArrayCell` cannot represent.
+                    // The outer braces are stripped before the loop, so an unquoted brace in the
+                    // body can only come from a nested array, which `ArrayCell` cannot represent.
                     '{' | '}' if !in_quotes => {
                         bail!(
                             ErrorKind::ConversionError,
@@ -954,8 +951,8 @@ mod tests {
     #[test]
     fn parse_array_escape_sequences() {
         // The array parser doesn't process escape sequences in the same way as
-        // the table row parser It expects literal characters in the
-        // array string
+        // the table row parser It expects literal characters in the array
+        // string
         let cell =
             parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"line1\\nline2","tab\\there"}"#)
                 .unwrap();

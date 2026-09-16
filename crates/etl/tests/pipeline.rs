@@ -778,8 +778,7 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
 
     // Add two tables while the original apply slot is still active. Publication
     // membership is reconciled on restart, when one table will be initialized
-    // as `Init` and the other will already have a persisted `Errored`
-    // state.
+    // as `Init` and the other will already have a persisted `Errored` state.
     let init_table_name = test_table_name("init_before_slot_loss");
     let init_table_id = database
         .create_table(init_table_name.clone(), true, &[("value", "int4 not null")])
@@ -958,8 +957,8 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     // Invalidate the slot.
     database.invalidate_slot(&apply_slot_name).await.unwrap();
 
-    // Restart the pipeline, it should fail because the slot is invalidated
-    // and error behavior is configured.
+    // Restart the pipeline, it should fail because the slot is invalidated and
+    // error behavior is configured.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         pipeline_id,
@@ -1421,8 +1420,8 @@ async fn publication_changes_are_correctly_handled() {
         .unwrap();
 
     // Shutdown pipeline after the table was dropped. We do this to show that
-    // the dropping of a table doesn't cause issues with the pipeline since
-    // the change is picked up on pipeline restart.
+    // the dropping of a table doesn't cause issues with the pipeline since the
+    // change is picked up on pipeline restart.
     pipeline.shutdown_and_wait().await.unwrap();
 
     // The destination should have the insert event for each original table

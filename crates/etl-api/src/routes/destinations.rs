@@ -407,9 +407,9 @@ pub(crate) async fn delete_destination(
     }
 
     // Pipeline locks protect the discovered set, but do not serialize
-    // concurrent pipeline creation or attachment. Database constraints
-    // remain the final guard against deleting a destination that became
-    // referenced after the checks.
+    // concurrent pipeline creation or attachment. Database constraints remain
+    // the final guard against deleting a destination that became referenced
+    // after the checks.
     data::destinations::delete_destination(api_txn.deref_mut(), tenant_id, destination_id)
         .await?
         .ok_or(DestinationError::DestinationNotFound(destination_id))?;

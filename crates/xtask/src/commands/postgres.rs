@@ -13,9 +13,8 @@ use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_
 
 const COMPOSE_FILE: &str = "./scripts/docker/docker-compose.yaml";
 
-/// Returns the program and initial args for docker compose.
-/// Prefers `docker compose` (v2 plugin) and falls back to `docker-compose`
-/// (standalone).
+/// Returns the program and initial args for docker compose. Prefers `docker
+/// compose` (v2 plugin) and falls back to `docker-compose` (standalone).
 fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
     if Command::new("docker")
         .args(["compose", "version"])

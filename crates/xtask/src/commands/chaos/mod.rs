@@ -43,8 +43,8 @@ pub(crate) struct ChaosArgs {
 impl ChaosArgs {
     pub(crate) async fn run(self) -> Result<()> {
         // Install is handled before connecting to the cluster — Chaos Mesh is
-        // not yet present so ChaosClient::new (which checks for the CRD
-        // group) would fail.
+        // not yet present so ChaosClient::new (which checks for the CRD group)
+        // would fail.
         if let scenario::Scenario::Install { runtime } = &self.scenario {
             return install::install(runtime);
         }
@@ -207,8 +207,8 @@ impl ChaosClient {
         let name = chaos.metadata.name.clone().unwrap();
 
         // Clean up any leftover resource from a previous run before creating.
-        // After issuing the delete we poll until the object is truly gone —
-        // a plain sleep is not enough because Kubernetes may keep the object in
+        // After issuing the delete we poll until the object is truly gone — a
+        // plain sleep is not enough because Kubernetes may keep the object in
         // Terminating state and reject the subsequent create with
         // AlreadyExists.
         match self.api.delete(&name, &DeleteParams::default()).await {
@@ -267,8 +267,8 @@ impl ChaosClient {
                 None,
             ),
             Target::Url(url) => (Some(direction.to_owned()), None, Some(vec![url])),
-            // ipset hash:net,port rejects 0.0.0.0/0 (/0 mask is invalid as a hash key).
-            // Split into two /1 CIDRs that together cover all IPv4 addresses.
+            // ipset hash:net,port rejects 0.0.0.0/0 (/0 mask is invalid as a hash key). Split into
+            // two /1 CIDRs that together cover all IPv4 addresses.
             Target::Port(port) => (
                 Some(direction.to_owned()),
                 None,
@@ -433,9 +433,8 @@ pub(crate) enum Target {
 
     /// External hostname, IP address, CIDR block, or `"host:port"` string.
     ///
-    /// Passed directly as a Chaos Mesh `externalTargets` entry.
-    /// Examples: `"postgres"`, `"10.0.0.1"`, `"10.0.0.0/8"`,
-    /// `"clickhouse:8123"`
+    /// Passed directly as a Chaos Mesh `externalTargets` entry. Examples:
+    /// `"postgres"`, `"10.0.0.1"`, `"10.0.0.0/8"`, `"clickhouse:8123"`
     Url(String),
 
     /// All traffic to a specific destination port, regardless of host.

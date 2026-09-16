@@ -962,13 +962,12 @@ async fn table_copy_stream_is_consistent() {
         .await
         .unwrap();
 
-    // An earlier version of this test only inserted one row but was
-    // incorrectly committing the transaction before the copy stream was done.
-    // The test still passed because the copy messages were buffered
-    // and the commit was not yet sent to the server.
-    // We now insert a larger number of rows to ensure that the copy stream
-    // is not buffered and the commit is sent only after the copy stream is
-    // done.
+    // An earlier version of this test only inserted one row but was incorrectly
+    // committing the transaction before the copy stream was done. The test
+    // still passed because the copy messages were buffered and the commit was
+    // not yet sent to the server. We now insert a larger number of rows to
+    // ensure that the copy stream is not buffered and the commit is sent only
+    // after the copy stream is done.
     let expected_rows_count = 1_0000;
 
     database
@@ -1401,8 +1400,8 @@ async fn get_replicated_column_names_for_tables_in_schema_publication() {
         .unwrap();
 
     // Create a FOR TABLES IN SCHEMA publication. Column filtering is NOT
-    // supported with this type. Note: Tables are created in the "test"
-    // schema by test_table_name().
+    // supported with this type. Note: Tables are created in the "test" schema
+    // by test_table_name().
     let publication_name = "test_pub_schema";
     database
         .run_sql(&format!("create publication {publication_name} for tables in schema test"))

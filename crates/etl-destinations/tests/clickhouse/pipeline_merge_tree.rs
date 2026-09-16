@@ -1,7 +1,7 @@
 //! MergeTree-only integration tests. These verify event-log semantics
 //! (`cdc_operation` + `cdc_lsn`) that exist only on the MergeTree engine; the
-//! parameterized spine in `pipeline.rs` covers current-state behavior on
-//! both engines.
+//! parameterized spine in `pipeline.rs` covers current-state behavior on both
+//! engines.
 
 use etl::{
     event::EventType,
@@ -22,8 +22,8 @@ use rand::random;
 use crate::support::crypto::install_crypto_provider;
 
 /// MergeTree event-log row: includes CDC metadata. All three operations in this
-/// test target the same source row, so `id` is asserted on alongside the
-/// CDC columns.
+/// test target the same source row, so `id` is asserted on alongside the CDC
+/// columns.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 struct EventLogRow {
     id: i64,

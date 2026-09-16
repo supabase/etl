@@ -203,9 +203,9 @@ pub async fn delete_pipeline_replication_slots(
 
     for attempt in 0..MAX_RETRIES {
         // Phase 1: terminate active walsender processes for the ETL-managed
-        // slots associated with this pipeline id. We use both the exact
-        // apply slot name and the table-sync prefix so cleanup can
-        // still succeed even if ETL metadata was already removed.
+        // slots associated with this pipeline id. We use both the exact apply
+        // slot name and the table-sync prefix so cleanup can still succeed even
+        // if ETL metadata was already removed.
         let terminate_query = r#"
             select pg_terminate_backend(r.active_pid)
             from pg_replication_slots r
@@ -292,8 +292,7 @@ mod tests {
 
     #[test]
     fn slot_name_length_validation() {
-        // Test that normal slot names are within limits
-        // Max u64
+        // Test that normal slot names are within limits Max u64
         let pipeline_id = 9223372036854775807_u64;
         // Max u32
         let result: Result<String, EtlReplicationSlotError> =

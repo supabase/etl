@@ -97,8 +97,8 @@ where
     let columns: Vec<_> =
         table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
 
-    // Applied metadata needs no transition coordination, but this process
-    // may still need to reopen its local channel state.
+    // Applied metadata needs no transition coordination, but this process may
+    // still need to reopen its local channel state.
     if let Some(metadata) = store.get_destination_table_metadata(table_id).await?
         && metadata.is_applied()
     {
@@ -110,8 +110,8 @@ where
         return Ok(());
     }
 
-    // Own the complete Creating -> remote setup -> Applied transition with
-    // the same gate used by channel reopening and table-copy reset.
+    // Own the complete Creating -> remote setup -> Applied transition with the
+    // same gate used by channel reopening and table-copy reset.
     let table = client.lock_table(table_id).await;
 
     // Re-read under the table gate because another copy partition may have
@@ -181,8 +181,8 @@ where
             Some(metadata)
         }
         Some(_) => {
-            // Applying metadata belongs to schema evolution, which requires
-            // its separate recovery path.
+            // Applying metadata belongs to schema evolution, which requires its
+            // separate recovery path.
             bail!(
                 ErrorKind::InvalidState,
                 "Snowflake table schema is still being applied",
@@ -354,8 +354,8 @@ where
         let mut column_cache: HashMap<TableId, Vec<ColumnSchema>> = HashMap::new();
 
         // Consume data events (insert/update/delete) into per-table batch
-        // builders, stopping at barrier events (truncate, relation)
-        // that require a flush before they can be applied.
+        // builders, stopping at barrier events (truncate, relation) that
+        // require a flush before they can be applied.
         while let Some(event) = iter.peek() {
             if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                 break;
@@ -695,8 +695,8 @@ where
         let table_name = try_stringify_table_name(replicated_table_schema.name())?.to_uppercase();
         let (task_guard, detached) = timeout(RESET_PREPARATION_TIMEOUT, async {
             // Acquire the task registry before any client lock. Event tasks
-            // have no registry access, so they can finish while
-            // reset waits for them.
+            // have no registry access, so they can finish while reset waits for
+            // them.
             let task_guard = self.tasks.drain().await?;
             let detached = self
                 .writer
@@ -716,9 +716,8 @@ where
         })??;
 
         // Keep event registration closed through the remote drop. This
-        // operation stays outside the local drain timeout because
-        // cancelling remote SQL does not prove whether Snowflake
-        // completed it.
+        // operation stays outside the local drain timeout because cancelling
+        // remote SQL does not prove whether Snowflake completed it.
         let result =
             self.writer.client.drop_detached_table_for_copy(detached).await.map_err(EtlError::from);
 

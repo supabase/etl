@@ -54,14 +54,14 @@ pub struct ApiConfig {
     pub sentry: Option<SentryConfig>,
     /// Optional Supabase API URL for error notifications.
     ///
-    /// When provided, this URL is passed to replicators to enable
-    /// error notifications to the Supabase API. The API key will be
-    /// injected as a Kubernetes secret named `supabase_api_key`.
+    /// When provided, this URL is passed to replicators to enable error
+    /// notifications to the Supabase API. The API key will be injected as a
+    /// Kubernetes secret named `supabase_api_key`.
     pub supabase_api_url: Option<String>,
     /// Optional ConfigCat SDK key for feature flag integration.
     ///
-    /// If provided, enables ConfigCat feature flag evaluation.
-    /// If `None`, the API operates without feature flag support.
+    /// If provided, enables ConfigCat feature flag evaluation. If `None`, the
+    /// API operates without feature flag support.
     pub configcat_sdk_key: Option<String>,
 }
 
@@ -125,8 +125,8 @@ pub struct K8sConfig {
     ///
     /// This key remains `replicator_resources` in API configuration files. It
     /// provides the mandatory baseline CPU and memory requests written to each
-    /// replicator pod template unless a pipeline-level override supplies one
-    /// of those request values.
+    /// replicator pod template unless a pipeline-level override supplies one of
+    /// those request values.
     pub replicator_resources: ReplicatorResourceDefaultsConfig,
     /// Optional API-wide VPA interval for replicator CPU and memory.
     ///
@@ -171,8 +171,8 @@ pub struct ReplicatorResourceAutoscalingConfig {
 ///
 /// The API creates a VPA for every replicator. [`Self::Off`] keeps that VPA in
 /// recommendation-only mode; every other mode allows it to apply resource
-/// recommendations. Reconciliation preserves the update mode already present
-/// on a live VPA, so this setting only chooses the mode at creation time.
+/// recommendations. Reconciliation preserves the update mode already present on
+/// a live VPA, so this setting only chooses the mode at creation time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplicatorResourceAutoscalingUpdateMode {
@@ -331,14 +331,13 @@ fn validate_positive_request(name: &str, value: i32) -> Result<(), String> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SourceConfig {
     /// TLS configuration for source database connections, mirroring
-    /// `database.tls`'s shape so both connections are configured the same
-    /// way.
+    /// `database.tls`'s shape so both connections are configured the same way.
     ///
-    /// When `enabled` is `true`, the API uses `trusted_root_certs` to
-    /// establish TLS connections to source databases. This applies both to
-    /// direct API connections (e.g., listing tables, managing publications)
-    /// and to replicator pods deployed in Kubernetes, which receive the same
-    /// resolved value embedded in their generated configuration.
+    /// When `enabled` is `true`, the API uses `trusted_root_certs` to establish
+    /// TLS connections to source databases. This applies both to direct API
+    /// connections (e.g., listing tables, managing publications) and to
+    /// replicator pods deployed in Kubernetes, which receive the same resolved
+    /// value embedded in their generated configuration.
     pub tls: TlsConfig,
     /// Optional trusted username for source profile validation.
     ///

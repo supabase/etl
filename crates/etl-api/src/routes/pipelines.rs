@@ -234,9 +234,9 @@ impl PipelineError {
                 "Pipeline resources are still stopping. Retry once the pipeline has stopped."
                     .to_owned()
             }
-            // Do not expose internal details in error messages. These all map to 500 status
-            // codes and the underlying causes (database, k8s, replicator/image plumbing,
-            // missing config) are not actionable by the user.
+            // Do not expose internal details in error messages. These all map to 500 status codes
+            // and the underlying causes (database, k8s, replicator/image plumbing, missing config)
+            // are not actionable by the user.
             PipelineError::SourcesDb(_)
             | PipelineError::DestinationsDb(_)
             | PipelineError::PipelinesDb(_)
@@ -464,8 +464,7 @@ pub struct TableStatus {
     /// response properties.
     #[serde(flatten)]
     pub table: SourceTable,
-    // TODO: Remove the legacy fields after all platform consumers use `id`,
-    // `schema`, and `name`.
+    // TODO: Remove the legacy fields after all platform consumers use `id`, `schema`, and `name`.
     /// Deprecated compatibility alias for `id`.
     #[schema(example = 1, deprecated)]
     pub table_id: u32,
@@ -859,8 +858,7 @@ pub(crate) async fn read_pipeline(
     ),
     tag = "Pipelines"
 )]
-// Axum gives the static /pipelines/stop route precedence over this dynamic
-// route.
+// Axum gives the static /pipelines/stop route precedence over this dynamic route.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn update_pipeline(
     headers: HeaderMap,
@@ -1007,9 +1005,9 @@ pub(crate) async fn delete_pipeline(
     }
 
     // Retain control-plane records and the pipeline lock through source
-    // metadata and slot cleanup so failures leave enough information to
-    // reclaim source state. If this commit fails, a retry can repeat the
-    // idempotent cleanup.
+    // metadata and slot cleanup so failures leave enough information to reclaim
+    // source state. If this commit fails, a retry can repeat the idempotent
+    // cleanup.
     api_txn.commit().await?;
 
     Ok(StatusCode::OK)
@@ -1093,9 +1091,8 @@ pub(crate) async fn start_pipeline(
     let (pipeline, replicator, image, source, destination) =
         read_pipeline_components(&mut api_txn, tenant_id, pipeline_id, &encryption_key).await?;
 
-    // A successful stop response only acknowledges deletion. Finish removing
-    // an inactive runtime before applying resources that could still be
-    // deleted.
+    // A successful stop response only acknowledges deletion. Finish removing an
+    // inactive runtime before applying resources that could still be deleted.
     if should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await? {
         api_txn.commit().await?;
 
@@ -1740,10 +1737,10 @@ pub(crate) async fn update_pipeline_version(
     let destination_type = DestinationType::from(&destination.config);
     let image_name_unchanged = target_image.name == current_image.name;
 
-    // If the images have equal name, non-DuckLake pipelines do not need any
-    // K8s reconciliation. DuckLake pipelines still reconcile because the
-    // external maintenance CR may be missing for pipelines created before that
-    // resource existed.
+    // If the images have equal name, non-DuckLake pipelines do not need any K8s
+    // reconciliation. DuckLake pipelines still reconcile because the external
+    // maintenance CR may be missing for pipelines created before that resource
+    // existed.
     if image_name_unchanged && !matches!(destination_type, DestinationType::Ducklake) {
         api_txn.commit().await?;
 

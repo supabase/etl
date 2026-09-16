@@ -3837,9 +3837,8 @@ mod tests {
             "-1 day",
             "23 hours",
             "1 day -1 microsecond",
-            // DuckDB compares years as 12 * 30 days: -360 + 361 = 1 day,
-            // exactly the old minimum. Calendar subtraction instead moves the
-            // cutoff 4 or 5 days into the future.
+            // DuckDB compares years as 12 * 30 days: -360 + 361 = 1 day, exactly the old minimum.
+            // Calendar subtraction instead moves the cutoff 4 or 5 days into the future.
             "-1 year 361 days",
             "",
             "not an interval",

@@ -78,9 +78,9 @@ pub enum ApiDestinationConfig {
         #[schema(example = "my_db")]
         #[serde(deserialize_with = "crate::utils::trim_string")]
         database: String,
-        /// Table engine used for replicated tables. Applied only when a
-        /// table is created or recreated; changing it does not affect a
-        /// table that already exists.
+        /// Table engine used for replicated tables. Applied only when a table
+        /// is created or recreated; changing it does not affect a table that
+        /// already exists.
         #[schema(value_type = String, example = "replacing_merge_tree")]
         #[serde(default)]
         engine: ClickHouseEngine,
@@ -242,8 +242,7 @@ pub enum ApiDestinationConfig {
     },
 }
 
-/// API representation of a destination configuration with credentials
-/// omitted.
+/// API representation of a destination configuration with credentials omitted.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StrippedApiDestinationConfig {
@@ -262,8 +261,8 @@ pub enum StrippedApiDestinationConfig {
         /// Size of the BigQuery Storage Write API connection pool.
         #[serde(skip_serializing_if = "Option::is_none")]
         connection_pool_size: Option<usize>,
-        /// Per-table partitioning and clustering options, applied only when
-        /// the physical table is created or recreated.
+        /// Per-table partitioning and clustering options, applied only when the
+        /// physical table is created or recreated.
         #[serde(default, skip_serializing_if = "BigQueryTableOptionsConfig::is_empty")]
         table_options: BigQueryTableOptionsConfig,
     },
@@ -277,9 +276,9 @@ pub enum StrippedApiDestinationConfig {
         user: String,
         /// ClickHouse target database.
         database: String,
-        /// Table engine used for replicated tables. Applied only when a
-        /// table is created or recreated; changing it does not affect a
-        /// table that already exists.
+        /// Table engine used for replicated tables. Applied only when a table
+        /// is created or recreated; changing it does not affect a table that
+        /// already exists.
         #[schema(value_type = String)]
         engine: ClickHouseEngine,
     },
@@ -486,8 +485,8 @@ pub enum UpdateApiDestinationConfig {
         )]
         service_account_key: UpdateField<SerializableSecretString>,
         /// Maximum staleness in minutes for BigQuery CDC reads. Applied only
-        /// when a table is created or recreated, not to a table that
-        /// already exists.
+        /// when a table is created or recreated, not to a table that already
+        /// exists.
         #[schema(example = 15)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         max_staleness_mins: UpdateField<u16>,
@@ -495,9 +494,9 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = 8)]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         connection_pool_size: UpdateField<usize>,
-        /// Replaces all per-table creation options. `null` resets them.
-        /// Applied only when a table is created or recreated, not to a
-        /// table that already exists.
+        /// Replaces all per-table creation options. `null` resets them. Applied
+        /// only when a table is created or recreated, not to a table that
+        /// already exists.
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         table_options: UpdateField<BigQueryTableOptionsConfig>,
     },
@@ -534,8 +533,8 @@ pub enum UpdateApiDestinationConfig {
             deserialize_with = "deserialize_update_trimmed_string"
         )]
         database: UpdateField<String>,
-        /// Applied only when a table is created or recreated, not to a
-        /// table that already exists.
+        /// Applied only when a table is created or recreated, not to a table
+        /// that already exists.
         #[schema(value_type = String, example = "replacing_merge_tree")]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         engine: UpdateField<ClickHouseEngine>,
@@ -661,8 +660,8 @@ pub enum UpdateApiDestinationConfig {
         #[schema(example = "kubernetes")]
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         maintenance_mode: UpdateField<DuckLakeMaintenanceMode>,
-        /// Replaces the initial-copy buffering configuration. `null` clears
-        /// the pipeline value so the ETL API replicator default is used.
+        /// Replaces the initial-copy buffering configuration. `null` clears the
+        /// pipeline value so the ETL API replicator default is used.
         #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
         copy_buffer: UpdateField<DuckLakeCopyBufferConfig>,
         /// Replaces all per-table sort orders. `null` resets them.
@@ -2217,8 +2216,7 @@ pub enum StrippedApiIcebergConfig {
         /// S3-compatible storage region.
         s3_region: String,
     },
-    /// REST Iceberg catalog configuration without its object-store
-    /// credentials.
+    /// REST Iceberg catalog configuration without its object-store credentials.
     Rest {
         /// REST catalog URI.
         catalog_uri: String,

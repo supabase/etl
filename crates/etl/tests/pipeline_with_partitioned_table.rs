@@ -375,8 +375,8 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
 
-/// Tests that initial COPY replicates all rows from a partitioned table.
-/// Only the parent table is tracked, not individual child partitions.
+/// Tests that initial COPY replicates all rows from a partitioned table. Only
+/// the parent table is tracked, not individual child partitions.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_copy_replicates_existing_data() {
     init_test_tracing();
@@ -580,8 +580,8 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     assert_eq!(parent_inserts.len(), 1);
 }
 
-/// Tests that a new leaf partition is discovered after restart when changes
-/// are published using leaf identities.
+/// Tests that a new leaf partition is discovered after restart when changes are
+/// published using leaf identities.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_partition_with_leaf_identity_is_discovered_after_restart() {
     init_test_tracing();

@@ -111,8 +111,8 @@ impl ApplyLoopTasks {
 impl Drop for ApplyLoopTasks {
     fn drop(&mut self) {
         // Cancellation or panic can skip or interrupt async teardown. Abort
-        // every task; interrupted cleanup only prunes obsolete schemas and
-        // can be retried.
+        // every task; interrupted cleanup only prunes obsolete schemas and can
+        // be retried.
         self.feedback_sender_task.abort();
         self.replication_lag_metrics_task.abort();
         self.schema_cleanup_worker_task.abort();

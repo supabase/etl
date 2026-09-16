@@ -16,8 +16,8 @@ pub struct Config {
 
     /// Snowflake account identifier (e.g. `ORGNAME-ACCTNAME`).
     ///
-    /// Used in JWT claims and API routing.
-    /// Uppercased internally where Snowflake requires it.
+    /// Used in JWT claims and API routing. Uppercased internally where
+    /// Snowflake requires it.
     pub(crate) account_id: String,
 
     /// Snowflake login name used for key-pair authentication.

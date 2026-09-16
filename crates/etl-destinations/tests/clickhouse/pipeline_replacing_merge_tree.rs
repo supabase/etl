@@ -36,9 +36,8 @@ struct CountRow {
     count: u64,
 }
 
-/// ReplacingMergeTree: source table must have a primary key.
-/// Table preparation rejects PK-less schemas under ReplacingMergeTree with
-/// `SourceSchemaError`.
+/// ReplacingMergeTree: source table must have a primary key. Table preparation
+/// rejects PK-less schemas under ReplacingMergeTree with `SourceSchemaError`.
 #[tokio::test(flavor = "multi_thread")]
 async fn replacing_merge_tree_rejects_pkless_source_table() {
     init_test_tracing();
@@ -637,8 +636,8 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
     // CH ships ReplacingMergeTree-with-CLEANUP behind an experimental gate that
     // has shifted names across versions (26.x removed the previous setting
     // name). When the server does not allow the call, treat this test as
-    // covered by the FINAL-based spine assertions and skip the
-    // physical-removal check.
+    // covered by the FINAL-based spine assertions and skip the physical-removal
+    // check.
     match optimize_result {
         Ok(()) => {
             let counts: Vec<CountRow> =
@@ -673,9 +672,9 @@ async fn engine_mismatch_existing_replacing_merge_tree_then_merge_tree_pipeline(
     engine_mismatch_runs(ClickHouseEngine::ReplacingMergeTree, ClickHouseEngine::MergeTree).await;
 }
 
-/// Drives the engine-mismatch flow: pipeline A creates the table under
-/// `first`, shuts down; pipeline B tries to use the same ClickHouse database
-/// under `second` and the table goes Errored with an engine-mismatch reason.
+/// Drives the engine-mismatch flow: pipeline A creates the table under `first`,
+/// shuts down; pipeline B tries to use the same ClickHouse database under
+/// `second` and the table goes Errored with an engine-mismatch reason.
 async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();

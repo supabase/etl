@@ -78,8 +78,8 @@ fn container_status_is_unknown(container: &ContainerStatus) -> bool {
 
     // Waiting reasons are extensible strings, not a closed API enum. Preserve
     // known initialization/recovery states without inventing semantics for a
-    // new reason. RestartingAllContainers is the kubelet's whole-Pod
-    // recovery state.
+    // new reason. RestartingAllContainers is the kubelet's whole-Pod recovery
+    // state.
     state.waiting.as_ref().and_then(|waiting| waiting.reason.as_deref()).is_some_and(|reason| {
         !matches!(reason, "" | "ContainerCreating" | "PodInitializing" | "RestartingAllContainers")
             && !container_has_error(container)
@@ -104,8 +104,8 @@ fn derive_pod_status(pod: &Pod, replicator_container_name: &str) -> PodStatus {
         .chain(status.init_container_statuses.iter().flatten());
 
     // Loss of observation takes precedence over retained container health. A
-    // node can become unreachable while its last reported process still
-    // looks healthy.
+    // node can become unreachable while its last reported process still looks
+    // healthy.
     if status
         .phase
         .as_deref()
@@ -136,8 +136,8 @@ fn derive_pod_status(pod: &Pod, replicator_container_name: &str) -> PodStatus {
                 PodStatus::Starting
             }
         }
-        // Always restart policy means a clean exit is recovery, not a stopped
-        // pipeline. Missing phase is normal before the kubelet first reports status.
+        // Always restart policy means a clean exit is recovery, not a stopped pipeline. Missing
+        // phase is normal before the kubelet first reports status.
         None | Some("Pending" | "Succeeded") => PodStatus::Starting,
         _ => PodStatus::Unknown,
     }
@@ -169,8 +169,8 @@ fn derive_replicator_status(
     match spec.replicas.unwrap_or(1) {
         0 => return if pod.is_some() { PodStatus::Stopping } else { PodStatus::Stopped },
         1 => {}
-        // This architecture runs one replicator. Inspecting ordinal zero cannot
-        // establish the health of an externally scaled, multi-process pipeline.
+        // This architecture runs one replicator. Inspecting ordinal zero cannot establish the
+        // health of an externally scaled, multi-process pipeline.
         _ => return PodStatus::Unknown,
     }
 

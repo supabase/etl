@@ -8,9 +8,9 @@ use crate::{error::ReplicatorResult, metrics};
 
 /// Starts a pipeline and handles graceful shutdown signals.
 ///
-/// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT,
-/// and ensures proper cleanup on shutdown. The pipeline will attempt to
-/// finish processing current batches before terminating.
+/// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT, and
+/// ensures proper cleanup on shutdown. The pipeline will attempt to finish
+/// processing current batches before terminating.
 #[tracing::instrument(skip(pipeline))]
 pub(super) async fn start<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
 where
@@ -61,11 +61,11 @@ where
     // Wait for the pipeline to finish (either normally or via shutdown).
     let result = pipeline.wait().await;
 
-    // Ensure the shutdown task is finished before returning.
-    // If the pipeline finished before Ctrl+C, we want to abort the shutdown
-    // task. If Ctrl+C was pressed, the shutdown task will have already
-    // triggered shutdown. We don't care about the result of the
-    // shutdown_handle, but we should abort it if it's still running.
+    // Ensure the shutdown task is finished before returning. If the pipeline
+    // finished before Ctrl+C, we want to abort the shutdown task. If Ctrl+C was
+    // pressed, the shutdown task will have already triggered shutdown. We don't
+    // care about the result of the shutdown_handle, but we should abort it if
+    // it's still running.
     shutdown_handle.abort();
     let _ = shutdown_handle.await;
     metrics_tasks.abort_and_wait().await;

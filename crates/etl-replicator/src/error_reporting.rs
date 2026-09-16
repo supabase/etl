@@ -15,11 +15,11 @@ use crate::{error_notification::ErrorNotificationClient, sentry};
 
 /// State store decorator that reports persisted table replication errors.
 ///
-/// After [`StateStore::update_table_states`] succeeds, this wrapper
-/// reports each terminal [`TableState::Errored`] update to Sentry and, when
-/// configured, to the Supabase error-notification endpoint. Errors with a
-/// timed retry remain visible in the state store but are not reported while
-/// automatic recovery is still in progress.
+/// After [`StateStore::update_table_states`] succeeds, this wrapper reports
+/// each terminal [`TableState::Errored`] update to Sentry and, when configured,
+/// to the Supabase error-notification endpoint. Errors with a timed retry
+/// remain visible in the state store but are not reported while automatic
+/// recovery is still in progress.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorReportingStateStore<S> {
     inner: S,

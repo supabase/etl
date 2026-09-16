@@ -143,9 +143,10 @@ where
 
                 // An expired deadline cannot be starved by optional requests.
                 _ = tokio::time::sleep_until(deadline) => {
-                    // Keep the connection alive even while intake is backpressured.
-                    // Repeat only supplied safe positions. The requested reply
-                    // can drive idle processing once intake resumes.
+                    // Keep the connection alive even while intake is
+                    // backpressured. Repeat only supplied safe positions. The
+                    // requested reply can drive idle processing once intake
+                    // resumes.
                     self.send_status_update(0.into(), 0.into(), true, StatusUpdateType::PeriodicKeepAlive).await?;
 
                     // Fault injection may suppress a send. Still space retries
@@ -185,19 +186,19 @@ where
     /// reported promptly, but passes `force = false` when PostgreSQL did not
     /// request a reply.
     ///
-    /// PostgreSQL normally requests an immediate reply after roughly half
-    /// of `wal_sender_timeout` has elapsed without hearing from ETL. Once it
-    /// sends that requested heartbeat, the walsender waits for the response
-    /// instead of issuing more requested heartbeats. Orderly walsender shutdown
-    /// can also request a reply while waiting for confirmation of its final WAL
+    /// PostgreSQL normally requests an immediate reply after roughly half of
+    /// `wal_sender_timeout` has elapsed without hearing from ETL. Once it sends
+    /// that requested heartbeat, the walsender waits for the response instead
+    /// of issuing more requested heartbeats. Orderly walsender shutdown can
+    /// also request a reply while waiting for confirmation of its final WAL
     /// position. Keepalives emitted for skipped transactions or in response to
     /// our own reply requests do not request a reply.
     ///
     /// A non-forced call with an unchanged flush frontier is therefore
     /// debounced. A skipped update means ETL suppressed that redundant response
     /// locally; it does not mean a status message was sent and rejected by
-    /// PostgreSQL. Outside test fault injection, forced heartbeat
-    /// responses always bypass this interval.
+    /// PostgreSQL. Outside test fault injection, forced heartbeat responses
+    /// always bypass this interval.
     async fn send_status_update(
         &mut self,
         write_lsn: PgLsn,
@@ -206,8 +207,8 @@ where
         status_update_type: StatusUpdateType,
     ) -> EtlResult<bool> {
         // If the failpoint is active, we do not send any status update. This is
-        // useful for testing the system when we want to check what
-        // happens when no status updates are sent.
+        // useful for testing the system when we want to check what happens when
+        // no status updates are sent.
         #[cfg(feature = "failpoints")]
         if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
             warn!("not sending status update due to active failpoint");
@@ -271,20 +272,19 @@ where
             .as_micros() as i64;
 
         // We will send the `flush_lsn` as `apply_lsn` since in our case, we
-        // don't distinguish between them as Postgres does. The reason
-        // is that `apply_lsn` is used to mark when an LSN is both
-        // durable and visible, but from ETL's perspective we are fine
-        // with just it being durable, which is marked via the
-        // `flush_lsn`.
+        // don't distinguish between them as Postgres does. The reason is that
+        // `apply_lsn` is used to mark when an LSN is both durable and visible,
+        // but from ETL's perspective we are fine with just it being durable,
+        // which is marked via the `flush_lsn`.
         //
         // This outgoing request flag is separate from `force`. For a primary
         // keepalive, `force` mirrors PostgreSQL's incoming reply-request flag.
-        // Background periodic updates are forced and request a
-        // reply. PostgreSQL answers with a primary keepalive carrying
-        // reply_requested = false. The apply loop may still enqueue an optional
-        // KeepAlive response, subject to debouncing, but that response also has
-        // reply_requested = false. Neither response requests another answer,
-        // so this exchange cannot sustain an infinite keepalive request loop.
+        // Background periodic updates are forced and request a reply.
+        // PostgreSQL answers with a primary keepalive carrying reply_requested
+        // = false. The apply loop may still enqueue an optional KeepAlive
+        // response, subject to debouncing, but that response also has
+        // reply_requested = false. Neither response requests another answer, so
+        // this exchange cannot sustain an infinite keepalive request loop.
         let request_reply: u8 = status_update_type.request_reply().into();
         // CopyBoth supplies the framing; this is the standby-status payload.
         let mut message = BytesMut::with_capacity(34);
@@ -334,9 +334,9 @@ impl FeedbackHandle {
     /// Creates a channel handle and the [`FeedbackSender`] future.
     ///
     /// The caller must spawn and own the returned future; the handle only
-    /// submits requests and never writes to the transport itself.
-    /// Buffering small LSN/urgency requests lets the apply loop continue while
-    /// the sender debounces, encodes, and submits feedback to the transport.
+    /// submits requests and never writes to the transport itself. Buffering
+    /// small LSN/urgency requests lets the apply loop continue while the sender
+    /// debounces, encodes, and submits feedback to the transport.
     pub(crate) fn create<S>(
         sink: S,
         keep_alive_deadline_duration: Duration,

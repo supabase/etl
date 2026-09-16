@@ -95,16 +95,16 @@ where
     pub fn new(config: PipelineConfig, store: S, destination: D) -> Self {
         // Register metrics here during pipeline creation to avoid burdening the
         // users of etl crate to explicitly calling it. Since this method is
-        // safe to call multiple times, it is ok even if there are
-        // multiple pipelines created.
+        // safe to call multiple times, it is ok even if there are multiple
+        // pipelines created.
         register_metrics();
 
         // We create a watch channel of unit types since this is just used to
         // notify all subscribers that shutdown is needed.
         //
         // Here we are not taking the `shutdown_rx` since we will just extract
-        // it from the `shutdown_tx` via the `subscribe` method. This is
-        // done to make the code cleaner.
+        // it from the `shutdown_tx` via the `subscribe` method. This is done to
+        // make the code cleaner.
         let (shutdown_tx, _) = create_shutdown_channel();
 
         Self {
@@ -124,8 +124,8 @@ where
     /// Returns a handle for sending shutdown signals to this pipeline.
     ///
     /// Multiple components can hold shutdown handles to coordinate graceful
-    /// termination. When shutdown is signaled, all workers will complete
-    /// their current operations and terminate cleanly.
+    /// termination. When shutdown is signaled, all workers will complete their
+    /// current operations and terminate cleanly.
     pub fn shutdown_tx(&self) -> ShutdownTx {
         self.shutdown_tx.clone()
     }
@@ -177,8 +177,7 @@ where
         self.store.load_table_schemas().await?;
 
         // We load the table states by checking the table ids of a publication
-        // and loading/creating the table states based on the current
-        // state.
+        // and loading/creating the table states based on the current state.
         self.initialize_table_states(&replication_client).await?;
 
         // We then let destinations perform their startup sequence if any.
@@ -232,8 +231,8 @@ where
     ///
     /// This method blocks until both the apply worker and all table sync
     /// workers have finished their work. If the pipeline was never started,
-    /// this returns immediately. If any workers encounter errors, those
-    /// errors are collected and returned.
+    /// this returns immediately. If any workers encounter errors, those errors
+    /// are collected and returned.
     ///
     /// The wait process ensures proper shutdown ordering:
     /// 1. Apply worker completes first (may spawn additional table sync
@@ -251,18 +250,18 @@ where
         let mut errors = vec![];
 
         // We first wait for the apply worker to finish, since that must be done
-        // before waiting for the table sync workers to finish,
-        // otherwise if we wait for sync workers first, we might be
-        // having the apply worker that spawns new sync workers after we
-        // waited for the current ones to finish.
+        // before waiting for the table sync workers to finish, otherwise if we
+        // wait for sync workers first, we might be having the apply worker that
+        // spawns new sync workers after we waited for the current ones to
+        // finish.
         debug!("waiting for apply worker to complete");
         let apply_worker_result = apply_worker.wait().await;
         if let Err(err) = apply_worker_result {
             errors.push(err);
 
             // If we fail to send the shutdown signal, we are not going to
-            // capture the error since it means that no table sync
-            // workers are running, which is fine.
+            // capture the error since it means that no table sync workers are
+            // running, which is fine.
             let _ = self.shutdown_tx.shutdown();
         }
 
@@ -307,9 +306,9 @@ where
     /// Initiates graceful shutdown of the pipeline.
     ///
     /// Sends shutdown signals to all workers, instructing them to complete
-    /// their current operations and terminate. This method returns
-    /// immediately after sending the signals and does not wait for workers
-    /// to actually stop.
+    /// their current operations and terminate. This method returns immediately
+    /// after sending the signals and does not wait for workers to actually
+    /// stop.
     ///
     /// Use [`Pipeline::wait`] after calling this method to wait for complete
     /// shutdown.
@@ -327,16 +326,16 @@ where
     /// Initiates shutdown and waits for complete pipeline termination.
     ///
     /// This convenience method combines [`Pipeline::shutdown`] and
-    /// [`Pipeline::wait`] to provide a single call that both initiates
-    /// shutdown and waits for completion. Returns any errors encountered
-    /// during the shutdown process.
+    /// [`Pipeline::wait`] to provide a single call that both initiates shutdown
+    /// and waits for completion. Returns any errors encountered during the
+    /// shutdown process.
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
     }
 
-    /// Initializes table states for tables in the publication and
-    /// purges state for tables removed from it.
+    /// Initializes table states for tables in the publication and purges state
+    /// for tables removed from it.
     ///
     /// Ensures each table currently in the Postgres publication has a
     /// corresponding table state; tables without existing states are
@@ -396,8 +395,8 @@ where
                 );
 
                 // We delete all table state before removing the slot, so that
-                // we don't incur in the case where we have a
-                // slot tied to an invalid state.
+                // we don't incur in the case where we have a slot tied to an
+                // invalid state.
                 self.store.delete_table_state(table_id).await?;
 
                 // We try to delete the replication slot.
