@@ -228,7 +228,7 @@ fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
 /// Copies a table through ctid work items, using worker child connections.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
-    activity_handle: ActivityHandle,
+    activity_handle: &ActivityHandle,
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
@@ -774,7 +774,8 @@ where
                     completed_flush_result.into_parts_with_completion();
                 let write_status = result?;
 
-                // Notify that there is activity in the table copy.
+                // Observe completed destination writes, including accepted
+                // batches whose durability is confirmed by the final barrier.
                 activity_handle.ping();
 
                 table_copy_batch_metadata.record_processed(D::name());

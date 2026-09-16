@@ -160,6 +160,7 @@ mod tests {
 
     use crate::{core::ReplicatorState, health::ActivityStatus};
 
+    /// A stalled operation fails health without masking other timeout policies.
     #[test]
     fn inactivity_boundaries_and_independent_workers() {
         let stall_timeout = Duration::from_secs(600);
@@ -187,6 +188,7 @@ mod tests {
         );
     }
 
+    /// Lifecycle and activity jointly determine both probe responses.
     #[test]
     fn probes_follow_replicator_lifecycle_and_activity() {
         let ok = (StatusCode::OK, "ok");

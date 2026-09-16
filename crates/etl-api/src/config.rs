@@ -109,7 +109,7 @@ impl ReplicatorProbeConfig {
         ] {
             if value < 1 {
                 return Err(ValidationError::InvalidFieldValue {
-                    field: format!("replicator.health.{probe_name}.{field}"),
+                    field: format!("k8s.replicator_health.{probe_name}.{field}"),
                     constraint: "must be greater than zero".to_owned(),
                 });
             }
@@ -123,16 +123,16 @@ impl ReplicatorProbeConfig {
 /// Omitted probes are not generated. With no probes, the API also omits the
 /// replicator listener configuration and container port. Kubernetes settings
 /// remain in the API; only port and inactivity allowance reach the replicator.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct ApiReplicatorHealthConfig {
     /// Health settings passed to the replicator itself: listener port and
     /// inactivity allowance. Defaults to port 9001 and 300000 milliseconds
     /// without observed activity; Kubernetes probe timing is configured below.
+    #[serde(default)]
     pub replicator: ReplicatorHealthConfig,
     /// Optional `/livez` startup check. Until it succeeds, Kubernetes delays
-    /// the configured readiness and liveness checks. It observes listener
-    /// availability, not completion of initial sync.
+    /// the configured readiness and liveness checks. It does not wait for
+    /// pipeline initialization or completion of initial sync.
     pub startup: Option<ReplicatorProbeConfig>,
     /// Optional `/livez` check that restarts the container after repeated
     /// failures. Its failure window is additional to the inactivity allowance.
@@ -167,10 +167,6 @@ impl Validate for ApiReplicatorHealthConfig {
 /// Defaults applied to generated replicator configurations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ApiReplicatorConfig {
-    /// Optional replicator activity probes. Only explicitly supplied probes
-    /// are generated; omission and an empty block both disable them.
-    #[serde(default)]
-    pub health: Option<ApiReplicatorHealthConfig>,
     /// Defaults grouped by destination kind.
     #[serde(default)]
     pub destination_defaults: DestinationDefaultsConfig,
@@ -192,7 +188,7 @@ pub struct DuckLakeDestinationDefaultsConfig {
     pub copy_buffer: DuckLakeCopyBufferConfig,
 }
 
-/// Preserves the existing five-minute Pod drain allowance.
+/// Preserves the five-minute Pod termination allowance when omitted.
 fn default_replicator_termination_grace_period_seconds() -> i64 {
     300
 }
@@ -226,8 +222,10 @@ pub struct K8sConfig {
     /// fixes the bounds to the resolved startup request, while a configured
     /// interval defines the allowed recommendation range independently of the
     /// startup request.
-    #[serde(default)]
     pub replicator_autoscaling: Option<ReplicatorResourceAutoscalingConfig>,
+    /// Optional replicator activity probes. Only explicitly supplied probes
+    /// are generated; omission and an empty block both disable them.
+    pub replicator_health: Option<ApiReplicatorHealthConfig>,
     /// Pod shutdown allowance, in seconds, before forced termination.
     /// Defaults to 300 (five minutes), including when probes are disabled.
     /// Must be at least one. This bounds draining; it does not extend probe
@@ -371,10 +369,10 @@ impl ApiConfig {
                 .to_owned()
                 .into());
         }
-        self.replicator.destination_defaults.ducklake.copy_buffer.validate()?;
-        if let Some(health) = &self.replicator.health {
-            health.validate()?;
+        if let Some(replicator_health) = &self.k8s.replicator_health {
+            replicator_health.validate()?;
         }
+        self.replicator.destination_defaults.ducklake.copy_buffer.validate()?;
 
         Ok(())
     }
@@ -689,22 +687,47 @@ mod tests {
         );
     }
 
+    /// Omitted or empty probe settings disable the listener; readiness can
+    /// stand alone.
     #[test]
     fn replicator_probes_require_explicit_configuration() {
-        for value in [json!({}), json!({"health": null}), json!({"health": {}})] {
-            let config: ApiReplicatorConfig = serde_json::from_value(value).unwrap();
-            assert_eq!(config.health.and_then(|health| health.listener_config()), None);
+        let base = json!({
+            "replicator_resources": {
+                "memory_request_mib": 2000,
+                "cpu_request_millicores": 500
+            },
+            "vector_resources": {
+                "memory_request_mib": 192,
+                "cpu_request_millicores": 75
+            }
+        });
+        for health in [
+            None,
+            Some(json!(null)),
+            Some(json!({})),
+            Some(json!({"startup": null, "liveness": null, "readiness": null})),
+        ] {
+            let mut value = base.clone();
+            if let Some(health) = health {
+                value["replicator_health"] = health;
+            }
+            let config: K8sConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.replicator_health.and_then(|health| health.listener_config()), None);
         }
-        let health: ApiReplicatorHealthConfig = serde_json::from_value(json!({
+        let mut value = base;
+        value["replicator_health"] = json!({
             "readiness": {"period_seconds": 10, "timeout_seconds": 2, "failure_threshold_count": 3}
-        }))
-        .unwrap();
+        });
+        let config: K8sConfig = serde_json::from_value(value).unwrap();
+        let health = config.replicator_health.unwrap();
         health.validate().unwrap();
         assert_eq!(health.listener_config(), Some(ReplicatorHealthConfig::default()));
         assert!(health.startup.is_none());
         assert!(health.liveness.is_none());
     }
 
+    /// Every enabled probe requires positive, explicitly configured timing
+    /// values.
     #[test]
     fn replicator_probes_reject_missing_and_nonpositive_values() {
         for probe_name in ["startup", "liveness", "readiness"] {
@@ -723,8 +746,12 @@ mod tests {
                     invalid[field] = json!(value);
                     let health: ApiReplicatorHealthConfig =
                         serde_json::from_value(json!({probe_name: invalid})).unwrap();
-                    let error = health.validate().unwrap_err();
-                    assert!(error.to_string().contains(&format!("{probe_name}.{field}")));
+                    let ValidationError::InvalidFieldValue { field: invalid_field, .. } =
+                        health.validate().unwrap_err();
+                    assert_eq!(
+                        invalid_field,
+                        format!("k8s.replicator_health.{probe_name}.{field}")
+                    );
                 }
             }
         }

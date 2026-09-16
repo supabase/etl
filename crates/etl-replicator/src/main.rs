@@ -6,9 +6,8 @@
 
 use std::process::ExitCode;
 
-use ::tracing::{debug, error};
+use ::tracing::{debug, error, info};
 use etl_config::shared::ReplicatorConfig;
-use tracing::info;
 
 use crate::{
     core::start_replicator_with_config,

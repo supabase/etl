@@ -853,21 +853,55 @@ mod tests {
                     api_url: None,
                 },
                 api_default,
-                Some(ReplicatorHealthConfig::default()),
+                None,
                 TlsConfig::disabled(),
             )
             .unwrap();
-
-            assert_eq!(config.health, Some(ReplicatorHealthConfig::default()));
-            let serialized = serde_json::to_value(&config).unwrap();
-            assert_eq!(serialized["health"]["port"], 9001);
-            assert_eq!(serialized["health"]["stall_timeout_ms"], 300_000);
 
             let DestinationConfigWithoutSecrets::Ducklake { copy_buffer, .. } = config.destination
             else {
                 unreachable!("destination kind should remain DuckLake");
             };
             assert_eq!(copy_buffer, expected);
+        }
+    }
+
+    /// Generated configs preserve custom listener settings and omit disabled
+    /// listeners.
+    #[test]
+    fn replicator_config_builder_preserves_optional_health() {
+        for health in
+            [None, Some(ReplicatorHealthConfig { port: 19001, stall_timeout_ms: 120_000 })]
+        {
+            let pipeline_config = serde_json::from_value(serde_json::json!({
+                "publication_name": "example_publication"
+            }))
+            .unwrap();
+            let config = build_replicator_config_without_secrets(
+                1,
+                source_config_with_password(),
+                ducklake_destination_config(None),
+                pipeline_config,
+                SupabaseConfigWithoutSecrets {
+                    project_ref: "example-project-ref".to_owned(),
+                    api_url: None,
+                },
+                DuckLakeCopyBufferConfig::default(),
+                health,
+                TlsConfig::disabled(),
+            )
+            .unwrap();
+
+            assert_eq!(config.health, health);
+            let serialized = serde_json::to_value(&config).unwrap();
+            if health.is_some() {
+                assert_eq!(
+                    serialized["health"],
+                    serde_json::json!({"port": 19001, "stall_timeout_ms": 120000})
+                );
+            } else {
+                assert!(serialized.get("health").is_none());
+            }
         }
     }
 

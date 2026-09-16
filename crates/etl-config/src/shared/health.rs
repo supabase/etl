@@ -7,6 +7,7 @@ use crate::shared::{Validate, ValidationError};
 /// Default HTTP port for replicator activity probes.
 const DEFAULT_HEALTH_PORT: u16 = 9001;
 /// Default minimum inactivity allowance, in milliseconds.
+///
 /// Five minutes tolerates slow batches before probes report inactivity;
 /// Kubernetes applies its own failure thresholds before marking unready or
 /// restarting.
@@ -58,6 +59,7 @@ impl Validate for ReplicatorHealthConfig {
 mod tests {
     use crate::shared::{ReplicatorHealthConfig, Validate};
 
+    /// Partial listener configuration retains the defaults for omitted fields.
     #[test]
     fn defaults_and_overrides() {
         let config: ReplicatorHealthConfig = serde_json::from_str("{}").unwrap();
@@ -69,6 +71,7 @@ mod tests {
         assert_eq!(config.stall_timeout_ms, 120_000);
     }
 
+    /// A listener requires a nonzero port and inactivity allowance.
     #[test]
     fn rejects_zero_values() {
         for config in [

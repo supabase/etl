@@ -140,7 +140,7 @@ pub(crate) async fn restart_replicator_if_running(
         destination,
         api_config.supabase_api_url.as_deref(),
         api_config.replicator.destination_defaults.ducklake.copy_buffer,
-        api_config.replicator.health,
+        api_config.k8s.replicator_health,
         source_tls_config.get_tls_config(),
         true,
     )

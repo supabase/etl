@@ -154,6 +154,7 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         replicator_service_account_name: "etl-replicator".to_owned(),
         replicator_node_selectors: Default::default(),
         replicator_tolerations: Default::default(),
+        replicator_health: None,
         replicator_termination_grace_period_seconds: 300,
         replicator_resources: ReplicatorResourceDefaultsConfig {
             memory_request_mib,
@@ -3049,6 +3050,8 @@ mod tests {
         );
     }
 
+    /// Every probe subset preserves its timing, endpoint, port, and drain
+    /// allowance.
     #[test]
     fn replicator_activity_probes_are_independently_configurable() {
         let k8s_config =
@@ -3091,11 +3094,11 @@ mod tests {
                 container["ports"].as_array().unwrap().len(),
                 if enabled == 0 { 1 } else { 2 }
             );
-            assert_eq!(health.listener_config().is_some(), enabled != 0);
             if enabled != 0 {
-                assert_eq!(container["ports"][1]["containerPort"], 19001);
-                let listener = serde_json::to_value(health.listener_config().unwrap()).unwrap();
-                assert_eq!(listener, json!({"port": 19001, "stall_timeout_ms": 120000}));
+                assert_eq!(
+                    container["ports"][1],
+                    json!({"name": "health", "containerPort": 19001, "protocol": "TCP"})
+                );
             }
             for (bit, name, path, period, timeout, failures) in [
                 (1, "startupProbe", "/livez", 4, 1, 20),

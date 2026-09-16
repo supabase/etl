@@ -450,8 +450,8 @@ struct PendingDurabilityInterval {
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
-    /// Activity shared by every apply loop, suspended during intentional
-    /// catchup waits.
+    /// This loop's activity observation, suspended during intentional catchup
+    /// waits.
     activity_handle: ActivityHandle,
     /// The highest commit end LSN that should be attached to the next
     /// destination write.
@@ -982,7 +982,8 @@ where
                 .await
             }?;
 
-            // Notify that there is activity in the apply loop.
+            // Only completed iterations count; independent feedback cannot
+            // hide a blocked loop.
             self.state.activity_handle.ping();
 
             // If we have a result from the apply loop, we should stop the loop.

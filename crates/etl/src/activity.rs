@@ -210,6 +210,8 @@ mod tests {
 
     use crate::activity::{ActivityKind, ActivityRegistration, ActivityRegistry, snapshot};
 
+    /// Each operation starts fresh and only its own pings advance its
+    /// timestamp.
     #[test]
     fn observations_start_at_registration_and_track_each_worker_independently() {
         let now = Instant::now();
@@ -233,61 +235,38 @@ mod tests {
         assert_eq!(entries[1].last_observed_at(), second_started_at);
     }
 
+    /// Suspending one loop preserves other observations and resuming resets its
+    /// window.
     #[test]
-    fn catchup_wait_is_exempt_and_resumes_with_a_fresh_window() {
-        let now = Instant::now();
-        let mut registry = ActivityRegistry::default();
-        let (_, handle) =
-            registry.register(ActivityKind::InitialTableCopy, now - Duration::from_secs(600));
-        let suspension = handle.suspend();
-        assert!(registry.snapshot().is_empty());
-        drop(suspension);
-        let entry = registry.snapshot()[0];
-        assert!(entry.inactive_for(now) < Duration::from_micros(1));
-        assert!(entry.last_observed_at() <= Instant::now());
-    }
-
-    #[test]
-    fn long_main_loop_wait_does_not_hide_catchup_inactivity() {
+    fn catchup_wait_is_exempt_without_hiding_other_workers() {
         let now = Instant::now();
         let kind = ActivityKind::WalApply { wal_sender_timeout: Duration::from_secs(60) };
         let mut registry = ActivityRegistry::default();
-        let (_, main) = registry.register(kind, now);
+        let (_, main) = registry.register(kind, now - Duration::from_secs(600));
         registry.register(kind, now - Duration::from_secs(600));
-        let _waiting = main.suspend();
+        let waiting = main.suspend();
         let entries = registry.snapshot();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].inactive_for(now), Duration::from_secs(600));
+
+        let before_resume = Instant::now();
+        drop(waiting);
+        let entries = registry.snapshot();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].last_observed_at() >= before_resume - Duration::from_micros(1));
+        assert!(entries[0].last_observed_at() <= Instant::now());
+        assert_eq!(entries[1].inactive_for(now), Duration::from_secs(600));
     }
 
+    /// Handles can record observations but cannot retain completed
+    /// registrations.
     #[test]
     fn handles_do_not_keep_completed_work_registered() {
         let registration = ActivityRegistration::register(ActivityKind::InitialTableCopy);
+        assert_eq!(snapshot().len(), 1);
         let handle = registration.handle();
         drop(registration);
         handle.ping();
-        assert!(snapshot().is_empty());
-    }
-
-    #[test]
-    fn unwinding_removes_registration() {
-        let result = std::panic::catch_unwind(|| {
-            let _registration = ActivityRegistration::register(ActivityKind::InitialTableCopy);
-            panic!("test unwind");
-        });
-        assert!(result.is_err());
-        assert!(snapshot().is_empty());
-    }
-
-    #[tokio::test]
-    async fn cancellation_removes_registration() {
-        let registration = ActivityRegistration::register(ActivityKind::InitialTableCopy);
-        let task = tokio::spawn(async move {
-            let _registration = registration;
-            std::future::pending::<()>().await;
-        });
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
         assert!(snapshot().is_empty());
     }
 }

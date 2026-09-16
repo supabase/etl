@@ -1113,7 +1113,7 @@ pub(crate) async fn start_pipeline(
         destination,
         api_config.supabase_api_url.as_deref(),
         api_config.replicator.destination_defaults.ducklake.copy_buffer,
-        api_config.replicator.health,
+        api_config.k8s.replicator_health,
         tls_config,
         true,
     )
@@ -1635,7 +1635,7 @@ pub(crate) async fn rollback_tables(
                 destination,
                 api_config.supabase_api_url.as_deref(),
                 api_config.replicator.destination_defaults.ducklake.copy_buffer,
-                api_config.replicator.health,
+                api_config.k8s.replicator_health,
                 source_tls_config.get_tls_config(),
                 true,
             )

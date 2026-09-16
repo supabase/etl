@@ -147,18 +147,19 @@ export APP_CONFIG_DIR=/etc/etl-api/config
 
 ### Replicator probes
 
-Probes are opt-in and configured independently. Omit `replicator.health`, or
+Probes are opt-in and configured independently. Omit `k8s.replicator_health`, or
 leave it empty, to generate no probes and no health listener. Supplying only
 `readiness` enables readiness alone; add `startup` and `liveness` when ready to
 roll them out. Each supplied probe requires all three timing/count fields.
 Use replicator images that support these endpoints.
 
-This example retains a five-minute inactivity allowance and a conservative
-restart window of roughly 30 minutes without observed progress:
+This example uses a five-minute inactivity allowance and, with PostgreSQL's
+default `wal_sender_timeout`, starts termination after roughly 30 minutes
+without observed activity:
 
 ```yaml
-replicator:
-  health:
+k8s:
+  replicator_health:
     replicator:
       port: 9001
       stall_timeout_ms: 300000
@@ -174,7 +175,6 @@ replicator:
       period_seconds: 30
       timeout_seconds: 2
       failure_threshold_count: 50
-k8s:
   replicator_termination_grace_period_seconds: 300
 ```
 
@@ -189,15 +189,23 @@ counts must be positive. The container port name remains `health`.
 | `timeout_seconds` | Maximum wait for an HTTP response; expiry counts as one failed check. |
 | `failure_threshold_count` | Consecutive failures before acting. One success resets the count. |
 | `replicator.stall_timeout_ms` | Inactivity allowance before the listener reports stalled work. Apply loops allow at least PostgreSQL's `wal_sender_timeout`. |
-| `replicator_termination_grace_period_seconds` | Pod drain time before forced termination; defaults to 300 even with probes disabled. |
+| `replicator_termination_grace_period_seconds` | Pod drain time before forced termination; defaults to 300 seconds even with probes disabled. |
 
 Startup uses `/livez` and gates the other probes until one success; it does not
 wait for initial sync to finish. Readiness uses `/readyz` and marks the Pod unready
 without pausing replication or restarting it. Liveness uses `/livez` and triggers
-a restart after repeated failures. In the example, readiness reports inactivity
-after roughly five minutes plus 20–30 seconds, while liveness starts termination
-after roughly 30 minutes. A nonresponsive listener starts accumulating failures
-immediately, without the inactivity allowance.
+a restart after repeated failures. With the example settings and PostgreSQL's
+default timeout, readiness marks the Pod unready after roughly five minutes plus
+20–30 seconds; liveness starts termination after roughly 30 minutes. The drain
+allowance can delay forced termination by another five minutes. A nonresponsive
+listener starts accumulating failures immediately, without the inactivity allowance.
+
+The endpoints observe completed apply-loop iterations and destination copy
+batches, not durable replication progress. Slot acquisition and intentional
+catchup waits are exempt. With no observations, the process is live but unready;
+during graceful shutdown, it remains live and unready. Initial sync need not be
+complete for readiness to succeed. When `wal_sender_timeout` is disabled or
+unavailable, the listener uses a 60-second fallback for the apply-loop allowance.
 
 API configuration changes affect newly generated Pod templates when pipelines
 start, restart, or otherwise reconcile; editing the API configuration alone does

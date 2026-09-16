@@ -187,15 +187,17 @@ the local Docker stack, which reserves port 9001 for ClickHouse.
   and no stalls; otherwise 503. Initial sync need not be complete.
 
 Probes observe completed apply-loop iterations and destination copy batches,
-not durable replication progress. Slot acquisition and intentional catchup waits
-are exempt. With no observations, the process stays live but unready. Apply loops
+not durable replication progress. Parallel copy workers share one observation
+per table; the observation includes source commit and the final destination
+durability barrier. Slot acquisition and intentional catchup waits are exempt.
+With no observations, the process stays live but unready. Apply loops
 allow the greater of `stall_timeout_ms` and PostgreSQL's `wal_sender_timeout`
 (60-second fallback when disabled or unavailable). Tune the stall timeout above
 expected copy batch and finalization durations.
 
 For Kubernetes, use `/livez` for startup and liveness, and `/readyz` for readiness
 on the configured port. The optional ETL API configures these independently under
-`replicator.health.startup`, `.liveness`, and `.readiness`. Each supplied block
+`k8s.replicator_health.startup`, `.liveness`, and `.readiness`. Each supplied block
 requires `period_seconds`, `timeout_seconds`, and `failure_threshold_count`;
 omitted blocks generate no probe. With no probes, the API also omits the listener.
 Enable probes only with a replicator image that supports these endpoints.

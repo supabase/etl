@@ -315,7 +315,7 @@ where
             // We check if the table should be copied, or we can skip it.
             if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
                 let result = table_copy(
-                    activity_handle.clone(),
+                    &activity_handle,
                     &replication_transaction,
                     table_id,
                     replicated_table_schema.clone(),
