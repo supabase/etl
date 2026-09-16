@@ -1102,6 +1102,15 @@ where
     }
 
     async fn drop_table_for_copy_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        #[cfg(feature = "test-utils")]
+        if std::mem::take(&mut *DROP_TABLE_FOR_COPY_FAILURE.lock()) {
+            return Err(etl_error!(
+                ErrorKind::DestinationError,
+                "Injected ClickHouse table reset failure",
+                "One-shot failure armed by arm_fail_drop_table_for_copy_once_for_tests"
+            ));
+        }
+
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
@@ -2099,6 +2108,17 @@ fn normalize_clickhouse_engine(engine: &str) -> &str {
 /// `Shared` Cloud variants as equivalent to their plain forms.
 fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
     normalize_clickhouse_engine(existing) == normalize_clickhouse_engine(configured)
+}
+
+/// One-shot failure armed for the next table reset's remote work.
+#[cfg(feature = "test-utils")]
+static DROP_TABLE_FOR_COPY_FAILURE: Mutex<bool> = Mutex::new(false);
+
+/// Arms the next [`ClickHouseDestination`] table reset to fail once before
+/// any remote work, after its task-registry drain.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_drop_table_for_copy_once_for_tests() {
+    *DROP_TABLE_FOR_COPY_FAILURE.lock() = true;
 }
 
 #[cfg(test)]

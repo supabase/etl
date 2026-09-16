@@ -60,6 +60,7 @@ use etl::{
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
     ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
+    arm_fail_drop_table_for_copy_once_for_tests,
     client::{ClickHouseClient, arm_pause_before_insert_statement_for_tests},
     test_utils::{
         ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
@@ -1776,5 +1777,56 @@ async fn table_reset_succeeds_after_failed_write() {
     assert_eq!(
         clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
         vec![(7, "after".to_owned())]
+    );
+}
+
+/// A failed table reset publishes its error through the async result,
+/// releases the registry for later admission, and can be retried.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_table_reset_publishes_error_and_reopens_admission() {
+    // GIVEN: two created tables and a one-shot injected reset failure.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let failing_schema = lifecycle_schema_with_id("resetfail", 7100);
+    let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&failing_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
+    arm_fail_drop_table_for_copy_once_for_tests();
+
+    // WHEN: the reset fails, a bystander write follows, and the reset is
+    // retried.
+    let reset_error =
+        drop_table_for_copy_via_trait(&destination, &failing_schema).await.unwrap_err();
+    let bystander_status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&bystander_schema, 7, "after")],
+    )
+    .await
+    .unwrap();
+    let retried_reset = drop_table_for_copy_via_trait(&destination, &failing_schema).await;
+
+    // THEN: the injected failure travelled the async result, admission
+    // stayed usable afterwards, and the one-shot failure did not stick to
+    // the retried reset.
+    assert_eq!(reset_error.kind(), ErrorKind::DestinationError);
+    assert_eq!(bystander_status, DestinationWriteStatus::Durable);
+    retried_reset.unwrap();
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
+        vec![(7, "after".to_owned())]
+    );
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() and name = \
+                 'public_resetfail'",
+            )
+            .await,
+        Vec::<String>::new()
     );
 }

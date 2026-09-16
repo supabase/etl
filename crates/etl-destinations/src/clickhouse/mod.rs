@@ -18,6 +18,8 @@ use etl::schema::ColumnNameMapping;
 /// resync.
 const CLICKHOUSE_COLUMN_NAME_MAPPING: ColumnNameMapping = ColumnNameMapping::Identity;
 
+#[cfg(feature = "test-utils")]
+pub use core::arm_fail_drop_table_for_copy_once_for_tests;
 pub use core::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig};
 
 pub use client::ClickHouseClient;
