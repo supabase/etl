@@ -87,7 +87,8 @@ fn try_main() -> ReplicatorResult<()> {
     // Phase 1: synchronous bootstrap before starting Tokio.
     //
     // Keep all fallible synchronous setup here so we fail fast without paying
-    // the cost of building the async runtime unless startup can actually proceed.
+    // the cost of building the async runtime unless startup can actually
+    // proceed.
 
     // Install rustls crypto provider before any TLS operations.
     init::init_crypto();

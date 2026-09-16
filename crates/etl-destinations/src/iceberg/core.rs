@@ -189,9 +189,9 @@ where
 
         // Check if metadata exists for this table.
         //
-        // If no metadata exists, it means the table was never created in Iceberg (e.g.,
-        // due to errors during copy). In this case, we skip the truncate since
-        // there's nothing to truncate.
+        // If no metadata exists, it means the table was never created in
+        // Iceberg (e.g., due to errors during copy). In this case, we
+        // skip the truncate since there's nothing to truncate.
         let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             warn!(
                 %table_id,
@@ -204,9 +204,10 @@ where
                 ensure_iceberg_relation_is_unchanged(&metadata, replicated_table_schema)?;
             }
             DestinationTableSchema::Creating { .. } => {
-                // A truncate-only replay reaches this path before any earlier DML
-                // can recover the marker. The drop/create pair below is itself the
-                // idempotent recovery operation for the recorded target.
+                // A truncate-only replay reaches this path before any earlier
+                // DML can recover the marker. The drop/create
+                // pair below is itself the idempotent recovery
+                // operation for the recorded target.
                 ensure_destination_schema_matches_metadata(
                     "Iceberg",
                     table_id,
@@ -243,9 +244,10 @@ where
             namespace
         };
 
-        // Persist a recovery marker before creating the intentional missing-table
-        // window. If replay reaches earlier DML first, normal Creating recovery
-        // recreates the table so the batch can advance to this truncate again.
+        // Persist a recovery marker before creating the intentional
+        // missing-table window. If replay reaches earlier DML first,
+        // normal Creating recovery recreates the table so the batch can
+        // advance to this truncate again.
         self.store.store_destination_table_metadata(table_id, recreating_metadata.clone()).await?;
 
         self.client
@@ -308,8 +310,9 @@ where
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let (namespace, iceberg_table_name) = {
-            // We hold the lock for the entire preparation to avoid race conditions since
-            // the consistency of this code path is critical.
+            // We hold the lock for the entire preparation to avoid race
+            // conditions since the consistency of this code path is
+            // critical.
             let mut inner = self.inner.lock().await;
             self.prepare_table_for_writes(&mut inner, replicated_table_schema).await?
         };
@@ -338,8 +341,9 @@ where
         let mut events_iter = events.into_iter().peekable();
 
         while events_iter.peek().is_some() {
-            // Maps table ID to (schema, rows); schema is the first one seen for that table.
-            // Once schema change support is implemented, we will re-implement this.
+            // Maps table ID to (schema, rows); schema is the first one seen for
+            // that table. Once schema change support is
+            // implemented, we will re-implement this.
             let mut table_id_to_data: HashMap<TableId, (ReplicatedTableSchema, Vec<TableRow>)> =
                 HashMap::new();
 
@@ -428,7 +432,8 @@ where
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (namespace, iceberg_table_name) = {
-                        // We hold the lock for the entire preparation to avoid race conditions
+                        // We hold the lock for the entire preparation to avoid
+                        // race conditions
                         // since the consistency of this code path is
                         // critical.
                         let mut inner = self.inner.lock().await;
@@ -450,10 +455,10 @@ where
 
             // Collect and deduplicate schemas from all truncate events.
             //
-            // This is done as an optimization since if we have multiple tables being
-            // truncated in a row without applying other events in the
-            // meanwhile, it doesn't make any sense to create new empty tables
-            // for each of them.
+            // This is done as an optimization since if we have multiple tables
+            // being truncated in a row without applying other
+            // events in the meanwhile, it doesn't make any sense to
+            // create new empty tables for each of them.
             let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
 
             while let Some(Event::Truncate(_)) = events_iter.peek() {
@@ -1029,7 +1034,8 @@ mod tests {
 
     #[test]
     fn schema_to_namespace_case_conversion() {
-        // PostgreSQL unquoted identifiers are case-insensitive and folded to lowercase.
+        // PostgreSQL unquoted identifiers are case-insensitive and folded to
+        // lowercase.
         assert_eq!(schema_to_namespace("UserSchema"), "userschema");
         assert_eq!(schema_to_namespace("MYSCHEMA"), "myschema");
         assert_eq!(schema_to_namespace("MixedCase"), "mixedcase");
@@ -1050,8 +1056,8 @@ mod tests {
 
     #[test]
     fn schema_to_namespace_non_ascii_replaced() {
-        // Non-ASCII characters should be replaced with underscores (one char = one
-        // underscore).
+        // Non-ASCII characters should be replaced with underscores (one char =
+        // one underscore).
         assert_eq!(schema_to_namespace("schémas"), "sch_mas");
         // All non-ASCII becomes underscores, then fixed to start/end with
         // letter/number.
@@ -1098,7 +1104,8 @@ mod tests {
         // Names starting with underscore followed by 'aws'.
         assert_eq!(schema_to_namespace("_aws_internal"), "s_aws_internal");
         assert_eq!(schema_to_namespace("_aws"), "s_aws");
-        // After removing leading underscore, it becomes 'aws', so needs 's_' prefix.
+        // After removing leading underscore, it becomes 'aws', so needs 's_'
+        // prefix.
         assert_eq!(schema_to_namespace("__aws"), "s__aws");
     }
 

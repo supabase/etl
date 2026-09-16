@@ -110,7 +110,8 @@ async fn read_replica_replays_multiple_test_databases() {
     let replica_b = local_pg_read_replica_connection_config(&primary_b.config);
 
     // Physical replication is cluster-wide, so wait for the standby to replay
-    // each database's setup before connecting to those databases on the replica.
+    // each database's setup before connecting to those databases on the
+    // replica.
     wait_for_read_replica_to_catch_up(&primary_a, &replica_a).await;
     wait_for_read_replica_to_catch_up(&primary_b, &replica_b).await;
 

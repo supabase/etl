@@ -87,7 +87,8 @@ impl TableSyncWorkerPool {
     where
         F: Future<Output = EtlResult<TableSyncWorkerResult>> + Send + 'static,
     {
-        // Lock workers_join_set first to ensure we block if wait_all is in progress.
+        // Lock workers_join_set first to ensure we block if wait_all is in
+        // progress.
         let mut workers_join_set = self.workers_join_set.lock().await;
         let mut workers = self.workers.write().await;
 
@@ -161,8 +162,9 @@ impl TableSyncWorkerPool {
                     // A new worker with the same table_id but different run_id
                     // may have been spawned, so we must not remove it.
                     //
-                    // We lock only after the join was completed, since we want to allow the active
-                    // workers to be read while waiting for all to complete.
+                    // We lock only after the join was completed, since we want
+                    // to allow the active workers to be
+                    // read while waiting for all to complete.
                     {
                         let mut workers = self.workers.write().await;
                         if let Some(handle) = workers.get(&worker_id.table_id)
@@ -180,9 +182,12 @@ impl TableSyncWorkerPool {
                             debug!(%worker_id, "table sync worker completed after shutdown");
                         }
                         Ok(TableSyncWorkerResult::Errored) => {
-                            // The worker must persist the table error before returning this result.
-                            // Waiting on the pool happens after the apply worker completes, so
-                            // `wait_all` cannot be the first place that releases apply-side
+                            // The worker must persist the table error before
+                            // returning this result.
+                            // Waiting on the pool happens after the apply
+                            // worker completes, so
+                            // `wait_all` cannot be the first place that
+                            // releases apply-side
                             // waiters.
                             debug!(
                                 %worker_id,

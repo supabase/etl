@@ -172,8 +172,9 @@ where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
-    // We use this watch channel to send connection updates without relying on the
-    // errors/terminations propagated by the active connection consumers.
+    // We use this watch channel to send connection updates without relying on
+    // the errors/terminations propagated by the active connection
+    // consumers.
     let (updates_tx, updates_rx) = watch::channel(PostgresConnectionUpdate::Running);
 
     let span = tracing::Span::current();
@@ -194,9 +195,9 @@ where
     }
     .instrument(span);
 
-    // There is no need to track the connection task via the `JoinHandle` since the
-    // `Client`, which returned the connection, will automatically terminate the
-    // connection when dropped.
+    // There is no need to track the connection task via the `JoinHandle` since
+    // the `Client`, which returned the connection, will automatically
+    // terminate the connection when dropped.
     tokio::spawn(task);
 
     updates_rx
@@ -480,12 +481,14 @@ impl PgReplicationClient {
         let results = self.client.simple_query(&query).await?;
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
-                // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
-                // A slot is invalidated when wal_status is 'lost'
+                // wal_status can be: 'reserved', 'extended', 'unreserved', or
+                // 'lost' A slot is invalidated when wal_status
+                // is 'lost'
                 let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
 
-                // A NULL status means PostgreSQL cannot determine WAL availability from the
-                // slot's restart LSN, for example because the slot has not reserved WAL yet.
+                // A NULL status means PostgreSQL cannot determine WAL
+                // availability from the slot's restart LSN, for
+                // example because the slot has not reserved WAL yet.
                 return match wal_status.as_deref() {
                     Some("lost") => Ok(SlotState::Invalidated),
                     Some(_) | None => Ok(SlotState::NotInvalidated),
@@ -821,15 +824,17 @@ mod tests {
 
     #[test]
     fn replication_base_name_fits_worker_suffix_without_clamping() {
-        // --- GIVEN: a worker suffix with pipeline id and table oid summing to 15
-        // digits, the documented no-clamp bound for the replication base name ---
+        // --- GIVEN: a worker suffix with pipeline id and table oid summing to
+        // 15 digits, the documented no-clamp bound for the replication
+        // base name ---
         let name = table_sync_worker_application_name(
             APP_NAME_REPLICATOR_REPLICATION,
             99_999,
             TableId::new(u32::MAX),
         );
 
-        // --- THEN: the name fits Postgres's 63-byte limit with the base intact ---
+        // --- THEN: the name fits Postgres's 63-byte limit with the base intact
+        // ---
         assert!(name.len() <= 63, "worker application_name '{name}' exceeds Postgres limit");
         assert!(name.starts_with(APP_NAME_REPLICATOR_REPLICATION));
     }

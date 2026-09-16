@@ -78,9 +78,9 @@ pub enum LogFlusher {
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
-            // Needed because if no env is set, it defaults to prod, which logs to files
-            // instead of terminal, and we need to log to terminal when
-            // `ENABLE_TRACING` env var is set.
+            // Needed because if no env is set, it defaults to prod, which logs
+            // to files instead of terminal, and we need to log to
+            // terminal when `ENABLE_TRACING` env var is set.
             Environment::Dev.set();
             let _log_flusher =
                 init_tracing("test").expect("Failed to initialize tracing for tests");
@@ -247,8 +247,9 @@ impl tracing::field::Visit for JsonFieldVisitor {
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn stdfmt::Debug) {
-        // `tracing-log` forwards log crate metadata as synthetic `log.*` fields.
-        // These are not user event payload, so we skip them here.
+        // `tracing-log` forwards log crate metadata as synthetic `log.*`
+        // fields. These are not user event payload, so we skip them
+        // here.
         if field.name().starts_with("log.") {
             return;
         }

@@ -284,8 +284,8 @@ where
         table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let table_id = table_schema.id();
-        // Check durable state before the warm-channel fast path so an interrupted
-        // schema change continues to block DML.
+        // Check durable state before the warm-channel fast path so an
+        // interrupted schema change continues to block DML.
         let metadata =
             self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
                 etl_error!(
@@ -325,7 +325,8 @@ where
         events: Vec<Event>,
     ) -> EtlResult<DestinationWriteStatus> {
         let mut iter = events.into_iter().peekable();
-        // Schema and truncate side effects must close the pending streaming window.
+        // Schema and truncate side effects must close the pending streaming
+        // window.
         let mut requires_durability_wait = false;
 
         while iter.peek().is_some() {
@@ -352,9 +353,9 @@ where
         let mut builders: HashMap<TableId, RowBatchBuilder> = HashMap::new();
         let mut column_cache: HashMap<TableId, Vec<ColumnSchema>> = HashMap::new();
 
-        // Consume data events (insert/update/delete) into per-table batch builders,
-        // stopping at barrier events (truncate, relation) that require a flush before
-        // they can be applied.
+        // Consume data events (insert/update/delete) into per-table batch
+        // builders, stopping at barrier events (truncate, relation)
+        // that require a flush before they can be applied.
         while let Some(event) = iter.peek() {
             if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                 break;
@@ -693,8 +694,9 @@ where
     ) -> EtlResult<()> {
         let table_name = try_stringify_table_name(replicated_table_schema.name())?.to_uppercase();
         let (task_guard, detached) = timeout(RESET_PREPARATION_TIMEOUT, async {
-            // Acquire the task registry before any client lock. Event tasks have no
-            // registry access, so they can finish while reset waits for them.
+            // Acquire the task registry before any client lock. Event tasks
+            // have no registry access, so they can finish while
+            // reset waits for them.
             let task_guard = self.tasks.drain().await?;
             let detached = self
                 .writer
@@ -713,9 +715,10 @@ where
             )
         })??;
 
-        // Keep event registration closed through the remote drop. This operation
-        // stays outside the local drain timeout because cancelling remote SQL does
-        // not prove whether Snowflake completed it.
+        // Keep event registration closed through the remote drop. This
+        // operation stays outside the local drain timeout because
+        // cancelling remote SQL does not prove whether Snowflake
+        // completed it.
         let result =
             self.writer.client.drop_detached_table_for_copy(detached).await.map_err(EtlError::from);
 
@@ -734,7 +737,8 @@ where
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
         let result: EtlResult<DestinationWriteStatus> = async {
-            // Table must exist even for empty snapshots, CDC events may arrive later.
+            // Table must exist even for empty snapshots, CDC events may arrive
+            // later.
             self.writer.initialize_table(replicated_table_schema).await?;
 
             if table_rows.is_empty() {
@@ -751,8 +755,8 @@ where
                 .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
                 .collect();
 
-            // Build row batches. Snowflake has limits on max size of input, so we slice
-            // into proper batches, when necessary.
+            // Build row batches. Snowflake has limits on max size of input, so
+            // we slice into proper batches, when necessary.
             let zero = OffsetToken::zero();
             let mut builder = RowBatchBuilder::new();
             for row in &table_rows {
@@ -982,7 +986,8 @@ mod tests {
         let mut initialization = Box::pin(destination.writer.initialize_table(&schema));
         assert!(initialization.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
 
-        // Another copy partition completes while this caller waits for the gate.
+        // Another copy partition completes while this caller waits for the
+        // gate.
         let metadata = DestinationTableMetadata::new_applied(
             try_stringify_table_name(schema.name()).unwrap().to_uppercase(),
             schema.inner().snapshot_id,
@@ -992,7 +997,8 @@ mod tests {
         drop(table);
 
         // Reopening reaches the deliberately failing token provider without
-        // recursively acquiring the lifecycle gate or changing Applied metadata.
+        // recursively acquiring the lifecycle gate or changing Applied
+        // metadata.
         let Poll::Ready(result) =
             initialization.as_mut().poll(&mut Context::from_waker(Waker::noop()))
         else {

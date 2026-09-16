@@ -118,22 +118,23 @@ impl ReplicationMask {
         // enabled. However, this is indistinguishable from an invalid state
         // where the schema has diverged, we cannot detect the difference.
         //
-        // How schema divergence occurs: When progress tracking fails and the system
-        // restarts, we may receive a `Relation` message reflecting the
-        // *current* table schema rather than the schema at the time the
-        // in-flight events were emitted. This is how Postgres handles
-        // initial `Relation` messages on reconnection. It's not the wrong behavior
-        // since the data has the columns that it announces, but it conflicts
-        // with our schema management logic. TODO: We are still debugging this
+        // How schema divergence occurs: When progress tracking fails and the
+        // system restarts, we may receive a `Relation` message
+        // reflecting the *current* table schema rather than the schema
+        // at the time the in-flight events were emitted. This is how
+        // Postgres handles initial `Relation` messages on reconnection.
+        // It's not the wrong behavior since the data has the columns
+        // that it announces, but it conflicts with our schema
+        // management logic. TODO: We are still debugging this
         // case to validate when it happens, since it's hard to  reproduce.
         // Nonetheless, the error should be raised.
         //
-        // Invariant: Our schema management assumes the schema in `Relation` messages is
-        // consistent with the schema under which the corresponding row events
-        // were produced.
+        // Invariant: Our schema management assumes the schema in `Relation`
+        // messages is consistent with the schema under which the
+        // corresponding row events were produced.
         //
-        // In the future we might want to implement a system to go around this edge
-        // case.
+        // In the future we might want to implement a system to go around this
+        // edge case.
         validate_mask_column_names(table_schema, replicated_column_names)?;
 
         Ok(Self(Arc::new(build_mask_bytes(table_schema, replicated_column_names))))
@@ -494,8 +495,8 @@ impl ReplicatedTableSchema {
             }
         }
 
-        // We pre-compute counts to avoid computing them each time since they are needed
-        // for the exact size iterators.
+        // We pre-compute counts to avoid computing them each time since they
+        // are needed for the exact size iterators.
         let replicated_column_count = replication_mask.replicated_count();
         let identity_column_count = replication_mask
             .as_slice()
@@ -576,8 +577,9 @@ impl ReplicatedTableSchema {
     /// the corresponding mask value is 1. The returned iterator implements
     /// [`ExactSizeIterator`].
     pub fn column_schemas(&self) -> impl ExactSizeIterator<Item = &ColumnSchema> + Clone + '_ {
-        // Assuming that the schema is created via the constructor, we can safely assume
-        // that the column schemas and replication mask are of the same length.
+        // Assuming that the schema is created via the constructor, we can
+        // safely assume that the column schemas and replication mask
+        // are of the same length.
         debug_assert!(
             self.replication_mask.len() == self.table_schema.column_schemas.len(),
             "the replication mask columns have a different len from the table schema columns, \
@@ -719,9 +721,9 @@ impl ReplicatedTableSchema {
         }
 
         // Once ordered by `attnum`, one linear merge classifies the endpoint
-        // difference. Planning happens afterward because a rename after-name may
-        // still be occupied by a higher-`attnum` column that is itself renamed
-        // or dropped by the same endpoint transition.
+        // difference. Planning happens afterward because a rename after-name
+        // may still be occupied by a higher-`attnum` column that is
+        // itself renamed or dropped by the same endpoint transition.
         let mut before_index = 0;
         let mut after_index = 0;
         let mut added_columns = Vec::new();
@@ -759,8 +761,9 @@ impl ReplicatedTableSchema {
                     after_index += 1;
                 }
                 Ordering::Equal => {
-                    // Equal `attnum` means the same logical column. A rename and its metadata
-                    // changes therefore stay grouped even when the endpoint name changed.
+                    // Equal `attnum` means the same logical column. A rename
+                    // and its metadata changes therefore
+                    // stay grouped even when the endpoint name changed.
                     if let Some(change) = ColumnMetadataChange::between(before_column, after_column)
                     {
                         altered_columns.push(change);
@@ -1589,8 +1592,8 @@ impl SchemaOperationPlanner {
                 .insert(ordinal_position, PendingRename { before_column_schema, after_name });
         }
 
-        // Free after-names form the initial ready frontier. Ordinal ordering keeps
-        // independent rename components deterministic.
+        // Free after-names form the initial ready frontier. Ordinal ordering
+        // keeps independent rename components deterministic.
         let mut ready_renames: BTreeSet<i32> = pending_renames
             .iter()
             .filter_map(|(&ordinal_position, rename)| {
@@ -1606,8 +1609,9 @@ impl SchemaOperationPlanner {
                     return Err(SchemaPlanError::ReadyRenameNotPending { ordinal_position });
                 };
 
-                // Consume the free after-name, release the before-name, and wake
-                // the rename waiting for that released name.
+                // Consume the free after-name, release the before-name, and
+                // wake the rename waiting for that released
+                // name.
                 let before_name = rename.before_column_schema.name.clone();
                 self.occupied_destination_names.remove(&before_name);
                 self.occupied_destination_names.insert(rename.after_name.clone());
@@ -1628,9 +1632,10 @@ impl SchemaOperationPlanner {
                 continue;
             }
 
-            // With no free after-name, every valid remaining component is a cycle.
-            // Break the smallest-ordinal component with one reserved temporary
-            // name; ordinary ready processing then unwinds the cycle.
+            // With no free after-name, every valid remaining component is a
+            // cycle. Break the smallest-ordinal component with one
+            // reserved temporary name; ordinary ready processing
+            // then unwinds the cycle.
             let Some((&ordinal_position, rename)) = pending_renames.first_key_value() else {
                 break;
             };

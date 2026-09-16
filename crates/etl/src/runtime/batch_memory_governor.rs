@@ -200,7 +200,8 @@ impl BatchMemoryGovernor {
         }
 
         // The target is advisory and independently atomic. Recalculation is
-        // serialized separately, so observing the preceding value briefly is safe.
+        // serialized separately, so observing the preceding value briefly is
+        // safe.
         self.state.batch_size_target_bytes.load(Ordering::Acquire)
     }
 

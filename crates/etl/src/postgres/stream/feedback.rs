@@ -205,9 +205,9 @@ where
         force: bool,
         status_update_type: StatusUpdateType,
     ) -> EtlResult<bool> {
-        // If the failpoint is active, we do not send any status update. This is useful
-        // for testing the system when we want to check what happens when no
-        // status updates are sent.
+        // If the failpoint is active, we do not send any status update. This is
+        // useful for testing the system when we want to check what
+        // happens when no status updates are sent.
         #[cfg(feature = "failpoints")]
         if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
             warn!("not sending status update due to active failpoint");
@@ -222,7 +222,8 @@ where
         let write_lsn = self.write_lsn;
         let flush_lsn = self.flush_lsn;
 
-        // A durable checkpoint cannot cover WAL the apply loop has not consumed.
+        // A durable checkpoint cannot cover WAL the apply loop has not
+        // consumed.
         debug_assert!(write_lsn >= flush_lsn);
 
         // Debounce only optional replies. PostgreSQL may generate many primary
@@ -260,8 +261,8 @@ where
             }
         }
 
-        // The client's system clock at the time of transmission, as microseconds since
-        // midnight on 2000-01-01.
+        // The client's system clock at the time of transmission, as
+        // microseconds since midnight on 2000-01-01.
         let ts = POSTGRES_EPOCH
             .elapsed()
             .map_err(
@@ -269,11 +270,12 @@ where
             )?
             .as_micros() as i64;
 
-        // We will send the `flush_lsn` as `apply_lsn` since in our case, we don't
-        // distinguish between them as Postgres does. The reason is that
-        // `apply_lsn` is used to mark when an LSN is both durable and visible,
-        // but from ETL's perspective we are fine with just it being durable, which
-        // is marked via the `flush_lsn`.
+        // We will send the `flush_lsn` as `apply_lsn` since in our case, we
+        // don't distinguish between them as Postgres does. The reason
+        // is that `apply_lsn` is used to mark when an LSN is both
+        // durable and visible, but from ETL's perspective we are fine
+        // with just it being durable, which is marked via the
+        // `flush_lsn`.
         //
         // This outgoing request flag is separate from `force`. For a primary
         // keepalive, `force` mirrors PostgreSQL's incoming reply-request flag.
@@ -493,7 +495,8 @@ mod tests {
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 200, 90, false);
 
-        // An incoming request forces a response but does not request another reply.
+        // An incoming request forces a response but does not request another
+        // reply.
         feedback_handle.enqueue_status_update(50.into(), 40.into(), true).await.unwrap();
         tokio::task::yield_now().await;
         assert_feedback(messages.try_recv().unwrap(), 200, 90, false);

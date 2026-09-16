@@ -85,8 +85,9 @@ impl Stream for TableCopyStream {
             Poll::Ready(Some(Ok(row))) => {
                 let metadata = TableCopyPayloadMetadata::new(row.len() as u64);
 
-                // Conversion step: transform raw bytes into structured TableRow.
-                // This is where most errors occur due to data format or type issues.
+                // Conversion step: transform raw bytes into structured
+                // TableRow. This is where most errors occur due
+                // to data format or type issues.
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.as_slice())
                 {
                     Ok(row) => Poll::Ready(Some(Ok(TableCopyRow { row, metadata }))),

@@ -222,8 +222,8 @@ impl ChannelProgress {
         }
 
         // Snowflake does not document creation timestamps as unique.
-        // A changed value proves replacement, equal values still require the offset and
-        // counter checks below.
+        // A changed value proves replacement, equal values still require the
+        // offset and counter checks below.
         let lineage_changed = matches!(
             (self.created_on_ms, status.created_on_ms),
             (Some(previous), Some(current)) if previous != current

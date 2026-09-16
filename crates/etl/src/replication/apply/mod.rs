@@ -422,8 +422,8 @@ impl EventBatch {
     fn take(&mut self) -> Self {
         debug_assert!(!self.is_empty());
 
-        // Steady-state streaming usually produces similarly sized batches, so retain
-        // enough event capacity for the next batch.
+        // Steady-state streaming usually produces similarly sized batches, so
+        // retain enough event capacity for the next batch.
         let replacement_capacity = self.len();
         std::mem::replace(self, Self::with_capacity(replacement_capacity))
     }
@@ -877,7 +877,8 @@ where
             )
             .await?;
 
-        // Apply loops always supply a deadline; only protocol tests disable feedback.
+        // Apply loops always supply a deadline; only protocol tests disable
+        // feedback.
         let (feedback_handle, feedback_sender_future) = feedback
             .expect("A keep-alive deadline must create a feedback handle and sender future");
 
@@ -949,9 +950,10 @@ where
         );
         pin!(replication_message_stream);
 
-        // Keep an independent subscription for flushing the apply loop's decoded
-        // batch. The source wrapper must remain free to stop PostgreSQL intake,
-        // while this subscription lets already-owned memory continue draining.
+        // Keep an independent subscription for flushing the apply loop's
+        // decoded batch. The source wrapper must remain free to stop
+        // PostgreSQL intake, while this subscription lets already-owned
+        // memory continue draining.
         let mut batch_memory_subscription = self.memory_monitor.subscribe();
         let mut connection_updates_rx = replication_client.connection_updates_rx();
 
@@ -1015,12 +1017,13 @@ where
         batch_memory_subscription: &mut Option<MemoryMonitorSubscription>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         // Process quiescent coordination before waiting for another signal. The
-        // next loop iteration observes progress made by whichever branch runs below.
+        // next loop iteration observes progress made by whichever branch runs
+        // below.
         self.maybe_process_syncing_tables_when_quiescent().await?;
 
-        // We try to finish the active iteration even before starting it, since we might
-        // be able to finish earlier, without having to process any signal from
-        // the following `select!`.
+        // We try to finish the active iteration even before starting it, since
+        // we might be able to finish earlier, without having to process
+        // any signal from the following `select!`.
         if let Some(result) = self.try_finish_active_iteration() {
             return Ok(Some(result));
         }
@@ -1147,8 +1150,8 @@ where
             return Ok(Some(self.finish_shutdown()));
         }
 
-        // If the batch work is not completed, we return `None` to continue the draining
-        // in the next iteration.
+        // If the batch work is not completed, we return `None` to continue the
+        // draining in the next iteration.
         Ok(None)
     }
 
@@ -1157,8 +1160,9 @@ where
     fn finish_shutdown(&self) -> ApplyLoopResult {
         debug_assert!(!self.state.has_unresolved_batch_work());
 
-        // We try to honor the existing exit result, otherwise we just mark it as
-        // `Paused` since shutting down is effectively pausing a loop.
+        // We try to honor the existing exit result, otherwise we just mark it
+        // as `Paused` since shutting down is effectively pausing a
+        // loop.
         self.state.exit_result().unwrap_or(ApplyLoopResult::Paused)
     }
 
@@ -1378,11 +1382,13 @@ where
                 continue;
             }
 
-            // We try to load the destination table metadata to see if it is referencing a
-            // snapshot ID that would be cleaned up if we were to just use the
-            // persisted checkpoint as the boundary.
+            // We try to load the destination table metadata to see if it is
+            // referencing a snapshot ID that would be cleaned up if
+            // we were to just use the persisted checkpoint as the
+            // boundary.
             //
-            // If there is no metadata, we play it safe and skip the pruning for this table.
+            // If there is no metadata, we play it safe and skip the pruning for
+            // this table.
             let Some(destination_table_metadata) =
                 self.schema_store.get_destination_table_metadata(table_id).await?
             else {
@@ -1394,8 +1400,9 @@ where
                 continue;
             };
 
-            // An applying schema change may still need both endpoints for recovery, so
-            // retain from the earlier destination snapshot.
+            // An applying schema change may still need both endpoints for
+            // recovery, so retain from the earlier destination
+            // snapshot.
             let destination_snapshot_id = destination_table_metadata.snapshot_id();
             let destination_retention_snapshot_id = match destination_table_metadata.table_schema()
             {
@@ -1442,24 +1449,28 @@ where
         &mut self,
         flush_result: CompletedWriteEventsResult,
     ) -> EtlResult<()> {
-        // We clear the state up front because this flush is no longer in flight.
+        // We clear the state up front because this flush is no longer in
+        // flight.
         let processing_paused = self.state.resume_processing();
 
-        // Decompose the completed result into its metadata, timing, and outcome.
+        // Decompose the completed result into its metadata, timing, and
+        // outcome.
         let (metadata, completed_at, result) = flush_result.into_parts_with_completion();
 
         // If there was an error in the flushing, we return it immediately.
         let status = result?;
 
         if let Some(metadata) = metadata.as_ref() {
-            // Relation events are optimistic cleanup signals: the first relation after
-            // startup need not represent a schema change, while a real DDL is
-            // communicated downstream through one. Accumulate them until a durable
-            // result also carries a commit end LSN, because only then can persisted
-            // progress cover every preceding relation in this ordered apply-loop
-            // stream. This also makes cleanup self-healing across restarts: the first
-            // later relation rebuilds the candidate even though this in-memory set was
-            // lost.
+            // Relation events are optimistic cleanup signals: the first
+            // relation after startup need not represent a schema
+            // change, while a real DDL is communicated downstream
+            // through one. Accumulate them until a durable
+            // result also carries a commit end LSN, because only then can
+            // persisted progress cover every preceding relation in
+            // this ordered apply-loop stream. This also makes
+            // cleanup self-healing across restarts: the first later
+            // relation rebuilds the candidate even though this in-memory set
+            // was lost.
             self.state
                 .pending_relation_table_ids
                 .extend(metadata.relation_table_ids.iter().copied());
@@ -1480,8 +1491,9 @@ where
             )
             .increment(metadata.event_count as u64);
 
-            // Empty writes are durability barriers rather than data batches, so they must
-            // not contribute observations to destination batch latency.
+            // Empty writes are durability barriers rather than data batches, so
+            // they must not contribute observations to destination
+            // batch latency.
             if metadata.event_count > 0 {
                 histogram!(
                     ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
@@ -1556,29 +1568,36 @@ where
                         );
                     }
 
-                    // We process the syncing tables with the last end lsn that the batch contains.
+                    // We process the syncing tables with the last end lsn that
+                    // the batch contains.
                     //
-                    // Note that it could be that there is no end lsn for a specific batch, which
-                    // could happen if we process a huge transaction, and we don't reach the
-                    // commit before flushing. In that case, we don't process syncing
-                    // tables, meaning that progress is not tracked, since it's not going to
-                    // do anything because we can only track progress at commit boundaries.
+                    // Note that it could be that there is no end lsn for a
+                    // specific batch, which could happen if
+                    // we process a huge transaction, and we don't reach the
+                    // commit before flushing. In that case, we don't process
+                    // syncing tables, meaning that progress
+                    // is not tracked, since it's not going to
+                    // do anything because we can only track progress at commit
+                    // boundaries.
                     if let Some(commit_end_lsn) = metadata.commit_end_lsn {
                         self.process_syncing_tables_after_flush(commit_end_lsn).await?;
 
-                        // Progress and table-sync state are now durable. Freeze cleanup
-                        // boundaries for all cumulatively covered relations before
-                        // allowing their database deletion to run asynchronously.
+                        // Progress and table-sync state are now durable. Freeze
+                        // cleanup boundaries for all
+                        // cumulatively covered relations before
+                        // allowing their database deletion to run
+                        // asynchronously.
                         self.try_queue_schema_cleanup().await;
                     }
                 }
             }
 
             // A keepalive-only table-sync completion records `Complete` before
-            // dispatching its empty durability barrier. The normal quiescent hook
-            // skips once an exit is requested, and shutdown drain does not run that
-            // hook. Complete the handoff here after the barrier has settled the
-            // carried commit LSN and the loop is quiescent again.
+            // dispatching its empty durability barrier. The normal quiescent
+            // hook skips once an exit is requested, and shutdown
+            // drain does not run that hook. Complete the handoff
+            // here after the barrier has settled the carried commit
+            // LSN and the loop is quiescent again.
             if metadata.event_count == 0
                 && metadata.durability == WriteEventsDurability::RequireDurable
                 && status == DestinationWriteStatus::Durable
@@ -1589,8 +1608,9 @@ where
             }
         }
 
-        // If processing was paused, there must be a queued batch that still needs to be
-        // flushed now that the previous in-flight result has resolved.
+        // If processing was paused, there must be a queued batch that still
+        // needs to be flushed now that the previous in-flight result
+        // has resolved.
         if processing_paused {
             if let Some(metadata) = metadata.as_ref() {
                 // A nonempty required-durability write is terminal and stops
@@ -1617,8 +1637,8 @@ where
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
-        // If there is no message anymore, it means that the connection has been closed
-        // or had some issues, we must handle this case.
+        // If there is no message anymore, it means that the connection has been
+        // closed or had some issues, we must handle this case.
         let Some(message) = maybe_message else {
             let is_closed = replication_client.is_closed();
             return Err(self.build_stream_ended_error(is_closed));
@@ -1677,16 +1697,18 @@ where
             // We add the element to the pending batch.
             self.state.event_batch.push(event, result.streaming_payload_metadata);
 
-            // We update the last end lsn of the commit that we encountered, if any.
+            // We update the last end lsn of the commit that we encountered, if
+            // any.
             self.state.update_last_commit_end_lsn(result.end_lsn);
 
-            // We start the batch timer for the flushing. This timer is needed to control
-            // force flushing if the batch-size hint threshold is not reached in time.
+            // We start the batch timer for the flushing. This timer is needed
+            // to control force flushing if the batch-size hint
+            // threshold is not reached in time.
             self.state.set_flush_deadline_if_needed(self.max_batch_fill_duration);
         }
 
-        // We check for the batch flushing conditions before deciding whether to flush
-        // or not.
+        // We check for the batch flushing conditions before deciding whether to
+        // flush or not.
         let batch_size_hint_bytes_reached = self.state.event_batch.size_hint_bytes()
             >= self.batch_memory_governor.batch_size_target_bytes();
         let early_flush_requested = result.end_batch;
@@ -1717,8 +1739,9 @@ where
             return Ok(());
         }
 
-        // A flush is already in flight. Pause processing until the result resolves, at
-        // which point the loop will resume and dispatch this batch.
+        // A flush is already in flight. Pause processing until the result
+        // resolves, at which point the loop will resume and dispatch
+        // this batch.
         if self.state.has_pending_flush_result() {
             self.state.pause_processing();
             return Ok(());
@@ -1784,8 +1807,8 @@ where
             "flushing batch to destination",
         );
 
-        // Capture dispatch-time metrics; they are carried through the result channel
-        // and recorded once the destination result completes.
+        // Capture dispatch-time metrics; they are carried through the result
+        // channel and recorded once the destination result completes.
         let metadata = ApplyLoopAsyncResultMetadata {
             commit_end_lsn: self.state.last_commit_end_lsn.take(),
             durability,
@@ -1795,15 +1818,16 @@ where
             dispatched_at: Instant::now(),
         };
 
-        // Create the flush result channel: the sender is handed to the destination and
-        // the pending receiver is stored on the loop state until the
-        // destination signals completion.
+        // Create the flush result channel: the sender is handed to the
+        // destination and the pending receiver is stored on the loop
+        // state until the destination signals completion.
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
         self.destination.write_events(events, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
         // Reset only after dispatch. A batch deferred behind an in-flight write
-        // keeps its deadline until that write completes and dispatch is retried.
+        // keeps its deadline until that write completes and dispatch is
+        // retried.
         self.state.reset_flush_deadline();
 
         Ok(())
@@ -1860,14 +1884,16 @@ where
                 // commits can therefore produce a burst of primary keepalives.
                 // We enqueue a response to each one, but the feedback sender
                 // debounces redundant optional replies.
-                // In either case this is a decoded-WAL frontier, not necessarily
-                // an emitted-event frontier: it may advance through an
-                // uncommitted transaction whose changes remain in the server's
+                // In either case this is a decoded-WAL frontier, not
+                // necessarily an emitted-event frontier: it may
+                // advance through an uncommitted transaction
+                // whose changes remain in the server's
                 // reorder buffer. The slot retains the earlier `restart_lsn`
                 // needed to rebuild such transactions after a reconnect.
-                // ETL uses this position only while the apply loop is quiescent;
-                // while emitted work is unresolved, `checkpoint_lsn()` remains
-                // at the completed destination flush frontier. This relies on
+                // ETL uses this position only while the apply loop is
+                // quiescent; while emitted work is unresolved,
+                // `checkpoint_lsn()` remains at the completed
+                // destination flush frontier. This relies on
                 // the current non-streaming pgoutput session and must be
                 // re-audited if transaction streaming is enabled.
                 let end_lsn = PgLsn::from(message.wal_end());
@@ -2063,7 +2089,8 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        // The `remote_final_lsn` is the `commit_lsn` of the current transaction.
+        // The `remote_final_lsn` is the `commit_lsn` of the current
+        // transaction.
         let snapshot_id = schema_snapshot_id_from_message(remote_final_lsn, message);
         let table_schema = schema_change_message.into_table_schema(snapshot_id);
         let previous_state = self.table_decoding_states.remove(&table_id);
@@ -2128,7 +2155,8 @@ where
         let final_lsn = PgLsn::from(message.final_lsn());
         self.state.remote_final_lsn = Some(final_lsn);
 
-        // When a new transaction begins, we want to reset the accumulating state.
+        // When a new transaction begins, we want to reset the accumulating
+        // state.
         self.state.current_tx_events = 0;
         self.state.reset_tx_ordinal();
 
@@ -2181,10 +2209,10 @@ where
             ..Default::default()
         };
 
-        // Any requested exit forces the current commit batch to end, including the
-        // commit event itself. For shutdown, this is mainly the catch-up wait
-        // path requesting a pause exit, which lets that case reuse the normal
-        // commit flush flow.
+        // Any requested exit forces the current commit batch to end, including
+        // the commit event itself. For shutdown, this is mainly the
+        // catch-up wait path requesting a pause exit, which lets that
+        // case reuse the normal commit flush flow.
         if should_end_batch {
             result.end_batch = true;
         }
@@ -2213,13 +2241,14 @@ where
             return Ok(HandleMessageResult::no_event());
         }
 
-        // We extract the columns from the message that are needed to build the masks.
-        // The masks themselves are built by name, so relation-message order is
-        // not needed to decide membership: PostgreSQL live column names are
-        // unique within a table schema version. The order matters after the
-        // masks are applied: PostgreSQL writes RELATION columns and tuple data
-        // in the same physical `pg_attribute.attnum` order, skipping
-        // unpublished columns. Because stored TableSchema values use that same
+        // We extract the columns from the message that are needed to build the
+        // masks. The masks themselves are built by name, so
+        // relation-message order is not needed to decide membership:
+        // PostgreSQL live column names are unique within a table schema
+        // version. The order matters after the masks are applied:
+        // PostgreSQL writes RELATION columns and tuple data in the same
+        // physical `pg_attribute.attnum` order, skipping unpublished
+        // columns. Because stored TableSchema values use that same
         // order, ReplicatedTableSchema becomes the positional view used to
         // decode later tuple payloads.
         let replicated_columns = parse_replicated_column_names(message)?;
@@ -2696,9 +2725,9 @@ where
         streaming_payload_metadata.record_received();
         streaming_payload_metadata.record_row_size();
 
-        // Exactly one worker owns protocol interpretation for a table at a time, so
-        // Non-owning workers skip row decoding and leave their connection-local
-        // decoding state untouched.
+        // Exactly one worker owns protocol interpretation for a table at a
+        // time, so Non-owning workers skip row decoding and leave their
+        // connection-local decoding state untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
@@ -2742,9 +2771,9 @@ where
         streaming_payload_metadata.record_received();
         streaming_payload_metadata.record_row_size();
 
-        // Exactly one worker owns protocol interpretation for a table at a time, so
-        // Non-owning workers skip row decoding and leave their connection-local
-        // decoding state untouched.
+        // Exactly one worker owns protocol interpretation for a table at a
+        // time, so Non-owning workers skip row decoding and leave their
+        // connection-local decoding state untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
@@ -2788,9 +2817,9 @@ where
         streaming_payload_metadata.record_received();
         streaming_payload_metadata.record_row_size();
 
-        // Exactly one worker owns protocol interpretation for a table at a time, so
-        // Non-owning workers skip row decoding and leave their connection-local
-        // decoding state untouched.
+        // Exactly one worker owns protocol interpretation for a table at a
+        // time, so Non-owning workers skip row decoding and leave their
+        // connection-local decoding state untouched.
         if !self.should_apply_changes(table_id, remote_final_lsn).await? {
             return Ok(HandleMessageResult::no_event());
         }
@@ -2832,8 +2861,9 @@ where
         for &rel_id in message.rel_ids() {
             let table_id = TableId::new(rel_id);
 
-            // Exactly one worker owns protocol interpretation for a table at a time, so
-            // non-owning workers skip truncation handling for that table as well.
+            // Exactly one worker owns protocol interpretation for a table at a
+            // time, so non-owning workers skip truncation handling
+            // for that table as well.
             if self.should_apply_changes(table_id, remote_final_lsn).await? {
                 truncated_tables.push(self.replicated_table_schema_for_truncate(table_id)?);
             }
@@ -2943,7 +2973,8 @@ where
 
         self.state.record_exit_intent(exit_intent);
 
-        // Persist progress only after worker-specific state processing succeeds.
+        // Persist progress only after worker-specific state processing
+        // succeeds.
         //
         // The apply-worker hook above intentionally reads the progress that was
         // durable before this flush. If this flush is the first one to reach a
@@ -3015,10 +3046,11 @@ where
             return Ok(());
         }
 
-        // Catchup can reach its target through a keepalive after the last event batch
-        // returned `Accepted`. Once no transaction, buffered batch, or in-flight write
-        // remains, no terminal batch exists to carry `RequireDurable`, so dispatch an
-        // empty durability barrier.
+        // Catchup can reach its target through a keepalive after the last event
+        // batch returned `Accepted`. Once no transaction, buffered
+        // batch, or in-flight write remains, no terminal batch exists
+        // to carry `RequireDurable`, so dispatch an empty durability
+        // barrier.
         if !self.state.handling_transaction()
             && !self.state.has_unresolved_batch_work()
             && self.state.last_commit_end_lsn.is_some()
@@ -3263,10 +3295,11 @@ mod apply_worker {
     where
         S: SchemaStore,
     {
-        // The table-sync worker owns the table through `SyncDone`. Reaching that
-        // state releases the apply loop. An owned relation can rebuild the
-        // decoder using the handover boundary, while relation-less DML can
-        // restore the complete stored decoder on demand.
+        // The table-sync worker owns the table through `SyncDone`. Reaching
+        // that state releases the apply loop. An owned relation can
+        // rebuild the decoder using the handover boundary, while
+        // relation-less DML can restore the complete stored decoder on
+        // demand.
         let catchup_state = match wait_reason {
             CatchupWaitReason::EnteredCatchup => "entered",
             CatchupWaitReason::AlreadyInCatchup => "already_in",
@@ -3280,8 +3313,8 @@ mod apply_worker {
             "apply worker blocking until table sync worker reaches sync_done",
         );
 
-        // We wait for both states since if the table sync worker errors, we don't want
-        // to stall forever.
+        // We wait for both states since if the table sync worker errors, we
+        // don't want to stall forever.
         let result = worker_state
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
@@ -3356,8 +3389,9 @@ mod apply_worker {
 
             match state {
                 TableState::SyncWait { lsn: snapshot_lsn } => {
-                    // The catchup lsn is determined via max since it could be that the table sync
-                    // worker is started from a lsn which is far in the future
+                    // The catchup lsn is determined via max since it could be
+                    // that the table sync worker is started
+                    // from a lsn which is far in the future
                     // compared to where the apply worker is.
                     let catchup_lsn = snapshot_lsn.max(current_lsn);
 
@@ -3374,7 +3408,8 @@ mod apply_worker {
                         .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
                         .await?;
 
-                    // It's important to drop the state guard before waiting, otherwise we deadlock.
+                    // It's important to drop the state guard before waiting,
+                    // otherwise we deadlock.
                     drop(worker_state_guard);
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
@@ -3532,9 +3567,10 @@ mod apply_worker {
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
-        // If there is an active worker, we want to see if we can switch it to the ready
-        // state. If there isn't an active worker, we just try to see if we can
-        // switch the table to ready state or start a new worker for that table.
+        // If there is an active worker, we want to see if we can switch it to
+        // the ready state. If there isn't an active worker, we just try
+        // to see if we can switch the table to ready state or start a
+        // new worker for that table.
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
             let state = worker_state_guard.table_state();
@@ -3717,10 +3753,11 @@ mod apply_worker {
     {
         let worker_state = ctx.pool.get_active_worker_state(table_id).await;
 
-        // If there is an active worker, we want to see if we can start the catchup or
-        // if we can switch it to ready state.
-        // If there isn't an active worker, we just try to see if we can switch the
-        // table to ready state or start a new worker for that table.
+        // If there is an active worker, we want to see if we can start the
+        // catchup or if we can switch it to ready state.
+        // If there isn't an active worker, we just try to see if we can switch
+        // the table to ready state or start a new worker for that
+        // table.
         if let Some(worker_state) = worker_state {
             let mut worker_state_guard = worker_state.lock().await;
             let state = worker_state_guard.table_state();
@@ -3739,8 +3776,9 @@ mod apply_worker {
 
             match state {
                 TableState::SyncWait { lsn: snapshot_lsn } => {
-                    // The catchup lsn is determined via max since it could be that the table sync
-                    // worker is started from a lsn which is far in the future
+                    // The catchup lsn is determined via max since it could be
+                    // that the table sync worker is started
+                    // from a lsn which is far in the future
                     // compared to where the apply worker is.
                     let catchup_lsn = snapshot_lsn.max(current_lsn);
 
@@ -3757,7 +3795,8 @@ mod apply_worker {
                         .set_and_store(TableState::Catchup { lsn: catchup_lsn }, &ctx.store)
                         .await?;
 
-                    // It's important to drop the state guard before waiting, otherwise we deadlock.
+                    // It's important to drop the state guard before waiting,
+                    // otherwise we deadlock.
                     drop(worker_state_guard);
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
@@ -4053,8 +4092,8 @@ mod table_sync_worker {
     ) -> EtlResult<Option<ExitIntent>> {
         let worker_type = WorkerType::TableSync { table_id: ctx.table_id };
 
-        // Check if catchup position reached, if so, signal end batch but don't update
-        // the state yet.
+        // Check if catchup position reached, if so, signal end batch but don't
+        // update the state yet.
         let inner = ctx.table_sync_worker_state.lock().await;
         if let TableState::Catchup { lsn: catchup_lsn } = inner.table_state() {
             if current_lsn >= catchup_lsn {
@@ -4361,7 +4400,8 @@ mod tests {
             SnapshotId::initial(),
         );
 
-        // Only accepted work at an idle boundary may start a durability barrier.
+        // Only accepted work at an idle boundary may start a durability
+        // barrier.
         assert!(!state.can_settle_idle_durability());
         state.update_last_commit_end_lsn(Some(200.into()));
         assert!(state.can_settle_idle_durability());

@@ -1769,7 +1769,8 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
 /// The returned timestamp must be used directly for expiration because calendar
 /// arithmetic can change an interval's effective retention between queries.
 fn expire_snapshots_cutoff(conn: &duckdb::Connection, older_than: &str) -> EtlResult<String> {
-    // Compare timestamps because interval ordering assumes every month has 30 days.
+    // Compare timestamps because interval ordering assumes every month has 30
+    // days.
     let sql = format!(
         "select cast(cutoff as varchar), cutoff <= cast(now() as timestamp) - cast({} as \
          interval) from (select cast(now() as timestamp) - cast({} as interval) as cutoff);",

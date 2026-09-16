@@ -446,9 +446,10 @@ pub(crate) async fn delete_source(
         return Err(SourceError::SourceInUse(source_id));
     }
 
-    // Pipeline locks protect the discovered set, but do not serialize concurrent
-    // pipeline creation or attachment. Database constraints remain the final
-    // guard against deleting a source that became referenced after the checks.
+    // Pipeline locks protect the discovered set, but do not serialize
+    // concurrent pipeline creation or attachment. Database constraints
+    // remain the final guard against deleting a source that became
+    // referenced after the checks.
     data::sources::delete_source(api_txn.deref_mut(), tenant_id, source_id)
         .await?
         .ok_or(SourceError::SourceNotFound(source_id))?;

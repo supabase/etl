@@ -359,7 +359,8 @@ fn process_append_result(append_result: AppendResult) -> AppendRequestProcessRes
     for response in append_result.responses {
         match response {
             Ok(response) => {
-                // Row-level errors are permanent failures (bad data, schema mismatch, etc).
+                // Row-level errors are permanent failures (bad data, schema
+                // mismatch, etc).
                 if !response.row_errors.is_empty() {
                     row_errors.extend(response.row_errors);
                 }
@@ -824,8 +825,8 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -848,8 +849,8 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -875,8 +876,8 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -901,8 +902,8 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -1482,8 +1483,9 @@ impl BigQueryClient {
                 let mut retryable_requests = Vec::new();
                 let mut has_non_retryable_request = false;
 
-                // A call-level Storage Write error is not tied to a single request index. Retry
-                // only if the error is locally retryable for every request in the call.
+                // A call-level Storage Write error is not tied to a single
+                // request index. Retry only if the error is
+                // locally retryable for every request in the call.
                 for request in append_requests {
                     if let Some(detail) =
                         retryable_storage_write_error_detail(self, &request, &error).await?
@@ -1532,8 +1534,9 @@ impl BigQueryClient {
                     }
                 }
                 AppendRequestProcessResult::RequestError { error: request_error } => {
-                    // Request-level errors retain their request index, so only the affected
-                    // request needs to be classified and retried.
+                    // Request-level errors retain their request index, so only
+                    // the affected request needs to be
+                    // classified and retried.
                     if let Some(detail) = retryable_storage_write_error_detail(
                         self,
                         &append_requests[request_index],

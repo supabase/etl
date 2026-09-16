@@ -701,9 +701,10 @@ where
     }
 
     // ClickHouse Cloud transparently substitutes the MergeTree family with its
-    // shared-storage variants (`ReplacingMergeTree` -> `SharedReplacingMergeTree`).
-    // These are drop-in equivalents, so `system.tables.engine` reads back the
-    // `Shared`-prefixed name even though the pipeline configured the plain one.
+    // shared-storage variants (`ReplacingMergeTree` ->
+    // `SharedReplacingMergeTree`). These are drop-in equivalents, so
+    // `system.tables.engine` reads back the `Shared`-prefixed name even
+    // though the pipeline configured the plain one.
 
     /// Rejects writing to a pre-existing ClickHouse table whose engine does
     /// not match the configured one. No-op if the table doesn't exist yet.
@@ -854,10 +855,11 @@ where
             Some(_) => {}
         }
 
-        // Compute nullable flags from the actual ClickHouse schema. This matters after
-        // `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced to
-        // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
-        // include the nullable marker byte ClickHouse expects.
+        // Compute nullable flags from the actual ClickHouse schema. This
+        // matters after `ALTER TABLE ADD COLUMN`: ClickHouse scalar
+        // columns are forced to `Nullable(T)` even when the Postgres
+        // column is `NOT NULL`, so RowBinary must include the nullable
+        // marker byte ClickHouse expects.
         let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
         let expected_column_names =
             expected_clickhouse_column_names(schema, self.inserter_config.engine);
@@ -1075,10 +1077,12 @@ where
             .map(|table_row| {
                 let mut values: Vec<ClickHouseValue> =
                     table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
-                // Initial-copy rows are tagged as INSERT with LSN 0 / tx_ordinal 0
-                // (sentinel meaning "this row pre-dates the streaming cursor"). For
-                // ReplacingMergeTree, any streaming event then wins on FINAL because its packed
-                // `_etl_version` is non-zero.
+                // Initial-copy rows are tagged as INSERT with LSN 0 /
+                // tx_ordinal 0 (sentinel meaning "this row
+                // pre-dates the streaming cursor"). For
+                // ReplacingMergeTree, any streaming event then wins on FINAL
+                // because its packed `_etl_version` is
+                // non-zero.
                 append_cdc_columns(
                     &mut values,
                     CdcOperation::Insert,
@@ -1459,7 +1463,8 @@ where
             let mut pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)> =
                 HashMap::new();
 
-            // Accumulate data events until we hit a Truncate or Relation boundary.
+            // Accumulate data events until we hit a Truncate or Relation
+            // boundary.
             while let Some(event) = event_iter.peek() {
                 if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                     break;
@@ -2114,7 +2119,8 @@ mod tests {
 
     #[test]
     fn clickhouse_engine_matches_accepts_cloud_shared_variants() {
-        // Cloud `Shared` variants are equivalent to their plain configured forms.
+        // Cloud `Shared` variants are equivalent to their plain configured
+        // forms.
         assert!(clickhouse_engine_matches("SharedReplacingMergeTree", "ReplacingMergeTree"));
         assert!(clickhouse_engine_matches("SharedMergeTree", "MergeTree"));
         assert!(clickhouse_engine_matches("ReplacingMergeTree", "ReplacingMergeTree"));
@@ -2470,7 +2476,8 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
-        // The error should identify the primary-key column that blocks the operation.
+        // The error should identify the primary-key column that blocks the
+        // operation.
         assert!(err.to_string().contains("tenant_id"));
     }
 

@@ -42,8 +42,9 @@ pub(crate) struct ChaosArgs {
 
 impl ChaosArgs {
     pub(crate) async fn run(self) -> Result<()> {
-        // Install is handled before connecting to the cluster — Chaos Mesh is not
-        // yet present so ChaosClient::new (which checks for the CRD group) would fail.
+        // Install is handled before connecting to the cluster — Chaos Mesh is
+        // not yet present so ChaosClient::new (which checks for the CRD
+        // group) would fail.
         if let scenario::Scenario::Install { runtime } = &self.scenario {
             return install::install(runtime);
         }
@@ -208,7 +209,8 @@ impl ChaosClient {
         // Clean up any leftover resource from a previous run before creating.
         // After issuing the delete we poll until the object is truly gone —
         // a plain sleep is not enough because Kubernetes may keep the object in
-        // Terminating state and reject the subsequent create with AlreadyExists.
+        // Terminating state and reject the subsequent create with
+        // AlreadyExists.
         match self.api.delete(&name, &DeleteParams::default()).await {
             Ok(_) => {
                 let deadline = std::time::Instant::now() + Duration::from_secs(30);
@@ -236,7 +238,8 @@ impl ChaosClient {
         Ok(())
     }
 
-    // ── Convenience constructors ──────────────────────────────────────────────
+    // ── Convenience constructors
+    // ──────────────────────────────────────────────
 
     /// Inject packet loss from `source` pods toward `target`.
     ///

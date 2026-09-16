@@ -62,12 +62,12 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 
     let handle_clone = handle.clone();
 
-    // This task periodically performs upkeep to avoid unbounded memory growth due
-    // to metrics collection.
+    // This task periodically performs upkeep to avoid unbounded memory growth
+    // due to metrics collection.
     let upkeep_task = tokio::spawn(async move {
         loop {
-            // upkeep_timeout hardcoded for now. Will make it configurable later if it
-            // creates a problem
+            // upkeep_timeout hardcoded for now. Will make it configurable later
+            // if it creates a problem
             let upkeep_timeout = Duration::from_secs(5);
             tokio::time::sleep(upkeep_timeout).await;
             trace!("running metrics upkeep");

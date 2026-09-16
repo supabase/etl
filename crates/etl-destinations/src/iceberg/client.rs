@@ -325,9 +325,9 @@ impl IcebergClient {
         let table_metadata = table.metadata();
         let iceberg_schema = table_metadata.current_schema();
 
-        // Convert the actual Iceberg schema to Arrow schema using iceberg-rust's
-        // built-in converter This preserves field IDs properly for
-        // transaction-based writes
+        // Convert the actual Iceberg schema to Arrow schema using
+        // iceberg-rust's built-in converter This preserves field IDs
+        // properly for transaction-based writes
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
         let record_batch =
@@ -362,7 +362,8 @@ impl IcebergClient {
         let parquet_writer_builder =
             ParquetWriterBuilder::new(writer_props, Arc::clone(table.metadata().current_schema()));
 
-        // Create rolling file writer builder (handles file I/O and location generation)
+        // Create rolling file writer builder (handles file I/O and location
+        // generation)
         let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
             parquet_writer_builder,
             table.file_io().clone(),
@@ -373,7 +374,8 @@ impl IcebergClient {
         // Create data file writer builder
         let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
 
-        // Build the writer (pass None for partition key on unpartitioned tables)
+        // Build the writer (pass None for partition key on unpartitioned
+        // tables)
         let mut data_file_writer = data_file_writer_builder.build(None).await?;
 
         // Write the record batch using Iceberg writer

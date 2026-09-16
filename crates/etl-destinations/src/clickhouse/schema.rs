@@ -606,7 +606,8 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_composite_pk_orders_by_ordinal() {
-        // --- GIVEN: composite PK whose ordinal order differs from table order ---
+        // --- GIVEN: composite PK whose ordinal order differs from table order
+        // ---
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -709,7 +710,8 @@ mod tests {
         ];
         // --- WHEN: build the current-state view DDL ---
         let sql = create_current_view_sql("public_users", &schemas);
-        // --- THEN: __current suffix, FINAL read, tombstone filter, no etl cols ---
+        // --- THEN: __current suffix, FINAL read, tombstone filter, no etl cols
+        // ---
         assert!(sql.contains("CREATE VIEW IF NOT EXISTS \"public_users__current\""));
         assert!(sql.contains("SELECT \"id\", \"name\""));
         assert!(sql.contains("FROM \"public_users\" FINAL"));

@@ -988,16 +988,17 @@ where
         "wait for ducklake blocking slot"
     );
 
-    // This is needed to make sure we properly interrupt the blocking operation if
-    // it exceeds the timeout, we don't just cancel the task and leave the
-    // connection active.
+    // This is needed to make sure we properly interrupt the blocking operation
+    // if it exceeds the timeout, we don't just cancel the task and leave
+    // the connection active.
     let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
     let abort_deadline = deadline + BLOCKING_ABORT_GRACE;
 
     let blocking_task = tokio::task::spawn_blocking(move || -> EtlResult<R> {
-        // Please if you modify the code inside this blocking task do not add any
-        // blocking operations that could delay other tasks waiting on this slot.
+        // Please if you modify the code inside this blocking task do not add
+        // any blocking operations that could delay other tasks waiting
+        // on this slot.
         let _permit = permit;
         provider.with_connection(deadline, timeout, move |pooled_conn| {
             if pooled_conn.broken {

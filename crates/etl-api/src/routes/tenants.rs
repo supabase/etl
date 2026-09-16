@@ -392,8 +392,9 @@ pub(crate) async fn delete_tenant(
 
         source_txn.commit().await.map_err(TenantError::SourceDatabase)?;
 
-        // After connecting, cleanup errors must retain the API records for retry,
-        // including pipeline IDs needed to remove slots after metadata is gone.
+        // After connecting, cleanup errors must retain the API records for
+        // retry, including pipeline IDs needed to remove slots after
+        // metadata is gone.
         for pipeline_id in deleted_pipeline_ids {
             delete_pipeline_replication_slots(&source_pool, pipeline_id)
                 .await

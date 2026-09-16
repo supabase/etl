@@ -258,8 +258,8 @@ impl StateStore for PostgresStore {
     /// Updates multiple table states atomically in both database
     /// and cache.
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
-        // Convert all states upfront to catch any conversion errors before starting the
-        // transaction.
+        // Convert all states upfront to catch any conversion errors before
+        // starting the transaction.
         let db_updates: Vec<(TableId, pg_table_state::StoredTableStateType, serde_json::Value)> =
             updates
                 .iter()

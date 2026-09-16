@@ -81,8 +81,8 @@ mod tests {
 
     #[test]
     fn name_fits_without_clamping_up_to_15_combined_id_digits() {
-        // --- GIVEN: the longest in-repo base with pipeline id and table oid summing to
-        // 15 digits, the documented no-clamp bound ---
+        // --- GIVEN: the longest in-repo base with pipeline id and table oid
+        // summing to 15 digits, the documented no-clamp bound ---
         let base = "supabase_etl_replicator_replication";
         let name = table_sync_worker_application_name(base, 99_999, TableId::new(u32::MAX));
 
@@ -93,12 +93,13 @@ mod tests {
 
     #[test]
     fn name_beyond_no_clamp_bound_keeps_suffix_and_prefix_filterable_base() {
-        // --- GIVEN: the longest in-repo base with ids one digit past the no-clamp
-        // bound ---
+        // --- GIVEN: the longest in-repo base with ids one digit past the
+        // no-clamp bound ---
         let base = "supabase_etl_replicator_replication";
         let name = table_sync_worker_application_name(base, 999_999, TableId::new(u32::MAX));
 
-        // --- THEN: the base clamps but the suffix and the etl prefix survive ---
+        // --- THEN: the base clamps but the suffix and the etl prefix survive
+        // ---
         assert_eq!(name.len(), MAX_APPLICATION_NAME_LENGTH);
         assert!(name.ends_with(&format!(":table_sync:999999:{}", u32::MAX)));
         assert!(name.starts_with("supabase_etl_"));
@@ -121,7 +122,8 @@ mod tests {
         let base = "é".repeat(60);
         let name = apply_worker_application_name(&base, u64::MAX);
 
-        // --- THEN: clamping does not split a character and the suffix survives ---
+        // --- THEN: clamping does not split a character and the suffix survives
+        // ---
         assert!(name.len() <= MAX_APPLICATION_NAME_LENGTH);
         assert!(name.ends_with(&format!(":apply:{}", u64::MAX)));
     }

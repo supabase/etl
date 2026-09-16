@@ -454,10 +454,11 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(postgres_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the
-        // fields. If there is an override (likely during an incident or SREs
-        // intervention), we want to override their changes. The API database is
-        // the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should
+        // own the fields. If there is an override (likely during an
+        // incident or SREs intervention), we want to override their
+        // changes. The API database is the source of truth for
+        // credentials.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&postgres_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -484,10 +485,11 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(bq_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the
-        // fields. If there is an override (likely during an incident or SREs
-        // intervention), we want to override their changes. The API database is
-        // the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should
+        // own the fields. If there is an override (likely during an
+        // incident or SREs intervention), we want to override their
+        // changes. The API database is the source of truth for
+        // credentials.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&bq_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -513,10 +515,11 @@ impl K8sClient for HttpK8sClient {
                 password,
             );
 
-            // We are forcing the update since we are the field manager that should own the
-            // fields. If there is an override (likely during an incident or
-            // SREs intervention), we want to override their changes. The API
-            // database is the source of truth for credentials.
+            // We are forcing the update since we are the field manager that
+            // should own the fields. If there is an override
+            // (likely during an incident or SREs intervention), we
+            // want to override their changes. The API database is
+            // the source of truth for credentials.
             let pp = PatchParams::apply(FIELD_MANAGER).force();
             self.secrets_api.patch(&clickhouse_secret_name, &pp, &Patch::Apply(secret)).await?;
         }
@@ -551,10 +554,11 @@ impl K8sClient for HttpK8sClient {
         );
         let secret: Secret = serde_json::from_value(iceberg_secret_json)?;
 
-        // We are forcing the update since we are the field manager that should own the
-        // fields. If there is an override (likely during an incident or SREs
-        // intervention), we want to override their changes. The API database is
-        // the source of truth for credentials.
+        // We are forcing the update since we are the field manager that should
+        // own the fields. If there is an override (likely during an
+        // incident or SREs intervention), we want to override their
+        // changes. The API database is the source of truth for
+        // credentials.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.secrets_api.patch(&iceberg_secret_name, &pp, &Patch::Apply(secret)).await?;
 
@@ -723,10 +727,11 @@ impl K8sClient for HttpK8sClient {
         );
         let config_map: ConfigMap = serde_json::from_value(config_map_json)?;
 
-        // We are forcing the update since we are the field manager that should own the
-        // fields. If there is an override (likely during an incident or SREs
-        // intervention), we want to override their changes. The API database is
-        // the source of truth for configuration.
+        // We are forcing the update since we are the field manager that should
+        // own the fields. If there is an override (likely during an
+        // incident or SREs intervention), we want to override their
+        // changes. The API database is the source of truth for
+        // configuration.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         self.config_maps_api
             .patch(&replicator_config_map_name, &pp, &Patch::Apply(config_map))
@@ -803,9 +808,10 @@ impl K8sClient for HttpK8sClient {
 
         let stateful_set: StatefulSet = serde_json::from_value(stateful_set_json)?;
 
-        // We are forcing the update since we are the field manager that should own the
-        // fields. If there is an override (likely during an incident or SREs
-        // intervention), we want to override their changes.
+        // We are forcing the update since we are the field manager that should
+        // own the fields. If there is an override (likely during an
+        // incident or SREs intervention), we want to override their
+        // changes.
         let pp = PatchParams::apply(FIELD_MANAGER).force();
         let applied = self
             .stateful_sets_api
@@ -813,7 +819,8 @@ impl K8sClient for HttpK8sClient {
             .await?;
 
         // Apply the template before deleting any pod so its replacement uses
-        // the new configuration, even when an unready pod blocks rolling updates.
+        // the new configuration, even when an unready pod blocks rolling
+        // updates.
         restart_outdated_pod(
             &self.stateful_sets_api,
             &self.pods_api,
@@ -849,9 +856,9 @@ impl K8sClient for HttpK8sClient {
             workload_config.replicator_resource_override.as_ref(),
         )?;
 
-        // Merge leaves the mode untouched, including a concurrent controller promotion.
-        // Omitting it from server-side apply could delete a mode previously owned by
-        // us.
+        // Merge leaves the mode untouched, including a concurrent controller
+        // promotion. Omitting it from server-side apply could delete a
+        // mode previously owned by us.
         let pp =
             PatchParams { field_manager: Some(FIELD_MANAGER.to_owned()), ..Default::default() };
         match self
@@ -881,7 +888,8 @@ impl K8sClient for HttpK8sClient {
         {
             Ok(_) => Ok(()),
             Err(kube::Error::Api(error)) if error.code == 409 => {
-                // Another request created it first; preserve that object's mode too.
+                // Another request created it first; preserve that object's mode
+                // too.
                 self.vertical_pod_autoscalers_api
                     .patch(&name, &pp, &Patch::Merge(&vertical_pod_autoscaler))
                     .await?;
@@ -3150,7 +3158,8 @@ mod tests {
                     requests.lock().unwrap().push((method, body.clone()));
                     let status = statuses.lock().unwrap().pop_front().unwrap();
                     let response = if status.is_success() {
-                        // Model a live VPA that the controller already promoted.
+                        // Model a live VPA that the controller already
+                        // promoted.
                         let mut live = body;
                         live["spec"]["updatePolicy"]["updateMode"] = json!("InPlaceOrRecreate");
                         live

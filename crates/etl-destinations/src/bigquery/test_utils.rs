@@ -358,7 +358,8 @@ impl BigQueryDatabase {
 
         // Use REGEXP_CONTAINS to match the sequenced table name format.
         // BigQuery table names have format: {schema}_{table}_{sequence_number}
-        // The regex matches the table_id followed by underscore and one or more digits.
+        // The regex matches the table_id followed by underscore and one or more
+        // digits.
         let query = format!(
             "SELECT column_name, data_type, ordinal_position FROM \
              `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` WHERE \

@@ -98,7 +98,8 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
         .await;
 
-    // --- WHEN: two transactions commit sequentially on separate connections ---
+    // --- WHEN: two transactions commit sequentially on separate connections
+    // ---
     let tx_a = database_1.begin_transaction().await;
     tx_a.run_sql(&format!(
         "UPDATE {} SET value = 'update_a' WHERE id = 1",

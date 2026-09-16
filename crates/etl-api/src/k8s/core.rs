@@ -584,8 +584,8 @@ async fn create_or_update_replicator_workload(
     identity: &PipelineRuntimeIdentity,
     workload_config: ReplicatorWorkloadConfig,
 ) -> Result<(), K8sCoreError> {
-    // Apply the VPA first so newly admitted Pods observe its intended update mode
-    // and bounds.
+    // Apply the VPA first so newly admitted Pods observe its intended update
+    // mode and bounds.
     k8s_client
         .create_or_update_replicator_vertical_pod_autoscaler(
             resource_prefix,
@@ -647,10 +647,10 @@ async fn delete_dynamic_replicator_secrets(
 ) -> Result<(), K8sCoreError> {
     k8s_client.delete_postgres_secret(resource_prefix, wait).await?;
 
-    // Delete all destination-specific secret types unconditionally. Only one will
-    // exist at a time, but if a pipeline's destination was changed (e.g. BigQuery →
-    // ClickHouse) the old secret type might still be present. Deleting a
-    // non-existent secret is a safe no-op.
+    // Delete all destination-specific secret types unconditionally. Only one
+    // will exist at a time, but if a pipeline's destination was changed
+    // (e.g. BigQuery → ClickHouse) the old secret type might still be
+    // present. Deleting a non-existent secret is a safe no-op.
     k8s_client.delete_bigquery_secret(resource_prefix, wait).await?;
     k8s_client.delete_clickhouse_secret(resource_prefix, wait).await?;
     k8s_client.delete_iceberg_secret(resource_prefix, wait).await?;

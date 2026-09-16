@@ -345,7 +345,8 @@ mod tests {
 
     #[test]
     fn parse_numeric_array_with_parsing_error() {
-        // This should return an error because "invalid" cannot be parsed as a number
+        // This should return an error because "invalid" cannot be parsed as a
+        // number
         let result = parse_cell_from_postgres_text(&Type::INT4_ARRAY, "{1,invalid,3}");
         assert!(result.is_err());
         // The error should be a parsing error, not related to NULL handling
@@ -952,15 +953,16 @@ mod tests {
 
     #[test]
     fn parse_array_escape_sequences() {
-        // The array parser doesn't process escape sequences in the same way as the
-        // table row parser It expects literal characters in the array string
+        // The array parser doesn't process escape sequences in the same way as
+        // the table row parser It expects literal characters in the
+        // array string
         let cell =
             parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"line1\\nline2","tab\\there"}"#)
                 .unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
-                // These should be literal strings since array parser doesn't decode escapes
-                // like table parser
+                // These should be literal strings since array parser doesn't
+                // decode escapes like table parser
                 assert_eq!(
                     v,
                     vec![Some("line1\\nline2".to_owned()), Some("tab\\there".to_owned())]

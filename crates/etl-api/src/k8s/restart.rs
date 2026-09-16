@@ -55,7 +55,8 @@ pub(super) async fn restart_outdated_pod(
     tokio::time::timeout(RESTART_TIMEOUT, async {
         loop {
             // Read the pod before checking the generation so a newer request's
-            // replacement cannot be mistaken for an outdated pod of this request.
+            // replacement cannot be mistaken for an outdated pod of this
+            // request.
             let pod = pods.get_opt(pod_name).await?;
             let Some(current) = stateful_sets.get_opt(&name).await? else {
                 return Ok(());
@@ -111,7 +112,8 @@ pub(super) async fn restart_outdated_pod(
             }
 
             // Pod names are reused. Guard deletion with the observed UID so
-            // a concurrent replacement survives, and retain normal graceful shutdown.
+            // a concurrent replacement survives, and retain normal graceful
+            // shutdown.
             let pod_uid = pod.metadata.uid.ok_or_else(|| K8sError::InvalidRestartResource {
                 kind: "Pod",
                 name: pod_name.to_owned(),

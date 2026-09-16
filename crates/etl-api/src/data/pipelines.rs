@@ -77,8 +77,9 @@ pub(crate) async fn read_pipeline_tables_to_sync(
             serde_json::from_value::<TableState>(metadata)
                 .map_err(PipelineError::InvalidTableState)?
         } else {
-            // A newly published table has no stored state yet. Treat it as Init so
-            // its first initial sync triggers a VPA reset before the worker starts.
+            // A newly published table has no stored state yet. Treat it as Init
+            // so its first initial sync triggers a VPA reset before
+            // the worker starts.
             TableState::Init
         };
 
@@ -320,8 +321,8 @@ pub async fn delete_pipeline_api_state(
     tenant_id: &str,
     pipeline: &PipelineDeletion,
 ) -> Result<(), PipelinesDbError> {
-    // Delete the pipeline from the main database (this does NOT cascade delete the
-    // replicator due to missing constraint).
+    // Delete the pipeline from the main database (this does NOT cascade delete
+    // the replicator due to missing constraint).
     delete_pipeline(&mut *api_connection, tenant_id, pipeline.id).await?;
 
     // Manually delete the replicator since there's no cascade constraint.

@@ -140,7 +140,8 @@ async fn setup_pipeline_with_source_db() -> (TestApp, String, i64, PgPool, PgCon
     // We run the migrations to create all the tables used by `etl`.
     run_etl_migrations_on_source_database(&source_db_config).await;
 
-    // Match the default pipeline publication; tests add their tables explicitly.
+    // Match the default pipeline publication; tests add their tables
+    // explicitly.
     source_db_pool.execute("create schema test").await.unwrap();
     source_db_pool.execute("create publication publication").await.unwrap();
 
@@ -1808,7 +1809,8 @@ async fn destination_pipeline_update_locks_and_restarts_shared_pipelines() {
     let source_id = create_source(&app, &tenant_id).await;
     let pool = get_connection_pool(app.database_config());
     let image = etl_api::data::images::read_default_image(&pool).await.unwrap().unwrap();
-    // Bypass the one-pipeline quota to verify isolation with a shared destination.
+    // Bypass the one-pipeline quota to verify isolation with a shared
+    // destination.
     let mut api_txn = pool.begin().await.unwrap();
 
     let pipeline_id = etl_api::data::pipelines::create_pipeline(
@@ -1882,7 +1884,8 @@ async fn pipeline_operations_do_not_lock_related_resources() {
     let mut resource_txn = pool.begin().await.unwrap();
 
     // These are the row locks taken by ordinary non-key configuration updates.
-    // Foreign-key checks remain compatible, but explicit share/update locks do not.
+    // Foreign-key checks remain compatible, but explicit share/update locks do
+    // not.
     sqlx::query("select id from app.tenants where id = $1 for no key update")
         .bind(&tenant_id)
         .execute(&mut *resource_txn)
@@ -2058,7 +2061,8 @@ async fn restarting_pipeline_resets_vpa_when_table_sync_will_repeat() {
     )
     .await;
 
-    // Finishing the copy does not complete initial sync; catchup must also finish.
+    // Finishing the copy does not complete initial sync; catchup must also
+    // finish.
     for state in ["init", "data_sync", "finished_copy"] {
         sqlx::query(
             "update etl.replication_state set state = $1::text::etl.table_state, metadata = \
@@ -2268,7 +2272,8 @@ async fn restarting_pipeline_uses_only_current_state_for_its_pipeline() {
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(app.k8s_state.vpa_delete_calls(), 0);
 
-    // A different pipeline's completed sync cannot suppress this pipeline's sync.
+    // A different pipeline's completed sync cannot suppress this pipeline's
+    // sync.
     create_tables_with_states(
         &source_db_pool,
         pipeline_id + 1,
@@ -2423,7 +2428,8 @@ async fn restarting_pipeline_preserves_vpa_when_source_lock_times_out() {
         setup_pipeline_with_source_db().await;
     create_published_test_table(&source_db_pool, "test_users").await;
 
-    // Hold the lock until the source connection's lock timeout cancels inspection.
+    // Hold the lock until the source connection's lock timeout cancels
+    // inspection.
     let mut transaction = source_db_pool.begin().await.unwrap();
 
     sqlx::query("lock table etl.replication_state in access exclusive mode")
@@ -2831,7 +2837,8 @@ async fn assert_pipeline_deletion_can_be_retried(failure: DeletionFailure) {
         let (app, tenant_id, original_pipeline_id, source_pool, source_config) =
             setup_pipeline_with_source_db().await;
         let api_pool = get_connection_pool(app.database_config());
-        // Slot names are cluster-wide, so each test needs a distinct pipeline ID.
+        // Slot names are cluster-wide, so each test needs a distinct pipeline
+        // ID.
         let pipeline_id =
             i64::try_from(uuid::Uuid::new_v4().as_u128() & ((1_u128 << 63) - 1)).unwrap();
         sqlx::query("select setval(pg_get_serial_sequence('app.pipelines', 'id'), $1, false)")
@@ -2881,8 +2888,9 @@ async fn assert_pipeline_deletion_can_be_retried(failure: DeletionFailure) {
                     .unwrap();
             }
             DeletionFailure::SlotCleanup => {
-                // Shadow slot deletion only in this source database's new sessions.
-                // This fails after metadata commits without changing server privileges.
+                // Shadow slot deletion only in this source database's new
+                // sessions. This fails after metadata commits
+                // without changing server privileges.
                 source_pool
                     .execute(
                         r#"
@@ -3298,8 +3306,8 @@ async fn rollback_tables_all_errored_succeeds() {
     )
     .await;
 
-    // table4: errored with no_retry (should be rolled back - all errored tables are
-    // now included)
+    // table4: errored with no_retry (should be rolled back - all errored tables
+    // are now included)
     let table4_oid = create_table_with_state_chain(
         &source_db_pool,
         pipeline_id,
@@ -3376,7 +3384,8 @@ async fn rollback_tables_all_errored_fails_when_no_errored_tables() {
     )
     .await;
 
-    // Call rollback with all_errored_tables - should fail since no errored tables
+    // Call rollback with all_errored_tables - should fail since no errored
+    // tables
     let response = app
         .rollback_tables(
             &tenant_id,

@@ -77,8 +77,9 @@ fn container_status_is_unknown(container: &ContainerStatus) -> bool {
     }
 
     // Waiting reasons are extensible strings, not a closed API enum. Preserve
-    // known initialization/recovery states without inventing semantics for a new
-    // reason. RestartingAllContainers is the kubelet's whole-Pod recovery state.
+    // known initialization/recovery states without inventing semantics for a
+    // new reason. RestartingAllContainers is the kubelet's whole-Pod
+    // recovery state.
     state.waiting.as_ref().and_then(|waiting| waiting.reason.as_deref()).is_some_and(|reason| {
         !matches!(reason, "" | "ContainerCreating" | "PodInitializing" | "RestartingAllContainers")
             && !container_has_error(container)
@@ -102,8 +103,9 @@ fn derive_pod_status(pod: &Pod, replicator_container_name: &str) -> PodStatus {
         .flatten()
         .chain(status.init_container_statuses.iter().flatten());
 
-    // Loss of observation takes precedence over retained container health. A node
-    // can become unreachable while its last reported process still looks healthy.
+    // Loss of observation takes precedence over retained container health. A
+    // node can become unreachable while its last reported process still
+    // looks healthy.
     if status
         .phase
         .as_deref()
@@ -193,7 +195,8 @@ fn derive_replicator_status(
     }
 
     // The annotation changes immediately when a restart is accepted. Controller
-    // status may still describe the old revision until it observes that mutation.
+    // status may still describe the old revision until it observes that
+    // mutation.
     let desired_restart = spec
         .template
         .metadata
@@ -227,7 +230,8 @@ fn derive_replicator_status(
     let pod_revision =
         pod.metadata.labels.as_ref().and_then(|labels| labels.get("controller-revision-hash"));
 
-    // Missing rollout evidence is not proof that the requested process is running.
+    // Missing rollout evidence is not proof that the requested process is
+    // running.
     if revision.is_none_or(String::is_empty) || revision != pod_revision {
         return PodStatus::Starting;
     }

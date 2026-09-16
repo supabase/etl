@@ -262,8 +262,9 @@ mod tests {
         let env_content = match extension {
             "json" => serde_json::to_string_pretty(&original_config).unwrap(),
             "yaml" | "yml" => {
-                // YAML serialization for externally tagged enums doesn't match what config
-                // crate expects For now, manually construct YAML that config
+                // YAML serialization for externally tagged enums doesn't match
+                // what config crate expects For now, manually
+                // construct YAML that config
                 // crate can deserialize
                 format!(
                     "name: \"{}\"\nmode:\n  disk:\n    path: \"{}\"\n    max_size: {}\n",
@@ -356,7 +357,8 @@ mod tests {
             std::env::set_var("APP_ENVIRONMENT", "prod");
         }
 
-        // Load config - should use APP_CONFIG_DIR, not current_dir/configuration
+        // Load config - should use APP_CONFIG_DIR, not
+        // current_dir/configuration
         let loaded_config: ApplicationConfig = load_config().unwrap();
 
         // Verify the loaded config matches the original

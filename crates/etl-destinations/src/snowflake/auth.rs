@@ -262,7 +262,8 @@ fn decode_and_load_rsa_key(
         doc.as_bytes().to_vec()
     };
 
-    // Try PKCS#8: extract the inner RSA key for jsonwebtoken, load via from_pkcs8.
+    // Try PKCS#8: extract the inner RSA key for jsonwebtoken, load via
+    // from_pkcs8.
     if let Ok(pki) = pkcs8::PrivateKeyInfoRef::from_der(&der_bytes) {
         let key_pair = aws_lc_rs::rsa::KeyPair::from_pkcs8(&der_bytes)
             .map_err(|e| Error::Auth(format!("failed to load RSA key: {e}")))?;
@@ -473,7 +474,8 @@ P23pIjtEtEPNpGkXj0aB1RDq
             assert_eq!(entry.access_token, "fresh-token-from-exchange");
         }
 
-        // Second call should return the cached fresh token without re-exchanging.
+        // Second call should return the cached fresh token without
+        // re-exchanging.
         let token = manager.get_token().await.expect("get_token");
         assert_eq!(token, "fresh-token-from-exchange");
     }

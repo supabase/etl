@@ -481,8 +481,8 @@ pub(crate) fn parse_event_from_update_message(
 
     // Old-row shape matters only for `UnchangedToast` resolution:
     // - full rows can recover any unchanged column by index.
-    // - key rows can recover only unchanged key columns, consuming key values in
-    //   replicated table order as we walk the schema below.
+    // - key rows can recover only unchanged key columns, consuming key values
+    //   in replicated table order as we walk the schema below.
     let table_row = convert_update_tuple_to_updated_table_row(
         &replicated_table_schema,
         new_tuple_data,
@@ -651,8 +651,9 @@ fn convert_update_tuple_to_updated_table_row(
             ConvertedTupleCell::Present(value) => full_values.push(value),
             ConvertedTupleCell::Missing => {
                 if !partial_row {
-                    // This is the first column we cannot reconstruct. Up to this
-                    // point `full_values` held a dense prefix of known values, so
+                    // This is the first column we cannot reconstruct. Up to
+                    // this point `full_values` held a dense
+                    // prefix of known values, so
                     // we move that prefix into `present_values` and continue
                     // collecting only the values we do know plus the indexes we
                     // do not.
@@ -950,8 +951,9 @@ fn convert_tuple_data_to_cell(
 ) -> EtlResult<ConvertedTupleCell> {
     match tuple_data {
         protocol::TupleData::Null => {
-            // If a column schema is nullable and there is no value, it's fine, but if it's
-            // not nullable this is a problem, and we need to raise it.
+            // If a column schema is nullable and there is no value, it's fine,
+            // but if it's not nullable this is a problem, and we
+            // need to raise it.
             if column_schema.nullable {
                 Ok(ConvertedTupleCell::Present(Cell::Null))
             } else {

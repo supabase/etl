@@ -156,7 +156,8 @@ impl Destination for DeferredEventsDestination {
 
         if events.is_empty() {
             assert_eq!(durability, WriteEventsDurability::RequireDurable);
-            // Hold the empty barrier so the test can prove completion waits for it.
+            // Hold the empty barrier so the test can prove completion waits for
+            // it.
             assert!(
                 self.writes_tx
                     .send(DeferredEventsWrite::DurabilityBarrier { result: async_result })
@@ -434,8 +435,8 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     let _scenario = FailScenario::setup();
-    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so
-    // that on the 3rd time, the system switches to manual retry.
+    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times,
+    // so that on the 3rd time, the system switches to manual retry.
     fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "3*return(timed_retry)").unwrap();
 
     init_test_tracing();
@@ -460,8 +461,8 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
         destination.clone(),
     );
 
-    // Register notifications for waiting on the manual retry which is expected to
-    // be flipped by the max attempts handling.
+    // Register notifications for waiting on the manual retry which is expected
+    // to be flipped by the max attempts handling.
     let users_ready_notify = store
         .notify_on_table_state(database_schema.users_schema().id, |state| {
             matches!(state, TableState::Errored { retry_policy: TableRetryPolicy::ManualRetry, .. })
@@ -1170,7 +1171,8 @@ impl Destination for HoldingDmlDispatchDestination {
             if let Some(gate) = gate {
                 *self.first_held_dml_commit_lsn.lock().unwrap() = Some(first_dml_commit_lsn);
                 // Hold before forwarding the batch or its result handle, so the
-                // inner destination cannot write or acknowledge it until release.
+                // inner destination cannot write or acknowledge it until
+                // release.
                 gate.apply(Ok(())).await?;
             }
         }
@@ -1522,8 +1524,8 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
         destination.clone(),
     );
 
-    // We wait until 4 inserts have been reached, the previous ones + the current
-    // ones.
+    // We wait until 4 inserts have been reached, the previous ones + the
+    // current ones.
     let new_inserts_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 4)])
         .await;
@@ -2480,8 +2482,8 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
 
     init_test_tracing();
 
-    // --- GIVEN: a pipeline whose table sync worker is paused after copy, so both
-    // worker connections are alive ---
+    // --- GIVEN: a pipeline whose table sync worker is paused after copy, so
+    // both worker connections are alive ---
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;

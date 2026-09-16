@@ -111,8 +111,9 @@ impl OutOfBandSourcePool {
             ));
         };
 
-        // A NULL status means PostgreSQL cannot determine WAL availability from the
-        // slot's restart LSN, for example because the slot has not reserved WAL yet.
+        // A NULL status means PostgreSQL cannot determine WAL availability from
+        // the slot's restart LSN, for example because the slot has not
+        // reserved WAL yet.
         Ok(match wal_status.as_deref() {
             Some("lost") => SlotState::Invalidated,
             Some(_) | None => SlotState::NotInvalidated,

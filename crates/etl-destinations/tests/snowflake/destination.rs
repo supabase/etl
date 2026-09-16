@@ -797,8 +797,8 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         )
         .await;
 
-        // Wait for initial data to commit before DDL, channel refresh loses uncommitted
-        // rows.
+        // Wait for initial data to commit before DDL, channel refresh loses
+        // uncommitted rows.
         let committed = poll_destination_offset(
             &harness.destination,
             table_id,

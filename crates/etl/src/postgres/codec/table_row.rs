@@ -82,13 +82,15 @@ fn parse_table_row_from_postgres_copy_str(
         let mut field_end = field_start;
         let mut field_escaped = false;
 
-        // Inner loop parses a single field value until tab, newline, or end of input.
-        // `find_next_special` uses vectorized search for long literal runs.
+        // Inner loop parses a single field value until tab, newline, or end of
+        // input. `find_next_special` uses vectorized search for long
+        // literal runs.
         loop {
             let Some(offset) = find_next_special(&bytes[pos..]) else {
-                // No delimiter, terminator, or escape anywhere in the rest of the
-                // row. A properly terminated row always has an unescaped newline
-                // remaining at this point, so this means the row is incomplete.
+                // No delimiter, terminator, or escape anywhere in the rest of
+                // the row. A properly terminated row always has
+                // an unescaped newline remaining at this point,
+                // so this means the row is incomplete.
                 if field_escaped && bytes.len() > literal_start {
                     field_buffer.push_str(&row_str[literal_start..]);
                 }
@@ -103,9 +105,10 @@ fn parse_table_row_from_postgres_copy_str(
             };
             let special_pos = pos + offset;
 
-            // Escapes packed only a byte or two apart (or consecutive delimiters,
-            // like an empty field) make this run empty most of the time; skip the
-            // slice and its UTF-8 boundary check rather than appending nothing.
+            // Escapes packed only a byte or two apart (or consecutive
+            // delimiters, like an empty field) make this run empty
+            // most of the time; skip the slice and its UTF-8
+            // boundary check rather than appending nothing.
             if field_escaped && special_pos > literal_start {
                 field_buffer.push_str(&row_str[literal_start..special_pos]);
             }
@@ -179,7 +182,8 @@ fn parse_table_row_from_postgres_copy_str(
             break;
         }
 
-        // Get the next column schema - error if we have more fields than expected.
+        // Get the next column schema - error if we have more fields than
+        // expected.
         let Some(column_schema) = column_schemas.get(column_index) else {
             let actual_column_count = column_index + 1;
             bail!(
@@ -203,9 +207,10 @@ fn parse_table_row_from_postgres_copy_str(
         } else {
             let field_value = if field_escaped { field_buffer.as_str() } else { raw_field_value };
 
-            // Convert non-null field value to the appropriate Cell type based on the
-            // column's Postgres type, covering all supported data types (integers,
-            // floats, strings, booleans, etc.).
+            // Convert non-null field value to the appropriate Cell type based
+            // on the column's Postgres type, covering all supported
+            // data types (integers, floats, strings, booleans,
+            // etc.).
             match parse_cell_from_postgres_text(&column_schema.typ, field_value) {
                 Ok(value) => value,
                 Err(e) => {
@@ -556,7 +561,8 @@ mod tests {
     fn try_from_postgres_multibyte_with_escapes() {
         let column_schemas = create_single_column_schema("data", Type::TEXT);
 
-        // Unicode text with escape sequences (testing multibyte character handling)
+        // Unicode text with escape sequences (testing multibyte character
+        // handling)
         let row_data = "Hello\\t🌍\\nWorld\\r测试".as_bytes();
         let mut row_with_newline = row_data.to_vec();
         row_with_newline.push(b'\n');
@@ -571,7 +577,8 @@ mod tests {
     fn try_from_postgres_escape_sequences() {
         let column_schemas = create_single_column_schema("data", Type::TEXT);
 
-        // Comprehensive test of all escape sequences that Postgres COPY TO produces
+        // Comprehensive test of all escape sequences that Postgres COPY TO
+        // produces
         let test_cases: Vec<(&[u8], &str)> = vec![
             // Control character escapes
             (b"\\b\n", "\u{0008}"), // backspace

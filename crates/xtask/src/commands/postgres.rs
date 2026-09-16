@@ -129,8 +129,8 @@ impl StartArgs {
 
         let tls_files = if self.no_tls { None } else { Some(self.prepare_tls_files()?) };
 
-        // Start the full stack on the base port unless the caller only needs source
-        // Postgres.
+        // Start the full stack on the base port unless the caller only needs
+        // source Postgres.
         let first_shard_services =
             if self.source_only { &SOURCE_POSTGRES_SERVICES[..] } else { &[] };
         self.start_cluster(None, self.base_port, first_shard_services, tls_files.as_ref())?;

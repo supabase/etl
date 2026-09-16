@@ -634,10 +634,11 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // CH ships ReplacingMergeTree-with-CLEANUP behind an experimental gate that has
-    // shifted names across versions (26.x removed the previous setting name).
-    // When the server does not allow the call, treat this test as covered by
-    // the FINAL-based spine assertions and skip the physical-removal check.
+    // CH ships ReplacingMergeTree-with-CLEANUP behind an experimental gate that
+    // has shifted names across versions (26.x removed the previous setting
+    // name). When the server does not allow the call, treat this test as
+    // covered by the FINAL-based spine assertions and skip the
+    // physical-removal check.
     match optimize_result {
         Ok(()) => {
             let counts: Vec<CountRow> =

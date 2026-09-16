@@ -258,7 +258,8 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     assert_eq!(r1.cidr_col, "192.168.0.0/16");
     assert_eq!(r1.macaddr_col, "aa:bb:cc:dd:ee:ff");
     assert_eq!(r1.uuid_col.to_lowercase(), "f47ac10b-58cc-4372-a567-0e02b2c3d479");
-    // Empty arrays -- the regression case that accidentally worked before the fix.
+    // Empty arrays -- the regression case that accidentally worked before the
+    // fix.
     assert_eq!(
         r1.integer_array_col,
         Vec::<Option<i32>>::new(),
@@ -449,8 +450,8 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
         .await
         .unwrap();
 
-    // Row 2: arrays with interior NULL elements -- the element at index 1 is NULL
-    // while surrounding elements are present.
+    // Row 2: arrays with interior NULL elements -- the element at index 1 is
+    // NULL while surrounding elements are present.
     database
         .run_sql(&format!(
             "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) VALUES \
@@ -1786,8 +1787,8 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 
     assert_eq!(rows.len(), 2);
 
-    // Alice: pre-change row, added columns use the destination's add-time defaults
-    // where supported.
+    // Alice: pre-change row, added columns use the destination's add-time
+    // defaults where supported.
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].name, "Alice");
     assert_eq!(rows[0].age, 25);
@@ -2227,7 +2228,8 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     );
     let clickhouse_table_name = applied_metadata.table_id().to_owned();
 
-    // --- WHEN: a fresh destination on the same store replays the old relation ---
+    // --- WHEN: a fresh destination on the same store replays the old relation
+    // ---
     let restarted_destination =
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
     let result = restarted_destination

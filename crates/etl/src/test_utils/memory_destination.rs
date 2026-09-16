@@ -138,8 +138,8 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        // For table drops, we simulate removing all table rows for a specific table and
-        // also the events of that table.
+        // For table drops, we simulate removing all table rows for a specific
+        // table and also the events of that table.
         let mut inner = self.inner.lock().await;
 
         let table_id = replicated_table_schema.id();
@@ -176,8 +176,8 @@ where
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
 
-        // Store destination table metadata on first write, like real destinations
-        // (BigQuery, Iceberg) do.
+        // Store destination table metadata on first write, like real
+        // destinations (BigQuery, Iceberg) do.
         self.sync_destination_table_metadata(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;

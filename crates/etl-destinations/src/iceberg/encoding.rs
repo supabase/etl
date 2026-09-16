@@ -1626,7 +1626,8 @@ mod tests {
     fn rows_to_record_batch_schema_mismatch_length() {
         use arrow::datatypes::{Field, Schema};
 
-        // Test what happens when row has different number of columns than schema
+        // Test what happens when row has different number of columns than
+        // schema
         let rows = vec![TableRow::new(vec![
             Cell::I32(1),
             Cell::String("test".to_owned()),
@@ -1728,7 +1729,8 @@ mod tests {
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
 
-        // Test with non-boolean array type - should fall back to string conversion
+        // Test with non-boolean array type - should fall back to string
+        // conversion
         let rows =
             vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(1), Some(0), None]))])];
 
@@ -1736,7 +1738,8 @@ mod tests {
         let array_ref = build_boolean_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
-        // Should still create a list array but with string elements due to fallback
+        // Should still create a list array but with string elements due to
+        // fallback
         assert_eq!(list_array.len(), 1);
         assert!(!list_array.is_null(0));
     }
@@ -2643,8 +2646,8 @@ mod tests {
     fn build_list_array_dispatch() {
         use arrow::datatypes::Field;
 
-        // Test that build_list_array correctly dispatches to the right type-specific
-        // builders
+        // Test that build_list_array correctly dispatches to the right
+        // type-specific builders
         let test_cases = vec![
             (DataType::Boolean, "boolean list"),
             (DataType::Int32, "int32 list"),

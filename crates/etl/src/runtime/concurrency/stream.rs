@@ -57,8 +57,8 @@ fn poll_memory_backpressure(
             Poll::Ready(None) => break true,
             Poll::Pending => {
                 // `Pending` registers this task's waker. Read the current value
-                // as well because the subscription does not yield the state that
-                // predates its creation.
+                // as well because the subscription does not yield the state
+                // that predates its creation.
                 *paused_for_memory = subscription.current_backpressure_active();
 
                 break false;
@@ -266,8 +266,9 @@ where
                         this.batch_size_hint_bytes.saturating_add(item_size_hint_bytes);
                     this.items.push(item);
 
-                    // If backpressure activated while the source was ready, flush the
-                    // accumulated data before pausing source intake.
+                    // If backpressure activated while the source was ready,
+                    // flush the accumulated data before
+                    // pausing source intake.
                     if let Some(memory_subscription) = this.memory_subscription.as_mut()
                         && memory_subscription.current_backpressure_active()
                     {
@@ -279,10 +280,11 @@ where
                         return Poll::Ready(Some(Ok(batch)));
                     }
 
-                    // Consult the shared target after every decoded item. A PostgreSQL COPY
-                    // stream can yield many ready rows during one outer poll, so checking only
-                    // once per poll would delay adaptation to a changed cgroup limit or active
-                    // batch-slot count.
+                    // Consult the shared target after every decoded item. A
+                    // PostgreSQL COPY stream can yield many
+                    // ready rows during one outer poll, so checking only
+                    // once per poll would delay adaptation to a changed cgroup
+                    // limit or active batch-slot count.
                     if *this.batch_size_hint_bytes
                         >= this.batch_memory_governor.batch_size_target_bytes()
                     {
@@ -318,7 +320,8 @@ where
                     return Poll::Ready(last);
                 }
                 Poll::Pending => {
-                    // No more items available right now, check if we should emit due to timeout.
+                    // No more items available right now, check if we should
+                    // emit due to timeout.
                     break;
                 }
             }
@@ -438,8 +441,9 @@ mod tests {
                 0 => SizedToken { value: 1, bytes: 400 },
                 1 => {
                     self.memory.set_total_memory_bytes_for_test(500);
-                    // Publishing a new coherent memory snapshot must refresh the shared target
-                    // while the outer poll continues draining ready rows.
+                    // Publishing a new coherent memory snapshot must refresh
+                    // the shared target while the outer
+                    // poll continues draining ready rows.
                     SizedToken { value: 2, bytes: 100 }
                 }
                 2 => SizedToken { value: 3, bytes: 100 },
@@ -512,8 +516,8 @@ mod tests {
         memory.set_backpressure_active_for_test(true);
         let memory_sub = memory.subscribe();
 
-        // When backpressure is active, wrapped stream stays pending even if it has
-        // data.
+        // When backpressure is active, wrapped stream stays pending even if it
+        // has data.
         let mut stream = Box::pin(MemoryBackpressureStream::wrap(
             futures::stream::iter(vec![10]),
             "test_stream",
@@ -546,7 +550,8 @@ mod tests {
         // Activate backpressure after subscribe and before next poll.
         memory.set_backpressure_active_for_test(true);
 
-        // Even if the updates stream is pending, wrapper falls back to current state.
+        // Even if the updates stream is pending, wrapper falls back to current
+        // state.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected pending based on current backpressure state"),
@@ -564,7 +569,8 @@ mod tests {
             memory_sub,
         );
 
-        // Set blocked before first poll so the first poll observes an immediate update.
+        // Set blocked before first poll so the first poll observes an immediate
+        // update.
         memory.set_backpressure_active_for_test(true);
 
         let unblocker = {
@@ -581,7 +587,8 @@ mod tests {
             stream.next().await
         });
 
-        // Give the spawned waiter a chance to poll before advancing virtual time.
+        // Give the spawned waiter a chance to poll before advancing virtual
+        // time.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(1)).await;
 
@@ -705,7 +712,8 @@ mod tests {
             test_batch_memory_governor(&memory),
         );
 
-        // Set blocked before first poll so the first poll observes an immediate update.
+        // Set blocked before first poll so the first poll observes an immediate
+        // update.
         memory.set_backpressure_active_for_test(true);
 
         let unblocker = {
@@ -722,7 +730,8 @@ mod tests {
             stream.next().await
         });
 
-        // Give the spawned waiter a chance to poll before advancing virtual time.
+        // Give the spawned waiter a chance to poll before advancing virtual
+        // time.
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_secs(1)).await;
 
@@ -821,16 +830,16 @@ mod tests {
             test_batch_memory_governor(&memory),
         ));
 
-        // The stream has buffered items but not enough to reach its byte target, so it
-        // should wait.
+        // The stream has buffered items but not enough to reach its byte
+        // target, so it should wait.
         poll_fn(|cx| match stream.as_mut().poll_next(cx) {
             Poll::Pending => Poll::Ready(()),
             _ => panic!("expected pending before timeout"),
         })
         .await;
 
-        // Advancing past the deadline should trigger timeout-based flush to bound
-        // latency.
+        // Advancing past the deadline should trigger timeout-based flush to
+        // bound latency.
         tokio::time::advance(Duration::from_millis(120)).await;
 
         let flushed = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
@@ -892,8 +901,8 @@ mod tests {
         let last = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert_eq!(last, Some(Ok(vec![7, 8])));
 
-        // A subsequent poll must return None, proving the stream transitions to ended
-        // state.
+        // A subsequent poll must return None, proving the stream transitions to
+        // ended state.
         let done = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert!(done.is_none());
     }
@@ -912,7 +921,8 @@ mod tests {
             test_batch_memory_governor(&memory),
         ));
 
-        // Empty streams should complete immediately without emitting empty batches.
+        // Empty streams should complete immediately without emitting empty
+        // batches.
         let result = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         assert!(result.is_none());
     }

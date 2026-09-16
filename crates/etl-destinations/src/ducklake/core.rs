@@ -2905,8 +2905,9 @@ where
                 if !active_sort_order_matches(&active, &columns) {
                     statements.push(build_set_sorted_by_sql_ducklake(table_name, &columns));
                 }
-                // Keep foreground insert latency unchanged. Flush and compaction
-                // still use the table's active sort order.
+                // Keep foreground insert latency unchanged. Flush and
+                // compaction still use the table's active sort
+                // order.
                 statements.push(build_disable_sort_on_insert_sql_ducklake(table_name));
                 statements.join(";\n")
             }
@@ -3110,7 +3111,8 @@ where
             let mut table_id_to_mutations: HashMap<TableId, Vec<TableMutationSegment>> =
                 HashMap::new();
 
-            // Accumulate row events, stopping at the first DDL or truncate boundary.
+            // Accumulate row events, stopping at the first DDL or truncate
+            // boundary.
             while let Some(event) = event_iter.peek() {
                 if matches!(event, Event::Relation(_) | Event::Truncate(_)) {
                     break;
@@ -3256,7 +3258,8 @@ where
                                 );
                                 continue;
                             }
-                            // Schema reconciliation also acquires the table write slot.
+                            // Schema reconciliation also acquires the table
+                            // write slot.
                             drop(replay_table_write_permit);
                             let ready_table_name = destination
                                 .ensure_table_ready_for_streaming_schema(
@@ -3324,7 +3327,8 @@ where
                 }
             }
 
-            // Collect contiguous truncate events while preserving table-local order.
+            // Collect contiguous truncate events while preserving table-local
+            // order.
             let mut truncate_table_ids: HashMap<
                 TableId,
                 (ReplicatedTableSchema, Vec<TrackedTruncateEvent>),
@@ -3377,7 +3381,8 @@ where
                             );
                             return Ok(());
                         }
-                        // Schema reconciliation also acquires the table write slot.
+                        // Schema reconciliation also acquires the table write
+                        // slot.
                         drop(replay_table_write_permit);
                         let ready_table_name = destination
                             .ensure_table_ready_for_streaming_schema(&replicated_table_schema)

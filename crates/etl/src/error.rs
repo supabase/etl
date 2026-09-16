@@ -281,7 +281,8 @@ impl EtlError {
         match self.repr {
             ErrorRepr::Single(ref payload) => payload.detail.as_deref(),
             ErrorRepr::Many { ref errors, .. } => {
-                // For multiple errors, return the detail of the first error that has one.
+                // For multiple errors, return the detail of the first error
+                // that has one.
                 errors.iter().find_map(|e| e.detail())
             }
         }
@@ -1487,7 +1488,8 @@ mod tests {
             hash::{Hash, Hasher},
         };
 
-        // Same kind and description with different details should produce same hash.
+        // Same kind and description with different details should produce same
+        // hash.
         let err1 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query failed",

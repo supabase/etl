@@ -145,7 +145,8 @@ impl<G: GenericClient> PgDatabase<G> {
 
             client.execute(&create_publication_query, &[]).await?;
         } else {
-            // PostgreSQL 14 and earlier: create publication and add tables individually
+            // PostgreSQL 14 and earlier: create publication and add tables
+            // individually
             match schema {
                 Some(schema_name) => {
                     let create_pub_query = format!("create publication {quoted_publication_name}");
@@ -603,8 +604,9 @@ impl<G: GenericClient> PgDatabase<G> {
             }
         }
 
-        // IMPORTANT: Reset config BEFORE returning to avoid invalidating new slots
-        // when the pipeline restarts and creates table sync slots.
+        // IMPORTANT: Reset config BEFORE returning to avoid invalidating new
+        // slots when the pipeline restarts and creates table sync
+        // slots.
         cleanup().await;
 
         if invalidated {
@@ -647,8 +649,8 @@ impl PgDatabase<Client> {
     /// without creating a new database.
     pub async fn duplicate(&self) -> Self {
         let config = self.config.clone();
-        // This connects to the database assuming it already exists since this is meant
-        // to be a duplicate connection.
+        // This connects to the database assuming it already exists since this
+        // is meant to be a duplicate connection.
         let client = connect_to_pg_database(&config).await;
 
         Self { config, client: Some(client.0), server_version: client.1, destroy_on_drop: true }
@@ -741,9 +743,9 @@ impl PgDatabase<Transaction<'_>> {
 impl<G> Drop for PgDatabase<G> {
     fn drop(&mut self) {
         if self.destroy_on_drop {
-            // To use `block_in_place,` we need a multithreaded runtime since when a
-            // blocking task is issued, the runtime will offload existing tasks
-            // to another worker.
+            // To use `block_in_place,` we need a multithreaded runtime since
+            // when a blocking task is issued, the runtime will
+            // offload existing tasks to another worker.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tokio::task::block_in_place(move || {
                     Handle::current().block_on(async move { drop_pg_database(&self.config).await });
@@ -905,7 +907,8 @@ pub async fn drop_pg_database(config: &PgConnectionConfig) {
         eprintln!("warning: failed to terminate connections for database {}: {}", config.name, e);
     }
 
-    // Give PostgreSQL time to mark slots as inactive after terminating connections.
+    // Give PostgreSQL time to mark slots as inactive after terminating
+    // connections.
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Drop any replication slots on this database.

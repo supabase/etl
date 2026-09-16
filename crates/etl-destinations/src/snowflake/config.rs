@@ -58,8 +58,8 @@ impl Config {
         database: &str,
         schema: &str,
     ) -> Result<Self, ValidationError> {
-        // The account id is interpolated into the account URL, so this rejects values
-        // that could take over the host (SSRF).
+        // The account id is interpolated into the account URL, so this rejects
+        // values that could take over the host (SSRF).
         validate_snowflake_account_id(account_id)?;
 
         let account_url = format!("https://{}.snowflakecomputing.com", account_id.to_uppercase());

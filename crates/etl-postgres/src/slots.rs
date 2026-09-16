@@ -202,10 +202,10 @@ pub async fn delete_pipeline_replication_slots(
     const INITIAL_BACKOFF_MS: u64 = 100;
 
     for attempt in 0..MAX_RETRIES {
-        // Phase 1: terminate active walsender processes for the ETL-managed slots
-        // associated with this pipeline id. We use both the exact apply slot
-        // name and the table-sync prefix so cleanup can still succeed even if
-        // ETL metadata was already removed.
+        // Phase 1: terminate active walsender processes for the ETL-managed
+        // slots associated with this pipeline id. We use both the exact
+        // apply slot name and the table-sync prefix so cleanup can
+        // still succeed even if ETL metadata was already removed.
         let terminate_query = r#"
             select pg_terminate_backend(r.active_pid)
             from pg_replication_slots r
@@ -227,9 +227,9 @@ pub async fn delete_pipeline_replication_slots(
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Phase 2: drop all matching replication slots, whether still active or already
-        // inactive. Note: pg_drop_replication_slot will signal walsenders to
-        // terminate if still active
+        // Phase 2: drop all matching replication slots, whether still active or
+        // already inactive. Note: pg_drop_replication_slot will signal
+        // walsenders to terminate if still active
         let drop_query = r#"
             select pg_drop_replication_slot(r.slot_name)
             from pg_replication_slots r
@@ -304,7 +304,8 @@ mod tests {
         let slot_name = result.unwrap();
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
 
-        // The longest possible slot name with current prefixes should still be valid
+        // The longest possible slot name with current prefixes should still be
+        // valid
         assert_eq!(slot_name, "supabase_etl_table_sync_9223372036854775807_4294967295");
         assert!(slot_name.len() <= MAX_SLOT_NAME_LENGTH);
     }

@@ -302,8 +302,8 @@ where
         )
         .await?;
 
-        // The apply loop when used via the apply worker, should never complete since
-        // it's always streaming indefinitely.
+        // The apply loop when used via the apply worker, should never complete
+        // since it's always streaming indefinitely.
         debug_assert!(!matches!(apply_loop_result, ApplyLoopResult::Completed));
 
         match apply_loop_result {
@@ -348,10 +348,10 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
 
-    // Inspect the slot before creating it so a stale checkpoint from the previous
-    // lineage can be deleted first. Creating the slot before cleanup would leave
-    // a crash window where a later restart could pair the new slot with old
-    // persisted checkpoint.
+    // Inspect the slot before creating it so a stale checkpoint from the
+    // previous lineage can be deleted first. Creating the slot before
+    // cleanup would leave a crash window where a later restart could pair
+    // the new slot with old persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
         Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
@@ -364,8 +364,9 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         Err(err) => return Err(err),
     };
 
-    // Once we have the slot, we determine the start lsn, which is the consistent
-    // point from which Postgres tells us to start streaming from.
+    // Once we have the slot, we determine the start lsn, which is the
+    // consistent point from which Postgres tells us to start streaming
+    // from.
     let slot_start_lsn = slot.get_start_lsn();
 
     match &slot {
@@ -390,8 +391,8 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     if let GetOrCreateSlotResult::GetSlot(_) = &slot {
         let slot_state = replication_client.get_slot_state(&slot_name).await?;
 
-        // If the slot was invalidated, we need to handle its invalidation based on the
-        // configured rules.
+        // If the slot was invalidated, we need to handle its invalidation based
+        // on the configured rules.
         if slot_state == SlotState::Invalidated {
             return handle_invalidated_slot(
                 pipeline_id,
@@ -406,15 +407,17 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
 
         // An apply slot may predate this setting. Reconcile a valid slot before
         // reuse so enabling failover does not leave it ineligible for standby
-        // synchronization. Invalidated slots are handled above instead of altered.
+        // synchronization. Invalidated slots are handled above instead of
+        // altered.
         if failover {
             replication_client.ensure_slot_failover(&slot_name).await?;
         }
     }
 
-    // If the slot was created, we don't need an invalidation check. The previous
-    // lineage's persisted checkpoint was deleted before creation, so replication
-    // can start directly from the new slot's consistent point.
+    // If the slot was created, we don't need an invalidation check. The
+    // previous lineage's persisted checkpoint was deleted before creation,
+    // so replication can start directly from the new slot's consistent
+    // point.
     if matches!(slot, GetOrCreateSlotResult::CreateSlot(_)) {
         return Ok(slot_start_lsn);
     }

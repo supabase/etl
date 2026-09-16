@@ -2921,7 +2921,8 @@ mod tests {
                 assert_eq!(staleness1, staleness2);
                 assert_eq!(connection_pool_size1, connection_pool_size2);
                 assert_eq!(table_options1, table_options2);
-                // Assert that service account key was encrypted and decrypted correctly
+                // Assert that service account key was encrypted and decrypted
+                // correctly
                 assert_eq!(key1.expose_secret(), key2.expose_secret());
             }
             _ => panic!("Config types don't match"),
@@ -2985,7 +2986,8 @@ mod tests {
                     p2_s3_access_key_id.expose_secret()
                 );
                 assert_eq!(p1_s3_region, p2_s3_region);
-                // Assert that secret fields were encrypted and decrypted correctly
+                // Assert that secret fields were encrypted and decrypted
+                // correctly
                 assert_eq!(p1_catalog_token.expose_secret(), p2_catalog_token.expose_secret());
                 assert_eq!(
                     p1_s3_secret_access_key.expose_secret(),
@@ -3297,7 +3299,8 @@ mod tests {
                 );
                 assert_eq!(p1_max_staleness_mins, p2_max_staleness_mins);
                 assert_eq!(p1_table_options, p2_table_options);
-                // Note: connection_pool_size should be set to DEFAULT_POOL_SIZE when None
+                // Note: connection_pool_size should be set to DEFAULT_POOL_SIZE
+                // when None
                 assert_eq!(p1_connection_pool_size, None);
                 assert_eq!(
                     p2_connection_pool_size,

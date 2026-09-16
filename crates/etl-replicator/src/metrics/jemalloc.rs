@@ -136,9 +136,9 @@ fn log_jemalloc_config() {
     let tcache_max = opt::tcache_max::read().ok();
 
     // Read values not exposed in typed API via raw mallctl.
-    // SAFETY: These are read-only queries to jemalloc's opt.* configuration values.
-    // The keys are valid null-terminated strings and the return types match
-    // jemalloc's types.
+    // SAFETY: These are read-only queries to jemalloc's opt.* configuration
+    // values. The keys are valid null-terminated strings and the return
+    // types match jemalloc's types.
     let dirty_decay_ms: Option<isize> = unsafe { raw::read(b"opt.dirty_decay_ms\0") }.ok();
     let muzzy_decay_ms: Option<isize> = unsafe { raw::read(b"opt.muzzy_decay_ms\0") }.ok();
     let abort_conf: Option<bool> = unsafe { raw::read(b"opt.abort_conf\0") }.ok();
@@ -218,8 +218,8 @@ pub(super) fn spawn_jemalloc_metrics_task() -> JoinHandle<()> {
 
     tokio::spawn(async move {
         // Initialize MIBs once for efficient repeated lookups.
-        // MIBs translate string keys to numeric indices, avoiding string parsing on
-        // each read.
+        // MIBs translate string keys to numeric indices, avoiding string
+        // parsing on each read.
         let epoch_mib = match epoch::mib() {
             Ok(mib) => mib,
             Err(err) => {

@@ -156,9 +156,9 @@ impl MemorySnapshot {
             return MemoryRefresh::fresh(snapshot);
         }
 
-        // Once the process cgroup has been observed, a missing read is treated as
-        // transient. Falling back to host memory could momentarily expand the batch
-        // budget far beyond the pod's actual limit.
+        // Once the process cgroup has been observed, a missing read is treated
+        // as transient. Falling back to host memory could momentarily
+        // expand the batch budget far beyond the pod's actual limit.
         if let Some(previous @ Self { source: MemorySnapshotSource::ProcessCgroup, .. }) = previous
         {
             trace!(
@@ -201,8 +201,8 @@ impl MemorySnapshot {
     /// visible hierarchy and is not necessarily the literal `memory.current` of
     /// any one cgroup.
     fn from_cgroup_limits(cgroup: &sysinfo::CGroupLimits, source: MemorySnapshotSource) -> Self {
-        // `rss` only contains anonymous resident memory and misses other charges
-        // enforced by the memory controller.
+        // `rss` only contains anonymous resident memory and misses other
+        // charges enforced by the memory controller.
         Self {
             used: cgroup.total_memory.saturating_sub(cgroup.free_memory),
             total: cgroup.total_memory,
@@ -274,7 +274,8 @@ impl MemoryMonitor {
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
     ) -> Self {
-        // sysinfo docs suggest using a single `System` instance across the program.
+        // sysinfo docs suggest using a single `System` instance across the
+        // program.
         let mut system = sysinfo::System::new();
         let current_pid = sysinfo::get_current_pid().ok();
         if let Some(current_pid) = current_pid {
@@ -285,8 +286,8 @@ impl MemoryMonitor {
             );
         }
 
-        // Initialize from a real memory snapshot so startup state reflects current
-        // pressure.
+        // Initialize from a real memory snapshot so startup state reflects
+        // current pressure.
         let startup_snapshot = MemorySnapshot::refresh(&mut system, current_pid, None).snapshot;
         emit_memory_snapshot_metrics(startup_snapshot, None);
         let backpressure = memory_backpressure_config.map(|config| {
@@ -413,8 +414,8 @@ impl MemoryMonitor {
     pub(crate) fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
         let backpressure = self.inner.backpressure.as_ref()?;
 
-        // Retain a receiver for current-state reads while the stream yields only
-        // changes that occur after subscription.
+        // Retain a receiver for current-state reads while the stream yields
+        // only changes that occur after subscription.
         let rx = backpressure.active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
@@ -491,9 +492,10 @@ impl MemoryMonitor {
             *current = snapshot;
 
             // Wrapping is intentional. Governor readers compare revisions for
-            // inequality, so `u64::MAX -> 0` still denotes a new snapshot. Update
-            // it while the snapshot is write-locked so readers cannot pair this
-            // snapshot with the preceding revision.
+            // inequality, so `u64::MAX -> 0` still denotes a new snapshot.
+            // Update it while the snapshot is write-locked so
+            // readers cannot pair this snapshot with the preceding
+            // revision.
             self.inner.snapshot_revision.fetch_add(1, Ordering::Relaxed);
 
             previous_source

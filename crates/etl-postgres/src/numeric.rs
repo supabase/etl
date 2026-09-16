@@ -277,7 +277,8 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
     let mut decimal_digits =
         Vec::with_capacity(bytes.len().min(MAX_INITIAL_DECIMAL_DIGITS_CAPACITY));
     let mut have_decimal_point = false;
-    // Decimal weight is the number of digits before the decimal point minus one.
+    // Decimal weight is the number of digits before the decimal point minus
+    // one.
     let mut dweight = -1i32;
     // Decimal scale is the number of digits after the decimal point.
     let mut dscale = 0u32;
@@ -808,7 +809,8 @@ mod tests {
 
     #[test]
     fn weight_ignores_trailing_fraction_groups() {
-        // 0.0012000 has groups [12, 0], and weight must stay at -1 after stripping.
+        // 0.0012000 has groups [12, 0], and weight must stay at -1 after
+        // stripping.
         let num = PgNumeric::from_str("0.0012000").unwrap();
         assert_eq!(num.to_string(), "0.0012000");
 
@@ -879,15 +881,17 @@ mod tests {
             // String form should be stable across two parses.
             assert_eq!(printed, reparsed.to_string(), "unstable print for {case}");
 
-            // Value representation should be equal across parse, print, and parse.
+            // Value representation should be equal across parse, print, and
+            // parse.
             assert_eq!(parsed, reparsed, "unstable internal value for {case}");
         }
     }
 
     #[test]
     fn large_integer_weight() {
-        // 1,200,000 is 120 * 10000 + 0, giving digits [120, 0] before stripping.
-        // We expect trailing zero group to be stripped, weight stays 1.
+        // 1,200,000 is 120 * 10000 + 0, giving digits [120, 0] before
+        // stripping. We expect trailing zero group to be stripped,
+        // weight stays 1.
         let num = PgNumeric::from_str("1200000").unwrap();
         assert_eq!(num.to_string(), "1200000");
 

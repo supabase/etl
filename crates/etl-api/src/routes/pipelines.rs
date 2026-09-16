@@ -1006,9 +1006,10 @@ pub(crate) async fn delete_pipeline(
             .map_err(PipelineError::SourcePipelineState)?;
     }
 
-    // Retain control-plane records and the pipeline lock through source metadata
-    // and slot cleanup so failures leave enough information to reclaim source
-    // state. If this commit fails, a retry can repeat the idempotent cleanup.
+    // Retain control-plane records and the pipeline lock through source
+    // metadata and slot cleanup so failures leave enough information to
+    // reclaim source state. If this commit fails, a retry can repeat the
+    // idempotent cleanup.
     api_txn.commit().await?;
 
     Ok(StatusCode::OK)
@@ -1093,7 +1094,8 @@ pub(crate) async fn start_pipeline(
         read_pipeline_components(&mut api_txn, tenant_id, pipeline_id, &encryption_key).await?;
 
     // A successful stop response only acknowledges deletion. Finish removing
-    // an inactive runtime before applying resources that could still be deleted.
+    // an inactive runtime before applying resources that could still be
+    // deleted.
     if should_reconcile_pipeline_runtime(k8s_client.as_ref(), tenant_id, replicator.id).await? {
         api_txn.commit().await?;
 

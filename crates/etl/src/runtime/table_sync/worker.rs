@@ -97,9 +97,9 @@ impl TableSyncWorkerStateInner {
 
         // Broadcast notification to all active waiters.
         //
-        // Note that this notify will not wake up waiters that will be coming in the
-        // future since no permit is stored, only active listeners will be
-        // notified.
+        // Note that this notify will not wake up waiters that will be coming in
+        // the future since no permit is stored, only active listeners
+        // will be notified.
         self.state_change.notify_waiters();
     }
 
@@ -144,8 +144,8 @@ impl TableSyncWorkerStateInner {
     /// the previous state, then applies that state to the in-memory
     /// representation and notifies any waiting workers of the change.
     pub(crate) async fn rollback<S: StateStore>(&mut self, state_store: &S) -> EtlResult<()> {
-        // We rollback the state in the store and then also set the rolled back state in
-        // memory.
+        // We rollback the state in the store and then also set the rolled back
+        // state in memory.
         let previous_state = state_store.rollback_table_state(self.table_id).await?;
         self.set(previous_state);
 
@@ -226,14 +226,16 @@ impl TableSyncWorkerState {
                 "waiting for table state",
             );
 
-            // We listen for the state change while holding the lock to avoid the race
-            // condition which occurs when we release the lock, the value
-            // changes, and then we wait for a value change, in that case, we
-            // will miss the notification and the system will stall.
+            // We listen for the state change while holding the lock to avoid
+            // the race condition which occurs when we release the
+            // lock, the value changes, and then we wait for a value
+            // change, in that case, we will miss the notification
+            // and the system will stall.
             let state_change = Arc::clone(&inner.state_change);
             let state_change_notified = state_change.notified();
 
-            // We must drop the lock here so that state changes can actually happen.
+            // We must drop the lock here so that state changes can actually
+            // happen.
             drop(inner);
 
             tokio::select! {
@@ -386,9 +388,9 @@ where
     ) -> EtlResult<Option<TableSyncWorkerResult>> {
         error!(table_id = table_id.0, error = %err, "table sync worker failed");
 
-        // Build a retry policy from the shared classifier. The concrete retry timestamp
-        // is computed in the worker from config so both table sync and apply
-        // worker use the same retry timing settings.
+        // Build a retry policy from the shared classifier. The concrete retry
+        // timestamp is computed in the worker from config so both table
+        // sync and apply worker use the same retry timing settings.
         let policy = build_error_handling_policy(&err);
         let mut retry_policy = match policy.retry_directive() {
             RetryDirective::Timed => TableRetryPolicy::retry_in(ChronoDuration::milliseconds(
@@ -401,9 +403,9 @@ where
 
         let mut state_guard = state.lock().await;
 
-        // If we should retry this error, we want to see if we reached the maximum
-        // number of attempts before trying again. If we did, we switch to a
-        // manual retry policy.
+        // If we should retry this error, we want to see if we reached the
+        // maximum number of attempts before trying again. If we did, we
+        // switch to a manual retry policy.
         if policy.should_retry()
             && state_guard.retry_attempts() >= config.table_error_retry_max_attempts
         {
@@ -429,12 +431,12 @@ where
         )
         .increment(1);
 
-        // Update the state and store with the error. This way the user is notified
-        // about the current error state.
+        // Update the state and store with the error. This way the user is
+        // notified about the current error state.
         //
-        // Errors from persisting this state must still propagate: a table sync error is
-        // only considered handled once it has been durably reflected in the
-        // state store.
+        // Errors from persisting this state must still propagate: a table sync
+        // error is only considered handled once it has been durably
+        // reflected in the state store.
         state_guard.set_and_store(table_error.into(), store).await?;
 
         match retry_policy {
@@ -452,11 +454,13 @@ where
                         "retrying table sync worker",
                     );
 
-                    // We drop the state guard lock before sleeping to avoid stalling
-                    // the apply worker while the worker is waiting to retry.
+                    // We drop the state guard lock before sleeping to avoid
+                    // stalling the apply worker while the
+                    // worker is waiting to retry.
                     drop(state_guard);
 
-                    // Stop retrying immediately on shutdown instead of sleeping through it.
+                    // Stop retrying immediately on shutdown instead of sleeping
+                    // through it.
                     tokio::select! {
                         biased;
 
@@ -474,8 +478,9 @@ where
                     info!(table_id = table_id.0, "retrying table sync worker");
                 }
 
-                // If we should shutdown because we got a shutdown request during retry we
-                // just want to immediately return.
+                // If we should shutdown because we got a shutdown request
+                // during retry we just want to immediately
+                // return.
                 if should_shutdown {
                     state_guard.reset_retry_attempts();
 
@@ -486,19 +491,24 @@ where
                 state_guard.increment_retry_attempts();
 
                 // After sleeping, we rollback to the previous state and retry.
-                // Rollback failures must propagate because they leave retry state inconsistent.
+                // Rollback failures must propagate because they leave retry
+                // state inconsistent.
                 //
-                // Note that this rollback is one state before which works only if we are
-                // in a table sync worker, this is why it's not in the apply worker:
+                // Note that this rollback is one state before which works only
+                // if we are in a table sync worker, this is why
+                // it's not in the apply worker:
                 // - Errored -> Init: okay since it will restart from scratch.
-                // - Errored -> DataSync: okay since it will restart the copy from a new slot.
-                // - Errored -> FinishedCopy: okay since table sync startup treats it as a clean
-                //   copy restart.
-                // - Errored -> SyncDone: okay since the table sync will immediately stop.
+                // - Errored -> DataSync: okay since it will restart the copy
+                //   from a new slot.
+                // - Errored -> FinishedCopy: okay since table sync startup
+                //   treats it as a clean copy restart.
+                // - Errored -> SyncDone: okay since the table sync will
+                //   immediately stop.
                 // - Errored -> Ready: same as SyncDone.
                 //
-                // The in-memory states like SyncWait and Catchup won't ever be in a rollback
-                // since they are just states used for synchronization and never saved in the
+                // The in-memory states like SyncWait and Catchup won't ever be
+                // in a rollback since they are just states used
+                // for synchronization and never saved in the
                 // state store.
                 state_guard.rollback(store).await?;
 
@@ -653,10 +663,10 @@ where
 
         let mut attempt_shutdown_rx = self.shutdown_rx.clone();
 
-        // We acquire a permit to run the table sync worker. This helps us limit the
-        // number of table sync workers running in parallel which in turn helps
-        // limit the max number of concurrent connections to the source
-        // database.
+        // We acquire a permit to run the table sync worker. This helps us limit
+        // the number of table sync workers running in parallel which in
+        // turn helps limit the max number of concurrent connections to
+        // the source database.
         let _permit = tokio::select! {
             biased;
 
@@ -682,15 +692,15 @@ where
 
         info!(table_id = self.table_id.0, "acquired running permit for table sync worker");
 
-        // Keep the owned permit alive for the full worker run so concurrency stays
-        // bounded until the worker fully exits.
+        // Keep the owned permit alive for the full worker run so concurrency
+        // stays bounded until the worker fully exits.
 
-        // We create a new replication connection specifically for this table sync
-        // worker.
+        // We create a new replication connection specifically for this table
+        // sync worker.
         //
-        // Note that this connection must be tied to the lifetime of this worker,
-        // otherwise there will be problems when cleaning up the replication
-        // slot.
+        // Note that this connection must be tied to the lifetime of this
+        // worker, otherwise there will be problems when cleaning up the
+        // replication slot.
         let mut replication_client = PgReplicationClient::connect_for_table_sync_worker(
             self.config.pg_connection.clone(),
             self.pipeline_id,
@@ -761,14 +771,17 @@ where
 
         match apply_loop_result {
             ApplyLoopResult::Completed => {
-                // The terminal commit requests `Complete` before its destination write has
-                // finished. That intent must not become `ApplyLoopResult::Completed` until
-                // the write reports `Durable` and `SyncDone` has been stored. Check the state
-                // again at the cleanup boundary so a future ordering regression cannot delete
+                // The terminal commit requests `Complete` before its
+                // destination write has finished. That intent
+                // must not become `ApplyLoopResult::Completed` until
+                // the write reports `Durable` and `SyncDone` has been stored.
+                // Check the state again at the cleanup boundary
+                // so a future ordering regression cannot delete
                 // its persisted checkpoint and replication slot prematurely.
                 //
-                // The apply worker may already have observed the durable handover and moved the
-                // shared state to `Ready` before this worker reaches cleanup.
+                // The apply worker may already have observed the durable
+                // handover and moved the shared state to
+                // `Ready` before this worker reaches cleanup.
                 let table_state = state.lock().await.table_state().as_type();
                 if !matches!(table_state, TableStateType::SyncDone | TableStateType::Ready) {
                     bail!(

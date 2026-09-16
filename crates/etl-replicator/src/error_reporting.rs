@@ -93,7 +93,8 @@ where
     }
 
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
-        // We collect all errors in advance, to avoid cloning the whole set of updates.
+        // We collect all errors in advance, to avoid cloning the whole set of
+        // updates.
         let reportable_errors = Self::collect_reportable_errors(&updates);
 
         self.inner.update_table_states(updates).await?;

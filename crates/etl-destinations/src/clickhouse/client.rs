@@ -1127,7 +1127,8 @@ mod tests {
         assert_eq!(floor_secs(Duration::from_nanos(1)), "1");
         assert_eq!(floor_secs(Duration::from_millis(500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(999)), "1");
-        // Fractional seconds beyond 1s truncate to whole seconds (Duration::as_secs).
+        // Fractional seconds beyond 1s truncate to whole seconds
+        // (Duration::as_secs).
         assert_eq!(floor_secs(Duration::from_millis(1500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(2999)), "2");
     }

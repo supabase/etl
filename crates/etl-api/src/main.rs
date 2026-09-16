@@ -31,9 +31,9 @@ fn install_crypto_provider() {
 /// command-line argument handling for both server mode and database migration.
 fn main() -> anyhow::Result<()> {
     // Install rustls crypto provider before any TLS operations.
-    // This is needed because Cargo's feature unification causes rustls to have both
-    // ring and aws-lc-rs features enabled, and we must explicitly choose which to
-    // use.
+    // This is needed because Cargo's feature unification causes rustls to have
+    // both ring and aws-lc-rs features enabled, and we must explicitly
+    // choose which to use.
     install_crypto_provider();
 
     // Initialize tracing from the binary name
