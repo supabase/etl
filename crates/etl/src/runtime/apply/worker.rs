@@ -5,6 +5,7 @@ use etl_postgres::slots::EtlReplicationSlot;
 use metrics::counter;
 use tokio::{sync::Semaphore, task::JoinHandle};
 use tokio_postgres::types::PgLsn;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
 use crate::{
@@ -23,7 +24,6 @@ use crate::{
     replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext, WorkerType},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::ShutdownRx,
         error_policy::{RetryDirective, build_error_handling_policy},
     },
     store::{PipelineStore, StateStore, TableStateLifecycleStore},
@@ -81,7 +81,7 @@ pub(crate) struct ApplyWorker<S, D> {
     store: S,
     destination: D,
     out_of_band_source_pool: OutOfBandSourcePool,
-    shutdown_rx: ShutdownRx,
+    shutdown_token: CancellationToken,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -102,7 +102,7 @@ impl<S, D> ApplyWorker<S, D> {
         store: S,
         destination: D,
         out_of_band_source_pool: OutOfBandSourcePool,
-        shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
     ) -> Self {
@@ -120,7 +120,7 @@ impl<S, D> ApplyWorker<S, D> {
             store,
             destination,
             out_of_band_source_pool,
-            shutdown_rx,
+            shutdown_token,
             table_sync_worker_permits,
             memory_monitor,
             batch_memory_governor,
@@ -143,7 +143,7 @@ where
     /// immediately propagated.
     async fn handle_apply_worker_error(
         config: &PipelineConfig,
-        shutdown_rx: &mut ShutdownRx,
+        shutdown_token: &CancellationToken,
         retry_attempts: &mut u32,
         err: EtlError,
     ) -> EtlResult<bool> {
@@ -193,7 +193,7 @@ where
         tokio::select! {
             biased;
 
-            _ = shutdown_rx.changed() => {
+            _ = shutdown_token.cancelled() => {
                 info!("shutting down apply worker while waiting to retry");
                 Ok(true)
             }
@@ -204,10 +204,9 @@ where
 
     /// Spawns the apply worker and returns a handle for monitoring.
     ///
-    /// This method initializes the apply worker by determining the starting
-    /// LSN, creating coordination signals, and launching the main apply
-    /// loop. The worker runs asynchronously and can be monitored through
-    /// the returned handle.
+    /// Starts the worker's retry loop in a background task. Each attempt
+    /// determines its starting LSN and runs the apply loop with the shared
+    /// shutdown token. The returned handle tracks the task's completion.
     pub(crate) fn spawn(self) -> ApplyWorkerHandle {
         info!("starting apply worker");
 
@@ -231,7 +230,6 @@ where
     /// `table_error_retry_max_attempts`) so retry behavior is
     /// coherent across worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
-        let mut retry_shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
 
         loop {
@@ -241,7 +239,7 @@ where
                 Err(err) => {
                     let should_shutdown = Self::handle_apply_worker_error(
                         self.config.as_ref(),
-                        &mut retry_shutdown_rx,
+                        &self.shutdown_token,
                         &mut retry_attempts,
                         err,
                     )
@@ -272,7 +270,6 @@ where
         )
         .await?;
 
-        let attempt_shutdown_rx = self.shutdown_rx.clone();
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
             config: Arc::clone(&self.config),
@@ -280,7 +277,7 @@ where
             store: self.store.clone(),
             destination: self.destination.clone(),
             out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-            shutdown_rx: attempt_shutdown_rx.clone(),
+            shutdown_token: self.shutdown_token.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
             batch_memory_governor: self.batch_memory_governor.clone(),
@@ -295,7 +292,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            attempt_shutdown_rx,
+            self.shutdown_token.clone(),
             self.memory_monitor.clone(),
             self.batch_memory_governor.clone(),
             None,

@@ -57,15 +57,13 @@ use tokio::{
     time::MissedTickBehavior,
 };
 use tokio_stream::wrappers::WatchStream;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, trace};
 
-use crate::{
-    observability::{
-        DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-        ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
-        ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
-    },
-    runtime::concurrency::ShutdownRx,
+use crate::observability::{
+    DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+    ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
 };
 
 /// Identifies the memory domain represented by a [`MemorySnapshot`].
@@ -270,7 +268,7 @@ pub(crate) struct MemoryMonitor {
 impl MemoryMonitor {
     /// Creates a new memory monitor and starts its refresh task.
     pub(crate) fn new(
-        mut shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
     ) -> Self {
@@ -326,7 +324,7 @@ impl MemoryMonitor {
                 tokio::select! {
                     biased;
 
-                    _ = shutdown_rx.changed() => {
+                    _ = shutdown_token.cancelled() => {
                         info!("memory monitor stopped due to shutdown");
 
                         return;

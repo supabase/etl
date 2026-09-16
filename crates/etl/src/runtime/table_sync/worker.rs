@@ -9,6 +9,7 @@ use tokio::{
     sync::{Mutex, MutexGuard, Notify, Semaphore},
     task::AbortHandle,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
@@ -28,7 +29,7 @@ use crate::{
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::{ShutdownResult, ShutdownRx},
+        concurrency::ShutdownResult,
         error_policy::{RetryDirective, build_error_handling_policy},
         table_sync::TableSyncWorkerId,
     },
@@ -203,7 +204,7 @@ impl TableSyncWorkerState {
     pub(crate) async fn wait_for_state_type(
         &self,
         target_state_types: &[TableStateType],
-        mut shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
     ) -> ShutdownResult<MutexGuard<'_, TableSyncWorkerStateInner>, ()> {
         loop {
             let inner = self.inner.lock().await;
@@ -239,7 +240,7 @@ impl TableSyncWorkerState {
             tokio::select! {
                 biased;
 
-                _ = shutdown_rx.changed() => {
+                _ = shutdown_token.cancelled() => {
                     info!(
                         target_table_state_types = %format_state_types(target_state_types),
                         "shutdown signal received, cancelling wait for state",
@@ -321,7 +322,7 @@ pub(crate) struct TableSyncWorker<S, D> {
     store: S,
     destination: D,
     out_of_band_source_pool: OutOfBandSourcePool,
-    shutdown_rx: ShutdownRx,
+    shutdown_token: CancellationToken,
     run_permit: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -343,7 +344,7 @@ impl<S, D> TableSyncWorker<S, D> {
         store: S,
         destination: D,
         out_of_band_source_pool: OutOfBandSourcePool,
-        shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
         run_permit: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
         batch_memory_governor: BatchMemoryGovernor,
@@ -355,7 +356,7 @@ impl<S, D> TableSyncWorker<S, D> {
             store,
             destination,
             out_of_band_source_pool,
-            shutdown_rx,
+            shutdown_token,
             run_permit,
             memory_monitor,
             batch_memory_governor,
@@ -381,7 +382,7 @@ where
         config: &PipelineConfig,
         state: &TableSyncWorkerState,
         store: &S,
-        shutdown_rx: &mut ShutdownRx,
+        shutdown_token: &CancellationToken,
         err: EtlError,
     ) -> EtlResult<Option<TableSyncWorkerResult>> {
         error!(table_id = table_id.0, error = %err, "table sync worker failed");
@@ -460,7 +461,7 @@ where
                     tokio::select! {
                         biased;
 
-                        _ = shutdown_rx.changed() => {
+                        _ = shutdown_token.cancelled() => {
                             info!(table_id = table_id.0, "shutting down table sync worker while waiting to retry");
                             should_shutdown = true;
                         }
@@ -562,8 +563,6 @@ where
         state: TableSyncWorkerState,
         table_sync_worker_span: tracing::Span,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let mut shutdown_rx = self.shutdown_rx.clone();
-
         let result = AssertUnwindSafe(
             self.guarded_run_table_sync_worker(state.clone()).instrument(table_sync_worker_span),
         )
@@ -579,7 +578,7 @@ where
                     self.config.as_ref(),
                     &state,
                     &self.store,
-                    &mut shutdown_rx,
+                    &self.shutdown_token,
                     err,
                 )
                 .await?
@@ -604,8 +603,6 @@ where
         &self,
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let mut retry_shutdown_rx = self.shutdown_rx.clone();
-
         loop {
             let result = self.run_table_sync_worker(state.clone()).await;
 
@@ -622,7 +619,7 @@ where
                         self.config.as_ref(),
                         &state,
                         &self.store,
-                        &mut retry_shutdown_rx,
+                        &self.shutdown_token,
                         err,
                     )
                     .await?;
@@ -651,8 +648,6 @@ where
             "waiting to acquire a running permit for table sync worker"
         );
 
-        let mut attempt_shutdown_rx = self.shutdown_rx.clone();
-
         // We acquire a permit to run the table sync worker. This helps us limit the
         // number of table sync workers running in parallel which in turn helps
         // limit the max number of concurrent connections to the source
@@ -660,7 +655,7 @@ where
         let _permit = tokio::select! {
             biased;
 
-            _ = attempt_shutdown_rx.changed() => {
+            _ = self.shutdown_token.cancelled() => {
                 info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
 
                 return Ok(TableSyncWorkerResult::Shutdown);
@@ -707,7 +702,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
-            attempt_shutdown_rx.clone(),
+            self.shutdown_token.clone(),
             self.memory_monitor.clone(),
             self.batch_memory_governor.clone(),
         )
@@ -752,7 +747,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            attempt_shutdown_rx,
+            self.shutdown_token.clone(),
             self.memory_monitor.clone(),
             self.batch_memory_governor.clone(),
             Some(replicated_table_schema),

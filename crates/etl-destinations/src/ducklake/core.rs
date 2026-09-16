@@ -4102,7 +4102,7 @@ where
     /// Stops the background DuckLake metrics sampler.
     async fn shutdown_metrics_sampler(&self) -> EtlResult<()> {
         if let Some(metrics_sampler) = &*self.metrics_sampler {
-            let _ = metrics_sampler.shutdown_tx.send(());
+            metrics_sampler.shutdown_token.cancel();
             let handle = metrics_sampler.handle.lock().take();
             if let Some(handle) = handle {
                 handle.abort();

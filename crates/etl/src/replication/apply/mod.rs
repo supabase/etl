@@ -27,6 +27,7 @@ use tokio::{
     sync::{Semaphore, watch},
 };
 use tokio_postgres::types::PgLsn;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
@@ -74,7 +75,7 @@ use crate::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
         TableSyncWorkerState,
         concurrency::{
-            MemoryBackpressureStream, ShutdownRx, apply_worker_apply_stream_id,
+            MemoryBackpressureStream, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
         },
     },
@@ -173,8 +174,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) destination: D,
     /// Shared pool for out-of-band source database queries.
     pub(crate) out_of_band_source_pool: OutOfBandSourcePool,
-    /// Shutdown signal receiver for graceful termination.
-    pub(crate) shutdown_rx: ShutdownRx,
+    /// Cancellation token for graceful termination.
+    pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
     pub(crate) table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
@@ -789,8 +790,8 @@ pub(crate) struct ApplyLoop<S, D> {
     /// Connection-local per-table protocol state used to decode relation and
     /// row messages.
     table_decoding_states: HashMap<TableId, TableDecodingState>,
-    /// Shutdown signal receiver.
-    shutdown_rx: ShutdownRx,
+    /// Cancellation token.
+    shutdown_token: CancellationToken,
     /// Worker-specific dependencies and coordination hooks.
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
@@ -823,7 +824,7 @@ where
         destination: D,
         out_of_band_source_pool: OutOfBandSourcePool,
         worker_context: WorkerContext<S, D>,
-        shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
         memory_monitor: MemoryMonitor,
         batch_memory_governor: BatchMemoryGovernor,
         initial_replicated_table_schema: Option<ReplicatedTableSchema>,
@@ -919,7 +920,7 @@ where
             schema_store,
             destination,
             table_decoding_states,
-            shutdown_rx,
+            shutdown_token,
             worker_context,
             memory_monitor,
             batch_memory_governor,
@@ -1030,7 +1031,7 @@ where
 
             // PRIORITY 1: Handle shutdown signals.
             // Shutdown stops new intake first and then lets the loop drain or wait as needed.
-            _ = self.shutdown_rx.changed() => {
+            _ = self.shutdown_token.cancelled() => {
                 self.handle_shutdown_signal();
             }
 
@@ -3285,7 +3286,7 @@ mod apply_worker {
         let result = worker_state
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
-                ctx.shutdown_rx.clone(),
+                ctx.shutdown_token.clone(),
             )
             .await;
 
@@ -3970,7 +3971,7 @@ mod apply_worker {
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.out_of_band_source_pool.clone(),
-            ctx.shutdown_rx.clone(),
+            ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
             ctx.batch_memory_governor.clone(),

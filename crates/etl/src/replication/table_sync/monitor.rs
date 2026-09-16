@@ -3,13 +3,13 @@ use std::time::Duration;
 use metrics::{counter, gauge};
 use tokio::{sync::watch, task::JoinHandle, time::MissedTickBehavior};
 use tokio_postgres::types::PgLsn;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
     error::ErrorKind,
     observability::{ETL_SLOT_INVALIDATIONS_TOTAL, ETL_TABLE_COPY_END_TO_END_LAG_BYTES},
     postgres::{OutOfBandSourcePool, client::SlotState},
-    runtime::concurrency::ShutdownRx,
     schema::TableId,
 };
 
@@ -26,14 +26,14 @@ pub(crate) struct TableSyncMonitor {
 
 impl TableSyncMonitor {
     /// Spawns a table sync monitor for `table_id`, ticking every
-    /// `refresh_interval` until `shutdown_rx` fires.
+    /// `refresh_interval` until `shutdown_token` is cancelled.
     pub(crate) fn spawn(
         table_id: TableId,
         slot_name: String,
         consistent_point: PgLsn,
         out_of_band_source_pool: OutOfBandSourcePool,
         refresh_interval: Duration,
-        mut shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
     ) -> Self {
         let (slot_invalidated_tx, slot_invalidated_rx) = watch::channel(false);
 
@@ -45,7 +45,7 @@ impl TableSyncMonitor {
                 tokio::select! {
                     biased;
 
-                    _ = shutdown_rx.changed() => {
+                    _ = shutdown_token.cancelled() => {
                         break;
                     }
 

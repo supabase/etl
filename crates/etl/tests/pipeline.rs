@@ -391,8 +391,32 @@ async fn pipeline_rejects_second_start_before_destination_startup() {
     assert_eq!(err.kind(), ErrorKind::InvalidState);
 }
 
+/// Shutdown requested before startup must reach workers created afterward.
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_shutdown_calls_destination_shutdown() {
+async fn pipeline_preserves_shutdown_requested_before_start() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        database_schema.publication_name(),
+        store,
+        destination.clone(),
+    );
+
+    pipeline.shutdown();
+    pipeline.start().await.unwrap();
+    pipeline.wait().await.unwrap();
+
+    assert!(destination.shutdown_called().await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_shutdown_token_calls_destination_shutdown() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
@@ -420,7 +444,8 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
     // Shutdown should not have been called yet.
     assert!(!destination.shutdown_called().await);
 
-    pipeline.shutdown_and_wait().await.unwrap();
+    pipeline.shutdown_token().cancel();
+    pipeline.wait().await.unwrap();
 
     // Verify that shutdown was called on the destination.
     assert!(destination.shutdown_called().await);

@@ -8,9 +8,9 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info, warn};
+pub use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
-pub use crate::runtime::concurrency::ShutdownTx;
 use crate::{
     bail,
     config::PipelineConfig,
@@ -20,10 +20,7 @@ use crate::{
     observability::register_metrics,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
     replication::state::TableState,
-    runtime::{
-        ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::create_shutdown_channel,
-    },
+    runtime::{ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool},
     schema::TableId,
     store::PipelineStore,
 };
@@ -76,7 +73,7 @@ pub struct Pipeline<S, D> {
     store: S,
     destination: D,
     state: PipelineState,
-    shutdown_tx: ShutdownTx,
+    shutdown_token: CancellationToken,
 }
 
 impl<S, D> Pipeline<S, D>
@@ -98,20 +95,12 @@ where
         // call multiple times, it is ok even if there are multiple pipelines created.
         register_metrics();
 
-        // We create a watch channel of unit types since this is just used to notify all
-        // subscribers that shutdown is needed.
-        //
-        // Here we are not taking the `shutdown_rx` since we will just extract it from
-        // the `shutdown_tx` via the `subscribe` method. This is done to make
-        // the code cleaner.
-        let (shutdown_tx, _) = create_shutdown_channel();
-
         Self {
             config: Arc::new(config),
             store,
             destination,
             state: PipelineState::NotStarted,
-            shutdown_tx,
+            shutdown_token: CancellationToken::new(),
         }
     }
 
@@ -120,13 +109,15 @@ where
         self.config.id
     }
 
-    /// Returns a handle for sending shutdown signals to this pipeline.
+    /// Returns a token for requesting graceful shutdown of this pipeline.
     ///
-    /// Multiple components can hold shutdown handles to coordinate graceful
-    /// termination. When shutdown is signaled, all workers will complete
-    /// their current operations and terminate cleanly.
-    pub fn shutdown_tx(&self) -> ShutdownTx {
-        self.shutdown_tx.clone()
+    /// Calling [`CancellationToken::cancel`] on any clone requests the same
+    /// shutdown as [`Pipeline::shutdown`]. Cancellation is permanent and is
+    /// also observed by workers started after the request. Dropping a token
+    /// does not request shutdown. Use [`Pipeline::wait`] to wait for shutdown
+    /// to complete.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown_token.clone()
     }
 
     /// Starts the pipeline and begins replication processing.
@@ -203,7 +194,7 @@ where
         // From this point onward, the monitor is owned by the started pipeline
         // and Pipeline::wait joins its refresh task after shutdown.
         let memory_monitor = MemoryMonitor::new(
-            self.shutdown_tx.subscribe(),
+            self.shutdown_token.clone(),
             self.config.memory_backpressure.clone(),
             self.config.memory_refresh_interval_ms,
         );
@@ -216,7 +207,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             out_of_band_source_pool,
-            self.shutdown_tx.subscribe(),
+            self.shutdown_token.clone(),
             table_sync_worker_permits,
             memory_monitor.clone(),
         )
@@ -259,10 +250,7 @@ where
         if let Err(err) = apply_worker_result {
             errors.push(err);
 
-            // If we fail to send the shutdown signal, we are not going to capture the error
-            // since it means that no table sync workers are running, which is
-            // fine.
-            let _ = self.shutdown_tx.shutdown();
+            self.shutdown_token.cancel();
         }
 
         // We wait for all table sync workers to finish.
@@ -304,20 +292,19 @@ where
 
     /// Initiates graceful shutdown of the pipeline.
     ///
-    /// Sends shutdown signals to all workers, instructing them to complete
-    /// their current operations and terminate. This method returns
-    /// immediately after sending the signals and does not wait for workers
-    /// to actually stop.
+    /// Cancels the shared shutdown token. Apply loops stop new intake and
+    /// drain pending destination writes; initial sync workers interrupt their
+    /// copy waits and stop. The request is retained even if no workers have
+    /// started yet. Repeated requests are harmless.
+    ///
+    /// This method returns immediately without waiting for workers to stop.
     ///
     /// Use [`Pipeline::wait`] after calling this method to wait for complete
     /// shutdown.
     pub fn shutdown(&self) {
         info!("initiating pipeline shutdown");
 
-        if let Err(err) = self.shutdown_tx.shutdown() {
-            error!(error = %err, "failed to send shutdown signal");
-            return;
-        }
+        self.shutdown_token.cancel();
 
         info!("shutdown signal sent to all workers");
     }

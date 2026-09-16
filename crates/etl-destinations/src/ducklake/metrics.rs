@@ -13,10 +13,10 @@ use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool};
 use tokio::{
-    sync::watch,
     task::JoinHandle,
     time::{Duration, Instant, MissedTickBehavior},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::ducklake::{
@@ -96,7 +96,7 @@ pub(crate) const MAINTENANCE_OUTCOME_LABEL: &str = "outcome";
 
 /// Shared state for the background DuckLake metrics sampler.
 pub(super) struct DuckLakeMetricsSampler {
-    pub(super) shutdown_tx: watch::Sender<()>,
+    pub(super) shutdown_token: CancellationToken,
     pub(super) handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -331,15 +331,15 @@ pub(super) fn spawn_ducklake_metrics_sampler(
     metadata_pg_pool: PgPool,
     applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
 ) -> EtlResult<DuckLakeMetricsSampler> {
-    let (shutdown_tx, shutdown_rx) = watch::channel(());
+    let shutdown_token = CancellationToken::new();
     let handle = tokio::spawn(run_ducklake_metrics_sampler(
         metadata_schema,
         metadata_pg_pool,
         applied_tables,
-        shutdown_rx,
+        shutdown_token.clone(),
     ));
 
-    Ok(DuckLakeMetricsSampler { shutdown_tx, handle: Mutex::new(handle.into()) })
+    Ok(DuckLakeMetricsSampler { shutdown_token, handle: Mutex::new(handle.into()) })
 }
 
 /// Periodically samples DuckLake metadata from PostgreSQL.
@@ -347,7 +347,7 @@ async fn run_ducklake_metrics_sampler(
     metadata_schema: String,
     metadata_pg_pool: PgPool,
     applied_tables: Arc<Mutex<HashSet<DuckLakeTableName>>>,
-    mut shutdown_rx: watch::Receiver<()>,
+    shutdown_token: CancellationToken,
 ) {
     let mut interval =
         tokio::time::interval_at(Instant::now() + METRICS_POLL_INTERVAL, METRICS_POLL_INTERVAL);
@@ -358,7 +358,7 @@ async fn run_ducklake_metrics_sampler(
     loop {
         tokio::select! {
             biased;
-            _ = shutdown_rx.changed() => {
+            _ = shutdown_token.cancelled() => {
                 info!("ducklake metrics sampler shutting down");
                 break;
             }
@@ -375,7 +375,7 @@ async fn run_ducklake_metrics_sampler(
                 };
 
                 for table_name in table_names {
-                    if shutdown_rx.has_changed().unwrap_or(false) {
+                    if shutdown_token.is_cancelled() {
                         info!("ducklake metrics sampler stopping after shutdown signal");
                         return;
                     }

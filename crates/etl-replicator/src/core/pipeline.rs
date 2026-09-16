@@ -2,7 +2,7 @@
 
 use etl::{destination::PipelineDestination, pipeline::Pipeline, store::PipelineStore};
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::{error::ReplicatorResult, metrics};
 
@@ -26,7 +26,7 @@ where
     let metrics_tasks = metrics::spawn_metrics_tasks();
 
     // Spawn a task to listen for shutdown signals and trigger shutdown.
-    let shutdown_tx = pipeline.shutdown_tx();
+    let shutdown_token = pipeline.shutdown_token();
     let shutdown_handle = tokio::spawn(async move {
         // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
         //
@@ -36,9 +36,7 @@ where
         let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
             error!("failed to register sigterm handler, shutting down pipeline");
 
-            if let Err(err) = shutdown_tx.shutdown() {
-                warn!(error = %err, "failed to send shutdown signal");
-            }
+            shutdown_token.cancel();
 
             return;
         };
@@ -52,9 +50,7 @@ where
             }
         }
 
-        if let Err(err) = shutdown_tx.shutdown() {
-            warn!(error = %err, "failed to send shutdown signal");
-        }
+        shutdown_token.cancel();
     });
 
     // Wait for the pipeline to finish (either normally or via shutdown).
