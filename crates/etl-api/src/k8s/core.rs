@@ -13,6 +13,7 @@ use secrecy::ExposeSecret;
 use thiserror::Error;
 
 use crate::{
+    config::ApiReplicatorHealthConfig,
     configs::{
         destination::{StoredDestinationConfig, StoredIcebergConfig},
         pipeline::StoredPipelineConfig,
@@ -127,7 +128,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     destination: Destination,
     supabase_api_url: Option<&str>,
     ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
-    health: Option<ReplicatorHealthConfig>,
+    health: Option<ApiReplicatorHealthConfig>,
     tls_config: TlsConfig,
     wait: bool,
 ) -> Result<(), K8sCoreError> {
@@ -166,7 +167,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         pipeline.config,
         supabase_config,
         ducklake_copy_buffer_default,
-        health,
+        health.and_then(|health| health.listener_config()),
         tls_config,
     )?;
 
@@ -860,7 +861,7 @@ mod tests {
             assert_eq!(config.health, Some(ReplicatorHealthConfig::default()));
             let serialized = serde_json::to_value(&config).unwrap();
             assert_eq!(serialized["health"]["port"], 9001);
-            assert_eq!(serialized["health"]["stall_timeout_ms"], 600_000);
+            assert_eq!(serialized["health"]["stall_timeout_ms"], 300_000);
 
             let DestinationConfigWithoutSecrets::Ducklake { copy_buffer, .. } = config.destination
             else {

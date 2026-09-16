@@ -1,13 +1,15 @@
 //! Read-only HTTP probes of pipeline lifecycle and worker activity.
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
 use axum::{Router, extract::State, http::StatusCode, routing::get};
 use etl::activity::{self, ActivityKind};
 use etl_config::shared::ReplicatorHealthConfig;
-use tokio::sync::watch;
 
-use crate::core::PipelineState;
+use crate::core::ReplicatorState;
 
 /// Activity verdict, keeping absence of observations distinct from healthy
 /// work.
@@ -59,9 +61,9 @@ impl ActivityStatus {
     /// Draining stays live even if activity is stale, so shutdown itself does
     /// not request another restart. Kubernetes still enforces the termination
     /// grace period. This observation never initiates shutdown itself.
-    fn liveness(self, pipeline_state: PipelineState) -> (StatusCode, &'static str) {
-        match (pipeline_state, self) {
-            (PipelineState::Stopping, _) => (StatusCode::OK, "ok"),
+    fn liveness(self, replicator_state: ReplicatorState) -> (StatusCode, &'static str) {
+        match (replicator_state, self) {
+            (ReplicatorState::Stopping, _) => (StatusCode::OK, "ok"),
             (_, Self::Inactive) => (StatusCode::SERVICE_UNAVAILABLE, "inactive"),
             (_, Self::Unobserved | Self::Active) => (StatusCode::OK, "ok"),
         }
@@ -78,14 +80,14 @@ impl ActivityStatus {
     ///
     /// Initialization, absence of observations, and graceful shutdown are
     /// unready. Neither probe performs source or destination network checks.
-    fn readiness(self, pipeline_state: PipelineState) -> (StatusCode, &'static str) {
-        match (pipeline_state, self) {
-            (PipelineState::Stopping, _) => (StatusCode::SERVICE_UNAVAILABLE, "stopping"),
+    fn readiness(self, replicator_state: ReplicatorState) -> (StatusCode, &'static str) {
+        match (replicator_state, self) {
+            (ReplicatorState::Stopping, _) => (StatusCode::SERVICE_UNAVAILABLE, "stopping"),
             (_, Self::Inactive) => (StatusCode::SERVICE_UNAVAILABLE, "inactive"),
-            (PipelineState::Initializing, _) | (_, Self::Unobserved) => {
+            (ReplicatorState::Initializing, _) | (_, Self::Unobserved) => {
                 (StatusCode::SERVICE_UNAVAILABLE, "initializing")
             }
-            (PipelineState::Running, Self::Active) => (StatusCode::OK, "ok"),
+            (ReplicatorState::Running, Self::Active) => (StatusCode::OK, "ok"),
         }
     }
 }
@@ -93,14 +95,34 @@ impl ActivityStatus {
 /// Inputs observed by the HTTP probes; only the pipeline runner can change
 /// lifecycle state.
 #[derive(Clone)]
-struct PipelineHealth {
-    /// Read side of the pipeline runner's lifecycle channel.
-    pipeline_state_rx: watch::Receiver<PipelineState>,
+pub(crate) struct ReplicatorHealth {
+    /// Replicator lifecycle shared by the runner and probe handlers.
+    replicator_state: Arc<Mutex<ReplicatorState>>,
     /// Configured minimum inactivity allowance.
     stall_timeout: Duration,
 }
 
-impl PipelineHealth {
+impl ReplicatorHealth {
+    /// Creates shared probe state before pipeline initialization starts.
+    pub(crate) fn new(health_config: ReplicatorHealthConfig) -> Self {
+        Self {
+            replicator_state: Arc::new(Mutex::new(ReplicatorState::Initializing)),
+            stall_timeout: Duration::from_millis(health_config.stall_timeout_ms),
+        }
+    }
+
+    /// Updates the lifecycle observed by subsequent probe requests.
+    #[cfg(feature = "any-destination")]
+    pub(crate) fn set_replicator_state(&self, replicator_state: ReplicatorState) {
+        *self.replicator_state.lock().unwrap_or_else(PoisonError::into_inner) = replicator_state;
+    }
+
+    /// Copies the lifecycle without holding the lock during activity
+    /// collection.
+    fn replicator_state(&self) -> ReplicatorState {
+        *self.replicator_state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Reads approximate in-memory activity without querying either dependency.
     fn activity_status(&self) -> ActivityStatus {
         let now = Instant::now();
@@ -112,26 +134,21 @@ impl PipelineHealth {
 }
 
 /// Returns liveness, allowing initialization, slot acquisition, and draining.
-async fn live(State(health): State<PipelineHealth>) -> (StatusCode, &'static str) {
-    health.activity_status().liveness(*health.pipeline_state_rx.borrow())
+async fn live(State(replicator_health): State<ReplicatorHealth>) -> (StatusCode, &'static str) {
+    replicator_health.activity_status().liveness(replicator_health.replicator_state())
 }
 
 /// Returns readiness from pipeline lifecycle and currently monitored activity.
-async fn ready(State(health): State<PipelineHealth>) -> (StatusCode, &'static str) {
-    health.activity_status().readiness(*health.pipeline_state_rx.borrow())
+async fn ready(State(replicator_health): State<ReplicatorHealth>) -> (StatusCode, &'static str) {
+    replicator_health.activity_status().readiness(replicator_health.replicator_state())
 }
 
 /// Builds read-only probes from the pipeline runner's lifecycle observations.
-pub(crate) fn router(
-    health_config: ReplicatorHealthConfig,
-    pipeline_state_rx: watch::Receiver<PipelineState>,
-) -> Router {
-    Router::new().route("/livez", get(live)).route("/readyz", get(ready)).with_state(
-        PipelineHealth {
-            pipeline_state_rx,
-            stall_timeout: Duration::from_millis(health_config.stall_timeout_ms),
-        },
-    )
+pub(crate) fn router(replicator_health: ReplicatorHealth) -> Router {
+    Router::new()
+        .route("/livez", get(live))
+        .route("/readyz", get(ready))
+        .with_state(replicator_health)
 }
 
 #[cfg(test)]
@@ -141,7 +158,7 @@ mod tests {
     use axum::http::StatusCode;
     use etl::activity::ActivityKind;
 
-    use crate::{core::PipelineState, health::ActivityStatus};
+    use crate::{core::ReplicatorState, health::ActivityStatus};
 
     #[test]
     fn inactivity_boundaries_and_independent_workers() {
@@ -171,25 +188,25 @@ mod tests {
     }
 
     #[test]
-    fn probes_follow_pipeline_lifecycle_and_activity() {
+    fn probes_follow_replicator_lifecycle_and_activity() {
         let ok = (StatusCode::OK, "ok");
         let initializing = (StatusCode::SERVICE_UNAVAILABLE, "initializing");
         let inactive = (StatusCode::SERVICE_UNAVAILABLE, "inactive");
         let stopping = (StatusCode::SERVICE_UNAVAILABLE, "stopping");
 
-        for (pipeline_state, activity_status, expected_live, expected_ready) in [
-            (PipelineState::Initializing, ActivityStatus::Unobserved, ok, initializing),
-            (PipelineState::Initializing, ActivityStatus::Active, ok, initializing),
-            (PipelineState::Initializing, ActivityStatus::Inactive, inactive, inactive),
-            (PipelineState::Running, ActivityStatus::Unobserved, ok, initializing),
-            (PipelineState::Running, ActivityStatus::Active, ok, ok),
-            (PipelineState::Running, ActivityStatus::Inactive, inactive, inactive),
-            (PipelineState::Stopping, ActivityStatus::Unobserved, ok, stopping),
-            (PipelineState::Stopping, ActivityStatus::Active, ok, stopping),
-            (PipelineState::Stopping, ActivityStatus::Inactive, ok, stopping),
+        for (replicator_state, activity_status, expected_live, expected_ready) in [
+            (ReplicatorState::Initializing, ActivityStatus::Unobserved, ok, initializing),
+            (ReplicatorState::Initializing, ActivityStatus::Active, ok, initializing),
+            (ReplicatorState::Initializing, ActivityStatus::Inactive, inactive, inactive),
+            (ReplicatorState::Running, ActivityStatus::Unobserved, ok, initializing),
+            (ReplicatorState::Running, ActivityStatus::Active, ok, ok),
+            (ReplicatorState::Running, ActivityStatus::Inactive, inactive, inactive),
+            (ReplicatorState::Stopping, ActivityStatus::Unobserved, ok, stopping),
+            (ReplicatorState::Stopping, ActivityStatus::Active, ok, stopping),
+            (ReplicatorState::Stopping, ActivityStatus::Inactive, ok, stopping),
         ] {
-            assert_eq!(activity_status.liveness(pipeline_state), expected_live);
-            assert_eq!(activity_status.readiness(pipeline_state), expected_ready);
+            assert_eq!(activity_status.liveness(replicator_state), expected_live);
+            assert_eq!(activity_status.readiness(replicator_state), expected_ready);
         }
     }
 }

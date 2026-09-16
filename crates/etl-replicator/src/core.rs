@@ -4,12 +4,14 @@ use std::net::Ipv4Addr;
 
 use etl::{pipeline::PipelineId, store::PostgresStore};
 use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, ReplicatorHealthConfig};
-use tokio::{net::TcpListener, sync::watch, task::JoinHandle};
+use tokio::{net::TcpListener, task::JoinHandle};
 use tracing::{debug, error};
 
 use crate::{
-    error::ReplicatorResult, error_notification::ErrorNotificationClient,
-    error_reporting::ErrorReportingStateStore, health,
+    error::ReplicatorResult,
+    error_notification::ErrorNotificationClient,
+    error_reporting::ErrorReportingStateStore,
+    health::{self, ReplicatorHealth},
 };
 
 mod destinations;
@@ -31,10 +33,10 @@ compile_error!("`any-destination` is internal; enable a concrete destination fea
 /// Store type used by the replicator runtime.
 type ReplicatorStore = ErrorReportingStateStore<PostgresStore>;
 
-/// Pipeline lifecycle published by the runner and observed by health probes.
+/// Replicator lifecycle updated by the runner and observed by health probes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(not(feature = "any-destination"), allow(dead_code))]
-pub(crate) enum PipelineState {
+pub(crate) enum ReplicatorState {
     /// Store, destination, or pipeline initialization is still in progress.
     Initializing,
     /// Pipeline workers have started.
@@ -51,7 +53,7 @@ pub(crate) enum PipelineState {
 /// observed.
 async fn spawn_health_server(
     health_config: Option<ReplicatorHealthConfig>,
-    pipeline_state_rx: watch::Receiver<PipelineState>,
+    replicator_health: ReplicatorHealth,
 ) -> ReplicatorResult<Option<JoinHandle<()>>> {
     let Some(health_config) = health_config else {
         return Ok(None);
@@ -62,7 +64,7 @@ async fn spawn_health_server(
         stall_timeout_ms = health_config.stall_timeout_ms,
         "health server listener bound"
     );
-    let router = health::router(health_config, pipeline_state_rx);
+    let router = health::router(replicator_health);
 
     Ok(Some(tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, router).await {
@@ -96,9 +98,9 @@ pub(crate) async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
-    let (pipeline_state_tx, pipeline_state_rx) = watch::channel(PipelineState::Initializing);
+    let replicator_health = ReplicatorHealth::new(replicator_config.health.unwrap_or_default());
     let health_server_task =
-        spawn_health_server(replicator_config.health, pipeline_state_rx).await?;
+        spawn_health_server(replicator_config.health, replicator_health.clone()).await?;
 
     let replicator_result = async {
         let pipeline_id = replicator_config.pipeline.id;
@@ -110,7 +112,7 @@ pub(crate) async fn start_replicator_with_config(
             init_replicator_store(pipeline_id, store_pg_connection_config, notification_client)
                 .await?;
 
-        destinations::start(replicator_config, replicator_store, pipeline_state_tx).await
+        destinations::start(replicator_config, replicator_store, replicator_health).await
     }
     .await;
 

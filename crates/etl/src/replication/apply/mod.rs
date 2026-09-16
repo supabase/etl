@@ -982,10 +982,8 @@ where
                 .await
             }?;
 
-            // Observe completed iterations, not independent feedback. A pending
-            // write is allowed while the loop can still process work; once its
-            // buffers fill and processing stalls, this timestamp stops moving.
-            self.state.activity_handle.record(Instant::now());
+            // Notify that there is activity in the apply loop.
+            self.state.activity_handle.ping();
 
             // If we have a result from the apply loop, we should stop the loop.
             if let Some(result) = iteration_result {

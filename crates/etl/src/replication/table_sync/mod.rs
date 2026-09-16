@@ -1,7 +1,4 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
 mod copy;
 mod monitor;
@@ -311,8 +308,6 @@ where
             let replicated_table_schema =
                 ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
-            activity_handle.record(Instant::now());
-
             let mut total_table_copy_rows = 0_u64;
             let mut total_table_copy_duration_secs = 0.0;
             let mut table_copy_barrier_required = false;
@@ -365,7 +360,6 @@ where
             // fail since no transactions can be running while replication is
             // started.
             replication_transaction.commit().await?;
-            activity_handle.record(Instant::now());
 
             // If no table rows were written, call the method nonetheless to kickstart
             // table creation. Additionally, if any copy write was only accepted (and not
@@ -383,7 +377,7 @@ where
                 };
 
                 match completed_flush_result.into_result()? {
-                    DestinationWriteStatus::Durable => activity_handle.record(Instant::now()),
+                    DestinationWriteStatus::Durable => activity_handle.ping(),
                     DestinationWriteStatus::Accepted => bail!(
                         ErrorKind::DestinationError,
                         "Table copy durability barrier did not confirm durability"

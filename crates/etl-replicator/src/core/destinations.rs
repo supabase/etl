@@ -1,12 +1,8 @@
 //! Destination startup dispatch.
 
 use etl_config::shared::{DestinationKind, ReplicatorConfig};
-use tokio::sync::watch;
 
-use crate::{
-    core::{PipelineState, ReplicatorStore},
-    error::ReplicatorResult,
-};
+use crate::{core::ReplicatorStore, error::ReplicatorResult, health::ReplicatorHealth};
 
 /// Reports a destination that was not enabled at compile time.
 #[cfg(any(
@@ -30,18 +26,18 @@ mod bigquery {
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::bigquery::BigQueryDestination;
     use secrecy::ExposeSecret;
-    use tokio::sync::watch;
 
     use crate::{
-        core::{PipelineState, ReplicatorStore, pipeline},
+        core::{ReplicatorStore, pipeline},
         error::ReplicatorResult,
+        health::ReplicatorHealth,
     };
 
     /// Starts the BigQuery destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
         replicator_store: ReplicatorStore,
-        pipeline_state_tx: watch::Sender<PipelineState>,
+        replicator_health: ReplicatorHealth,
     ) -> ReplicatorResult<()> {
         let pipeline_id = replicator_config.pipeline.id;
 
@@ -70,7 +66,7 @@ mod bigquery {
         .with_table_options(table_options.clone());
 
         let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
-        pipeline::start(pipeline, pipeline_state_tx).await
+        pipeline::start(pipeline, replicator_health).await
     }
 }
 
@@ -83,11 +79,11 @@ mod clickhouse {
         ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
     };
     use secrecy::ExposeSecret;
-    use tokio::sync::watch;
 
     use crate::{
-        core::{PipelineState, ReplicatorStore, pipeline},
+        core::{ReplicatorStore, pipeline},
         error::ReplicatorResult,
+        health::ReplicatorHealth,
     };
 
     /// Returns whether a ClickHouse configuration requires public HTTPS
@@ -100,7 +96,7 @@ mod clickhouse {
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
         replicator_store: ReplicatorStore,
-        pipeline_state_tx: watch::Sender<PipelineState>,
+        replicator_health: ReplicatorHealth,
     ) -> ReplicatorResult<()> {
         let DestinationConfig::ClickHouse { url, user, password, database, engine } =
             &replicator_config.destination
@@ -142,7 +138,7 @@ mod clickhouse {
         destination.validate_engine_support().await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
-        pipeline::start(pipeline, pipeline_state_tx).await
+        pipeline::start(pipeline, replicator_health).await
     }
 
     #[cfg(test)]
@@ -176,18 +172,18 @@ mod ducklake {
         S3Config as DucklakeS3Config,
     };
     use secrecy::ExposeSecret;
-    use tokio::sync::watch;
 
     use crate::{
-        core::{PipelineState, ReplicatorStore, pipeline},
+        core::{ReplicatorStore, pipeline},
         error::{ReplicatorError, ReplicatorResult},
+        health::ReplicatorHealth,
     };
 
     /// Starts the DuckLake destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
         replicator_store: ReplicatorStore,
-        pipeline_state_tx: watch::Sender<PipelineState>,
+        replicator_health: ReplicatorHealth,
     ) -> ReplicatorResult<()> {
         let pipeline_id = replicator_config.pipeline.id;
 
@@ -260,7 +256,7 @@ mod ducklake {
         .await?;
 
         let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
-        pipeline::start(pipeline, pipeline_state_tx).await
+        pipeline::start(pipeline, replicator_health).await
     }
 }
 
@@ -276,11 +272,11 @@ mod iceberg {
         S3_SECRET_ACCESS_KEY,
     };
     use secrecy::ExposeSecret;
-    use tokio::sync::watch;
 
     use crate::{
-        core::{PipelineState, ReplicatorStore, pipeline},
+        core::{ReplicatorStore, pipeline},
         error::{ReplicatorError, ReplicatorResult},
+        health::ReplicatorHealth,
     };
 
     /// Creates Iceberg REST catalog S3 properties.
@@ -302,7 +298,7 @@ mod iceberg {
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
         replicator_store: ReplicatorStore,
-        pipeline_state_tx: watch::Sender<PipelineState>,
+        replicator_health: ReplicatorHealth,
     ) -> ReplicatorResult<()> {
         let client = match &replicator_config.destination {
             etl_config::shared::DestinationConfig::Iceberg {
@@ -370,7 +366,7 @@ mod iceberg {
         let destination = IcebergDestination::new(client, namespace, replicator_store.clone());
 
         let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
-        pipeline::start(pipeline, pipeline_state_tx).await
+        pipeline::start(pipeline, replicator_health).await
     }
 }
 
@@ -380,18 +376,18 @@ mod snowflake {
     use etl::pipeline::Pipeline;
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::snowflake as snowflake_destination;
-    use tokio::sync::watch;
 
     use crate::{
-        core::{PipelineState, ReplicatorStore, pipeline},
+        core::{ReplicatorStore, pipeline},
         error::{ReplicatorError, ReplicatorResult},
+        health::ReplicatorHealth,
     };
 
     /// Starts the Snowflake destination pipeline.
     pub(super) async fn start(
         replicator_config: ReplicatorConfig,
         replicator_store: ReplicatorStore,
-        pipeline_state_tx: watch::Sender<PipelineState>,
+        replicator_health: ReplicatorHealth,
     ) -> ReplicatorResult<()> {
         let pipeline_id = replicator_config.pipeline.id;
 
@@ -421,7 +417,7 @@ mod snowflake {
         let destination = snowflake_destination::Destination::new(client, replicator_store.clone());
 
         let pipeline = Pipeline::new(replicator_config.pipeline, replicator_store, destination);
-        pipeline::start(pipeline, pipeline_state_tx).await
+        pipeline::start(pipeline, replicator_health).await
     }
 }
 
@@ -430,16 +426,16 @@ mod snowflake {
 pub(super) async fn start(
     replicator_config: ReplicatorConfig,
     replicator_store: ReplicatorStore,
-    pipeline_state_tx: watch::Sender<PipelineState>,
+    replicator_health: ReplicatorHealth,
 ) -> ReplicatorResult<()> {
     #[cfg(not(feature = "any-destination"))]
-    let _ = (&replicator_store, &pipeline_state_tx);
+    let _ = (&replicator_store, &replicator_health);
 
     match replicator_config.destination.kind() {
         DestinationKind::BigQuery => {
             #[cfg(feature = "bigquery")]
             {
-                bigquery::start(replicator_config, replicator_store, pipeline_state_tx).await
+                bigquery::start(replicator_config, replicator_store, replicator_health).await
             }
 
             #[cfg(not(feature = "bigquery"))]
@@ -450,7 +446,7 @@ pub(super) async fn start(
         DestinationKind::ClickHouse => {
             #[cfg(feature = "clickhouse")]
             {
-                clickhouse::start(replicator_config, replicator_store, pipeline_state_tx).await
+                clickhouse::start(replicator_config, replicator_store, replicator_health).await
             }
 
             #[cfg(not(feature = "clickhouse"))]
@@ -461,7 +457,7 @@ pub(super) async fn start(
         DestinationKind::Ducklake => {
             #[cfg(feature = "ducklake")]
             {
-                ducklake::start(replicator_config, replicator_store, pipeline_state_tx).await
+                ducklake::start(replicator_config, replicator_store, replicator_health).await
             }
 
             #[cfg(not(feature = "ducklake"))]
@@ -472,7 +468,7 @@ pub(super) async fn start(
         DestinationKind::Iceberg => {
             #[cfg(feature = "iceberg")]
             {
-                iceberg::start(replicator_config, replicator_store, pipeline_state_tx).await
+                iceberg::start(replicator_config, replicator_store, replicator_health).await
             }
 
             #[cfg(not(feature = "iceberg"))]
@@ -483,7 +479,7 @@ pub(super) async fn start(
         DestinationKind::Snowflake => {
             #[cfg(feature = "snowflake")]
             {
-                snowflake::start(replicator_config, replicator_store, pipeline_state_tx).await
+                snowflake::start(replicator_config, replicator_store, replicator_health).await
             }
 
             #[cfg(not(feature = "snowflake"))]

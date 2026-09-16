@@ -32,7 +32,7 @@ pub enum ActivityKind {
         /// the proactive keepalive interval is calculated separately.
         wal_sender_timeout: Duration,
     },
-    /// An initial snapshot copy completing destination batches and copy stages.
+    /// An initial snapshot copy completing destination batches.
     ///
     /// Parallel partitions share the table observation. Source commit and the
     /// final destination durability barrier remain part of the copy window.
@@ -100,11 +100,12 @@ pub(crate) struct ActivityHandle {
 }
 
 impl ActivityHandle {
-    /// Records activity without locking, preserving the latest observation.
+    /// Records activity at the current time without locking.
     ///
-    /// Concurrent copy completions may arrive out of order. No replication
-    /// state or memory ownership depends on this timestamp.
-    pub(crate) fn record(&self, now: Instant) {
+    /// Concurrent pings may publish out of order, so the latest observation is
+    /// preserved. No replication state or memory ownership depends on it.
+    pub(crate) fn ping(&self) {
+        let now = Instant::now();
         let micros = u64::try_from(now.saturating_duration_since(self.state.origin).as_micros())
             .unwrap_or(u64::MAX);
 
@@ -127,7 +128,7 @@ pub(crate) struct ActivitySuspension<'a> {
 
 impl Drop for ActivitySuspension<'_> {
     fn drop(&mut self) {
-        self.handle.record(Instant::now());
+        self.handle.ping();
     }
 }
 
@@ -212,27 +213,24 @@ mod tests {
     #[test]
     fn observations_start_at_registration_and_track_each_worker_independently() {
         let now = Instant::now();
+        let first_started_at = now - Duration::from_secs(10);
+        let second_started_at = now - Duration::from_secs(5);
         let mut registry = ActivityRegistry::default();
-        let (_, handle) = registry.register(ActivityKind::InitialTableCopy, now);
-        registry.register(ActivityKind::InitialTableCopy, now + Duration::from_secs(5));
+        let (_, handle) = registry.register(ActivityKind::InitialTableCopy, first_started_at);
+        registry.register(ActivityKind::InitialTableCopy, second_started_at);
         let entries = registry.snapshot();
-        assert_eq!(entries[0].last_observed_at(), now);
-        assert_eq!(entries[0].inactive_for(now + Duration::from_secs(10)), Duration::from_secs(10));
-        assert_eq!(entries[1].inactive_for(now + Duration::from_secs(10)), Duration::from_secs(5));
-        handle.record(now + Duration::from_secs(9));
-        let entries = registry.snapshot();
-        assert_eq!(entries[0].inactive_for(now + Duration::from_secs(10)), Duration::from_secs(1));
-        assert_eq!(entries[1].inactive_for(now + Duration::from_secs(10)), Duration::from_secs(5));
-    }
+        assert_eq!(entries[0].last_observed_at(), first_started_at);
+        assert_eq!(entries[0].inactive_for(now), Duration::from_secs(10));
+        assert_eq!(entries[1].inactive_for(now), Duration::from_secs(5));
 
-    #[test]
-    fn out_of_order_copy_completions_do_not_move_activity_backwards() {
-        let now = Instant::now();
-        let mut registry = ActivityRegistry::default();
-        let (_, handle) = registry.register(ActivityKind::InitialTableCopy, now);
-        handle.record(now + Duration::from_secs(2));
-        handle.record(now + Duration::from_secs(1));
-        assert_eq!(registry.snapshot()[0].last_observed_at(), now + Duration::from_secs(2));
+        let before_ping = Instant::now();
+        handle.ping();
+        let after_ping = Instant::now();
+        let entries = registry.snapshot();
+        // Atomic timestamps truncate to microseconds when encoding the instant.
+        assert!(entries[0].last_observed_at() >= before_ping - Duration::from_micros(1));
+        assert!(entries[0].last_observed_at() <= after_ping);
+        assert_eq!(entries[1].last_observed_at(), second_started_at);
     }
 
     #[test]
@@ -255,15 +253,11 @@ mod tests {
         let kind = ActivityKind::WalApply { wal_sender_timeout: Duration::from_secs(60) };
         let mut registry = ActivityRegistry::default();
         let (_, main) = registry.register(kind, now);
-        let (_, catchup) = registry.register(kind, now);
+        registry.register(kind, now - Duration::from_secs(600));
         let _waiting = main.suspend();
-        catchup.record(now + Duration::from_secs(5));
         let entries = registry.snapshot();
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0].inactive_for(now + Duration::from_secs(605)),
-            Duration::from_secs(600)
-        );
+        assert_eq!(entries[0].inactive_for(now), Duration::from_secs(600));
     }
 
     #[test]
@@ -271,7 +265,7 @@ mod tests {
         let registration = ActivityRegistration::register(ActivityKind::InitialTableCopy);
         let handle = registration.handle();
         drop(registration);
-        handle.record(Instant::now());
+        handle.ping();
         assert!(snapshot().is_empty());
     }
 

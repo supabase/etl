@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::{Validate, ValidationError};
 
+/// Default HTTP port for replicator activity probes.
+const DEFAULT_HEALTH_PORT: u16 = 9001;
+/// Default minimum inactivity allowance, in milliseconds.
+/// Five minutes tolerates slow batches before probes report inactivity;
+/// Kubernetes applies its own failure thresholds before marking unready or
+/// restarting.
+const DEFAULT_STALL_TIMEOUT_MILLISECONDS: u64 = 5 * 60 * 1000;
+
 /// Replicator probe listener and inactivity policy.
 ///
 /// Omit the replicator's `health` block to disable its listener. Slot
@@ -14,7 +22,8 @@ use crate::shared::{Validate, ValidationError};
 pub struct ReplicatorHealthConfig {
     /// HTTP port for `/livez` and `/readyz` on all IPv4 interfaces.
     pub port: u16,
-    /// Minimum inactivity allowance in milliseconds.
+    /// Minimum inactivity allowance in milliseconds, defaulting to five
+    /// minutes.
     ///
     /// Apply loops allow at least PostgreSQL's `wal_sender_timeout` (or the
     /// fallback when disabled or unavailable) so quiet sources can exchange
@@ -24,7 +33,7 @@ pub struct ReplicatorHealthConfig {
 
 impl Default for ReplicatorHealthConfig {
     fn default() -> Self {
-        Self { port: 9001, stall_timeout_ms: 600_000 }
+        Self { port: DEFAULT_HEALTH_PORT, stall_timeout_ms: DEFAULT_STALL_TIMEOUT_MILLISECONDS }
     }
 }
 
@@ -52,7 +61,7 @@ mod tests {
     #[test]
     fn defaults_and_overrides() {
         let config: ReplicatorHealthConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(config, ReplicatorHealthConfig::default());
+        assert_eq!(config, ReplicatorHealthConfig { port: 9001, stall_timeout_ms: 300_000 });
         config.validate().unwrap();
         let config: ReplicatorHealthConfig =
             serde_json::from_str(r#"{"stall_timeout_ms":120000}"#).unwrap();

@@ -815,6 +815,7 @@ async fn spawn_test_app_with_services(
             replicator_service_account_name: "etl-replicator".to_owned(),
             replicator_node_selectors: Default::default(),
             replicator_tolerations: Default::default(),
+            replicator_termination_grace_period_seconds: 300,
             replicator_resources: ReplicatorResourceDefaultsConfig {
                 memory_request_mib: 250,
                 cpu_request_millicores: 125,

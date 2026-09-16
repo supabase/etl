@@ -82,12 +82,95 @@ impl From<String> for ApiConfigValidationError {
     }
 }
 
+/// Timing and failure tolerance for one Kubernetes HTTP probe.
+///
+/// All values are required when the probe block is present. Omit the block to
+/// disable that probe. Endpoint paths and the container port name are fixed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ReplicatorProbeConfig {
+    /// Interval between checks, in seconds; must be at least one.
+    pub period_seconds: i32,
+    /// Maximum wait for each HTTP response, in seconds; must be at least one.
+    /// A timeout counts as a failed check, just like an HTTP 503 response.
+    pub timeout_seconds: i32,
+    /// Consecutive failures required before Kubernetes acts; must be at least
+    /// one. Readiness marks the Pod unready; startup and liveness restart the
+    /// container. One successful check resets the failure count.
+    pub failure_threshold_count: i32,
+}
+
+impl ReplicatorProbeConfig {
+    /// Validates the values accepted by Kubernetes, retaining the probe name.
+    fn validate(&self, probe_name: &str) -> Result<(), ValidationError> {
+        for (field, value) in [
+            ("period_seconds", self.period_seconds),
+            ("timeout_seconds", self.timeout_seconds),
+            ("failure_threshold_count", self.failure_threshold_count),
+        ] {
+            if value < 1 {
+                return Err(ValidationError::InvalidFieldValue {
+                    field: format!("replicator.health.{probe_name}.{field}"),
+                    constraint: "must be greater than zero".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Optional probes and the listener configuration shared by them.
+///
+/// Omitted probes are not generated. With no probes, the API also omits the
+/// replicator listener configuration and container port. Kubernetes settings
+/// remain in the API; only port and inactivity allowance reach the replicator.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ApiReplicatorHealthConfig {
+    /// Health settings passed to the replicator itself: listener port and
+    /// inactivity allowance. Defaults to port 9001 and 300000 milliseconds
+    /// without observed activity; Kubernetes probe timing is configured below.
+    pub replicator: ReplicatorHealthConfig,
+    /// Optional `/livez` startup check. Until it succeeds, Kubernetes delays
+    /// the configured readiness and liveness checks. It observes listener
+    /// availability, not completion of initial sync.
+    pub startup: Option<ReplicatorProbeConfig>,
+    /// Optional `/livez` check that restarts the container after repeated
+    /// failures. Its failure window is additional to the inactivity allowance.
+    pub liveness: Option<ReplicatorProbeConfig>,
+    /// Optional `/readyz` check that marks stalled or initializing workers
+    /// unready without stopping replication or restarting the container.
+    pub readiness: Option<ReplicatorProbeConfig>,
+}
+
+impl ApiReplicatorHealthConfig {
+    /// Enables the listener only when at least one probe uses it.
+    pub(crate) fn listener_config(&self) -> Option<ReplicatorHealthConfig> {
+        (self.startup.is_some() || self.liveness.is_some() || self.readiness.is_some())
+            .then_some(self.replicator)
+    }
+}
+
+impl Validate for ApiReplicatorHealthConfig {
+    fn validate(&self) -> Result<(), ValidationError> {
+        self.replicator.validate()?;
+        for (name, probe) in
+            [("startup", self.startup), ("liveness", self.liveness), ("readiness", self.readiness)]
+        {
+            if let Some(probe) = probe {
+                probe.validate(name)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Defaults applied to generated replicator configurations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ApiReplicatorConfig {
-    /// Optional replicator activity listener and Kubernetes probes.
+    /// Optional replicator activity probes. Only explicitly supplied probes
+    /// are generated; omission and an empty block both disable them.
     #[serde(default)]
-    pub health: Option<ReplicatorHealthConfig>,
+    pub health: Option<ApiReplicatorHealthConfig>,
     /// Defaults grouped by destination kind.
     #[serde(default)]
     pub destination_defaults: DestinationDefaultsConfig,
@@ -107,6 +190,11 @@ pub struct DuckLakeDestinationDefaultsConfig {
     /// Initial-copy buffering used when a pipeline does not configure it.
     #[serde(default)]
     pub copy_buffer: DuckLakeCopyBufferConfig,
+}
+
+/// Preserves the existing five-minute Pod drain allowance.
+fn default_replicator_termination_grace_period_seconds() -> i64 {
+    300
 }
 
 /// Kubernetes-specific API configuration.
@@ -140,6 +228,12 @@ pub struct K8sConfig {
     /// startup request.
     #[serde(default)]
     pub replicator_autoscaling: Option<ReplicatorResourceAutoscalingConfig>,
+    /// Pod shutdown allowance, in seconds, before forced termination.
+    /// Defaults to 300 (five minutes), including when probes are disabled.
+    /// Must be at least one. This bounds draining; it does not extend probe
+    /// failure thresholds or limit normal batch duration.
+    #[serde(default = "default_replicator_termination_grace_period_seconds")]
+    pub replicator_termination_grace_period_seconds: i64,
     /// Vector image used by the logging sidecar.
     #[serde(default = "default_vector_image")]
     pub vector_image: String,
@@ -272,6 +366,11 @@ impl ApiConfig {
             replicator_autoscaling.validate()?;
         }
         self.k8s.vector_resources.validate()?;
+        if self.k8s.replicator_termination_grace_period_seconds < 1 {
+            return Err("K8s replicator termination grace period must be greater than 0"
+                .to_owned()
+                .into());
+        }
         self.replicator.destination_defaults.ducklake.copy_buffer.validate()?;
         if let Some(health) = &self.replicator.health {
             health.validate()?;
@@ -591,6 +690,47 @@ mod tests {
     }
 
     #[test]
+    fn replicator_probes_require_explicit_configuration() {
+        for value in [json!({}), json!({"health": null}), json!({"health": {}})] {
+            let config: ApiReplicatorConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.health.and_then(|health| health.listener_config()), None);
+        }
+        let health: ApiReplicatorHealthConfig = serde_json::from_value(json!({
+            "readiness": {"period_seconds": 10, "timeout_seconds": 2, "failure_threshold_count": 3}
+        }))
+        .unwrap();
+        health.validate().unwrap();
+        assert_eq!(health.listener_config(), Some(ReplicatorHealthConfig::default()));
+        assert!(health.startup.is_none());
+        assert!(health.liveness.is_none());
+    }
+
+    #[test]
+    fn replicator_probes_reject_missing_and_nonpositive_values() {
+        for probe_name in ["startup", "liveness", "readiness"] {
+            for field in ["period_seconds", "timeout_seconds", "failure_threshold_count"] {
+                let valid = json!({"period_seconds": 10, "timeout_seconds": 2, "failure_threshold_count": 3});
+                let mut incomplete = valid.clone();
+                incomplete.as_object_mut().unwrap().remove(field);
+                assert!(
+                    serde_json::from_value::<ApiReplicatorHealthConfig>(
+                        json!({probe_name: incomplete})
+                    )
+                    .is_err()
+                );
+                for value in [0, -1] {
+                    let mut invalid = valid.clone();
+                    invalid[field] = json!(value);
+                    let health: ApiReplicatorHealthConfig =
+                        serde_json::from_value(json!({probe_name: invalid})).unwrap();
+                    let error = health.validate().unwrap_err();
+                    assert!(error.to_string().contains(&format!("{probe_name}.{field}")));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn ducklake_copy_buffer_is_enabled_by_default() {
         let config: ApiReplicatorConfig = serde_json::from_value(json!({})).unwrap();
 
@@ -661,6 +801,7 @@ mod tests {
             }
         }))
         .unwrap();
+        assert_eq!(unpinned.replicator_termination_grace_period_seconds, 300);
         assert_eq!(unpinned.replicator_namespace, "etl-data-plane");
         assert_eq!(unpinned.replicator_service_account_name, "etl-replicator");
         assert!(unpinned.replicator_node_selectors.is_empty());

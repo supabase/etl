@@ -542,7 +542,7 @@ where
 {
     let child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
-    let mut progress = TableCopyProgress::default();
+    let mut total_progress = TableCopyProgress::default();
 
     loop {
         if is_shutdown_requested(&shutdown_rx) {
@@ -557,7 +557,7 @@ where
             // means all CTID work has been claimed.
             child_replication_transaction.commit().await?;
 
-            return Ok(TableCopyWorkerOutcome::Completed(progress));
+            return Ok(TableCopyWorkerOutcome::Completed(total_progress));
         };
 
         match table_copy_partition_rows(
@@ -576,10 +576,7 @@ where
         )
         .await?
         {
-            ShutdownResult::Ok(partition_progress) => {
-                progress.merge(partition_progress);
-                activity_handle.record(Instant::now());
-            }
+            ShutdownResult::Ok(partition_progress) => total_progress.merge(partition_progress),
             ShutdownResult::Shutdown(_) => return Ok(TableCopyWorkerOutcome::Shutdown),
         }
     }
@@ -766,6 +763,7 @@ where
                         flush_result,
                     )
                     .await?;
+
                 let ShutdownResult::Ok(completed_flush_result) = pending_flush_result
                     .with_shutdown(&mut shutdown_rx)
                     .await
@@ -775,7 +773,9 @@ where
                 let (_, completed_at, result) =
                     completed_flush_result.into_parts_with_completion();
                 let write_status = result?;
-                activity_handle.record(completed_at);
+
+                // Notify that there is activity in the table copy.
+                activity_handle.ping();
 
                 table_copy_batch_metadata.record_processed(D::name());
                 counter!(

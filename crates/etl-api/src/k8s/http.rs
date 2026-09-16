@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, time::Duration};
 use async_trait::async_trait;
 use base64::{Engine, prelude::BASE64_STANDARD};
 use chrono::Utc;
-use etl_config::{Environment, shared::ReplicatorHealthConfig};
+use etl_config::Environment;
 #[cfg(test)]
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use k8s_openapi::{
@@ -28,7 +28,7 @@ use crate::config::{
     VectorResourceDefaultsConfig,
 };
 use crate::{
-    config::{K8sConfig, ReplicatorResourceAutoscalingUpdateMode},
+    config::{ApiReplicatorHealthConfig, K8sConfig, ReplicatorResourceAutoscalingUpdateMode},
     configs::{
         log::LogLevel,
         pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
@@ -97,6 +97,8 @@ const LOGFLARE_SECRET_NAME: &str = "replicator-logflare-api-key";
 const REPLICATOR_METRICS_PORT_NAME: &str = "metrics";
 /// Port the replicator listens on for Prometheus metrics.
 const REPLICATOR_METRICS_PORT: i32 = 9000;
+/// Container port name shared by the replicator's HTTP probes.
+const REPLICATOR_HEALTH_PORT_NAME: &str = "health";
 /// ConfigMap name containing the Vector configuration.
 const VECTOR_CONFIG_MAP_NAME: &str = "replicator-vector-config";
 /// Volume name for the replicator config file.
@@ -152,6 +154,7 @@ fn test_k8s_config(environment: &Environment) -> K8sConfig {
         replicator_service_account_name: "etl-replicator".to_owned(),
         replicator_node_selectors: Default::default(),
         replicator_tolerations: Default::default(),
+        replicator_termination_grace_period_seconds: 300,
         replicator_resources: ReplicatorResourceDefaultsConfig {
             memory_request_mib,
             cpu_request_millicores,
@@ -1744,9 +1747,7 @@ fn create_replicator_stateful_set_json(
             "volumes": volumes,
             "nodeSelector": node_selector,
             "tolerations": tolerations,
-            // We want to wait at most 5 minutes before K8S sends a `SIGKILL` to the containers,
-            // this way we let the system finish any in-flight transaction, if there are any.
-            "terminationGracePeriodSeconds": 300,
+            "terminationGracePeriodSeconds": k8s_config.replicator_termination_grace_period_seconds,
             "initContainers": init_containers,
             "containers": [
               {
@@ -1798,24 +1799,30 @@ fn create_replicator_stateful_set_json(
 /// Adds opt-in activity probes to a newly built replicator Pod template.
 fn configure_replicator_probes(
     stateful_set: &mut serde_json::Value,
-    health: ReplicatorHealthConfig,
+    health_config: ApiReplicatorHealthConfig,
 ) {
+    let Some(listener_config) = health_config.listener_config() else {
+        return;
+    };
     let container = &mut stateful_set["spec"]["template"]["spec"]["containers"][0];
     container["ports"].as_array_mut().unwrap().push(json!({
-        "name": "health",
-        "containerPort": health.port,
+        "name": REPLICATOR_HEALTH_PORT_NAME,
+        "containerPort": listener_config.port,
         "protocol": "TCP",
     }));
-    for (name, path, period, failures) in [
-        ("startupProbe", "/livez", 5, 60),
-        ("livenessProbe", "/livez", 30, 3),
-        ("readinessProbe", "/readyz", 10, 3),
+    for (name, path, probe) in [
+        ("startupProbe", "/livez", health_config.startup),
+        ("livenessProbe", "/livez", health_config.liveness),
+        ("readinessProbe", "/readyz", health_config.readiness),
     ] {
+        let Some(probe) = probe else {
+            continue;
+        };
         container[name] = json!({
-            "httpGet": { "path": path, "port": "health" },
-            "periodSeconds": period,
-            "timeoutSeconds": 2,
-            "failureThreshold": failures,
+            "httpGet": { "path": path, "port": REPLICATOR_HEALTH_PORT_NAME },
+            "periodSeconds": probe.period_seconds,
+            "timeoutSeconds": probe.timeout_seconds,
+            "failureThreshold": probe.failure_threshold_count,
         });
     }
 }
@@ -1895,7 +1902,7 @@ mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PipelineConfig, ReplicatorConfig, ReplicatorConfigWithoutSecrets,
-        ReplicatorHealthConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
     };
     use insta::{assert_json_snapshot, assert_snapshot};
 
@@ -3043,9 +3050,11 @@ mod tests {
     }
 
     #[test]
-    fn replicator_activity_probes_are_opt_in_and_preserve_metrics_and_grace() {
-        let mut stateful_set = create_replicator_stateful_set_json(
-            &default_k8s_config(),
+    fn replicator_activity_probes_are_independently_configurable() {
+        let k8s_config =
+            K8sConfig { replicator_termination_grace_period_seconds: 45, ..default_k8s_config() };
+        let base = create_replicator_stateful_set_json(
+            &k8s_config,
             "tenant-1-42",
             &pipeline_runtime_identity(),
             "tenant-1-42-replicator",
@@ -3058,31 +3067,57 @@ mod tests {
             Vec::new(),
             &test_resource_requirements(&Environment::Dev),
         );
-        let container = &stateful_set["spec"]["template"]["spec"]["containers"][0];
-        for name in ["startupProbe", "livenessProbe", "readinessProbe"] {
-            assert!(container.get(name).is_none());
-        }
-        configure_replicator_probes(
-            &mut stateful_set,
-            ReplicatorHealthConfig { port: 19001, ..Default::default() },
-        );
-        let pod = &stateful_set["spec"]["template"]["spec"];
-        assert_eq!(pod["terminationGracePeriodSeconds"], 300);
-        let container = &pod["containers"][0];
-        assert_eq!(container["ports"][0]["containerPort"], 9000);
-        assert_eq!(container["ports"][1]["containerPort"], 19001);
-        for (name, path, period, failures) in [
-            ("startupProbe", "/livez", 5, 60),
-            ("livenessProbe", "/livez", 30, 3),
-            ("readinessProbe", "/readyz", 10, 3),
-        ] {
+        // Exercise every subset, including none and readiness-only rollout.
+        for enabled in 0..8 {
+            let mut config = json!({"replicator": {"port": 19001, "stall_timeout_ms": 120000}});
+            for (bit, name, period, timeout, failures) in
+                [(1, "startup", 4, 1, 20), (2, "liveness", 25, 3, 40), (4, "readiness", 8, 2, 2)]
+            {
+                if enabled & bit != 0 {
+                    config[name] = json!({
+                        "period_seconds": period, "timeout_seconds": timeout,
+                        "failure_threshold_count": failures,
+                    });
+                }
+            }
+            let health: ApiReplicatorHealthConfig = serde_json::from_value(config).unwrap();
+            let mut stateful_set = base.clone();
+            configure_replicator_probes(&mut stateful_set, health);
+            let pod = &stateful_set["spec"]["template"]["spec"];
+            let container = &pod["containers"][0];
+            assert_eq!(pod["terminationGracePeriodSeconds"], 45);
+            assert_eq!(container["ports"][0]["containerPort"], 9000);
             assert_eq!(
-                container[name],
-                json!({
-                    "httpGet": { "path": path, "port": "health" },
-                    "periodSeconds": period, "timeoutSeconds": 2, "failureThreshold": failures,
-                })
+                container["ports"].as_array().unwrap().len(),
+                if enabled == 0 { 1 } else { 2 }
             );
+            assert_eq!(health.listener_config().is_some(), enabled != 0);
+            if enabled != 0 {
+                assert_eq!(container["ports"][1]["containerPort"], 19001);
+                let listener = serde_json::to_value(health.listener_config().unwrap()).unwrap();
+                assert_eq!(listener, json!({"port": 19001, "stall_timeout_ms": 120000}));
+            }
+            for (bit, name, path, period, timeout, failures) in [
+                (1, "startupProbe", "/livez", 4, 1, 20),
+                (2, "livenessProbe", "/livez", 25, 3, 40),
+                (4, "readinessProbe", "/readyz", 8, 2, 2),
+            ] {
+                if enabled & bit == 0 {
+                    assert!(container.get(name).is_none());
+                    continue;
+                }
+                assert_eq!(
+                    container[name],
+                    json!({
+                        "httpGet": { "path": path, "port": "health" },
+                        "periodSeconds": period, "timeoutSeconds": timeout,
+                        "failureThreshold": failures,
+                    })
+                );
+            }
+            if enabled == 0 {
+                assert_eq!(stateful_set, base);
+            }
         }
     }
 

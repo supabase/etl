@@ -1,13 +1,10 @@
 //! Pipeline execution and graceful shutdown owned by the replicator runner.
 
 use etl::{destination::PipelineDestination, pipeline::Pipeline, store::PipelineStore};
-use tokio::{
-    signal::unix::{Signal, SignalKind, signal},
-    sync::watch,
-};
+use tokio::signal::unix::{Signal, SignalKind, signal};
 use tracing::{error, info};
 
-use crate::{core::PipelineState, error::ReplicatorResult, metrics};
+use crate::{core::ReplicatorState, error::ReplicatorResult, health::ReplicatorHealth, metrics};
 
 /// Waits for a process termination request.
 async fn shutdown_requested(sigterm: &mut Signal) {
@@ -26,12 +23,12 @@ async fn shutdown_requested(sigterm: &mut Signal) {
     }
 }
 
-/// Runs the pipeline, publishing lifecycle observations and draining on
+/// Runs the pipeline, updating lifecycle observations and draining on
 /// termination.
-#[tracing::instrument(skip(pipeline, pipeline_state_tx))]
+#[tracing::instrument(skip(pipeline, replicator_health))]
 pub(super) async fn start<S, D>(
     mut pipeline: Pipeline<S, D>,
-    pipeline_state_tx: watch::Sender<PipelineState>,
+    replicator_health: ReplicatorHealth,
 ) -> ReplicatorResult<()>
 where
     S: PipelineStore,
@@ -42,7 +39,7 @@ where
 
     pipeline.start().await?;
 
-    pipeline_state_tx.send_replace(PipelineState::Running);
+    replicator_health.set_replicator_state(ReplicatorState::Running);
 
     // Report runtime metrics only after workers have started.
     let metrics_tasks = metrics::spawn_metrics_tasks();
@@ -55,13 +52,13 @@ where
 
     let pipeline_result = tokio::select! {
         pipeline_result = &mut pipeline_completion => {
-            pipeline_state_tx.send_replace(PipelineState::Stopping);
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
 
             pipeline_result
         }
 
         _ = shutdown_requested(&mut sigterm) => {
-            pipeline_state_tx.send_replace(PipelineState::Stopping);
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
 
             let _ = pipeline_shutdown_tx.shutdown();
 
