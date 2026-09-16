@@ -375,6 +375,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            generated: false,
             default_expression: None,
         }];
         // Pre-encoded table name with embedded quotes to verify the SQL
@@ -446,6 +447,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                generated: false,
                 default_expression: None,
             },
             ColumnSchema {
@@ -455,6 +457,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                generated: false,
                 default_expression: None,
             },
         ];
@@ -543,6 +546,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            generated: false,
             default_expression: None,
         }];
         let sql = create_merge_tree_sql("public_t", &schemas);
@@ -561,6 +565,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: None,
             nullable: false,
+            generated: false,
             default_expression: None,
         }];
         let sql = create_merge_tree_sql("public_t", &schemas);
@@ -581,6 +586,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                generated: false,
                 default_expression: None,
             },
             ColumnSchema {
@@ -590,6 +596,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                generated: false,
                 default_expression: None,
             },
         ];
@@ -615,6 +622,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(2),
                 nullable: false,
+                generated: false,
                 default_expression: None,
             },
             ColumnSchema {
@@ -624,6 +632,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                generated: false,
                 default_expression: None,
             },
             ColumnSchema {
@@ -633,6 +642,7 @@ mod tests {
                 ordinal_position: 3,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                generated: false,
                 default_expression: None,
             },
         ];
@@ -655,6 +665,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: None,
             nullable: true,
+            generated: false,
             default_expression: None,
         }];
         // --- WHEN: build the ReplacingMergeTree DDL ---
@@ -673,6 +684,7 @@ mod tests {
             ordinal_position: 1,
             primary_key_ordinal_position: Some(1),
             nullable: false,
+            generated: false,
             default_expression: None,
         }];
         // --- WHEN/THEN: dispatcher selects the matching engine branch ---
@@ -695,6 +707,7 @@ mod tests {
                 ordinal_position: 1,
                 primary_key_ordinal_position: Some(1),
                 nullable: false,
+                generated: false,
                 default_expression: None,
             },
             ColumnSchema {
@@ -704,6 +717,7 @@ mod tests {
                 ordinal_position: 2,
                 primary_key_ordinal_position: None,
                 nullable: true,
+                generated: false,
                 default_expression: None,
             },
         ];
