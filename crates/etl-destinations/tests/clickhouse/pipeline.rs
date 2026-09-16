@@ -14,17 +14,15 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
-    ClickHouseInserterConfig, test_utils::setup_clickhouse_database,
+    ClickHouseInserterConfig, client::arm_pause_before_insert_statement_for_tests,
+    test_utils::setup_clickhouse_database,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 use crate::support::{
-    clickhouse::{
-        AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query,
-        install_insert_delay,
-    },
+    clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query},
     crypto::install_crypto_provider,
 };
 
@@ -379,15 +377,15 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].value, "after");
 }
 
-/// A slow destination insert must not stall the pipeline: dispatch returns
-/// after admission so later transactions keep streaming, and shutdown drains
-/// the pending write to durability.
+/// An in-flight destination write must not stall the pipeline: dispatch
+/// returns after admission so streaming continues while the write is
+/// parked, and shutdown drains the pending write to durability.
 #[tokio::test(flavor = "multi_thread")]
-async fn delayed_inserts_keep_streaming_and_shut_down_cleanly_merge_tree() {
+async fn in_flight_write_keeps_streaming_and_shuts_down_cleanly_merge_tree() {
     init_test_tracing();
     install_crypto_provider();
 
-    // GIVEN: a copied table whose destination inserts are delayed.
+    // GIVEN: a copied table with a pause armed for its next CDC insert.
     let database = spawn_source_database().await;
     let table_name = test_table_name("slowsink");
     let table_id = database
@@ -421,9 +419,10 @@ async fn delayed_inserts_keep_streaming_and_shut_down_cleanly_merge_tree() {
     );
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
-    install_insert_delay(&clickhouse_db, "test_slowsink", 1).await;
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
 
-    // WHEN: two transactions stream through the delayed destination.
+    // WHEN: two transactions stream while the first CDC batch is parked at
+    // its INSERT statement, then the batch is released.
     let events_notify = destination
         .wait_for_events(vec![
             EventCondition::TableCount(EventType::Insert, table_id, 1),
@@ -444,10 +443,12 @@ async fn delayed_inserts_keep_streaming_and_shut_down_cleanly_merge_tree() {
         ))
         .await
         .unwrap();
+    reached.await.unwrap();
+    release.send(()).unwrap();
     events_notify.notified().await;
 
-    // THEN: shutdown drains the pending delayed write and both transactions
-    // are durably visible.
+    // THEN: shutdown drains the pending write and both transactions are
+    // durably visible.
     pipeline.shutdown_and_wait().await.unwrap();
     let query = current_state_query(
         ClickHouseEngine::MergeTree,

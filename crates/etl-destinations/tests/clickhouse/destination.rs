@@ -73,10 +73,7 @@ use proptest::{option, prelude::*};
 use url::Url;
 use uuid::Uuid;
 
-use crate::support::{
-    clickhouse::{current_state_query, install_insert_delay},
-    crypto::install_crypto_provider,
-};
+use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
 /// One ClickHouse table receiving generated rows through the production
 /// destination write path.
