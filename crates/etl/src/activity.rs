@@ -1,16 +1,13 @@
 //! Process-wide observations of active replication loops and table copies.
 //!
 //! Registrations own the lifetime of monitored work; handles record
-//! observations without locking the registry. Consumers choose their inactivity
-//! policy using [`snapshot`]. Slot acquisition and intentional catchup waits
-//! are exempt.
+//! observations under a per-operation mutex. Snapshots also lock the registry;
+//! consumers choose their inactivity policy using [`snapshot`]. Slot
+//! acquisition and intentional catchup waits are exempt.
 
 use std::{
     collections::BTreeMap,
-    sync::{
-        Arc, LazyLock, Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, LazyLock, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -69,26 +66,22 @@ impl ActivitySnapshot {
     }
 }
 
-/// Per-operation observation shared without taking the registry lock.
+/// Observation shared by an operation's handles.
 #[derive(Debug)]
 struct ActivityState {
     /// The monitored operation.
     kind: ActivityKind,
-    /// Fixed clock origin for encoding an [`Instant`] as an atomic integer.
-    origin: Instant,
-    /// Microseconds since the origin plus one; zero suspends observation.
-    last_observed: AtomicU64,
+    /// Last observation, or `None` while intentionally suspended.
+    last_observed: Mutex<Option<Instant>>,
 }
 
 impl ActivityState {
     /// Copies the current observation, excluding intentional waits.
     fn snapshot(&self) -> Option<ActivitySnapshot> {
-        let micros = self.last_observed.load(Ordering::Relaxed).checked_sub(1)?;
+        let last_observed_at =
+            (*self.last_observed.lock().unwrap_or_else(PoisonError::into_inner))?;
 
-        Some(ActivitySnapshot {
-            kind: self.kind,
-            last_observed_at: self.origin + Duration::from_micros(micros),
-        })
+        Some(ActivitySnapshot { kind: self.kind, last_observed_at })
     }
 }
 
@@ -100,21 +93,22 @@ pub(crate) struct ActivityHandle {
 }
 
 impl ActivityHandle {
-    /// Records activity at the current time without locking.
+    /// Records activity at the current time unless observation is suspended.
     ///
     /// Concurrent pings may publish out of order, so the latest observation is
-    /// preserved. No replication state or memory ownership depends on it.
+    /// preserved. Pings through cloned handles cannot end an intentional wait.
     pub(crate) fn ping(&self) {
         let now = Instant::now();
-        let micros = u64::try_from(now.saturating_duration_since(self.state.origin).as_micros())
-            .unwrap_or(u64::MAX);
-
-        self.state.last_observed.fetch_max(micros.saturating_add(1), Ordering::Relaxed);
+        let mut last_observed =
+            self.state.last_observed.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(previous) = *last_observed {
+            *last_observed = Some(previous.max(now));
+        }
     }
 
     /// Exempts an intentional catchup wait until the returned guard is dropped.
     pub(crate) fn suspend(&self) -> ActivitySuspension<'_> {
-        self.state.last_observed.store(0, Ordering::Relaxed);
+        *self.state.last_observed.lock().unwrap_or_else(PoisonError::into_inner) = None;
 
         ActivitySuspension { handle: self }
     }
@@ -128,7 +122,8 @@ pub(crate) struct ActivitySuspension<'a> {
 
 impl Drop for ActivitySuspension<'_> {
     fn drop(&mut self) {
-        self.handle.ping();
+        *self.handle.state.last_observed.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(Instant::now());
     }
 }
 
@@ -148,7 +143,7 @@ impl ActivityRegistry {
         self.next_id =
             self.next_id.checked_add(1).expect("activity registration IDs must not exhaust u64");
 
-        let state = Arc::new(ActivityState { kind, origin: now, last_observed: AtomicU64::new(1) });
+        let state = Arc::new(ActivityState { kind, last_observed: Mutex::new(Some(now)) });
         self.entries.insert(id, Arc::clone(&state));
 
         (id, ActivityHandle { state })
@@ -229,14 +224,13 @@ mod tests {
         handle.ping();
         let after_ping = Instant::now();
         let entries = registry.snapshot();
-        // Atomic timestamps truncate to microseconds when encoding the instant.
-        assert!(entries[0].last_observed_at() >= before_ping - Duration::from_micros(1));
+        assert!(entries[0].last_observed_at() >= before_ping);
         assert!(entries[0].last_observed_at() <= after_ping);
         assert_eq!(entries[1].last_observed_at(), second_started_at);
     }
 
-    /// Suspending one loop preserves other observations and resuming resets its
-    /// window.
+    /// Suspending one loop ignores cloned pings, preserves other observations,
+    /// and resets its window on resumption.
     #[test]
     fn catchup_wait_is_exempt_without_hiding_other_workers() {
         let now = Instant::now();
@@ -244,7 +238,9 @@ mod tests {
         let mut registry = ActivityRegistry::default();
         let (_, main) = registry.register(kind, now - Duration::from_secs(600));
         registry.register(kind, now - Duration::from_secs(600));
+        let cloned_handle = main.clone();
         let waiting = main.suspend();
+        cloned_handle.ping();
         let entries = registry.snapshot();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].inactive_for(now), Duration::from_secs(600));
@@ -253,7 +249,7 @@ mod tests {
         drop(waiting);
         let entries = registry.snapshot();
         assert_eq!(entries.len(), 2);
-        assert!(entries[0].last_observed_at() >= before_resume - Duration::from_micros(1));
+        assert!(entries[0].last_observed_at() >= before_resume);
         assert!(entries[0].last_observed_at() <= Instant::now());
         assert_eq!(entries[1].inactive_for(now), Duration::from_secs(600));
     }
