@@ -1703,7 +1703,8 @@ async fn write_admission_waits_for_table_reset() {
 /// every in-flight task, not only the reset table's.
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_writes_complete_independently_and_reset_drains_both() {
-    // GIVEN: two tables whose inserts are each delayed by two seconds.
+    // GIVEN: writes to two tables, each parked at its first INSERT
+    // statement by one of two armed pauses.
     init_test_tracing();
     install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
@@ -1714,40 +1715,54 @@ async fn concurrent_writes_complete_independently_and_reset_drains_both() {
         .await;
     destination.write_table_rows(&left_schema, vec![]).await.unwrap();
     destination.write_table_rows(&right_schema, vec![]).await.unwrap();
-    install_insert_delay(&clickhouse_db, "public_left", 2).await;
-    install_insert_delay(&clickhouse_db, "public_right", 2).await;
+    let (first_reached, first_release) = arm_pause_before_insert_statement_for_tests(0);
+    let (second_reached, second_release) = arm_pause_before_insert_statement_for_tests(0);
+    let left_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = left_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 3, "left")],
+            )
+            .await
+        }
+    });
+    let right_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = right_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 7, "right")],
+            )
+            .await
+        }
+    });
+    first_reached.await.unwrap();
+    second_reached.await.unwrap();
 
-    // WHEN: both writes are admitted before either completes, and a reset of
-    // the left table starts while both are in flight.
-    let started = Instant::now();
-    let left_write = write_events_via_trait(
-        &destination,
-        WriteEventsDurability::MayDefer,
-        vec![lifecycle_insert(&left_schema, 3, "left")],
-    );
-    let right_write = write_events_via_trait(
-        &destination,
-        WriteEventsDurability::MayDefer,
-        vec![lifecycle_insert(&right_schema, 7, "right")],
-    );
-    let reset = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let result = drop_table_for_copy_via_trait(&destination, &left_schema).await;
-        (result, started.elapsed())
-    };
-    let (left_status, right_status, (reset_result, reset_elapsed)) =
-        tokio::join!(left_write, right_write, reset);
+    // WHEN: a reset of the left table starts while both writes are parked,
+    // and both writes are released afterwards.
+    let reset_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = left_schema.clone();
+        async move { drop_table_for_copy_via_trait(&destination, &schema).await }
+    });
+    yield_rounds().await;
+    // The reset must be draining both parked tasks rather than finishing.
+    assert!(!reset_handle.is_finished());
+    first_release.send(()).unwrap();
+    second_release.send(()).unwrap();
 
-    // THEN: each write delivered its own durable result, the reset waited
-    // for both in-flight tasks, and the surviving row landed in its own
-    // table.
-    assert_eq!(left_status.unwrap(), DestinationWriteStatus::Durable);
-    assert_eq!(right_status.unwrap(), DestinationWriteStatus::Durable);
-    reset_result.unwrap();
-    assert!(
-        reset_elapsed >= Duration::from_millis(1500),
-        "reset raced the in-flight writes: {reset_elapsed:?}"
-    );
+    // THEN: each write delivered its own durable result, the reset removed
+    // the left table only after both tasks finished, and the surviving row
+    // landed in its own table.
+    assert_eq!(left_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(right_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    reset_handle.await.unwrap().unwrap();
     assert_eq!(
         clickhouse_db.query::<(i64, String)>("select id, value from \"public_right\"").await,
         vec![(7, "right".to_owned())]

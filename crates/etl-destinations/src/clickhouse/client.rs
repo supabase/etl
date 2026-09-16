@@ -763,13 +763,18 @@ struct ArmedInsertStatementPause {
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
-/// Currently armed insert-statement pause, if any.
+/// Currently armed insert-statement pauses; each is consumed once.
 #[cfg(feature = "test-utils")]
-static INSERT_STATEMENT_PAUSE: parking_lot::Mutex<Option<ArmedInsertStatementPause>> =
-    parking_lot::Mutex::new(None);
+static INSERT_STATEMENT_PAUSES: parking_lot::Mutex<Vec<ArmedInsertStatementPause>> =
+    parking_lot::Mutex::new(Vec::new());
 
 /// Arms a one-shot pause before the zero-based `statement_index` INSERT
-/// statement of the next [`ClickHouseClient::insert_rows`] call to reach it.
+/// statement of a [`ClickHouseClient::insert_rows`] call.
+///
+/// Several pauses may be armed at once; each call crossing an armed
+/// statement boundary consumes the earliest matching pause, so two
+/// concurrent single-statement writes can both be parked by arming the same
+/// index twice.
 ///
 /// Returns the `reached` receiver, signalled at the armed statement boundary
 /// after every earlier statement in the call was acknowledged, and the
@@ -782,7 +787,7 @@ pub fn arm_pause_before_insert_statement_for_tests(
 ) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
     let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-    *INSERT_STATEMENT_PAUSE.lock() = Some(ArmedInsertStatementPause {
+    INSERT_STATEMENT_PAUSES.lock().push(ArmedInsertStatementPause {
         statement_index,
         reached: reached_tx,
         release: release_rx,
@@ -791,12 +796,17 @@ pub fn arm_pause_before_insert_statement_for_tests(
     (reached_rx, release_tx)
 }
 
-/// Pauses at an armed statement boundary; no-op when unarmed or at another
-/// statement index.
+/// Pauses at an armed statement boundary; no-op when no armed pause matches
+/// the statement index.
 #[cfg(feature = "test-utils")]
 async fn pause_before_insert_statement_for_tests(statement_index: u64) {
-    let armed =
-        INSERT_STATEMENT_PAUSE.lock().take_if(|armed| armed.statement_index == statement_index);
+    let armed = {
+        let mut armed_pauses = INSERT_STATEMENT_PAUSES.lock();
+        armed_pauses
+            .iter()
+            .position(|armed| armed.statement_index == statement_index)
+            .map(|index| armed_pauses.remove(index))
+    };
     let Some(armed) = armed else {
         return;
     };
