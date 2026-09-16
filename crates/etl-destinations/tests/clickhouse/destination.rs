@@ -1346,11 +1346,38 @@ where
     }
 }
 
-/// The trait dispatch returns while a delayed insert is still pending, and
-/// the asynchronous result reports `Durable` only after the insert lands.
+/// Yields to the scheduler until `condition` holds.
+///
+/// Cooperative replacement for wall-clock waits; panics when the condition
+/// is not reached within a bounded yield budget so a regression fails
+/// instead of hanging.
+async fn yield_until(condition: impl Fn() -> bool) {
+    for _ in 0..10_000 {
+        if condition() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("condition not reached within the yield budget");
+}
+
+/// Gives the scheduler bounded opportunity to run other tasks.
+///
+/// Used before asserting that a task is still blocked; cooperative yields
+/// let spawned work reach its parked state without wall-clock sleeps.
+async fn yield_rounds() {
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The trait dispatch returns while an in-flight insert is still pending,
+/// and the asynchronous result reports `Durable` only after the insert
+/// lands.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_events_dispatch_returns_while_insert_is_pending() {
-    // GIVEN: a destination table whose inserts are delayed by one second.
+    // GIVEN: a destination table and a pause armed before the batch's first
+    // INSERT statement.
     init_test_tracing();
     install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
@@ -1359,26 +1386,38 @@ async fn write_events_dispatch_returns_while_insert_is_pending() {
         .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
         .await;
     destination.write_table_rows(&schema, vec![]).await.unwrap();
-    install_insert_delay(&clickhouse_db, "public_deferred", 1).await;
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
 
-    // WHEN: one insert event batch is dispatched through the trait.
-    let probe = DispatchTimingProbe { inner: destination, write_events_dispatch: Mutex::new(None) };
-    let started = Instant::now();
-    let status = write_events_via_trait(
-        &probe,
-        WriteEventsDurability::MayDefer,
-        vec![lifecycle_insert(&schema, 1, "delayed")],
-    )
-    .await
-    .unwrap();
-    let completion = started.elapsed();
+    // WHEN: one insert event batch dispatched through the trait parks at
+    // the armed statement.
+    let probe = Arc::new(DispatchTimingProbe {
+        inner: destination,
+        write_events_dispatch: Mutex::new(None),
+    });
+    let write_handle = tokio::spawn({
+        let probe = Arc::clone(&probe);
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                probe.as_ref(),
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "deferred")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+    yield_until(|| probe.write_events_dispatch.lock().is_some()).await;
 
-    // THEN: dispatch returned while the result was pending, and completion
-    // reported Durable only after the delayed insert landed.
-    assert_eq!(status, DestinationWriteStatus::Durable);
-    let dispatch = probe.write_events_dispatch.lock().unwrap();
-    assert!(completion >= Duration::from_secs(1), "insert was not delayed: {completion:?}");
-    assert!(dispatch < Duration::from_millis(500), "dispatch awaited the write: {dispatch:?}");
+    // THEN: dispatch returned while the parked write had sent nothing and
+    // its result was pending; releasing the pause completes it durably.
+    assert!(!write_handle.is_finished());
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"public_deferred\"").await,
+        Vec::<i64>::new()
+    );
+    release.send(()).unwrap();
+    assert_eq!(write_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
     assert_eq!(clickhouse_db.query::<i64>("select id from \"public_deferred\"").await, vec![1]);
 }
 
