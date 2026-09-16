@@ -66,7 +66,7 @@ pub fn test_table_name(name: &str) -> TableName {
 /// - `TESTS_DATABASE_TLS_ENABLED`: Whether test clients use TLS (default:
 ///   `false`)
 /// - `TESTS_DATABASE_TLS_ROOT_CERT`: Path to the trusted root certificate
-fn local_pg_connection_config() -> PgConnectionConfig {
+pub fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
         hostaddr: None,

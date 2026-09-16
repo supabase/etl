@@ -1,7 +1,10 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
 use std::{
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -34,6 +37,7 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_database_and_sync_done_pipeline_with_table, create_pipeline,
+            create_pipeline_with_batch_config,
         },
         schema::{
             assert_columns_names_types, assert_replicated_schema_column_names_types,
@@ -46,7 +50,7 @@ use etl::{
         },
     },
 };
-use etl_config::shared::TableSyncCopyConfig;
+use etl_config::shared::{BatchConfig, TableSyncCopyConfig};
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     below_version,
@@ -58,7 +62,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use fail::FailScenario;
 use pg_escape::quote_identifier;
 use rand::random;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::sleep};
 use tokio_postgres::{
     Client,
     types::{PgLsn, Type},
@@ -981,6 +985,273 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
             ],
         ],
     );
+}
+
+/// Streaming write observed by [`AbandoningEventsDestination`].
+struct AbandonedWrite {
+    /// Result of the first target-table batch, held for the test to answer.
+    result: WriteEventsResult,
+}
+
+/// Destination test double that holds its first target-table batch and answers
+/// every later write as durable.
+///
+/// Holding the first batch lets the apply loop queue the next one behind it, so
+/// a test can abandon a write that already has a successor waiting.
+#[derive(Clone)]
+struct AbandoningEventsDestination {
+    /// Table whose first batch is held.
+    table_id: TableId,
+    /// Channel exposing that held batch to the test.
+    writes_tx: mpsc::UnboundedSender<AbandonedWrite>,
+    /// Whether the first target-table batch is still to come.
+    first_write_pending: Arc<AtomicBool>,
+    /// Streaming writes dispatched after that batch was held.
+    later_writes: Arc<AtomicUsize>,
+}
+
+impl AbandoningEventsDestination {
+    /// Creates a destination and the observer of its held batch.
+    fn new(table_id: TableId) -> (Self, mpsc::UnboundedReceiver<AbandonedWrite>) {
+        let (writes_tx, writes_rx) = mpsc::unbounded_channel();
+
+        (
+            Self {
+                table_id,
+                writes_tx,
+                first_write_pending: Arc::new(AtomicBool::new(true)),
+                later_writes: Arc::new(AtomicUsize::new(0)),
+            },
+            writes_rx,
+        )
+    }
+
+    /// Returns how many streaming writes arrived after the held batch.
+    fn later_writes(&self) -> usize {
+        self.later_writes.load(Ordering::SeqCst)
+    }
+}
+
+impl Destination for AbandoningEventsDestination {
+    fn name() -> &'static str {
+        "abandoning_events"
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(()));
+
+        Ok(())
+    }
+
+    async fn write_table_rows(
+        &self,
+        _replicated_table_schema: &ReplicatedTableSchema,
+        _batch_id: Option<TableCopyBatchId>,
+        _table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+
+        Ok(())
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        _durability: WriteEventsDurability,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        let contains_target_insert = events.iter().any(|event| {
+            matches!(
+                event,
+                Event::Insert(insert) if insert.replicated_table_schema.id() == self.table_id
+            )
+        });
+
+        if contains_target_insert && self.first_write_pending.swap(false, Ordering::SeqCst) {
+            assert!(self.writes_tx.send(AbandonedWrite { result: async_result }).is_ok());
+
+            return Ok(());
+        }
+
+        if !self.first_write_pending.load(Ordering::SeqCst) {
+            self.later_writes.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async_result.send(Ok(DestinationWriteStatus::Durable));
+
+        Ok(())
+    }
+}
+
+/// Verifies that a write the destination abandons stops the apply loop for
+/// good, rather than handing the batch queued behind it to the same
+/// destination.
+///
+/// A durable result for that successor would report progress covering the
+/// abandoned write, which the destination never received: the table sync would
+/// reach `SyncDone` over lost events and the worker would then delete the
+/// checkpoint and replication slot that could still replay them.
+///
+/// The successor must already be queued when the write is abandoned, which is
+/// what the wait below arranges; running this test against a build without the
+/// fix confirms it, since the successor is dispatched there.
+#[tokio::test(flavor = "multi_thread")]
+async fn abandoned_write_stops_the_loop_before_a_successor_reports_progress() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+
+    let store = NotifyingStore::new();
+    let (destination, mut writes_rx) = AbandoningEventsDestination::new(table_id);
+
+    let pipeline_id: PipelineId = random();
+    // One event per batch, so the events following the held one form their own
+    // batch and queue behind it instead of joining it.
+    let mut pipeline = create_pipeline_with_batch_config(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+        BatchConfig { max_fill_ms: 50, memory_budget_ratio: 0.2, max_bytes: 1 },
+    );
+
+    let finished_copy_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+
+    finished_copy_notify.notified().await;
+
+    // The commit reaches the WAL while the table sync worker is paused. Its
+    // insert is the write the destination abandons, and the commit that closes
+    // it becomes the successor batch: the one carrying the LSN that would
+    // complete the catchup.
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    let abandoned = tokio::time::timeout(Duration::from_secs(30), writes_rx.recv())
+        .await
+        .expect("timed out waiting for the first target-table batch")
+        .expect("streaming write observer should remain available");
+
+    // Let the loop buffer the commit that closes the transaction, so a batch is
+    // queued behind the held write before it is abandoned.
+    sleep(Duration::from_secs(2)).await;
+
+    abandoned.result.shutdown();
+
+    tokio::time::timeout(Duration::from_secs(60), pipeline.wait()).await.unwrap().unwrap();
+
+    // Nothing may be dispatched to a destination that reported it stopped.
+    assert_eq!(destination.later_writes(), 0);
+
+    // And the sync must not be declared done: the destination holds neither the
+    // abandoned insert nor anything after it.
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert_eq!(TableStateType::from(&table_state), TableStateType::FinishedCopy);
+}
+
+/// Verifies that a destination reporting its own shutdown from the terminal
+/// durability barrier leaves the table sync retryable.
+///
+/// The loop records its completion before dispatching that barrier, so an
+/// abandoned barrier must still pause it. Completing instead would end the sync
+/// short of `SyncDone`, and the worker would persist an error that only a
+/// manual retry clears, stalling the table on every later start.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_barrier_reporting_destination_shutdown_keeps_the_table_retryable() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let users_schema = database_schema.users_schema();
+    let table_id = users_schema.id;
+
+    // Unrelated WAL moves the cluster frontier past the accepted commit, so
+    // catchup reaches its target through a keepalive and settles the durability
+    // debt with an empty barrier rather than a terminal event batch.
+    let other_database = spawn_source_database().await;
+    let other_database_table = test_table_name("table_sync_barrier_shutdown_wal");
+    other_database
+        .create_table(other_database_table.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let finished_copy_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+
+    finished_copy_notify.notified().await;
+
+    insert_users_data(&mut database, &users_schema.name, 1..=1).await;
+
+    other_database
+        .insert_values(other_database_table.clone(), &["value"], &[&1_i32])
+        .await
+        .unwrap();
+
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    let barrier_result = tokio::time::timeout(Duration::from_secs(30), async {
+        let Some(DeferredEventsWrite::Batch { result, .. }) = writes_rx.recv().await else {
+            panic!("expected accepted target-table event batch");
+        };
+        result.send(Ok(DestinationWriteStatus::Accepted));
+
+        let Some(DeferredEventsWrite::DurabilityBarrier { result }) = writes_rx.recv().await else {
+            panic!("expected empty required-durability barrier");
+        };
+
+        result
+    })
+    .await
+    .expect("timed out waiting for accepted batch and durability barrier");
+
+    // The destination stops instead of confirming durability, which is what ends
+    // the pipeline here.
+    barrier_result.shutdown();
+
+    tokio::time::timeout(Duration::from_secs(60), pipeline.wait()).await.unwrap().unwrap();
+
+    // The copy is durable and only the handoff is not, so the table waits at
+    // `FinishedCopy` for the next start instead of holding an error.
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert_eq!(TableStateType::from(&table_state), TableStateType::FinishedCopy);
 }
 
 #[tokio::test(flavor = "multi_thread")]

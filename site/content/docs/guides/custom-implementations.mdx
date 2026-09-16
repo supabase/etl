@@ -355,6 +355,13 @@ Create `src/http_destination.rs`. A destination implements the `Destination` tra
 
 There are also optional `startup()` and `shutdown()` methods with default no-op implementations. Override `startup()` if your destination needs to reconcile active durable ETL metadata with physical destination objects after a restart. Override `shutdown()` if your destination needs cleanup when the pipeline shuts down.
 
+`shutdown()` is ETL stopping your destination. A destination that stops on its
+own, for example together with the process embedding ETL, instead answers the
+work it abandons by calling `shutdown()` on the async result rather than
+`send()`. ETL then requests pipeline shutdown through its normal path and
+records no table error, so the next start resumes the table from its persisted
+state.
+
 ETL is **at least once**, so make row and event writes idempotent. Complete
 every async result handle: send `DestinationWriteStatus::Durable` from this
 immediate example after a successful write. ETL clears copy-scoped store state

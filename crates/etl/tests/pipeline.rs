@@ -1,4 +1,10 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use etl::{
     data::{Cell, TableRow},
@@ -48,7 +54,7 @@ use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
 use tokio::{
     sync::{Mutex, Notify},
-    time::sleep,
+    time::{sleep, timeout},
 };
 use tokio_postgres::types::{PgLsn, Type};
 
@@ -620,6 +626,196 @@ async fn drop_table_for_copy_shutdown_interrupts_pending_result_wait() {
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
     assert!(matches!(table_state, TableState::Init));
     assert!(store.get_destination_table_metadata(table_id).await.unwrap().is_some());
+}
+
+/// How long a pipeline whose destination reported shutdown may take to stop.
+///
+/// The pipeline ends itself in these tests, so without a bound a regression
+/// would hang instead of failing.
+const DESTINATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Destination operation from which [`ShuttingDownDestination`] reports that it
+/// is shutting down.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShutdownReportPoint {
+    /// A table-copy write carrying rows.
+    WriteTableRows,
+    /// A streaming write carrying events.
+    WriteEvents,
+}
+
+/// Destination test double that reports its own shutdown once.
+///
+/// This models a destination that stops together with the process embedding
+/// ETL: it abandons one operation and answers it with the async result's
+/// `shutdown` rather than a result, while nothing else requests pipeline
+/// shutdown.
+#[derive(Clone)]
+struct ShuttingDownDestination<D> {
+    /// Destination handling every operation that is not abandoned.
+    inner: D,
+    /// Operation that reports the destination shutdown.
+    report_point: ShutdownReportPoint,
+    /// Whether the next call of that operation still reports it.
+    armed: Arc<AtomicBool>,
+}
+
+impl<D> ShuttingDownDestination<D> {
+    /// Wraps a destination, leaving it disarmed.
+    fn wrap(inner: D, report_point: ShutdownReportPoint) -> Self {
+        Self { inner, report_point, armed: Arc::new(AtomicBool::new(false)) }
+    }
+
+    /// Makes the next call of the selected operation report the shutdown.
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns true once for the selected operation after arming.
+    fn should_report(&self, report_point: ShutdownReportPoint) -> bool {
+        self.report_point == report_point && self.armed.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl<D> Destination for ShuttingDownDestination<D>
+where
+    D: PipelineDestination,
+{
+    fn name() -> &'static str {
+        "shutting_down"
+    }
+
+    async fn startup(&self) -> EtlResult<()> {
+        self.inner.startup().await
+    }
+
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.inner.shutdown().await
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        // Only a batch carrying rows is abandoned, so the report cannot land on
+        // an empty initialization or durability-barrier write.
+        if batch_id.is_some() && self.should_report(ShutdownReportPoint::WriteTableRows) {
+            async_result.shutdown();
+
+            return Ok(());
+        }
+
+        self.inner
+            .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
+            .await
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        // Only a batch carrying events is abandoned, so the report cannot land
+        // on an empty durability barrier.
+        if !events.is_empty() && self.should_report(ShutdownReportPoint::WriteEvents) {
+            async_result.shutdown();
+
+            return Ok(());
+        }
+
+        self.inner.write_events(events, durability, async_result).await
+    }
+}
+
+/// Verifies that a destination reporting its own shutdown during a table copy
+/// stops the pipeline without recording a table error.
+///
+/// Nothing else requests shutdown here, so the destination's outcome alone must
+/// take the pipeline through its normal shutdown path and leave the table ready
+/// to be copied again.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_destination_shutdown_stops_pipeline_without_table_error() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    let store = NotifyingStore::new();
+    let destination = ShuttingDownDestination::wrap(
+        MemoryDestination::new(store.clone()),
+        ShutdownReportPoint::WriteTableRows,
+    );
+    destination.arm();
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    pipeline.start().await.unwrap();
+
+    // The destination is what ends this pipeline. The wait is bounded so a
+    // regression fails the test instead of hanging it.
+    timeout(DESTINATION_SHUTDOWN_TIMEOUT, pipeline.wait()).await.unwrap().unwrap();
+
+    let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
+    assert!(matches!(table_state, TableState::DataSync));
+}
+
+/// Verifies that a destination reporting its own shutdown while streaming stops
+/// the pipeline without failing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_destination_shutdown_stops_pipeline_without_error() {
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let destination = ShuttingDownDestination::wrap(
+        MemoryDestination::new(store.clone()),
+        ShutdownReportPoint::WriteEvents,
+    );
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    table_sync_complete_notify.notified().await;
+
+    // Arm only once the copy is done, so the abandoned write is a streaming one.
+    destination.arm();
+    insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+
+    timeout(DESTINATION_SHUTDOWN_TIMEOUT, pipeline.wait()).await.unwrap().unwrap();
 }
 
 /// Verifies that resetting a table during an active copy is overwritten by the
