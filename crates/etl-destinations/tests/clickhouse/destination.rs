@@ -1633,7 +1633,8 @@ async fn aborted_write_replays_to_converged_state_replacing_merge_tree() {
 /// completes and publishes its result.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_admission_waits_for_table_reset() {
-    // GIVEN: a delayed table and an undelayed bystander table.
+    // GIVEN: a write parked at the gated table's first INSERT statement and
+    // an untouched bystander table.
     init_test_tracing();
     install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
@@ -1644,43 +1645,54 @@ async fn write_admission_waits_for_table_reset() {
         .await;
     destination.write_table_rows(&gated_schema, vec![]).await.unwrap();
     destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
-    install_insert_delay(&clickhouse_db, "public_gated", 2).await;
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+    let gated_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = gated_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "landed")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
 
-    // WHEN: a reset starts behind a delayed write, and a bystander write is
-    // dispatched while the reset holds the task registry.
-    let probe =
-        DispatchTimingProbe { inner: destination.clone(), write_events_dispatch: Mutex::new(None) };
-    let gated_write = write_events_via_trait(
-        &destination,
-        WriteEventsDurability::MayDefer,
-        vec![lifecycle_insert(&gated_schema, 1, "landed")],
-    );
-    let reset = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        drop_table_for_copy_via_trait(&destination, &gated_schema).await
-    };
-    let bystander_write = async {
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        write_events_via_trait(
-            &probe,
-            WriteEventsDurability::MayDefer,
-            vec![lifecycle_insert(&bystander_schema, 7, "after")],
-        )
-        .await
-    };
-    let (gated_status, reset_result, bystander_status) =
-        tokio::join!(gated_write, reset, bystander_write);
+    // WHEN: a reset starts draining the parked write and a bystander write
+    // is dispatched while the reset holds the task registry.
+    let reset_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = gated_schema.clone();
+        async move { drop_table_for_copy_via_trait(&destination, &schema).await }
+    });
+    yield_rounds().await;
+    assert!(!reset_handle.is_finished());
+    let bystander_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = bystander_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 7, "after")],
+            )
+            .await
+        }
+    });
+    yield_rounds().await;
+    // Admission is closed while the reset holds the registry, so the
+    // bystander write must still be blocked even though its own table is
+    // unaffected.
+    assert!(!bystander_handle.is_finished());
+    release.send(()).unwrap();
 
-    // THEN: every operation succeeded, and the bystander dispatch stayed
-    // blocked until the reset released the registry.
-    assert_eq!(gated_status.unwrap(), DestinationWriteStatus::Durable);
-    reset_result.unwrap();
-    assert_eq!(bystander_status.unwrap(), DestinationWriteStatus::Durable);
-    let dispatch = probe.write_events_dispatch.lock().unwrap();
-    assert!(
-        dispatch >= Duration::from_secs(1),
-        "bystander write was admitted during the reset: {dispatch:?}"
-    );
+    // THEN: every operation completed after the release, and the bystander
+    // row landed in its own table.
+    assert_eq!(gated_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    reset_handle.await.unwrap().unwrap();
+    assert_eq!(bystander_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
     assert_eq!(
         clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
         vec![(7, "after".to_owned())]
