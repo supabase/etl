@@ -1422,10 +1422,11 @@ async fn write_events_dispatch_returns_while_insert_is_pending() {
 }
 
 /// A destructive table reset drains the admitted write before dropping the
-/// table, so the delayed insert lands and the drop waits for it.
+/// table, so the parked insert lands and the drop waits for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn drop_table_for_copy_waits_for_admitted_write() {
-    // GIVEN: a destination table whose inserts are delayed by two seconds.
+    // GIVEN: a destination table and a write parked at its first INSERT
+    // statement.
     init_test_tracing();
     install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
@@ -1434,27 +1435,39 @@ async fn drop_table_for_copy_waits_for_admitted_write() {
         .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
         .await;
     destination.write_table_rows(&schema, vec![]).await.unwrap();
-    install_insert_delay(&clickhouse_db, "public_resetrace", 2).await;
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "landed")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
 
-    // WHEN: a table reset starts while the delayed write is admitted.
-    let started = Instant::now();
-    let write = write_events_via_trait(
-        &destination,
-        WriteEventsDurability::MayDefer,
-        vec![lifecycle_insert(&schema, 1, "landed")],
-    );
-    let reset = async {
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let result = drop_table_for_copy_via_trait(&destination, &schema).await;
-        (result, started.elapsed())
-    };
-    let (write_status, (drop_result, drop_elapsed)) = tokio::join!(write, reset);
+    // WHEN: a table reset starts while the write is parked, and the write
+    // is released afterwards.
+    let reset_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move { drop_table_for_copy_via_trait(&destination, &schema).await }
+    });
+    yield_rounds().await;
+    // The reset must be draining the parked task rather than finishing.
+    assert!(!reset_handle.is_finished());
+    release.send(()).unwrap();
+    let write_status = write_handle.await.unwrap();
+    let drop_result = reset_handle.await.unwrap();
 
-    // THEN: the write completed durably before the drop, and the drop waited
-    // for the delayed insert instead of racing it.
+    // THEN: the released write completed durably instead of racing the
+    // dropped table, and the reset then removed the table.
     assert_eq!(write_status.unwrap(), DestinationWriteStatus::Durable);
     drop_result.unwrap();
-    assert!(drop_elapsed >= Duration::from_millis(1500), "reset raced the write: {drop_elapsed:?}");
     assert_eq!(
         clickhouse_db
             .query::<String>(
