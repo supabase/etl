@@ -728,6 +728,10 @@ where
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 let batch_id = batch_id_generator.next_batch_id()?;
 
+                // Inline writes are fine here: each partition has its own task
+                // and awaits both the method and its result before reading
+                // another batch. The copy owner can cancel this child during
+                // either await.
                 destination
                     .write_table_rows(
                         &replicated_table_schema,

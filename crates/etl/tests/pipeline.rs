@@ -689,47 +689,53 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
     assert!(matches!(table_state, TableState::DataSync));
 }
 
-/// The copy owner can abort a stalled destination method, then restart the
-/// incomplete copy from scratch instead of requiring each child to cooperate.
+/// Shutdown interrupts a stalled copy write, including the final empty call,
+/// and the incomplete copy restarts from scratch.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_shutdown_interrupts_stalled_write_and_restarts() {
-    let mut database = spawn_source_database().await;
-    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-    let table_id = schema.users_schema().id;
-    insert_users_data(&mut database, &schema.users_schema().name, 1..=1000).await;
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let write_hold = destination.hold_next(FaultyOp::WriteTableRows).await;
-    let pipeline_id = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        schema.publication_name(),
-        store.clone(),
-        destination.clone(),
-    );
-    pipeline.start().await.unwrap();
-    write_hold.wait_reached().await;
+    // An empty table reaches the final write; a populated table stalls a child.
+    for row_count in [0, 1000] {
+        let mut database = spawn_source_database().await;
+        let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+        let table_id = schema.users_schema().id;
+        insert_users_data(&mut database, &schema.users_schema().name, 1..=row_count).await;
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+        let write_hold = destination.hold_next(FaultyOp::WriteTableRows).await;
+        let pipeline_id = random();
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+        );
+        pipeline.start().await.unwrap();
+        write_hold.wait_reached().await;
 
-    tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, pipeline.shutdown_and_wait())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(destination.shutdown_called().await);
-    assert!(matches!(store.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync)));
+        tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, pipeline.shutdown_and_wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(destination.shutdown_called().await);
+        assert!(matches!(
+            store.get_table_state(table_id).await.unwrap(),
+            Some(TableState::DataSync)
+        ));
 
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        schema.publication_name(),
-        store.clone(),
-        destination.clone(),
-    );
-    let synced = store.notify_on_table_sync_complete(table_id).await;
-    pipeline.start().await.unwrap();
-    synced.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
-    assert_eq!(destination.get_table_rows().await[&table_id].len(), 1000);
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+        );
+        let synced = store.notify_on_table_sync_complete(table_id).await;
+        pipeline.start().await.unwrap();
+        synced.notified().await;
+        pipeline.shutdown_and_wait().await.unwrap();
+        assert_eq!(destination.get_table_rows().await[&table_id].len(), row_count);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

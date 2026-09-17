@@ -257,9 +257,17 @@ work, then join it before returning or reusing its resources.
 - **Apply:** an exit intent stops intake; normal exit waits for buffered batches
   and pending write results. Preserve existing deadlines, durability and error
   policies. Do not force early flushes or abort in-flight apply writes.
+- **Destination calls:** `write_events` should dispatch long-running writes to
+  owned tasks or queues and return promptly so the apply loop can keep running.
+  `write_table_rows` may write inline: copy partitions already have their own
+  tasks and each awaits its result before reading another batch.
 - **Copy and startup:** copy is replayable; its owner aborts and joins children
-  before releasing the snapshot. Cancel pending startup separately from apply
-  draining, and shut down constructed destinations even if startup never finished.
+  before releasing the snapshot. Keep replayable copy waits, including the final
+  empty write and its result, cancellable for prompt shutdown. Apply coordination
+  waits must also observe shutdown when a stopped worker may never publish the
+  awaited state; this does not make apply writes safe to cancel. Cancel pending
+  startup separately from apply draining, and shut down constructed destinations
+  even if startup never finished.
 - **Disposable tasks:** use `abort_and_join` for timers, samplers and monitors.
   Keep memory sampling alive until workers and the destination have drained,
   then abort and join it. Extra shutdown channels are unnecessary.

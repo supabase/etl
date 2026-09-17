@@ -41,6 +41,10 @@ destination if initialization fails or is cancelled.
 After startup, signals request pipeline shutdown and await its existing
 completion future. WAL apply stops intake and drains pending writes. Initial
 copy aborts and joins its child tasks; an interrupted copy is redone on restart.
+Its final empty write and result wait are also interruptible until the copy is
+marked complete. Apply coordination waits observe shutdown so they do not wait
+for a state transition from a worker that is stopping; in-flight apply writes
+still drain.
 Background samplers are aborted and joined, and errors returned by workers or
 cleanup propagate to the process exit status. Existing error policies still
 apply: table errors can be recorded in the store, and shutdown during a timed
@@ -54,9 +58,10 @@ The probe server is stopped and joined after pipeline teardown, including on
 initialization failure or cancellation.
 
 There is no internal grace-period timer or second-signal force-exit policy.
-An in-flight apply handler or destination drain can delay shutdown. Kubernetes
-enforces its termination grace period with SIGKILL, which cannot run cleanup;
-restart recovery uses persisted progress and destination replay semantics.
+An in-flight apply handler, inline initial-sync setup, or destination drain can
+delay shutdown. Kubernetes enforces its termination grace period with SIGKILL,
+which cannot run cleanup; restart recovery uses persisted progress and
+destination replay semantics.
 Aborting an async task also cannot undo a remote write or stop native work
 already running through `spawn_blocking`. DuckDB query interruption and deadline
 watchdogs survive cancellation of the async caller while the runtime is running.

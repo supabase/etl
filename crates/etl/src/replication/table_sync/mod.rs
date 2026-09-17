@@ -383,16 +383,27 @@ where
             // also the terminal table-wide durability barrier.
             if total_table_copy_rows == 0 || table_copy_barrier_required {
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
-                destination
-                    .write_table_rows(&replicated_table_schema, None, Vec::new(), flush_result)
-                    .await?;
-                let ShutdownResult::Ok(completed_flush_result) =
-                    with_shutdown!(pending_flush_result, shutdown_token)
-                else {
+                // The copy is still incomplete, so both the method call and
+                // its result wait can be interrupted. Restart drops the partial
+                // destination table and copies it again from a fresh snapshot.
+                let ShutdownResult::Ok(write_status) = with_shutdown!(
+                    async {
+                        destination
+                            .write_table_rows(
+                                &replicated_table_schema,
+                                None,
+                                Vec::new(),
+                                flush_result,
+                            )
+                            .await?;
+                        pending_flush_result.await.into_result()
+                    },
+                    shutdown_token,
+                ) else {
                     return Ok(TableSyncResult::Stopped);
                 };
 
-                match completed_flush_result.into_result()? {
+                match write_status? {
                     DestinationWriteStatus::Durable => activity_handle.ping(),
                     DestinationWriteStatus::Accepted => bail!(
                         ErrorKind::DestinationError,

@@ -238,6 +238,12 @@ impl TableSyncWorkerState {
             // happen.
             drop(inner);
 
+            // A stopping worker may never publish the awaited state. For now,
+            // the shared shutdown token is the simplest way to end this wait.
+            // TODO: observe the responsible worker's lifecycle instead,
+            //  so the apply loop can stop waiting when its table-sync worker
+            //  stops, without relying on the same shutdown signal. Worker exit
+            //  must remain distinct from reaching the requested state.
             if with_shutdown!(state_change_notified, shutdown_token).should_shutdown() {
                 info!(
                     target_table_state_types = %format_state_types(target_state_types),

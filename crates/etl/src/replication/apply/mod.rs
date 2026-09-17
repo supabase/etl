@@ -1847,6 +1847,9 @@ where
         // destination and the pending receiver is stored on the loop state
         // until the destination signals completion.
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
+        // Await dispatch without racing shutdown so an inline write is not
+        // interrupted. Destinations should offload long-running writes and
+        // return promptly; only then can this loop poll the result separately.
         self.destination.write_events(events, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
 
