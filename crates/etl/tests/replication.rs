@@ -1850,7 +1850,7 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
 
     let add_column_message = &messages[0];
     assert_eq!(add_column_message["command_tag"], "ALTER TABLE");
-    assert_eq!(add_column_message["oid"], table_id.into_inner() as u64);
+    assert_eq!(add_column_message["oid"], u64::from(table_id.into_inner()));
     assert_eq!(add_column_message["nspname"], table_name.schema);
     assert_eq!(add_column_message["relname"], table_name.name);
     assert_eq!(add_column_message["relkind"], "r");
@@ -1877,7 +1877,7 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         .find(|column| column["attname"] == "email")
         .expect("email column should be present after add column");
     assert_eq!(email_column["attnum"], 4);
-    assert_eq!(email_column["atttypid"], Type::TEXT.oid() as u64);
+    assert_eq!(email_column["atttypid"], u64::from(Type::TEXT.oid()));
     assert_eq!(email_column["typname"], "text");
     assert_eq!(email_column["formatted_type"], "text");
     assert_eq!(email_column["attnotnull"], true);
@@ -1915,7 +1915,7 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
         .find(|column| column["attname"] == "age")
         .expect("age column should still be present after type change");
     assert_eq!(age_column["attnum"], 3);
-    assert_eq!(age_column["atttypid"], Type::INT8.oid() as u64);
+    assert_eq!(age_column["atttypid"], u64::from(Type::INT8.oid()));
     assert_eq!(age_column["typname"], "int8");
     assert_eq!(age_column["formatted_type"], "bigint");
 

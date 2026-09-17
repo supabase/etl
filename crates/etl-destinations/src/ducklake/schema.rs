@@ -418,17 +418,16 @@ mod tests {
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(10, 2)");
 
         // NUMERIC(38, 0): max DuckDB precision, zero scale.
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((38i32 << 16) | 0) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(38, 0)");
 
         // NUMERIC(38, 38): max DuckDB precision and scale.
-        #[allow(clippy::identity_op)]
         let typmod = ((38i32 << 16) | 38) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(38, 38)");
 
         // NUMERIC(1, 0): minimal.
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((1i32 << 16) | 0) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(1, 0)");
     }
@@ -436,12 +435,12 @@ mod tests {
     #[test]
     fn scalar_type_mapping_numeric_incompatible_falls_back_to_varchar() {
         // NUMERIC(39, 0): precision exceeds DuckDB max.
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((39i32 << 16) | 0) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "varchar");
 
         // NUMERIC(10, -3): negative scale.
-        let typmod = ((10i32 << 16) | ((-3i16 as u16) as i32)) + 4;
+        let typmod = ((10i32 << 16) | i32::from(-3i16 as u16)) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "varchar");
 
         // NUMERIC(3, 5): scale exceeds precision.

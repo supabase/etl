@@ -208,7 +208,7 @@ fn cell_to_bool(cell: &Cell) -> Option<bool> {
 /// Returns [`None`] for incompatible cell types.
 fn cell_to_i32(cell: &Cell) -> Option<i32> {
     match cell {
-        Cell::I16(v) => Some(*v as i32),
+        Cell::I16(v) => Some(i32::from(*v)),
         Cell::I32(v) => Some(*v),
         _ => None,
     }
@@ -223,7 +223,7 @@ fn cell_to_i32(cell: &Cell) -> Option<i32> {
 fn cell_to_i64(cell: &Cell) -> Option<i64> {
     match cell {
         Cell::I64(v) => Some(*v),
-        Cell::U32(v) => Some(*v as i64),
+        Cell::U32(v) => Some(i64::from(*v)),
         _ => None,
     }
 }
@@ -450,7 +450,7 @@ fn build_int32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) 
             match array_cell {
                 ArrayCell::I16(vec) => {
                     for item in vec {
-                        list_builder.values().append_option(item.map(|v| v as i32));
+                        list_builder.values().append_option(item.map(i32::from));
                     }
                     list_builder.append(true);
                 }
@@ -488,7 +488,7 @@ fn build_int64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) 
                 }
                 ArrayCell::U32(vec) => {
                     for item in vec {
-                        list_builder.values().append_option(item.map(|v| v as i64));
+                        list_builder.values().append_option(item.map(i64::from));
                     }
                     list_builder.append(true);
                 }
@@ -1014,7 +1014,7 @@ mod tests {
         assert_eq!(cell_to_i64(&Cell::I64(42)), Some(42));
         assert_eq!(cell_to_i64(&Cell::I64(-42)), Some(-42));
         assert_eq!(cell_to_i64(&Cell::U32(42)), Some(42));
-        assert_eq!(cell_to_i64(&Cell::U32(u32::MAX)), Some(u32::MAX as i64)); // Overflow case
+        assert_eq!(cell_to_i64(&Cell::U32(u32::MAX)), Some(i64::from(u32::MAX))); // Overflow case
         assert_eq!(cell_to_i64(&Cell::Null), None);
         assert_eq!(cell_to_i64(&Cell::I32(42)), None);
         assert_eq!(cell_to_i64(&Cell::String("42".to_owned())), None);

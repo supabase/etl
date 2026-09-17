@@ -415,7 +415,7 @@ async fn new_test_destination(
 
 /// Creates a destination with the legacy immediate-copy policy used by tests
 /// that do not exercise deferred buffering.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn new_unbuffered_destination<S>(
     catalog_url: Url,
     data_url: Url,

@@ -398,7 +398,7 @@ fn cell_to_sql_literal(cell: Cell) -> String {
         Cell::I32(i) => i.to_string(),
         Cell::U32(u) => u.to_string(),
         Cell::I64(i) => i.to_string(),
-        Cell::F32(f) => float_literal(f as f64, false),
+        Cell::F32(f) => float_literal(f64::from(f), false),
         Cell::F64(f) => float_literal(f, true),
         Cell::Numeric(n) => quote_literal(&n.to_string()),
         Cell::Date(d) => format!("DATE '{}'", d.format("%Y-%m-%d")),
@@ -500,7 +500,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
         ArrayCell::F32(v) => v
             .into_iter()
             .map(|o| {
-                o.map_or_else(|| "NULL".to_owned(), |value| float_literal(value as f64, false))
+                o.map_or_else(|| "NULL".to_owned(), |value| float_literal(f64::from(value), false))
             })
             .collect(),
         ArrayCell::F64(v) => v

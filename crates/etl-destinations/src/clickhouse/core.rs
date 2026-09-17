@@ -107,7 +107,8 @@ fn append_cdc_columns(
         ClickHouseEngine::ReplacingMergeTree => {
             let version = sequence_key.as_u128();
             values.push(ClickHouseValue::UInt128(version));
-            values.push(ClickHouseValue::UInt8(matches!(operation, CdcOperation::Delete) as u8));
+            values
+                .push(ClickHouseValue::UInt8(u8::from(matches!(operation, CdcOperation::Delete))));
         }
     }
 }

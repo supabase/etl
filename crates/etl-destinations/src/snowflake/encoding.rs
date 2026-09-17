@@ -108,7 +108,7 @@ impl Serialize for CellSerializer<'_> {
             Cell::U32(n) => ser.serialize_u32(*n),
             Cell::I64(n) => ser.serialize_i64(*n),
             Cell::F32(f) => {
-                reject_non_finite(*f as f64)?;
+                reject_non_finite(f64::from(*f))?;
                 ser.serialize_f32(*f)
             }
             Cell::F64(f) => {
@@ -186,7 +186,7 @@ struct ValidatedF32(f32);
 
 impl Serialize for ValidatedF32 {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
-        reject_non_finite(self.0 as f64)?;
+        reject_non_finite(f64::from(self.0))?;
         ser.serialize_f32(self.0)
     }
 }

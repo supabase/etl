@@ -61,7 +61,7 @@ pub struct StoredDestinationTableMetadataRow {
 /// Inserts or updates the complete metadata for a table at a destination. Uses
 /// upsert semantics: if a row exists for (pipeline_id, table_id), all fields
 /// are updated.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn store_destination_table_metadata(
     pool: &PgPool,
     pipeline_id: i64,

@@ -94,7 +94,7 @@ impl<S, D> ApplyWorker<S, D> {
     /// The worker creates a fresh replication connection for each run attempt
     /// and coordinates with the table sync worker pool for initial
     /// synchronization operations.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         pipeline_id: PipelineId,
         config: Arc<PipelineConfig>,
