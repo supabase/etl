@@ -76,7 +76,8 @@ impl ReplicationMessageStream {
 
 impl Debug for ReplicationMessageStream {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        // CopyBothDuplex does not implement Debug, so omit the opaque transport.
+        // CopyBothDuplex does not implement Debug, so omit the opaque
+        // transport.
         f.debug_struct("ReplicationMessageStream").finish_non_exhaustive()
     }
 }
@@ -105,7 +106,8 @@ mod tests {
     #[test]
     fn malformed_messages_preserve_deserialization_errors() {
         let invalid_transport_frame = Bytes::from_static(b"w");
-        // A valid XLogData header reaches the logical parser with a truncated Begin.
+        // A valid XLogData header reaches the logical parser with a truncated
+        // Begin.
         let mut invalid_logical_frame = vec![b'w'];
         invalid_logical_frame.extend_from_slice(&[0; 24]);
         invalid_logical_frame.push(b'B');

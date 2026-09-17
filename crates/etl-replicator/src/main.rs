@@ -41,8 +41,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ///   memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
 ///
-/// On Linux, this can be overridden via `MALLOC_CONF` env var.
-/// On macOS, use `_RJEM_MALLOC_CONF` (unprefixed symbols not supported).
+/// On Linux, this can be overridden via `MALLOC_CONF` env var. On macOS, use
+/// `_RJEM_MALLOC_CONF` (unprefixed symbols not supported).
 #[cfg(all(target_os = "linux", not(target_env = "msvc")))]
 #[allow(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
@@ -123,7 +123,8 @@ fn try_main() -> ReplicatorResult<()> {
     // Phase 1: synchronous bootstrap before starting Tokio.
     //
     // Keep all fallible synchronous setup here so we fail fast without paying
-    // the cost of building the async runtime unless startup can actually proceed.
+    // the cost of building the async runtime unless startup can actually
+    // proceed.
 
     // Install rustls crypto provider before any TLS operations.
     init::init_crypto();

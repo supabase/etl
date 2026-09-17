@@ -193,8 +193,8 @@ fn decrypt(
 
 /// Generates a cryptographically secure random encryption key.
 ///
-/// Creates a new [`RandomizedNonceKey`] for AES-256-GCM encryption using
-/// secure random bytes.
+/// Creates a new [`RandomizedNonceKey`] for AES-256-GCM encryption using secure
+/// random bytes.
 ///
 /// # Panics
 /// Panics if `T` doesn't match the required key length for AES-256-GCM.

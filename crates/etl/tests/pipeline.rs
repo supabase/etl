@@ -667,7 +667,8 @@ async fn reset_during_active_copy_is_overwritten_by_active_worker() {
     // overrides the `Init` state which was set by the reset.
     held_write.release_ok();
 
-    // The active worker completes the copy and overwrites the stored Init state.
+    // The active worker completes the copy and overwrites the stored Init
+    // state.
     table_sync_done_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
@@ -777,8 +778,8 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     table_ready_notify.notified().await;
 
     // Add two tables while the original apply slot is still active. Publication
-    // membership is reconciled on restart, when one table will be initialized as
-    // `Init` and the other will already have a persisted `Errored` state.
+    // membership is reconciled on restart, when one table will be initialized
+    // as `Init` and the other will already have a persisted `Errored` state.
     let init_table_name = test_table_name("init_before_slot_loss");
     let init_table_id = database
         .create_table(init_table_name.clone(), true, &[("value", "int4 not null")])
@@ -813,7 +814,8 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     assert!(!table_schemas.contains_key(&init_table_id));
     assert!(!table_schemas.contains_key(&errored_table_id));
 
-    // Verify that the replication slot for the apply worker exists and is inactive.
+    // Verify that the replication slot for the apply worker exists and is
+    // inactive.
     database.wait_for_slot_inactive(&apply_slot_name).await;
 
     let slot_state = database.get_replication_slot_state(&apply_slot_name).await.unwrap();
@@ -838,8 +840,8 @@ async fn pipeline_recreates_missing_apply_slot_with_mixed_table_states() {
     let stale_checkpoint = PgLsn::from(u64::MAX);
     store.upsert_replication_checkpoint(WorkerType::Apply, stale_checkpoint).await.unwrap();
 
-    // Delete the apply worker slot after pausing the pipeline. No source changes
-    // occur between the pause and slot recreation.
+    // Delete the apply worker slot after pausing the pipeline. No source
+    // changes occur between the pause and slot recreation.
     database
         .run_sql(&format!("select pg_drop_replication_slot({})", quote_literal(&apply_slot_name)))
         .await
@@ -956,8 +958,8 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
     // Invalidate the slot.
     database.invalidate_slot(&apply_slot_name).await.unwrap();
 
-    // Restart the pipeline, it should fail because the slot is invalidated
-    // and error behavior is configured.
+    // Restart the pipeline, it should fail because the slot is invalidated and
+    // error behavior is configured.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         pipeline_id,
@@ -1310,8 +1312,8 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     assert_eq!(*table_schemas.get(&expected_users_schema.id).unwrap(), expected_users_schema);
     assert_eq!(*table_schemas.get(&expected_orders_schema.id).unwrap(), expected_orders_schema);
 
-    // We recreate a pipeline, assuming the other one was stopped, using the same
-    // state and destination.
+    // We recreate a pipeline, assuming the other one was stopped, using the
+    // same state and destination.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1424,8 +1426,8 @@ async fn publication_changes_are_correctly_handled() {
         .await
         .unwrap();
 
-    // Shutdown pipeline after the table was dropped. We do this to show that the
-    // dropping of a table doesn't cause issues with the pipeline since the
+    // Shutdown pipeline after the table was dropped. We do this to show that
+    // the dropping of a table doesn't cause issues with the pipeline since the
     // change is picked up on pipeline restart.
     pipeline.shutdown_and_wait().await.unwrap();
 
@@ -1668,8 +1670,8 @@ async fn publication_for_all_tables_in_schema_ignores_new_tables_until_restart()
         database.create_table(table_2.clone(), true, &[("value", "int4 not null")]).await.unwrap();
     database.insert_values(table_2.clone(), &["value"], &[&1_i32]).await.unwrap();
 
-    // Wait for the events to come in from the new table to make sure the pipeline
-    // reacts to them gracefully even if they are not replicated.
+    // Wait for the events to come in from the new table to make sure the
+    // pipeline reacts to them gracefully even if they are not replicated.
     sleep(Duration::from_secs(2)).await;
 
     // Shutdown and verify no errors occurred.
@@ -1805,8 +1807,8 @@ async fn run_table_sync_copy_case<F>(
     let orders_table_copied_rows = table_rows.get(&orders_table_id).map_or(0, Vec::len);
     assert_eq!(users_table_copied_rows, expected_users_copied_rows);
     assert_eq!(orders_table_copied_rows, expected_orders_copied_rows);
-    // We always expect the method to be called since the downstream table should be
-    // created nonetheless.
+    // We always expect the method to be called since the downstream table
+    // should be created nonetheless.
     assert_eq!(destination.write_table_rows_called().await, 2);
 
     // We validate that the single insert was received.
@@ -2017,8 +2019,8 @@ async fn table_copy_and_sync_streams_new_data() {
     // individually by table since the only thing we are guaranteed is that the
     // order of operations is preserved within the same table but not across
     // tables given the asynchronous nature of the pipeline (e.g., we could
-    // start streaming earlier on a table for data which was inserted after another
-    // table which was modified before this one)
+    // start streaming earlier on a table for data which was inserted after
+    // another table which was modified before this one)
     let events = destination.get_events().await;
     let grouped_events = group_events_by_type_and_table_id(&events);
     let users_inserts =
@@ -2546,7 +2548,8 @@ async fn table_sync_drops_destination_table_after_state_reset() {
     cdc_events_notify.notified().await;
     users_ready_notify.notified().await;
 
-    // Verify state before reset: table_rows has initial data, events has CDC data.
+    // Verify state before reset: table_rows has initial data, events has CDC
+    // data.
     let table_rows_before = destination.get_table_rows().await;
     let users_rows_before =
         table_rows_before.get(&database_schema.users_schema().id).unwrap().len();
@@ -2701,14 +2704,14 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     pipeline.start().await.unwrap();
 
     // Spawn a task that inserts data concurrently using a separate connection.
-    // This creates a race condition where some rows may be captured during table
-    // copy and others during streaming replication.
+    // This creates a race condition where some rows may be captured during
+    // table copy and others during streaming replication.
     let users_table_name = database_schema.users_schema().name.clone();
     let orders_table_name = database_schema.orders_schema().name.clone();
     let mut duplicate_database = database.duplicate().await;
 
-    // Use a JoinHandle to ensure the task completes and the database isn't dropped
-    // prematurely.
+    // Use a JoinHandle to ensure the task completes and the database isn't
+    // dropped prematurely.
     let insert_handle = tokio::spawn(async move {
         insert_mock_data(
             &mut duplicate_database,
@@ -2719,8 +2722,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
         )
         .await;
 
-        // Return the database to prevent it from being dropped and destroying the test
-        // database.
+        // Return the database to prevent it from being dropped and destroying
+        // the test database.
         duplicate_database
     });
 
@@ -2728,7 +2731,8 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     orders_sync_complete_notify.notified().await;
     all_events_notify.notified().await;
 
-    // Wait for the insert task to complete and retrieve the database connection.
+    // Wait for the insert task to complete and retrieve the database
+    // connection.
     let duplicate_database = insert_handle.await.unwrap();
 
     // Validate that the sum of table rows (from copy) + insert events (from

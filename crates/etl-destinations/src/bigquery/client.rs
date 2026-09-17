@@ -359,7 +359,8 @@ fn process_append_result(append_result: AppendResult) -> AppendRequestProcessRes
     for response in append_result.responses {
         match response {
             Ok(response) => {
-                // Row-level errors are permanent failures (bad data, schema mismatch, etc).
+                // Row-level errors are permanent failures (bad data, schema
+                // mismatch, etc).
                 if !response.row_errors.is_empty() {
                     row_errors.extend(response.row_errors);
                 }
@@ -479,9 +480,9 @@ fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
 
 /// Builds the error returned when local Storage Write retries are exhausted.
 ///
-/// The destination absorbs common short Storage Write retry windows locally.
-/// If BigQuery still has not accepted the append once that bounded window
-/// expires, the worker-level timed retry policy should take over.
+/// The destination absorbs common short Storage Write retry windows locally. If
+/// BigQuery still has not accepted the append once that bounded window expires,
+/// the worker-level timed retry policy should take over.
 fn storage_write_retry_timeout_error(detail: &str) -> EtlError {
     etl_error!(
         ErrorKind::DestinationAtomicBatchRetryable,
@@ -579,86 +580,85 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
             (ErrorKind::InvalidData, "BigQuery invalid metadata value")
         }
         BQError::TonicStatusError(status) => match status.code() {
-            // Code::Unavailable (14) - Canonical "service unavailable" code.
-            // Indicates transient conditions like network issues, server overload, or intentional
-            // throttling. BigQuery returns this with messages like "Task is overloaded".
-            // Retriable per Google's Storage Write API guidance.
+            // Code::Unavailable (14) - Canonical "service unavailable" code. Indicates transient
+            // conditions like network issues, server overload, or intentional throttling. BigQuery
+            // returns this with messages like "Task is overloaded". Retriable per Google's Storage
+            // Write API guidance.
             Code::Unavailable => (ErrorKind::DestinationError, "BigQuery unavailable"),
 
-            // Code::Internal (13) - Internal server errors.
-            // In BigQuery context, often manifests as transient backend issues, GOAWAY frames,
-            // or temporary processing failures. Retriable per BigQuery backend team guidance.
+            // Code::Internal (13) - Internal server errors. In BigQuery context, often manifests as
+            // transient backend issues, GOAWAY frames, or temporary processing failures. Retriable
+            // per BigQuery backend team guidance.
             Code::Internal => (ErrorKind::DestinationError, "BigQuery internal error"),
 
-            // Code::Aborted (10) - Concurrency conflicts or server-initiated aborts.
-            // For Storage Write API, includes sequencer failures and stream aborts due to
-            // transient conditions. Retriable per BigQuery backend team guidance.
+            // Code::Aborted (10) - Concurrency conflicts or server-initiated aborts. For Storage
+            // Write API, includes sequencer failures and stream aborts due to transient conditions.
+            // Retriable per BigQuery backend team guidance.
             Code::Aborted => (ErrorKind::DestinationError, "BigQuery operation aborted"),
 
-            // Code::Cancelled (1) - Server-cancelled operations.
-            // In streaming context, server may cancel in-flight appends due to internal
-            // reshuffling. Retriable per BigQuery backend team guidance.
+            // Code::Cancelled (1) - Server-cancelled operations. In streaming context, server may
+            // cancel in-flight appends due to internal reshuffling. Retriable per BigQuery backend
+            // team guidance.
             Code::Cancelled => (ErrorKind::DestinationError, "BigQuery operation cancelled"),
 
-            // Code::DeadlineExceeded (4) - Operation timeout.
-            // Request may or may not have completed server-side. Safe to retry with offset-based
-            // deduplication in Storage Write API. Retriable per Google's guidance.
+            // Code::DeadlineExceeded (4) - Operation timeout. Request may or may not have completed
+            // server-side. Safe to retry with offset-based deduplication in Storage Write API.
+            // Retriable per Google's guidance.
             Code::DeadlineExceeded => (ErrorKind::DestinationError, "BigQuery deadline exceeded"),
 
-            // Code::ResourceExhausted (8) - Quota or rate limit exhaustion.
-            // Requires exponential backoff to allow server capacity recovery. Retriable per
-            // Google's Storage Write API guidance, though may need longer backoff periods.
+            // Code::ResourceExhausted (8) - Quota or rate limit exhaustion. Requires exponential
+            // backoff to allow server capacity recovery. Retriable per Google's Storage Write API
+            // guidance, though may need longer backoff periods.
             Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
 
-            // Code::FailedPrecondition (9) - Precondition failures.
-            // Indicates issues like STREAM_FINALIZED, INVALID_STREAM_STATE, or SCHEMA_MISMATCH.
-            // Requires fixing the underlying issue before retrying. Never retry automatically.
+            // Code::FailedPrecondition (9) - Precondition failures. Indicates issues like
+            // STREAM_FINALIZED, INVALID_STREAM_STATE, or SCHEMA_MISMATCH. Requires fixing the
+            // underlying issue before retrying. Never retry automatically.
             Code::FailedPrecondition => {
                 (ErrorKind::DestinationError, "BigQuery precondition failed")
             }
 
-            // Code::Unknown (2) - Transport-level errors.
-            // When message contains "transport" or "connection", indicates errors that never
-            // reached the server (TCP resets, HTTP/2 GOAWAY). Retriable as per transport error
-            // guidance.
+            // Code::Unknown (2) - Transport-level errors. When message contains "transport" or
+            // "connection", indicates errors that never reached the server (TCP resets, HTTP/2
+            // GOAWAY). Retriable as per transport error guidance.
             Code::Unknown => (ErrorKind::DestinationError, "BigQuery unknown error"),
 
-            // Code::PermissionDenied (7) - Authorization failure.
-            // Requires IAM permission changes. Never retry.
+            // Code::PermissionDenied (7) - Authorization failure. Requires IAM permission changes.
+            // Never retry.
             Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
 
-            // Code::Unauthenticated (16) - Authentication failure.
-            // Requires credential refresh or configuration fix. Never retry.
+            // Code::Unauthenticated (16) - Authentication failure. Requires credential refresh or
+            // configuration fix. Never retry.
             Code::Unauthenticated => {
                 (ErrorKind::DestinationError, "BigQuery authentication failed")
             }
 
-            // Code::InvalidArgument (3) - Malformed request or invalid data.
-            // Client bug that requires code changes. Never retry.
+            // Code::InvalidArgument (3) - Malformed request or invalid data. Client bug that
+            // requires code changes. Never retry.
             Code::InvalidArgument => (ErrorKind::DestinationError, "BigQuery invalid argument"),
 
-            // Code::NotFound (5) - Resource doesn't exist.
-            // Requires creating the resource (table, dataset, stream) first. Never retry.
+            // Code::NotFound (5) - Resource doesn't exist. Requires creating the resource (table,
+            // dataset, stream) first. Never retry.
             Code::NotFound => (ErrorKind::DestinationTableMissing, "BigQuery entity not found"),
 
-            // Code::AlreadyExists (6) - Entity conflict during creation.
-            // For streaming with offsets, may indicate row was already written. Never retry.
+            // Code::AlreadyExists (6) - Entity conflict during creation. For streaming with
+            // offsets, may indicate row was already written. Never retry.
             Code::AlreadyExists => {
                 (ErrorKind::DestinationTableAlreadyExists, "BigQuery entity already exists")
             }
 
-            // Code::OutOfRange (11) - Invalid offset for streaming.
-            // Offset beyond current stream end. Requires application-level recovery. Never retry.
+            // Code::OutOfRange (11) - Invalid offset for streaming. Offset beyond current stream
+            // end. Requires application-level recovery. Never retry.
             Code::OutOfRange => (ErrorKind::DestinationError, "BigQuery offset out of range"),
 
-            // Code::Unimplemented (12) - Operation not available.
-            // Feature not supported by BigQuery. Never retry.
+            // Code::Unimplemented (12) - Operation not available. Feature not supported by
+            // BigQuery. Never retry.
             Code::Unimplemented => {
                 (ErrorKind::DestinationError, "BigQuery operation not supported")
             }
 
-            // Code::DataLoss (15) - Unrecoverable data corruption.
-            // Severe error requiring manual intervention. Never retry.
+            // Code::DataLoss (15) - Unrecoverable data corruption. Severe error requiring manual
+            // intervention. Never retry.
             Code::DataLoss => (ErrorKind::DestinationError, "BigQuery data loss"),
 
             // Code::Ok (0) - Should never be an error
@@ -793,8 +793,8 @@ async fn retryable_storage_write_error_detail(
 
     // Storage Write `NOT_FOUND` can be stale default-stream routing when the
     // table still exists after a delete/recreate. This intentionally covers
-    // both BigQuery's explicit "is re-created" message and generic
-    // "Requested entity was not found" responses.
+    // both BigQuery's explicit "is re-created" message and generic "Requested
+    // entity was not found" responses.
     if let Some(detail) = retryable_storage_write_not_found_detail(client, request, error).await? {
         return Ok(Some(detail));
     }
@@ -824,8 +824,8 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -848,8 +848,8 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -868,15 +868,15 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] using Application Default Credentials.
     ///
     /// Authenticates with BigQuery using the environment's default credentials.
-    /// Configures the Storage Write API with the given pool size.
-    /// Returns an error if credentials are missing or invalid.
+    /// Configures the Storage Write API with the given pool size. Returns an
+    /// error if credentials are missing or invalid.
     pub async fn new_with_adc(
         project_id: BigQueryProjectId,
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -892,8 +892,8 @@ impl BigQueryClient {
     /// Creates a new [`BigQueryClient`] using OAuth2 installed flow
     /// authentication.
     ///
-    /// Authenticates with BigQuery using the OAuth2 installed flow.
-    /// Configures the Storage Write API with the given pool size.
+    /// Authenticates with BigQuery using the OAuth2 installed flow. Configures
+    /// the Storage Write API with the given pool size.
     pub async fn new_with_flow_authenticator<S: AsRef<[u8]>, P: Into<std::path::PathBuf>>(
         project_id: BigQueryProjectId,
         secret: S,
@@ -901,8 +901,8 @@ impl BigQueryClient {
         connection_pool_size: usize,
     ) -> EtlResult<BigQueryClient> {
         let max_inflight_requests = compute_max_inflight_requests(connection_pool_size);
-        // Gzip is CPU-bound on every append with no compression-level control, and rows
-        // can carry large text/JSON payloads.
+        // Gzip is CPU-bound on every append with no compression-level control,
+        // and rows can carry large text/JSON payloads.
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
@@ -1373,8 +1373,8 @@ impl BigQueryClient {
     /// Checks whether a dataset exists and is accessible.
     ///
     /// Returns `true` if the dataset exists and the client has access, `false`
-    /// if the dataset does not exist. Returns an error for authentication
-    /// or connectivity failures.
+    /// if the dataset does not exist. Returns an error for authentication or
+    /// connectivity failures.
     pub async fn dataset_exists(&self, dataset_id: &BigQueryDatasetId) -> EtlResult<bool> {
         let result = self.client.dataset().get(&self.project_id, dataset_id).await;
 
@@ -1482,8 +1482,9 @@ impl BigQueryClient {
                 let mut retryable_requests = Vec::new();
                 let mut has_non_retryable_request = false;
 
-                // A call-level Storage Write error is not tied to a single request index. Retry
-                // only if the error is locally retryable for every request in the call.
+                // A call-level Storage Write error is not tied to a single
+                // request index. Retry only if the error is locally retryable
+                // for every request in the call.
                 for request in append_requests {
                     if let Some(detail) =
                         retryable_storage_write_error_detail(self, &request, &error).await?
@@ -1532,8 +1533,8 @@ impl BigQueryClient {
                     }
                 }
                 AppendRequestProcessResult::RequestError { error: request_error } => {
-                    // Request-level errors retain their request index, so only the affected
-                    // request needs to be classified and retried.
+                    // Request-level errors retain their request index, so only
+                    // the affected request needs to be classified and retried.
                     if let Some(detail) = retryable_storage_write_error_detail(
                         self,
                         &append_requests[request_index],

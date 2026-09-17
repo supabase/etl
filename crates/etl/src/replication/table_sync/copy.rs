@@ -177,8 +177,8 @@ fn target_ctid_partition_count(
     // We try to estimate the number of partitions given the worker count.
     let worker_target = max_copy_connections.saturating_mul(CTID_PARTITIONS_PER_COPY_WORKER).max(1);
 
-    // We try to estimate the number of partitions also using the total number of
-    // estimated rows for the table(s).
+    // We try to estimate the number of partitions also using the total number
+    // of estimated rows for the table(s).
     let row_target = total_estimated_rows.filter(|estimated_rows| *estimated_rows > 0).map_or(
         1,
         |estimated_rows| {
@@ -289,10 +289,11 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     );
 
     for worker_index in 0..worker_count {
-        // We fork the connection for each worker since the main replication transaction
-        // has to remain open for the whole duration of the copy. This is needed
-        // since the snapshot exported by the replication transaction is only
-        // valid while that transaction's connection is active.
+        // We fork the connection for each worker since the main replication
+        // transaction has to remain open for the whole duration of the copy.
+        // This is needed since the snapshot exported by the replication
+        // transaction is only valid while that transaction's connection is
+        // active.
         let child_replication_client = match replication_transaction.fork_child().await {
             Ok(child_replication_client) => child_replication_client,
             Err(error) => {

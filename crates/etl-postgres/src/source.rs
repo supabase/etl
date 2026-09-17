@@ -85,11 +85,11 @@ where
 
 /// Extracts the PostgreSQL server version from a version string.
 ///
-/// This function parses version strings like "15.5 (Homebrew)" or "14.2"
-/// and converts them to the numeric format used by PostgreSQL.
+/// This function parses version strings like "15.5 (Homebrew)" or "14.2" and
+/// converts them to the numeric format used by PostgreSQL.
 ///
-/// Returns the version in the format: MAJOR * 10000 + MINOR * 100 + PATCH
-/// For example: PostgreSQL 14.2 = 140200, PostgreSQL 15.1 = 150100
+/// Returns the version in the format: MAJOR * 10000 + MINOR * 100 + PATCH For
+/// example: PostgreSQL 14.2 = 140200, PostgreSQL 15.1 = 150100
 ///
 /// Returns `None` if the version string cannot be parsed or results in zero.
 pub fn extract_server_version(server_version_str: impl AsRef<str>) -> Option<NonZeroI32> {

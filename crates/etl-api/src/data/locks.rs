@@ -65,7 +65,8 @@ pub(crate) async fn lock_pipelines(
     let mut pipeline_ids = pipeline_ids.to_vec();
 
     // Acquire pipeline locks in a consistent order so competing batches do not
-    // each hold a lock the other needs. NOWAIT already prevents waiting on rows.
+    // each hold a lock the other needs. NOWAIT already prevents waiting on
+    // rows.
     pipeline_ids.sort_unstable();
     pipeline_ids.dedup();
 

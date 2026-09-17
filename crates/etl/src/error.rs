@@ -281,7 +281,8 @@ impl EtlError {
         match self.repr {
             ErrorRepr::Single(ref payload) => payload.detail.as_deref(),
             ErrorRepr::Many { ref errors, .. } => {
-                // For multiple errors, return the detail of the first error that has one.
+                // For multiple errors, return the detail of the first error
+                // that has one.
                 errors.iter().find_map(|e| e.detail())
             }
         }
@@ -302,9 +303,8 @@ impl EtlError {
     /// modified instance.
     ///
     /// The stored source is preserved across clones and exposed via
-    /// [`error::Error::source`]. Has no effect when called on aggregated
-    /// errors because aggregates forward the first contained error as their
-    /// source.
+    /// [`error::Error::source`]. Has no effect when called on aggregated errors
+    /// because aggregates forward the first contained error as their source.
     pub fn with_source<E>(mut self, source: E) -> Self
     where
         E: error::Error + Send + Sync + 'static,
@@ -985,8 +985,8 @@ impl From<sqlx::Error> for EtlError {
     }
 }
 
-/// Converts [`etl_postgres::slots::EtlReplicationSlotError`] to
-/// [`EtlError`] with appropriate error kind.
+/// Converts [`etl_postgres::slots::EtlReplicationSlotError`] to [`EtlError`]
+/// with appropriate error kind.
 impl From<etl_postgres::slots::EtlReplicationSlotError> for EtlError {
     fn from(err: etl_postgres::slots::EtlReplicationSlotError) -> EtlError {
         match err {
@@ -1487,7 +1487,8 @@ mod tests {
             hash::{Hash, Hasher},
         };
 
-        // Same kind and description with different details should produce same hash.
+        // Same kind and description with different details should produce same
+        // hash.
         let err1 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query failed",

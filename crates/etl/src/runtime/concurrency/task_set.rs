@@ -145,8 +145,8 @@ impl TaskSet {
     /// Handles the outcome of a completed task.
     ///
     /// If a task has panicked, we want to return the error immediately to avoid
-    /// having invariants being violated by the fact that a panic occurred
-    /// but was swallowed.
+    /// having invariants being violated by the fact that a panic occurred but
+    /// was swallowed.
     fn handle_task_result(&self, result: Result<(), tokio::task::JoinError>) -> EtlResult<()> {
         match result {
             Ok(()) => Ok(()),

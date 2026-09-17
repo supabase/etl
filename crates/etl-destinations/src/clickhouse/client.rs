@@ -120,9 +120,9 @@ pub(crate) struct ClickHouseTableColumn {
 
 /// Returns the placement clause for an `ADD COLUMN` statement.
 ///
-/// `None` means the destination table has no user columns to anchor on, so
-/// the new column goes at the front via `FIRST` (which still places it
-/// before the trailing CDC columns).
+/// `None` means the destination table has no user columns to anchor on, so the
+/// new column goes at the front via `FIRST` (which still places it before the
+/// trailing CDC columns).
 fn add_column_placement_clause(after_column: Option<&str>) -> String {
     match after_column {
         Some(anchor) => format!("AFTER {}", quote_identifier(anchor)),
@@ -296,10 +296,9 @@ impl ClickHouseClient {
     }
 
     /// Variant of [`Self::new`] that does not pin the client to a target
-    /// database. The server falls back to the user's profile default
-    /// database for every query, which lets the validator probe
-    /// connectivity / auth / database existence before the user-supplied
-    /// database is known to exist.
+    /// database. The server falls back to the user's profile default database
+    /// for every query, which lets the validator probe connectivity / auth /
+    /// database existence before the user-supplied database is known to exist.
     pub fn new_without_database(
         url: Url,
         user: impl Into<String>,
@@ -347,14 +346,12 @@ impl ClickHouseClient {
                     )
                     .with_option("http_send_timeout", floor_secs(config.insert_timeout))
                     .with_option("http_receive_timeout", floor_secs(config.insert_timeout))
-                    // Force synchronous insert acknowledgements: when a server
-                    // or user profile enables `async_insert` with
-                    // `wait_for_async_insert = 0`, ClickHouse acks inserts
-                    // before flushing the async-insert buffer into the table,
-                    // letting a following schema change overtake acked rows.
-                    // Pinning the setting makes every ack imply the rows were
-                    // flushed into the table; it is a no-op when async inserts
-                    // are disabled.
+                    // Force synchronous insert acknowledgements: when a server or user profile
+                    // enables `async_insert` with `wait_for_async_insert = 0`, ClickHouse acks
+                    // inserts before flushing the async-insert buffer into the table, letting a
+                    // following schema change overtake acked rows. Pinning the setting makes every
+                    // ack imply the rows were flushed into the table; it is a no-op when async
+                    // inserts are disabled.
                     .with_option("wait_for_async_insert", "1")
             }),
             config,
@@ -363,10 +360,10 @@ impl ClickHouseClient {
 
     /// Verifies that the ClickHouse server is reachable.
     ///
-    /// Issues a `SELECT 1` round-trip; cheaper than any DDL or metadata
-    /// query and exercises the auth/transport path. Mirrors the Iceberg
-    /// destination's `validate_connectivity` so callers (notably the
-    /// `etl-api` validators) can treat the two destinations uniformly.
+    /// Issues a `SELECT 1` round-trip; cheaper than any DDL or metadata query
+    /// and exercises the auth/transport path. Mirrors the Iceberg destination's
+    /// `validate_connectivity` so callers (notably the `etl-api` validators)
+    /// can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
         let query = self
             .inner
@@ -388,10 +385,9 @@ impl ClickHouseClient {
 
     /// Returns whether `database` exists on the ClickHouse server.
     ///
-    /// Queries `system.databases` directly so the result is independent of
-    /// the client's configured database. Pair with
-    /// [`Self::new_without_database`] to probe existence of a database
-    /// whose presence is unknown.
+    /// Queries `system.databases` directly so the result is independent of the
+    /// client's configured database. Pair with [`Self::new_without_database`]
+    /// to probe existence of a database whose presence is unknown.
     pub async fn database_exists(&self, database: &str) -> EtlResult<bool> {
         let query = self
             .inner
@@ -529,8 +525,8 @@ impl ClickHouseClient {
     /// Renames a column in an existing ClickHouse table (idempotent).
     ///
     /// `RENAME COLUMN IF EXISTS` makes the ALTER a server-side noop when the
-    /// old column is already absent, so the check and the rename happen in
-    /// one statement without a racy read-then-write.
+    /// old column is already absent, so the check and the rename happen in one
+    /// statement without a racy read-then-write.
     pub(crate) async fn rename_column(
         &self,
         table_name: &str,
@@ -563,9 +559,9 @@ impl ClickHouseClient {
         table_name: &str,
         column_name: &str,
     ) -> EtlResult<()> {
-        // ClickHouse returns BAD_ARGUMENTS when REMOVE DEFAULT targets a
-        // column without a default, so make the default-removal step idempotent
-        // with a metadata check while schema DDL is serialized.
+        // ClickHouse returns BAD_ARGUMENTS when REMOVE DEFAULT targets a column
+        // without a default, so make the default-removal step idempotent with a
+        // metadata check while schema DDL is serialized.
         let schema_secs = floor_secs(self.config.schema_query_timeout);
         let query = self
             .inner
@@ -654,9 +650,9 @@ impl ClickHouseClient {
     /// `nullable_flags` must have the same length as each row.
     ///
     /// When the accumulated uncompressed byte count reaches
-    /// `max_bytes_per_insert` the current INSERT statement is committed and
-    /// a new one is opened, keeping peak memory usage bounded for large
-    /// initial copies.
+    /// `max_bytes_per_insert` the current INSERT statement is committed and a
+    /// new one is opened, keeping peak memory usage bounded for large initial
+    /// copies.
     ///
     /// The `replication_path` label (`"copy"` or `"cdc"`) is attached to the
     /// `etl_clickhouse_insert_duration_seconds` histogram recorded after each
@@ -924,8 +920,8 @@ mod tests {
     /// `Display` is invoked.
     ///
     /// # THEN
-    /// It produces the human-readable op name interpolated into error
-    /// messages by `timeout_call`.
+    /// It produces the human-readable op name interpolated into error messages
+    /// by `timeout_call`.
     #[test]
     fn operation_kind_display_matches_error_messages() {
         assert_eq!(ClickHouseOperationKind::ConnectivityCheck.to_string(), "connectivity check");
@@ -941,13 +937,13 @@ mod tests {
     /// `timeout_call` is awaited under paused time.
     ///
     /// # THEN
-    /// It returns an `EtlError` with kind `DestinationTimeout` and a
-    /// detail that mentions the op and "timed out".
+    /// It returns an `EtlError` with kind `DestinationTimeout` and a detail
+    /// that mentions the op and "timed out".
     #[tokio::test(start_paused = true)]
     async fn timeout_call_returns_destination_timeout_on_deadline() {
         // A future that never resolves; tokio's paused clock advances virtual
-        // time when all tasks are stalled, so the timeout fires immediately
-        // in real wall-clock terms.
+        // time when all tasks are stalled, so the timeout fires immediately in
+        // real wall-clock terms.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
         let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, None, never)
@@ -986,15 +982,14 @@ mod tests {
     }
 
     /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` before the
-    /// deadline.
+    /// A future that returns a `clickhouse::error::Error` before the deadline.
     ///
     /// # WHEN
     /// `timeout_call` is awaited with no context.
     ///
     /// # THEN
-    /// It returns an `EtlError` with the op's `failed_kind` and a detail
-    /// that mentions the op and "failed".
+    /// It returns an `EtlError` with the op's `failed_kind` and a detail that
+    /// mentions the op and "failed".
     #[tokio::test(start_paused = true)]
     async fn timeout_call_propagates_inner_error() {
         let config = ClickHouseClientConfig::default();
@@ -1028,15 +1023,14 @@ mod tests {
     }
 
     /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` and
-    /// `Some(context)`.
+    /// A future that returns a `clickhouse::error::Error` and `Some(context)`.
     ///
     /// # WHEN
     /// `timeout_call` is awaited.
     ///
     /// # THEN
-    /// The error has the op's `failed_kind`, the detail contains the
-    /// context, and the inner clickhouse error is attached as `source`.
+    /// The error has the op's `failed_kind`, the detail contains the context,
+    /// and the inner clickhouse error is attached as `source`.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_inner_error_includes_context() {
         use std::error::Error as _;
@@ -1087,8 +1081,8 @@ mod tests {
     /// `failed_kind` is queried.
     ///
     /// # THEN
-    /// Each variant maps to the `ErrorKind` that drives the appropriate
-    /// retry policy for that bucket.
+    /// Each variant maps to the `ErrorKind` that drives the appropriate retry
+    /// policy for that bucket.
     #[test]
     fn operation_kind_failed_kind_per_bucket() {
         assert_eq!(
@@ -1127,7 +1121,8 @@ mod tests {
         assert_eq!(floor_secs(Duration::from_nanos(1)), "1");
         assert_eq!(floor_secs(Duration::from_millis(500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(999)), "1");
-        // Fractional seconds beyond 1s truncate to whole seconds (Duration::as_secs).
+        // Fractional seconds beyond 1s truncate to whole seconds
+        // (Duration::as_secs).
         assert_eq!(floor_secs(Duration::from_millis(1500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(2999)), "2");
     }

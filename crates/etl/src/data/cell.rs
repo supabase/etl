@@ -8,10 +8,9 @@ use crate::data::{PgNumeric, PgTimeTz};
 /// [`Cell`] is the primary data container for individual values during ETL
 /// processing. It represents the ergonomic Rust value shape passed to
 /// destinations, not the source database schema type. The original Postgres
-/// type remains available on the corresponding
-/// [`crate::schema::ColumnSchema`], so values without specialized Rust
-/// semantics can be preserved as [`Cell::String`] while destinations still know
-/// the source column type.
+/// type remains available on the corresponding [`crate::schema::ColumnSchema`],
+/// so values without specialized Rust semantics can be preserved as
+/// [`Cell::String`] while destinations still know the source column type.
 ///
 /// The enum is designed to make destination conversion efficient while
 /// maintaining data fidelity.

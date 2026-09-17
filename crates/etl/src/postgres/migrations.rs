@@ -36,9 +36,8 @@ async fn create_migration_connection(
     // Create the `etl` schema if it doesn't exist.
     conn.execute("create schema if not exists etl;").await?;
 
-    // Set the `search_path` to `etl` so that the `_sqlx_migrations`
-    // metadata table is created inside that schema instead of the public
-    // schema.
+    // Set the `search_path` to `etl` so that the `_sqlx_migrations` metadata
+    // table is created inside that schema instead of the public schema.
     conn.execute("set search_path = 'etl';").await?;
 
     Ok(conn)
@@ -89,16 +88,16 @@ async fn run_migration_set(
 
 /// Runs source-side migrations required by every ETL pipeline.
 ///
-/// These migrations install the `etl` schema, schema snapshot helper
-/// functions, and the DDL event trigger used by replication.
-/// When the configured source is a physical standby, this function skips
-/// migration execution because standby connections are read-only. In that
-/// setup, source-side migrations must be applied on the primary and then
-/// replayed to the standby before the pipeline starts.
+/// These migrations install the `etl` schema, schema snapshot helper functions,
+/// and the DDL event trigger used by replication. When the configured source is
+/// a physical standby, this function skips migration execution because standby
+/// connections are read-only. In that setup, source-side migrations must be
+/// applied on the primary and then replayed to the standby before the pipeline
+/// starts.
 ///
 /// [`crate::pipeline::Pipeline::start`] runs these migrations automatically.
-/// This function is public for applications that want to preflight or
-/// pre-apply the source-side setup.
+/// This function is public for applications that want to preflight or pre-apply
+/// the source-side setup.
 pub async fn run_source_migrations(source_config: &PgConnectionConfig) -> EtlResult<()> {
     let in_recovery = source_database_in_recovery(source_config).await.map_err(|err| {
         etl_error!(

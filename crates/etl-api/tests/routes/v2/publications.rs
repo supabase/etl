@@ -305,8 +305,8 @@ async fn publication_v2_resolves_table_names_from_ids_after_renames() {
         .await
         .unwrap();
 
-    // The response still carries the old display name, but the table OID is
-    // the request identity and resolves to the renamed table.
+    // The response still carries the old display name, but the table OID is the
+    // request identity and resolves to the renamed table.
     let response =
         app.create_source_publication_v2(tenant_id, source_id, "id_only_v2", &created.config).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -337,10 +337,10 @@ async fn publication_v2_ignores_client_supplied_schema_and_name() {
         .unwrap();
     let table_id = u32::try_from(table_id).unwrap();
 
-    // A client supplying `schema`/`name` alongside `id` (e.g. by echoing back
-    // a GET response) must not influence which table is targeted, or leak
-    // its bogus values into the stored/returned configuration: only `id` is
-    // the request identity.
+    // A client supplying `schema`/`name` alongside `id` (e.g. by echoing back a
+    // GET response) must not influence which table is targeted, or leak its
+    // bogus values into the stored/returned configuration: only `id` is the
+    // request identity.
     let config = json!({
         "type": "tables",
         "tables": [{ "id": table_id, "schema": "not_a_real_schema", "name": "not_a_real_name" }],

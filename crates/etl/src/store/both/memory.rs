@@ -21,9 +21,9 @@ use crate::{
 /// Inner state of [`MemoryStore`].
 #[derive(Debug)]
 struct Inner {
-    /// Current table state for each table - this is the authoritative
-    /// source of truth for table states. Every table being replicated must
-    /// have an entry here.
+    /// Current table state for each table - this is the authoritative source of
+    /// truth for table states. Every table being replicated must have an entry
+    /// here.
     table_states: TableStates,
     /// Complete history of state transitions for each table, used for debugging
     /// and auditing. This is an append-only log that grows over time and
@@ -45,9 +45,9 @@ struct Inner {
 /// keeps all data in memory. This is ideal for testing, development, and
 /// scenarios where persistence is not required.
 ///
-/// All state information, including table states, schema
-/// definitions, and destination table metadata are stored in memory and will be
-/// lost on process restart.
+/// All state information, including table states, schema definitions, and
+/// destination table metadata are stored in memory and will be lost on process
+/// restart.
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     inner: Arc<Mutex<Inner>>,

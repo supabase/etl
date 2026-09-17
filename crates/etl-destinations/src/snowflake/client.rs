@@ -60,9 +60,9 @@ pub(super) struct TableLifecycleGuard {
 ///
 /// [`Client::drop_detached_table_for_copy`] consumes the value outside that
 /// timeout to drop the Snowpipe channel and Snowflake table. This split keeps
-/// local draining and lock acquisition bounded without cancelling a remote
-/// drop whose outcome would then be unknown. The table lifecycle guard remains
-/// held through both phases, preventing setup from publishing a stale channel.
+/// local draining and lock acquisition bounded without cancelling a remote drop
+/// whose outcome would then be unknown. The table lifecycle guard remains held
+/// through both phases, preventing setup from publishing a stale channel.
 ///
 /// This value does not block event admission. The caller must retain its
 /// [`etl::destination::TaskSetDrainGuard`] until the remote drop returns.
@@ -616,9 +616,10 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             self.wait_for_pending_durability().await?;
             let mut guard = self.get_channel(table_id).await?.lock_owned().await;
 
-            // A sender holds this channel lock until it records any accepted batch
-            // in `pending_durability`. If a sender finished after the wait above,
-            // release the channel and drain its batch before truncating.
+            // A sender holds this channel lock until it records any accepted
+            // batch in `pending_durability`. If a sender finished after the
+            // wait above, release the channel and drain its batch before
+            // truncating.
             if self.pending_durability.lock().await.has_target(table_id) {
                 drop(guard);
                 continue;
@@ -626,9 +627,9 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
             let table_name = guard.table_name().to_owned();
 
-            // Open at the truncate offset before clearing the table. This waits for
-            // any in-flight rowset to commit and invalidates the previous owner's
-            // continuation token.
+            // Open at the truncate offset before clearing the table. This waits
+            // for any in-flight rowset to commit and invalidates the previous
+            // owner's continuation token.
             let status = guard.open_at(truncate_offset).await?;
             let channel_created_on_ms = status.created_on_ms.ok_or_else(|| {
                 Error::Channel(
@@ -648,8 +649,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             .request_id();
             self.sql_client.truncate_table(&table_name, request_id).await?;
 
-            // TRUNCATE may invalidate that token, so reopen at the same offset before
-            // allowing another sender to acquire the channel lock.
+            // TRUNCATE may invalidate that token, so reopen at the same offset
+            // before allowing another sender to acquire the channel lock.
             guard.open_at(truncate_offset).await?;
             return Ok(());
         }
@@ -659,15 +660,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     ///
     /// Callers must first prevent new streaming tasks from being admitted and
     /// wait for previously admitted tasks to finish. The returned token can
-    /// then be used to perform the potentially slow remote drop without
-    /// leaving a pending target that refers to a removed channel.
+    /// then be used to perform the potentially slow remote drop without leaving
+    /// a pending target that refers to a removed channel.
     pub(super) async fn detach_table_for_copy(
         &self,
         table_id: TableId,
         table_name: &str,
     ) -> Result<DetachedTableForCopy<C>> {
         // Event tasks must be drained before taking this gate, since they may
-        // need it to finish opening a channel. Never wait on it under a registry.
+        // need it to finish opening a channel. Never wait on it under a
+        // registry.
         let table = self.lock_table(table_id).await;
         let mut pending = self.pending_durability.lock().await;
         pending.discard(table_id)?;
@@ -1124,7 +1126,8 @@ mod tests {
         let mut setup = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
         assert!(poll_once(setup.as_mut()).is_pending());
 
-        // Model the first caller publishing while the second waits for its gate.
+        // Model the first caller publishing while the second waits for its
+        // gate.
         let channel = Arc::new(Mutex::new(ChannelHandle::new(
             Arc::clone(&client.stream_client),
             client.pipeline_id,

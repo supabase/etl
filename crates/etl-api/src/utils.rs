@@ -75,8 +75,8 @@ where
 
 /// Deserializes and trims a Supabase project ref.
 ///
-/// Values that are not strict project refs are rejected.
-/// The project ref is interpolated into the Iceberg catalog URL.
+/// Values that are not strict project refs are rejected. The project ref is
+/// interpolated into the Iceberg catalog URL.
 pub fn trim_supabase_project_ref<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
@@ -111,8 +111,8 @@ pub fn parse_docker_image_tag(image: &str) -> String {
     // Identify optional digest marker within the segment
     let at_pos = segment.find('@');
 
-    // Search for ':' in the segment, but if a digest '@' exists, ignore ':' that
-    // occur after it
+    // Search for ':' in the segment, but if a digest '@' exists, ignore ':'
+    // that occur after it
     let colon_pos_in_segment = match at_pos {
         Some(at_idx) => segment[..at_idx].find(':'),
         None => segment.find(':'),
@@ -133,8 +133,8 @@ pub fn parse_docker_image_tag(image: &str) -> String {
         return tag.to_owned();
     }
 
-    // No tag in the segment. If there's a digest in the segment, we can't infer a
-    // tag.
+    // No tag in the segment. If there's a digest in the segment, we can't infer
+    // a tag.
     if at_pos.is_some() {
         return "unavailable".to_owned();
     }

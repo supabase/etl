@@ -57,9 +57,8 @@ pub(crate) fn parse_postgres_timestamp(value: &str) -> Result<NaiveDateTime, chr
 /// Parses a Postgres `timestamp with time zone` text value.
 ///
 /// Replication connections set the Postgres session timezone to UTC. This
-/// parser accepts numeric offsets, but UTC session output keeps
-/// `timestamptz` values deterministic before they are normalized into
-/// [`chrono::Utc`].
+/// parser accepts numeric offsets, but UTC session output keeps `timestamptz`
+/// values deterministic before they are normalized into [`chrono::Utc`].
 pub(crate) fn parse_postgres_timestamptz(
     value: &str,
 ) -> Result<DateTime<FixedOffset>, ParseTimeError> {
@@ -218,8 +217,8 @@ mod tests {
         );
 
         // Chrono's `%.f` accepts more than nine fractional digits, so the
-        // fallback keeps accepting them exactly like the previous direct
-        // parse did.
+        // fallback keeps accepting them exactly like the previous direct parse
+        // did.
         assert_eq!(
             parse_postgres_time("12:30:45.1234567890").unwrap(),
             NaiveTime::parse_from_str("12:30:45.1234567890", TIME_FORMAT).unwrap()
