@@ -276,7 +276,7 @@ pub struct UpdateApiPipelineConfig {
     /// Automatic worker retry delay in milliseconds, from 1,000 through
     /// 86,400,000 inclusive. Omission preserves the stored value; null resets
     /// it to the 10,000 millisecond default.
-    #[schema(example = 1000, minimum = 1000, maximum = 86400000)]
+    #[schema(value_type = Option<u64>, example = 1000, minimum = 1000, maximum = 86400000)]
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub table_error_retry_delay_ms: UpdateField<u64>,
     #[schema(example = 5)]
