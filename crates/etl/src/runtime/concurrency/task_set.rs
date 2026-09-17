@@ -180,3 +180,132 @@ impl Default for TaskSet {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    /// Gives the scheduler bounded opportunity to run other tasks.
+    ///
+    /// Used before asserting that a task is still blocked; cooperative
+    /// yields avoid wall-clock sleeps while letting spawned work reach its
+    /// parked state.
+    async fn yield_rounds() {
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Spawns a task that panics and waits until the panic has completed.
+    ///
+    /// The task signals `started` and panics in the same poll with no await
+    /// point between, so once the signal is received the task has already
+    /// finished panicking and its join result is observable.
+    async fn spawn_completed_panic(tasks: &TaskSet) {
+        let (started_tx, started_rx) = oneshot::channel();
+        tasks
+            .spawn(async move {
+                started_tx.send(()).unwrap();
+                panic!("injected task panic");
+            })
+            .await;
+        started_rx.await.unwrap();
+    }
+
+    /// Spawns a task parked on a oneshot channel and returns its release
+    /// sender.
+    async fn spawn_parked_task(tasks: &TaskSet) -> oneshot::Sender<()> {
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        tasks
+            .spawn(async move {
+                let _ = release_rx.await;
+            })
+            .await;
+
+        release_tx
+    }
+
+    #[tokio::test]
+    async fn try_reap_surfaces_task_panic_past_the_reap_threshold() {
+        let tasks = TaskSet::new();
+        spawn_completed_panic(&tasks).await;
+        // Parked fillers push the tracked count past the reap threshold so
+        // the next reap must join the finished panicked task.
+        let mut release_senders = Vec::new();
+        for _ in 0..TASK_REAP_THRESHOLD {
+            release_senders.push(spawn_parked_task(&tasks).await);
+        }
+
+        let error = tasks.try_reap().await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+    }
+
+    #[tokio::test]
+    async fn drain_surfaces_panic_deferred_by_try_reap() {
+        let tasks = TaskSet::new();
+        spawn_completed_panic(&tasks).await;
+
+        // Below the reap threshold the panic is deliberately left unjoined.
+        tasks.try_reap().await.unwrap();
+        let error = tasks.drain().await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+
+        // The failed drain returned no guard, so the registry stays usable
+        // and the consumed panic does not resurface.
+        let _guard = tasks.drain().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_joins_admitted_tasks_before_returning_the_guard() {
+        let tasks = TaskSet::new();
+        let release = spawn_parked_task(&tasks).await;
+
+        let drain_handle = tokio::spawn({
+            let tasks = tasks.clone();
+            async move { tasks.drain().await.map(drop) }
+        });
+        yield_rounds().await;
+        assert!(!drain_handle.is_finished());
+
+        release.send(()).unwrap();
+        drain_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn drain_guard_blocks_registration_until_dropped() {
+        let tasks = TaskSet::new();
+        let guard = tasks.drain().await.unwrap();
+
+        let spawn_handle = tokio::spawn({
+            let tasks = tasks.clone();
+            async move { tasks.spawn(async {}).await }
+        });
+        yield_rounds().await;
+        assert!(!spawn_handle.is_finished());
+
+        drop(guard);
+        spawn_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_aborts_running_tasks_and_swallows_cancellation() {
+        let tasks = TaskSet::new();
+        // The sender is held so the task can only end through abortion.
+        let _release = spawn_parked_task(&tasks).await;
+
+        tasks.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_surfaces_task_panic() {
+        let tasks = TaskSet::new();
+        spawn_completed_panic(&tasks).await;
+
+        let error = tasks.shutdown().await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+    }
+}
