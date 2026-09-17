@@ -49,7 +49,7 @@ use crate::{
     runtime::{
         BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
-            MemoryBatchStream, ShutdownResult, ShutdownRx, table_sync_worker_copy_stream_id,
+            MemoryBatchStream, Shutdown, ShutdownResult, table_sync_worker_copy_stream_id,
         },
     },
     schema::{ReplicatedTableSchema, TableId},
@@ -219,11 +219,6 @@ fn partitions_for_table_weight(
     u16::try_from(partition_count).expect("clamped partition count should fit in u16")
 }
 
-/// Returns true when the table copy should stop for shutdown.
-fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
-    shutdown_rx.has_changed().unwrap_or(true)
-}
-
 /// Copies a table through ctid work items, using worker child connections.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
@@ -237,7 +232,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     out_of_band_source_pool: OutOfBandSourcePool,
     table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
+    shutdown: Shutdown,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -253,7 +248,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         out_of_band_source_pool,
         table_sync_monitor_interval,
         batch_config,
-        shutdown_rx,
+        shutdown,
         destination,
         memory_monitor,
         batch_memory_governor,
@@ -275,7 +270,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
     out_of_band_source_pool: OutOfBandSourcePool,
     table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
+    shutdown: Shutdown,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -320,7 +315,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
         consistent_point,
         out_of_band_source_pool,
         table_sync_monitor_interval,
-        shutdown_rx.clone(),
+        shutdown.clone(),
     );
 
     for worker_index in 0..worker_count {
@@ -345,7 +340,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
         let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
         let batch_config = batch_config.clone();
-        let shutdown_rx = shutdown_rx.clone();
+        let shutdown = shutdown.clone();
         let destination = destination.clone();
         let memory_monitor = memory_monitor.clone();
         let batch_memory_governor = batch_memory_governor.clone();
@@ -361,7 +356,7 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
                 replicated_table_schema,
                 publication_name,
                 batch_config,
-                shutdown_rx,
+                shutdown,
                 destination,
                 memory_monitor,
                 batch_memory_governor,
@@ -564,7 +559,7 @@ async fn table_copy_worker<D>(
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
     batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
+    shutdown: Shutdown,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -577,7 +572,7 @@ where
     let mut progress = TableCopyProgress::default();
 
     loop {
-        if is_shutdown_requested(&shutdown_rx) {
+        if shutdown.is_requested() {
             info!(table_id = table_id.0, worker_index, "table copy worker received shutdown");
 
             return Ok(TableCopyWorkerOutcome::Shutdown);
@@ -600,7 +595,7 @@ where
             publication_name.clone(),
             copy_partition,
             batch_config.clone(),
-            shutdown_rx.clone(),
+            shutdown.clone(),
             destination.clone(),
             memory_monitor.clone(),
             batch_memory_governor.clone(),
@@ -625,7 +620,7 @@ async fn table_copy_partition_rows<D>(
     publication_name: Option<String>,
     partition: TableCopyPartition,
     batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
+    shutdown: Shutdown,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -633,7 +628,7 @@ async fn table_copy_partition_rows<D>(
 where
     D: Destination + Clone + Send + 'static,
 {
-    if is_shutdown_requested(&shutdown_rx) {
+    if shutdown.is_requested() {
         return Ok(ShutdownResult::Shutdown(TableCopyProgress::default()));
     }
 
@@ -674,7 +669,7 @@ where
 
     let progress = match table_copy_rows_from_stream(
         table_copy_stream.as_mut(),
-        shutdown_rx,
+        shutdown,
         connection_updates_rx,
         replicated_table_schema,
         batch_id_generator,
@@ -708,7 +703,7 @@ where
 /// prioritized shutdown handling.
 async fn table_copy_rows_from_stream<D, S>(
     mut table_copy_stream: Pin<&mut S>,
-    mut shutdown_rx: ShutdownRx,
+    mut shutdown: Shutdown,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
     batch_id_generator: &TableCopyBatchIdGenerator,
@@ -724,7 +719,7 @@ where
         tokio::select! {
             biased;
 
-            _ = shutdown_rx.changed() => {
+            _ = shutdown.changed() => {
                 return Ok(ShutdownResult::Shutdown(progress));
             }
 
@@ -794,7 +789,7 @@ where
                     )
                     .await?;
                 let ShutdownResult::Ok(completed_flush_result) = pending_flush_result
-                    .with_shutdown(&mut shutdown_rx)
+                    .with_shutdown(&mut shutdown)
                     .await
                 else {
                     return Ok(ShutdownResult::Shutdown(progress));

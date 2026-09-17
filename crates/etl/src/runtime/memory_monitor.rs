@@ -65,7 +65,7 @@ use crate::{
         ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
         ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
     },
-    runtime::concurrency::ShutdownRx,
+    runtime::concurrency::Shutdown,
 };
 
 /// Identifies the memory domain represented by a [`MemorySnapshot`].
@@ -270,7 +270,7 @@ pub(crate) struct MemoryMonitor {
 impl MemoryMonitor {
     /// Creates a new memory monitor and starts its refresh task.
     pub(crate) fn new(
-        mut shutdown_rx: ShutdownRx,
+        mut shutdown: Shutdown,
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
     ) -> Self {
@@ -326,7 +326,7 @@ impl MemoryMonitor {
                 tokio::select! {
                     biased;
 
-                    _ = shutdown_rx.changed() => {
+                    _ = shutdown.changed() => {
                         info!("memory monitor stopped due to shutdown");
 
                         return;

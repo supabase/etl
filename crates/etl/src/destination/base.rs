@@ -25,6 +25,13 @@ use crate::{
 /// ETL is at-least-once, so destinations must tolerate duplicate writes. ETL
 /// may also call destination methods in parallel under some circumstances, so
 /// implementations must be safe for concurrent use.
+///
+/// A destination that stops on its own, for example together with the process
+/// that embeds ETL, answers the work it abandons with the async result's
+/// `shutdown` method instead of a result. ETL then requests pipeline shutdown
+/// through its normal path and records no table error, so the next start
+/// resumes the table from its persisted state. Dropping an async result without
+/// completing it remains a destination error.
 pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
@@ -36,6 +43,10 @@ pub trait Destination {
     /// stop writer loops and drain or drop outstanding work. ETL calls this
     /// method at most once for a destination instance, after it has stopped
     /// submitting new work. The default implementation is a no-op.
+    ///
+    /// This hook is ETL stopping the destination. A destination that stops on
+    /// its own reports that through the async result of the work it abandons,
+    /// as described on this trait.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }

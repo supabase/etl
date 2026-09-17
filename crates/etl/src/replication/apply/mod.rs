@@ -74,7 +74,7 @@ use crate::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
         TableSyncWorkerState,
         concurrency::{
-            MemoryBackpressureStream, ShutdownRx, apply_worker_apply_stream_id,
+            MemoryBackpressureStream, Shutdown, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
         },
     },
@@ -174,7 +174,7 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     /// Shared pool for out-of-band source database queries.
     pub(crate) out_of_band_source_pool: OutOfBandSourcePool,
     /// Shutdown signal receiver for graceful termination.
-    pub(crate) shutdown_rx: ShutdownRx,
+    pub(crate) shutdown: Shutdown,
     /// Semaphore controlling maximum concurrent table sync workers.
     pub(crate) table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
@@ -509,6 +509,11 @@ struct ApplyLoopState {
     /// and new message intake until the in-flight flush resolves and the
     /// queued batch can be retried.
     processing_paused: bool,
+    /// Set to `true` once the destination reported that it is shutting down.
+    ///
+    /// Nothing buffered can reach a destination that stopped, so the loop
+    /// neither dispatches nor completes anything more once this is set.
+    destination_stopped: bool,
     /// Fallback snapshot used before a table establishes connection-local
     /// protocol state or receives stored table decoding state.
     ///
@@ -540,6 +545,7 @@ impl ApplyLoopState {
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
+            destination_stopped: false,
             bootstrap_snapshot_id,
         }
     }
@@ -726,6 +732,26 @@ impl ApplyLoopState {
         };
     }
 
+    /// Records that the destination stopped without applying the in-flight
+    /// write, and pauses the loop for good.
+    ///
+    /// The batch queued behind that write is dropped: dispatching it would ask
+    /// a destination that already stopped to take more work, and a durable
+    /// result for it would report progress covering the events of the write
+    /// that was abandoned, which the destination never received. Its events
+    /// were never written and its LSNs never recorded, so the next start
+    /// replays them from the last persisted checkpoint.
+    ///
+    /// The exit is pinned to [`ApplyLoopResult::Paused`] rather than merged
+    /// through [`ExitIntent::merge`]: a completion intent is recorded before
+    /// the write that has to make it durable, so an abandoned write leaves it
+    /// unsatisfied, and no later intent may revive it.
+    fn record_destination_stopped(&mut self) {
+        self.destination_stopped = true;
+        self.event_batch = EventBatch::default();
+        self.exit_intent = Some(ExitIntent::Pause);
+    }
+
     /// Returns `true` when the apply loop may still accept new replication
     /// messages.
     fn can_process_messages(&self) -> bool {
@@ -735,7 +761,7 @@ impl ApplyLoopState {
     /// Returns `true` when the batch deadline timer may still trigger a flush
     /// for buffered work.
     fn can_wait_for_deadline(&self) -> bool {
-        !self.processing_paused && self.has_pending_batch()
+        !self.destination_stopped && !self.processing_paused && self.has_pending_batch()
     }
 
     /// Marks the current pending batch as paused behind an in-flight flush.
@@ -761,6 +787,10 @@ impl ApplyLoopState {
 
     /// Returns the final result requested by this loop, if any.
     fn exit_result(&self) -> Option<ApplyLoopResult> {
+        if self.destination_stopped {
+            return Some(ApplyLoopResult::Paused);
+        }
+
         self.exit_intent.map(ExitIntent::to_result)
     }
 
@@ -790,7 +820,7 @@ pub(crate) struct ApplyLoop<S, D> {
     /// row messages.
     table_decoding_states: HashMap<TableId, TableDecodingState>,
     /// Shutdown signal receiver.
-    shutdown_rx: ShutdownRx,
+    shutdown: Shutdown,
     /// Worker-specific dependencies and coordination hooks.
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
@@ -823,7 +853,7 @@ where
         destination: D,
         out_of_band_source_pool: OutOfBandSourcePool,
         worker_context: WorkerContext<S, D>,
-        shutdown_rx: ShutdownRx,
+        shutdown: Shutdown,
         memory_monitor: MemoryMonitor,
         batch_memory_governor: BatchMemoryGovernor,
         initial_replicated_table_schema: Option<ReplicatedTableSchema>,
@@ -919,7 +949,7 @@ where
             schema_store,
             destination,
             table_decoding_states,
-            shutdown_rx,
+            shutdown,
             worker_context,
             memory_monitor,
             batch_memory_governor,
@@ -1030,7 +1060,7 @@ where
 
             // PRIORITY 1: Handle shutdown signals.
             // Shutdown stops new intake first and then lets the loop drain or wait as needed.
-            _ = self.shutdown_rx.changed() => {
+            _ = self.shutdown.changed() => {
                 self.handle_shutdown_signal();
             }
 
@@ -1444,6 +1474,28 @@ where
     ) -> EtlResult<()> {
         // We clear the state up front because this flush is no longer in flight.
         let processing_paused = self.state.resume_processing();
+
+        // A destination that is shutting down did not apply the batch, so there is no
+        // progress to record. Requesting shutdown enters the same drain the pipeline's
+        // own signal enters, and the batch replays from the last persisted checkpoint
+        // on the next start.
+        if flush_result.is_shutdown() {
+            info!(
+                worker_type = %self.worker_context.worker_type(),
+                "destination reported shutdown while writing events, shutting down the pipeline"
+            );
+
+            // The abandoned write may be the one a recorded completion was waiting on,
+            // as it is for the terminal durability barrier of a table sync. Completing
+            // on it would end that sync short of `SyncDone` and make the worker persist
+            // an error that only a manual retry clears. Stopping here instead pauses
+            // the loop for good and drops what was queued behind the write, so nothing
+            // later can report progress over events the destination never received.
+            self.state.record_destination_stopped();
+            self.shutdown.request();
+
+            return Ok(());
+        }
 
         // Decompose the completed result into its metadata, timing, and outcome.
         let (metadata, completed_at, result) = flush_result.into_parts_with_completion();
@@ -3285,7 +3337,7 @@ mod apply_worker {
         let result = worker_state
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
-                ctx.shutdown_rx.clone(),
+                ctx.shutdown.clone(),
             )
             .await;
 
@@ -3970,7 +4022,7 @@ mod apply_worker {
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.out_of_band_source_pool.clone(),
-            ctx.shutdown_rx.clone(),
+            ctx.shutdown.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
             ctx.batch_memory_governor.clone(),

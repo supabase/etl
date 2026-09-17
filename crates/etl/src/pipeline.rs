@@ -22,7 +22,7 @@ use crate::{
     replication::state::TableState,
     runtime::{
         ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::create_shutdown_channel,
+        concurrency::{ShutdownOnDrop, create_shutdown_channel},
     },
     schema::TableId,
     store::PipelineStore,
@@ -77,6 +77,12 @@ pub struct Pipeline<S, D> {
     destination: D,
     state: PipelineState,
     shutdown_tx: ShutdownTx,
+    /// Requests shutdown once this pipeline is dropped.
+    ///
+    /// Workers own a transmitter of the same channel, so dropping the pipeline
+    /// no longer closes it. This guard stops them instead, which a pipeline
+    /// dropped without [`Pipeline::shutdown`] would otherwise never do.
+    _shutdown_guard: ShutdownOnDrop,
 }
 
 impl<S, D> Pipeline<S, D>
@@ -101,7 +107,7 @@ where
         // We create a watch channel of unit types since this is just used to notify all
         // subscribers that shutdown is needed.
         //
-        // Here we are not taking the `shutdown_rx` since we will just extract it from
+        // Here we are not taking the `shutdown` since we will just extract it from
         // the `shutdown_tx` via the `subscribe` method. This is done to make
         // the code cleaner.
         let (shutdown_tx, _) = create_shutdown_channel();
@@ -111,6 +117,7 @@ where
             store,
             destination,
             state: PipelineState::NotStarted,
+            _shutdown_guard: ShutdownOnDrop::new(shutdown_tx.clone()),
             shutdown_tx,
         }
     }
@@ -412,5 +419,52 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        pipeline::Pipeline,
+        test_utils::{
+            database::local_pg_connection_config, memory_destination::MemoryDestination,
+            notifying_store::NotifyingStore,
+        },
+    };
+
+    /// A worker holds a transmitter of the shutdown channel, so the channel no
+    /// longer closes when the pipeline goes away. The pipeline must request the
+    /// shutdown itself instead, or a pipeline dropped without one would leave
+    /// its background tasks waiting for a signal nobody can send.
+    #[test]
+    fn dropping_a_pipeline_requests_shutdown() {
+        let store = NotifyingStore::new();
+        let destination = MemoryDestination::new(store.clone());
+        let config = crate::config::PipelineConfig {
+            id: 1,
+            publication_name: "test_publication".to_owned(),
+            pg_connection: local_pg_connection_config(),
+            store_pg_connection: None,
+            replication_slot: Default::default(),
+            batch: Default::default(),
+            table_error_retry_delay_ms: 1000,
+            table_error_retry_max_attempts: 2,
+            max_table_sync_workers: 1,
+            table_sync_copy: Default::default(),
+            invalidated_slot_behavior: Default::default(),
+            max_copy_connections_per_table: 1,
+            memory_refresh_interval_ms: 1000,
+            table_sync_monitor_refresh_interval_ms: 1000,
+            memory_backpressure: None,
+            run_source_migrations: false,
+        };
+        let pipeline = Pipeline::new(config, store, destination);
+        let shutdown = pipeline.shutdown_tx().subscribe();
+
+        assert!(!shutdown.is_requested());
+
+        drop(pipeline);
+
+        assert!(shutdown.is_requested());
     }
 }
