@@ -1,7 +1,7 @@
 use etl_config::shared::{
     BatchConfig, DEFAULT_DUCKLAKE_TARGET_FILE_SIZE, InvalidatedSlotBehavior,
     MemoryBackpressureConfig, PgConnectionConfig, PipelineConfig, ReplicationSlotConfig,
-    TableSyncCopyConfig,
+    TableSyncCopyConfig, ValidationError, validate_table_error_retry_delay_ms,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -201,7 +201,9 @@ pub struct ApiPipelineConfig {
     pub replication_slot: Option<ReplicationSlotConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch: Option<BatchConfig>,
-    #[schema(example = 1000)]
+    /// Automatic worker retry delay in milliseconds, from 1,000 through
+    /// 86,400,000 inclusive. Omission uses the 10,000 millisecond default.
+    #[schema(example = 1000, minimum = 1000, maximum = 86400000)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub table_error_retry_delay_ms: Option<u64>,
     #[schema(example = 5)]
@@ -245,6 +247,9 @@ pub enum PipelineConfigUpdateError {
     /// A required field was explicitly cleared.
     #[error("Field `{field}` cannot be cleared")]
     RequiredFieldCleared { field: &'static str },
+    /// The effective retry delay is outside its supported range.
+    #[error(transparent)]
+    InvalidRetryDelay(#[from] ValidationError),
 }
 
 /// Patch-style pipeline configuration used by update endpoints.
@@ -268,7 +273,10 @@ pub struct UpdateApiPipelineConfig {
     pub replication_slot: UpdateField<ReplicationSlotConfig>,
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub batch: UpdateField<BatchConfig>,
-    #[schema(example = 1000)]
+    /// Automatic worker retry delay in milliseconds, from 1,000 through
+    /// 86,400,000 inclusive. Omission preserves the stored value; null resets
+    /// it to the 10,000 millisecond default.
+    #[schema(example = 1000, minimum = 1000, maximum = 86400000)]
     #[serde(default, skip_serializing_if = "UpdateField::is_preserve")]
     pub table_error_retry_delay_ms: UpdateField<u64>,
     #[schema(example = 5)]
@@ -334,8 +342,16 @@ impl UpdateApiPipelineConfig {
         }
     }
 
-    /// Validates API-only pipeline configuration fields.
+    /// Validates explicitly set retry delay, resource overrides, and
+    /// maintenance settings.
+    ///
+    /// Preserved and cleared values are resolved during merging, which also
+    /// validates the resulting retry delay.
     pub fn validate(&self) -> Result<(), String> {
+        if let UpdateField::Set(delay_ms) = self.table_error_retry_delay_ms {
+            validate_table_error_retry_delay_ms(delay_ms).map_err(|err| err.to_string())?;
+        }
+
         if let UpdateField::Set(replicator_resources) = &self.replicator_resources {
             replicator_resources.validate()?;
         }
@@ -352,7 +368,7 @@ impl UpdateApiPipelineConfig {
         self,
         stored: StoredPipelineConfig,
     ) -> Result<StoredPipelineConfig, PipelineConfigUpdateError> {
-        Ok(StoredPipelineConfig {
+        let merged = StoredPipelineConfig {
             publication_name: self.publication_name.apply_to_required(
                 stored.publication_name,
                 PipelineConfigUpdateError::RequiredFieldCleared { field: "publication_name" },
@@ -403,13 +419,22 @@ impl UpdateApiPipelineConfig {
                 .ducklake_maintenance
                 .apply_to_option(stored.ducklake_maintenance),
             log_level: self.log_level.apply_to_option(stored.log_level),
-        })
+        };
+
+        validate_table_error_retry_delay_ms(merged.table_error_retry_delay_ms)?;
+
+        Ok(merged)
     }
 }
 
 impl ApiPipelineConfig {
-    /// Validates API-only pipeline configuration fields.
+    /// Validates supplied retry delay, resource overrides, and maintenance
+    /// settings.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(delay_ms) = self.table_error_retry_delay_ms {
+            validate_table_error_retry_delay_ms(delay_ms).map_err(|err| err.to_string())?;
+        }
+
         if let Some(replicator_resources) = &self.replicator_resources {
             replicator_resources.validate()?;
         }
@@ -606,6 +631,85 @@ mod tests {
     use etl_config::shared::BatchConfig;
 
     use super::*;
+
+    /// Creates a stored config without bypassing create-time defaults.
+    fn stored_pipeline_config_with_retry_delay(delay_ms: u64) -> StoredPipelineConfig {
+        let config: ApiPipelineConfig = serde_json::from_value(serde_json::json!({
+            "publication_name": "publication",
+            "table_error_retry_delay_ms": delay_ms,
+        }))
+        .unwrap();
+        config.into()
+    }
+
+    /// Create and update requests reject the same invalid delay values.
+    #[test]
+    fn api_pipeline_retry_delay_validation() {
+        for (delay_ms, valid) in [
+            (0, false),
+            (999, false),
+            (1_000, true),
+            (86_400_000, true),
+            (86_400_001, false),
+            (u64::MAX, false),
+        ] {
+            let config: ApiPipelineConfig = serde_json::from_value(serde_json::json!({
+                "publication_name": "publication",
+                "table_error_retry_delay_ms": delay_ms,
+            }))
+            .unwrap();
+            let update = UpdateApiPipelineConfig::from_api_config(config.clone());
+            assert_eq!(config.validate().is_ok(), valid, "delay_ms={delay_ms}");
+            assert_eq!(update.validate().is_ok(), valid, "delay_ms={delay_ms}");
+        }
+    }
+
+    /// The effective delay is checked even when an update preserves a legacy
+    /// value.
+    #[test]
+    fn pipeline_retry_delay_merge_rejects_invalid_values() {
+        for (stored_delay, field) in [
+            (0, UpdateField::Preserve),
+            (u64::MAX, UpdateField::Preserve),
+            (10_000, UpdateField::Set(999)),
+            (10_000, UpdateField::Set(86_400_001)),
+        ] {
+            let update = UpdateApiPipelineConfig {
+                table_error_retry_delay_ms: field,
+                ..UpdateApiPipelineConfig::default()
+            };
+            let err = update
+                .merge_into_stored(stored_pipeline_config_with_retry_delay(stored_delay))
+                .unwrap_err();
+            let PipelineConfigUpdateError::InvalidRetryDelay(ValidationError::InvalidFieldValue {
+                field,
+                ..
+            }) = err
+            else {
+                panic!("Expected retry delay validation error");
+            };
+            assert_eq!(field, "table_error_retry_delay_ms");
+        }
+    }
+
+    /// Patch semantics preserve valid delays and allow invalid values to be
+    /// repaired.
+    #[test]
+    fn pipeline_retry_delay_merge_preserves_resets_and_replaces() {
+        for (stored_delay, json, expected) in [
+            (2_000, serde_json::json!({}), 2_000),
+            (0, serde_json::json!({ "table_error_retry_delay_ms": null }), 10_000),
+            (u64::MAX, serde_json::json!({ "table_error_retry_delay_ms": 1_000 }), 1_000),
+            (10_000, serde_json::json!({ "table_error_retry_delay_ms": 86_400_000 }), 86_400_000),
+        ] {
+            let update: UpdateApiPipelineConfig = serde_json::from_value(json).unwrap();
+            update.validate().unwrap();
+            let merged = update
+                .merge_into_stored(stored_pipeline_config_with_retry_delay(stored_delay))
+                .unwrap();
+            assert_eq!(merged.table_error_retry_delay_ms, expected);
+        }
+    }
 
     #[test]
     fn stored_pipeline_config_serialization() {

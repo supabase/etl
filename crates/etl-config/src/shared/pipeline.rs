@@ -348,7 +348,9 @@ pub struct PipelineConfig {
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
-    /// This setting is shared by table sync and apply workers.
+    /// This setting is shared by table sync and apply workers. It must be
+    /// between 1,000 and 86,400,000 milliseconds (one second through 24 hours),
+    /// inclusive. The default is 10,000 milliseconds.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic timed retry attempts before failing the
@@ -406,6 +408,13 @@ pub struct PipelineConfig {
 }
 
 impl PipelineConfig {
+    /// Minimum retry delay in milliseconds, limiting rapid automatic retries.
+    pub const MIN_TABLE_ERROR_RETRY_DELAY_MS: u64 = 1_000;
+
+    /// Maximum retry delay in milliseconds, keeping automatic recovery within
+    /// one day.
+    pub const MAX_TABLE_ERROR_RETRY_DELAY_MS: u64 = 86_400_000;
+
     /// Default retry delay in milliseconds between table error retries.
     pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 
@@ -446,6 +455,7 @@ impl Validate for PipelineConfig {
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
         )?;
+        validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
         self.table_sync_copy.validate()
     }
 }
@@ -498,6 +508,27 @@ fn validate_pipeline_settings(
         return Err(ValidationError::InvalidFieldValue {
             field: "table_sync_monitor_refresh_interval_ms".to_owned(),
             constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validates the delay shared by automatic table sync and apply retries.
+///
+/// Accepts one second through 24 hours, inclusive.
+pub fn validate_table_error_retry_delay_ms(delay_ms: u64) -> Result<(), ValidationError> {
+    if !(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS
+        ..=PipelineConfig::MAX_TABLE_ERROR_RETRY_DELAY_MS)
+        .contains(&delay_ms)
+    {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "table_error_retry_delay_ms".to_owned(),
+            constraint: format!(
+                "must be between {} and {} milliseconds (inclusive)",
+                PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS,
+                PipelineConfig::MAX_TABLE_ERROR_RETRY_DELAY_MS,
+            ),
         });
     }
 
@@ -564,7 +595,9 @@ pub struct PipelineConfigWithoutSecrets {
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
-    /// This setting is shared by table sync and apply workers.
+    /// This setting is shared by table sync and apply workers. It must be
+    /// between 1,000 and 86,400,000 milliseconds (one second through 24 hours),
+    /// inclusive. The default is 10,000 milliseconds.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic timed retry attempts before failing the
@@ -624,6 +657,7 @@ impl Validate for PipelineConfigWithoutSecrets {
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
         )?;
+        validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
         self.table_sync_copy.validate()
     }
 }
@@ -667,6 +701,61 @@ mod tests {
             tls: TlsConfig::disabled(),
             keepalive: TcpKeepaliveConfig::default(),
         }
+    }
+
+    /// Builds a pipeline configuration through its external JSON
+    /// representation.
+    fn pipeline_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": 1,
+            "publication_name": "publication",
+            "pg_connection": {
+                "host": "127.0.0.1",
+                "port": 5432,
+                "name": "postgres",
+                "username": "postgres",
+                "tls": { "enabled": false, "trusted_root_certs": "" }
+            }
+        })
+    }
+
+    /// Both runtime config representations enforce the same inclusive retry
+    /// bounds.
+    #[test]
+    fn pipeline_retry_delay_validation() {
+        for (delay_ms, valid) in [
+            (0, false),
+            (999, false),
+            (1_000, true),
+            (10_000, true),
+            (86_400_000, true),
+            (86_400_001, false),
+            (u64::try_from(i64::MAX).unwrap(), false),
+            (u64::try_from(i64::MAX).unwrap() + 1, false),
+            (u64::MAX, false),
+        ] {
+            let mut json = pipeline_config_json();
+            json["table_error_retry_delay_ms"] = delay_ms.into();
+            // Deserialization remains available so invalid stored values can be
+            // repaired.
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+            let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
+            for result in [config.validate(), without_secrets.validate()] {
+                assert_eq!(result.is_ok(), valid, "delay_ms={delay_ms}");
+                if let Err(ValidationError::InvalidFieldValue { field, .. }) = result {
+                    assert_eq!(field, "table_error_retry_delay_ms");
+                }
+            }
+        }
+    }
+
+    /// Omitting the retry delay retains the valid ten-second default.
+    #[test]
+    fn pipeline_retry_delay_default() {
+        let config: PipelineConfig = serde_json::from_value(pipeline_config_json()).unwrap();
+        assert_eq!(config.table_error_retry_delay_ms, 10_000);
+        config.validate().unwrap();
+        PipelineConfigWithoutSecrets::from(config).validate().unwrap();
     }
 
     #[test]
