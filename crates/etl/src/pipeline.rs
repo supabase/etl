@@ -94,16 +94,17 @@ where
     /// consistency between pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, store: S, destination: D) -> Self {
         // Register metrics here during pipeline creation to avoid burdening the
-        // users of etl crate to explicitly calling it. Since this method is safe to
-        // call multiple times, it is ok even if there are multiple pipelines created.
+        // users of etl crate to explicitly calling it. Since this method is
+        // safe to call multiple times, it is ok even if there are multiple
+        // pipelines created.
         register_metrics();
 
-        // We create a watch channel of unit types since this is just used to notify all
-        // subscribers that shutdown is needed.
+        // We create a watch channel of unit types since this is just used to
+        // notify all subscribers that shutdown is needed.
         //
-        // Here we are not taking the `shutdown_rx` since we will just extract it from
-        // the `shutdown_tx` via the `subscribe` method. This is done to make
-        // the code cleaner.
+        // Here we are not taking the `shutdown_rx` since we will just extract
+        // it from the `shutdown_tx` via the `subscribe` method. This is done to
+        // make the code cleaner.
         let (shutdown_tx, _) = create_shutdown_channel();
 
         Self {
@@ -123,8 +124,8 @@ where
     /// Returns a handle for sending shutdown signals to this pipeline.
     ///
     /// Multiple components can hold shutdown handles to coordinate graceful
-    /// termination. When shutdown is signaled, all workers will complete
-    /// their current operations and terminate cleanly.
+    /// termination. When shutdown is signaled, all workers will complete their
+    /// current operations and terminate cleanly.
     pub fn shutdown_tx(&self) -> ShutdownTx {
         self.shutdown_tx.clone()
     }
@@ -166,29 +167,28 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We load the destination table metadata and schemas from the store to have
-        // them cached for quick access.
+        // We load the destination table metadata and schemas from the store to
+        // have them cached for quick access.
         //
-        // It's really important to load the metadata and schemas before starting the
-        // apply worker since downstream code relies on the assumption that they
-        // are loaded in the cache.
+        // It's really important to load the metadata and schemas before
+        // starting the apply worker since downstream code relies on the
+        // assumption that they are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
 
-        // We load the table states by checking the table ids of a publication and
-        // loading/creating the table states based on the current
-        // state.
+        // We load the table states by checking the table ids of a publication
+        // and loading/creating the table states based on the current state.
         self.initialize_table_states(&replication_client).await?;
 
         // We then let destinations perform their startup sequence if any.
         self.destination.startup().await?;
 
-        // We create the table sync workers pool to manage all table sync workers in a
-        // central place.
+        // We create the table sync workers pool to manage all table sync
+        // workers in a central place.
         let pool = Arc::new(TableSyncWorkerPool::new());
 
-        // We create the permits semaphore which is used to control how many table sync
-        // workers can be running at the same time.
+        // We create the permits semaphore which is used to control how many
+        // table sync workers can be running at the same time.
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
@@ -231,8 +231,8 @@ where
     ///
     /// This method blocks until both the apply worker and all table sync
     /// workers have finished their work. If the pipeline was never started,
-    /// this returns immediately. If any workers encounter errors, those
-    /// errors are collected and returned.
+    /// this returns immediately. If any workers encounter errors, those errors
+    /// are collected and returned.
     ///
     /// The wait process ensures proper shutdown ordering:
     /// 1. Apply worker completes first (may spawn additional table sync
@@ -249,19 +249,19 @@ where
 
         let mut errors = vec![];
 
-        // We first wait for the apply worker to finish, since that must be done before
-        // waiting for the table sync workers to finish, otherwise if we wait
-        // for sync workers first, we might be having the apply worker that
-        // spawns new sync workers after we waited for the current
-        // ones to finish.
+        // We first wait for the apply worker to finish, since that must be done
+        // before waiting for the table sync workers to finish, otherwise if we
+        // wait for sync workers first, we might be having the apply worker that
+        // spawns new sync workers after we waited for the current ones to
+        // finish.
         debug!("waiting for apply worker to complete");
         let apply_worker_result = apply_worker.wait().await;
         if let Err(err) = apply_worker_result {
             errors.push(err);
 
-            // If we fail to send the shutdown signal, we are not going to capture the error
-            // since it means that no table sync workers are running, which is
-            // fine.
+            // If we fail to send the shutdown signal, we are not going to
+            // capture the error since it means that no table sync workers are
+            // running, which is fine.
             let _ = self.shutdown_tx.shutdown();
         }
 
@@ -272,7 +272,8 @@ where
             errors.push(err);
         }
 
-        // Once all workers completed, we notify the destination of shutting down.
+        // Once all workers completed, we notify the destination of shutting
+        // down.
         debug!("waiting for destination shutdown to complete");
         if let Err(err) = self.destination.shutdown().await {
             warn!("destination shutdown failed, collecting errors");
@@ -280,8 +281,8 @@ where
             errors.push(err);
         }
 
-        // As last thing, we want the memory refresh to be done, so that we can cleanly
-        // terminate the process.
+        // As last thing, we want the memory refresh to be done, so that we can
+        // cleanly terminate the process.
         debug!("waiting for memory monitor to complete");
         if let Err(err) = memory_monitor.wait_for_refresh_task().await {
             if err.is_cancelled() {
@@ -305,9 +306,9 @@ where
     /// Initiates graceful shutdown of the pipeline.
     ///
     /// Sends shutdown signals to all workers, instructing them to complete
-    /// their current operations and terminate. This method returns
-    /// immediately after sending the signals and does not wait for workers
-    /// to actually stop.
+    /// their current operations and terminate. This method returns immediately
+    /// after sending the signals and does not wait for workers to actually
+    /// stop.
     ///
     /// Use [`Pipeline::wait`] after calling this method to wait for complete
     /// shutdown.
@@ -325,16 +326,16 @@ where
     /// Initiates shutdown and waits for complete pipeline termination.
     ///
     /// This convenience method combines [`Pipeline::shutdown`] and
-    /// [`Pipeline::wait`] to provide a single call that both initiates
-    /// shutdown and waits for completion. Returns any errors encountered
-    /// during the shutdown process.
+    /// [`Pipeline::wait`] to provide a single call that both initiates shutdown
+    /// and waits for completion. Returns any errors encountered during the
+    /// shutdown process.
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
         self.wait().await
     }
 
-    /// Initializes table states for tables in the publication and
-    /// purges state for tables removed from it.
+    /// Initializes table states for tables in the publication and purges state
+    /// for tables removed from it.
     ///
     /// Ensures each table currently in the Postgres publication has a
     /// corresponding table state; tables without existing states are
@@ -383,8 +384,8 @@ where
 
         // Detect and purge tables that have been removed from the publication.
         //
-        // The purging doesn't delete any data in the destination, it just removes
-        // internal state for that table.
+        // The purging doesn't delete any data in the destination, it just
+        // removes internal state for that table.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
         for &table_id in table_states.keys() {
             if !publication_set.contains(&table_id) {
@@ -393,8 +394,9 @@ where
                     "table removed from publication, purging stored state and slot"
                 );
 
-                // We delete all table state before removing the slot, so that we don't
-                // incur in the case where we have a slot tied to an invalid state.
+                // We delete all table state before removing the slot, so that
+                // we don't incur in the case where we have a slot tied to an
+                // invalid state.
                 self.store.delete_table_state(table_id).await?;
 
                 // We try to delete the replication slot.

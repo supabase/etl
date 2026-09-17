@@ -201,7 +201,8 @@ async fn creating_default_image_switches_previous_default() {
     let response: CreateImageResponse = response.json().await.expect("failed to deserialize");
     let image2_id = response.id;
 
-    // Assert - First image should no longer be default, second should be default
+    // Assert - First image should no longer be default, second should be
+    // default
     let response = app.read_image(image1_id).await;
     let image1: ReadImageResponse = response.json().await.expect("failed to deserialize");
     assert!(!image1.is_default);

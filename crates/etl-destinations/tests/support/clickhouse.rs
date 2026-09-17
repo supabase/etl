@@ -41,8 +41,8 @@ pub(crate) struct AllTypesRow {
 
 /// A row read back from the ClickHouse `boundary_values` test table.
 ///
-/// Covers edge cases that the `all_types` test does not: nullable scalars,
-/// NULL array elements, empty strings, and multi-byte UTF-8.
+/// Covers edge cases that the `all_types` test does not: nullable scalars, NULL
+/// array elements, empty strings, and multi-byte UTF-8.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 pub(crate) struct BoundaryValuesRow {
     pub id: i64,
@@ -52,10 +52,10 @@ pub(crate) struct BoundaryValuesRow {
     pub text_array_col: Vec<Option<String>>,
 }
 
-/// A row read back from a ClickHouse table with a single `Date32` column,
-/// used to verify Postgres `date` round-tripping for values outside the Unix
-/// epoch (pre-1970 and far-future). The `date_col` is the signed day offset
-/// from 1970-01-01.
+/// A row read back from a ClickHouse table with a single `Date32` column, used
+/// to verify Postgres `date` round-tripping for values outside the Unix epoch
+/// (pre-1970 and far-future). The `date_col` is the signed day offset from
+/// 1970-01-01.
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 pub(crate) struct DateBoundariesRow {
     pub id: i64,
@@ -66,8 +66,8 @@ pub(crate) struct DateBoundariesRow {
 ///
 /// The projection is supplied by the caller (so per-column SQL like
 /// `toString(uuid_col) AS uuid_col` keeps working). The helper handles the
-/// engine-specific dedup + tombstone filter and applies the caller's
-/// `ORDER BY` for deterministic test reads.
+/// engine-specific dedup + tombstone filter and applies the caller's `ORDER BY`
+/// for deterministic test reads.
 ///
 /// MergeTree path: take the latest event per PK with `LIMIT 1 BY`, ordered by
 /// commit LSN and transaction ordinal, then drop any latest DELETE. The
@@ -97,8 +97,8 @@ pub(crate) fn current_state_query(
 
 /// SQL to force a `ReplacingMergeTree` table to drop tombstoned rows. The
 /// `SETTINGS` clause enables the (still experimental, as of CH 25.x) merges-
-/// with-cleanup feature for this query only, without requiring it to be
-/// enabled server-wide.
+/// with-cleanup feature for this query only, without requiring it to be enabled
+/// server-wide.
 pub(crate) fn optimize_final_cleanup_sql(table: &str) -> String {
     format!(
         "OPTIMIZE TABLE \"{table}\" FINAL CLEANUP SETTINGS \

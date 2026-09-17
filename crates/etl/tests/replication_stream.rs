@@ -2,7 +2,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use etl::{
     data::{ArrayCell, Cell, PgNumeric, PgTimeTz, TableRow},
     error::EtlResult,
-    postgres::client::PgReplicationClient,
+    postgres::{ReplicationMessageStream, client::PgReplicationClient},
     schema::{ColumnSchema, SnapshotId, TableId, TableName},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -19,10 +19,7 @@ use etl_postgres::{
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use pg_escape::quote_identifier;
-use postgres_replication::{
-    LogicalReplicationStream,
-    protocol::{LogicalReplicationMessage, ReplicationMessage},
-};
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use serde_json::{Value as JsonValue, json};
 use tokio::{
     pin,
@@ -79,7 +76,7 @@ impl StreamMarker {
 
 /// Collects protocol markers while preserving their decoded order.
 async fn collect_stream_markers(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     expected_count: usize,
 ) -> Vec<StreamMarker> {
     timeout(Duration::from_secs(10), async {
@@ -168,7 +165,7 @@ async fn collect_stream_markers(
 /// LSN.
 async fn assert_stream_markers_and_replay(
     initial_client: PgReplicationClient,
-    initial_stream: LogicalReplicationStream,
+    initial_stream: ReplicationMessageStream,
     database: &PgDatabase<Client>,
     publication_name: &str,
     slot_name: &str,
@@ -212,8 +209,8 @@ async fn assert_stream_markers_and_replay(
     database.wait_for_slot_inactive(slot_name).await;
 
     let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let replay_stream = replay_client
-        .start_logical_replication(publication_name, slot_name, start_lsn)
+    let (replay_stream, _) = replay_client
+        .start_logical_replication(publication_name, slot_name, start_lsn, None)
         .await
         .unwrap();
     let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
@@ -226,12 +223,15 @@ async fn start_replayable_stream(
     database: &PgDatabase<Client>,
     publication_name: &str,
     slot_suffix: &str,
-) -> (PgReplicationClient, LogicalReplicationStream, String, PgLsn) {
+) -> (PgReplicationClient, ReplicationMessageStream, String, PgLsn) {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name(slot_suffix);
     let start_lsn = client.create_slot(&slot_name, false).await.unwrap().consistent_point;
-    let stream =
-        client.start_logical_replication(publication_name, &slot_name, start_lsn).await.unwrap();
+    let (stream, feedback) = client
+        .start_logical_replication(publication_name, &slot_name, start_lsn, None)
+        .await
+        .unwrap();
+    assert!(feedback.is_none());
 
     (client, stream, slot_name, start_lsn)
 }
@@ -652,7 +652,7 @@ async fn collect_single_copy_parse_result(
 }
 
 async fn collect_insert_row(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     column_schemas: &[ColumnSchema],
 ) -> TableRow {
     pin!(stream);
@@ -675,7 +675,7 @@ async fn collect_insert_row(
 }
 
 async fn collect_insert_parse_result(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     column_schemas: &[ColumnSchema],
 ) -> EtlResult<TableRow> {
     pin!(stream);
@@ -1097,8 +1097,8 @@ async fn logical_replication_stream_converts_postgres_type_matrix() {
     let table_schema = transaction.get_table_schema(table_id).await.unwrap();
     transaction.commit().await.unwrap();
 
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
     insert_type_matrix_row(&database, &table_name).await;
@@ -1174,8 +1174,8 @@ async fn logical_replication_stream_rejects_known_unsupported_postgres_values() 
         let table_schema = transaction.get_table_schema(table_id).await.unwrap();
         transaction.commit().await.unwrap();
 
-        let stream = client
-            .start_logical_replication(&publication_name, &slot_name, slot.consistent_point)
+        let (stream, _) = client
+            .start_logical_replication(&publication_name, &slot_name, slot.consistent_point, None)
             .await
             .unwrap();
         insert_single_value_row(&database, &table_name, case.expression).await;
@@ -1212,8 +1212,8 @@ async fn logical_replication_replays_consecutive_ddl_only_transactions_without_r
     )
     .await;
 
-    // Each ALTER runs in its own transaction. With no DML, pgoutput carries
-    // the self-describing DDL messages but has no reason to emit Relation.
+    // Each ALTER runs in its own transaction. With no DML, pgoutput carries the
+    // self-describing DDL messages but has no reason to emit Relation.
     database
         .run_sql(&format!("alter table {quoted_table_name} add column b integer"))
         .await
@@ -1501,8 +1501,8 @@ async fn logical_replication_orders_concurrent_ddl_transactions_by_commit_lsn() 
     database.wait_for_slot_inactive(&slot_name).await;
 
     let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let replay_stream = replay_client
-        .start_logical_replication(publication_name, &slot_name, start_lsn)
+    let (replay_stream, _) = replay_client
+        .start_logical_replication(publication_name, &slot_name, start_lsn, None)
         .await
         .unwrap();
     let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
@@ -1640,8 +1640,8 @@ async fn logical_replication_emits_relation_before_truncate() {
         .unwrap();
 
     // No-op DDL stores a new schema snapshot without invalidating pgoutput's
-    // relation cache. Truncate still emits a protocol relation per table
-    // before the truncate message, unlike a later insert.
+    // relation cache. Truncate still emits a protocol relation per table before
+    // the truncate message, unlike a later insert.
     database.run_sql(&format!("alter table {first_quoted} owner to current_user")).await.unwrap();
     database.run_sql(&format!("alter table {second_quoted} owner to current_user")).await.unwrap();
     database.run_sql(&format!("truncate table {first_quoted}, {second_quoted}")).await.unwrap();

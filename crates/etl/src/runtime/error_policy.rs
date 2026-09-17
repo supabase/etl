@@ -46,9 +46,10 @@ impl ErrorHandlingPolicy {
 pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     match error.kind() {
         // Automatically retriable errors. Keep this list narrow and limited to transient source or
-        // destination connectivity/capacity failures that are expected to recover without
-        // operator intervention.
+        // destination connectivity/capacity failures and loss of replication feedback. Retry
+        // attempts are bounded; persistent failures still require intervention.
         ErrorKind::SourceConnectionFailed
+        | ErrorKind::ReplicationFeedbackUnavailable
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
         | ErrorKind::DestinationTimeout
@@ -154,6 +155,22 @@ mod tests {
         error::{ErrorKind, EtlError},
         runtime::error_policy::{RetryDirective, build_error_handling_policy},
     };
+
+    /// Protocol and internal failures require intervention; connectivity and
+    /// unavailable feedback use bounded retries.
+    #[test]
+    fn replication_feedback_errors_keep_distinct_retry_policies() {
+        for (kind, retry) in [
+            (ErrorKind::DeserializationError, RetryDirective::Manual),
+            (ErrorKind::InvalidState, RetryDirective::Manual),
+            (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
+            (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
+            (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
+        ] {
+            let error = EtlError::from((kind, "Test replication failure"));
+            assert_eq!(build_error_handling_policy(&error).retry_directive(), retry);
+        }
+    }
 
     #[test]
     fn source_replica_identity_errors_have_specific_manual_remediation() {

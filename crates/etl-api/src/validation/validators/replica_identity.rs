@@ -1,7 +1,7 @@
 //! Replica identity validation for destination compatibility.
 //!
-//! The validator classifies each publication table into semantic identity
-//! types so destinations can declare the row identities they can safely apply.
+//! The validator classifies each publication table into semantic identity types
+//! so destinations can declare the row identities they can safely apply.
 
 use async_trait::async_trait;
 use etl::schema::IdentityType;

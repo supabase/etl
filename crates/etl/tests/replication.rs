@@ -2,7 +2,10 @@ use std::{collections::HashSet, time::Duration};
 
 use etl::{
     error::ErrorKind,
-    postgres::client::{CtidPartition, PgReplicationClient, SlotState},
+    postgres::{
+        ReplicationMessageStream,
+        client::{CtidPartition, PgReplicationClient, SlotState},
+    },
     schema::ColumnSchema,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -20,10 +23,7 @@ use etl_postgres::{
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use pg_escape::{quote_identifier, quote_literal};
-use postgres_replication::{
-    LogicalReplicationStream,
-    protocol::{LogicalReplicationMessage, ReplicationMessage},
-};
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use serde_json::Value as JsonValue;
 use tokio::{pin, time::timeout};
 use tokio_postgres::{
@@ -255,7 +255,7 @@ struct MessageCounts {
 }
 
 async fn count_stream_components<F>(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     mut should_stop: F,
 ) -> MessageCounts
 where
@@ -298,7 +298,7 @@ where
 }
 
 async fn collect_ddl_messages(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     expected_count: usize,
 ) -> Vec<JsonValue> {
     let mut messages = Vec::with_capacity(expected_count);
@@ -427,7 +427,7 @@ fn observed_tuple_cells(tuple: &postgres_replication::protocol::Tuple) -> Vec<Ob
 }
 
 async fn collect_update_delete_messages(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     expected_count: usize,
 ) -> Vec<ObservedChangeMessage> {
     let mut messages = Vec::with_capacity(expected_count);
@@ -546,8 +546,8 @@ async fn run_raw_replica_identity_scenario(
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("raw_replica_identity_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 
@@ -614,8 +614,8 @@ async fn replication_client_creates_slot() {
     let get_slot = client.get_slot(&slot_name).await.unwrap();
     assert!(!get_slot.confirmed_flush_lsn.to_string().is_empty());
 
-    // Since we did not do anything with the slot, we expect the consistent point to
-    // be the same as the confirmed flush lsn.
+    // Since we did not do anything with the slot, we expect the consistent
+    // point to be the same as the confirmed flush lsn.
     assert_eq!(create_slot.consistent_point, get_slot.confirmed_flush_lsn);
 }
 
@@ -783,7 +783,8 @@ async fn table_schema_copy_across_multiple_connections() {
     assert_eq!(table_1_schema.name, test_table_name("table_1"));
     assert_table_schema_columns(&table_1_schema, &[id_column_schema(), age_schema.clone()]);
 
-    // We create a new table in the database and update the schema of the old one.
+    // We create a new table in the database and update the schema of the old
+    // one.
     let table_2_id = database
         .create_table(test_table_name("table_2"), true, &[("year", "integer")])
         .await
@@ -911,8 +912,8 @@ async fn ddl_message_primary_key_order_matches_loaded_table_schema() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_composite_pk_order_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 
@@ -961,12 +962,12 @@ async fn table_copy_stream_is_consistent() {
         .await
         .unwrap();
 
-    // An earlier version of this test only inserted one row but was
-    // incorrectly committing the transaction before the copy stream was done.
-    // The test still passed because the copy messages were buffered
-    // and the commit was not yet sent to the server.
-    // We now insert a larger number of rows to ensure that the copy stream
-    // is not buffered and the commit is sent only after the copy stream is done.
+    // An earlier version of this test only inserted one row but was incorrectly
+    // committing the transaction before the copy stream was done. The test
+    // still passed because the copy messages were buffered and the commit was
+    // not yet sent to the server. We now insert a larger number of rows to
+    // ensure that the copy stream is not buffered and the commit is sent only
+    // after the copy stream is done.
     let expected_rows_count = 1_0000;
 
     database
@@ -1299,7 +1300,8 @@ async fn get_replicated_column_names_respects_column_filter() {
     // Transaction should be committed after queries are done.
     transaction.commit().await.unwrap();
 
-    // Verify only the published columns are returned (id, name, age - not email).
+    // Verify only the published columns are returned (id, name, age - not
+    // email).
     assert_eq!(replicated_columns.len(), 3);
     assert!(replicated_columns.contains("id"));
     assert!(replicated_columns.contains("name"));
@@ -1334,8 +1336,8 @@ async fn get_replicated_column_names_for_all_tables_publication() {
         .await
         .unwrap();
 
-    // Create a FOR ALL TABLES publication. Column filtering is NOT supported with
-    // this type.
+    // Create a FOR ALL TABLES publication. Column filtering is NOT supported
+    // with this type.
     let publication_name = "test_pub_all_tables";
     database
         .run_sql(&format!("create publication {publication_name} for all tables"))
@@ -1361,8 +1363,8 @@ async fn get_replicated_column_names_for_all_tables_publication() {
 
     transaction.commit().await.unwrap();
 
-    // All columns should be returned since FOR ALL TABLES doesn't support column
-    // filtering.
+    // All columns should be returned since FOR ALL TABLES doesn't support
+    // column filtering.
     assert_eq!(replicated_columns.len(), 4);
     assert!(replicated_columns.contains("id"));
     assert!(replicated_columns.contains("name"));
@@ -1397,9 +1399,9 @@ async fn get_replicated_column_names_for_tables_in_schema_publication() {
         .await
         .unwrap();
 
-    // Create a FOR TABLES IN SCHEMA publication. Column filtering is NOT supported
-    // with this type. Note: Tables are created in the "test" schema by
-    // test_table_name().
+    // Create a FOR TABLES IN SCHEMA publication. Column filtering is NOT
+    // supported with this type. Note: Tables are created in the "test" schema
+    // by test_table_name().
     let publication_name = "test_pub_schema";
     database
         .run_sql(&format!("create publication {publication_name} for tables in schema test"))
@@ -1475,8 +1477,8 @@ async fn get_replicated_column_names_errors_when_table_not_in_publication() {
     // Get table schema for the table NOT in the publication.
     let table_schema = transaction.get_table_schema(table_1_id).await.unwrap();
 
-    // Attempting to get replicated column names for a table not in the publication
-    // should error.
+    // Attempting to get replicated column names for a table not in the
+    // publication should error.
     let result =
         transaction.get_replicated_column_names(table_1_id, &table_schema, publication_name).await;
 
@@ -1715,7 +1717,8 @@ async fn start_logical_replication() {
 
     let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // We create a slot which is going to replicate data before we insert the data.
+    // We create a slot which is going to replicate data before we insert the
+    // data.
     let slot_name = test_slot_name("my_slot");
     let slot = parent_client.create_slot(&slot_name, false).await.unwrap();
 
@@ -1734,21 +1737,21 @@ async fn start_logical_replication() {
     }
 
     // We start the cdc of events from the consistent point.
-    let stream = parent_client
-        .start_logical_replication("my_publication", &slot_name, slot.consistent_point)
+    let (stream, _) = parent_client
+        .start_logical_replication("my_publication", &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
     let counts = count_stream_components(stream, |counts| counts.insert_count == 10).await;
     assert_eq!(counts.insert_count, 10);
 
-    // We create a new connection and start another replication instance from the
-    // same slot to check if the same data is received.
+    // We create a new connection and start another replication instance from
+    // the same slot to check if the same data is received.
     let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // We try to stream again from that consistent point and see if we get the same
-    // data.
-    let stream = parent_client
-        .start_logical_replication("my_publication", &slot_name, slot.consistent_point)
+    // We try to stream again from that consistent point and see if we get the
+    // same data.
+    let (stream, _) = parent_client
+        .start_logical_replication("my_publication", &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
     let counts = count_stream_components(stream, |counts| counts.insert_count == 10).await;
@@ -1777,8 +1780,8 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_message_payload_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 
@@ -1945,8 +1948,8 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_default_payload_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 
@@ -2036,8 +2039,8 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_filter_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 
@@ -2097,8 +2100,8 @@ async fn schema_change_messages_allow_alter_table_from_table_owner_role() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_table_owner_role_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 
@@ -2136,8 +2139,8 @@ async fn single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_me
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_multi_subcommand_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 
@@ -2190,8 +2193,8 @@ async fn schema_change_messages_respect_skip_ddl_log_setting() {
     let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_skip_log_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
 

@@ -23,9 +23,8 @@ pub struct SourceTlsConfig {
 impl SourceTlsConfig {
     /// Resolves the source TLS configuration.
     ///
-    /// Fails if `tls.enabled` is `true` but `tls.trusted_root_certs` is
-    /// empty, since a TLS connection could never be established in that
-    /// state.
+    /// Fails if `tls.enabled` is `true` but `tls.trusted_root_certs` is empty,
+    /// since a TLS connection could never be established in that state.
     pub fn new(tls: TlsConfig) -> Result<Self, SourceTlsConfigError> {
         if tls.enabled && tls.trusted_root_certs.trim().is_empty() {
             return Err(SourceTlsConfigError::MissingTrustedRootCerts);

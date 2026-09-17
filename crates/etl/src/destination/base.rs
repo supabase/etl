@@ -32,10 +32,10 @@ pub trait Destination {
     /// Propagates the shutdown signal to the destination.
     ///
     /// Override this method if the destination needs cleanup or bookkeeping
-    /// during shutdown. Background streaming destinations should use it to
-    /// stop writer loops and drain or drop outstanding work. ETL calls this
-    /// method at most once for a destination instance, after it has stopped
-    /// submitting new work. The default implementation is a no-op.
+    /// during shutdown. Background streaming destinations should use it to stop
+    /// writer loops and drain or drop outstanding work. ETL calls this method
+    /// at most once for a destination instance, after it has stopped submitting
+    /// new work. The default implementation is a no-op.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -45,10 +45,9 @@ pub trait Destination {
     /// ETL calls this hook during pipeline startup, after destination table
     /// metadata, table schemas, and table states have been loaded and tables
     /// removed from the publication have been purged from ETL-owned state. It
-    /// runs before workers begin submitting table-specific writes.
-    /// Destinations can use it to reconcile durable destination state with
-    /// their physical objects after a process restart. The default
-    /// implementation is a no-op.
+    /// runs before workers begin submitting table-specific writes. Destinations
+    /// can use it to reconcile durable destination state with their physical
+    /// objects after a process restart. The default implementation is a no-op.
     fn startup(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -62,8 +61,8 @@ pub trait Destination {
     ///
     /// Before reporting success, the destination must ensure that writes
     /// accepted during an earlier copy attempt can no longer modify the
-    /// destination table. It may do this by waiting for them, cancelling
-    /// them, or rejecting them as stale.
+    /// destination table. It may do this by waiting for them, cancelling them,
+    /// or rejecting them as stale.
     ///
     /// The supplied schema describes the previously known destination table and
     /// exists only so the destination can locate what should be removed. ETL
@@ -85,10 +84,9 @@ pub trait Destination {
     /// This method is called with an empty row vector and no batch ID even if
     /// the source table has no data, so the destination can prepare its initial
     /// state before streaming begins. A nonempty row vector always has a batch
-    /// ID, and an empty row vector never has one.
-    /// ETL does not impose a meaningful ordering requirement on these row
-    /// batches; it just provides the data that should be written for the
-    /// initial snapshot.
+    /// ID, and an empty row vector never has one. ETL does not impose a
+    /// meaningful ordering requirement on these row batches; it just provides
+    /// the data that should be written for the initial snapshot.
     ///
     /// Implementations report asynchronous write status through `async_result`.
     /// The method return value is reserved for immediate dispatch/setup
@@ -113,9 +111,9 @@ pub trait Destination {
     /// [`crate::destination::DestinationWriteStatus::Durable`] and cumulatively
     /// cover every accepted write for the table copy. Returning
     /// [`crate::destination::DestinationWriteStatus::Accepted`] from the
-    /// barrier fails the copy without advancing its durable state. Empty
-    /// and skipped tables also receive a finish write so the destination
-    /// can prepare their initial state.
+    /// barrier fails the copy without advancing its durable state. Empty and
+    /// skipped tables also receive a finish write so the destination can
+    /// prepare their initial state.
     ///
     /// Awaiting each result before requesting the next batch bounds ETL-owned
     /// row batches per copy partition. A deferred destination must separately
@@ -134,11 +132,11 @@ pub trait Destination {
     ///
     /// This method handles real-time changes from the Postgres replication
     /// stream. Events include relation notifications, inserts, updates,
-    /// deletes, truncates, and transaction boundaries. ETL may call this
-    /// method multiple times with different streaming batches.
+    /// deletes, truncates, and transaction boundaries. ETL may call this method
+    /// multiple times with different streaming batches.
     ///
-    /// Streaming batches are built from size and time limits, not schema
-    /// change boundaries. A single call may contain zero, one, or many
+    /// Streaming batches are built from size and time limits, not schema change
+    /// boundaries. A single call may contain zero, one, or many
     /// [`Event::Relation`] events, including multiple schema changes for the
     /// same table. Implementations that apply destination DDL should process
     /// events in order and update their active table schema each time a
@@ -147,9 +145,9 @@ pub trait Destination {
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
     ///
-    /// Implementations report asynchronous write status through
-    /// `async_result`. The method return value is reserved for immediate
-    /// dispatch/setup failures before the work has been accepted.
+    /// Implementations report asynchronous write status through `async_result`.
+    /// The method return value is reserved for immediate dispatch/setup
+    /// failures before the work has been accepted.
     ///
     /// [`crate::destination::DestinationWriteStatus::Durable`] means this write
     /// and all earlier accepted writes in the same ordered apply-loop stream
@@ -196,19 +194,18 @@ pub trait Destination {
     /// instead.
     ///
     /// Async implementations that offload work should coordinate `async_result`
-    /// with [`Destination::shutdown`]. ETL calls [`Destination::shutdown`]
-    /// at most once and only after it has stopped submitting new work. If
-    /// the apply loop has already gone away, sending the result will fail
-    /// and may be treated as an implicit cancellation.
+    /// with [`Destination::shutdown`]. ETL calls [`Destination::shutdown`] at
+    /// most once and only after it has stopped submitting new work. If the
+    /// apply loop has already gone away, sending the result will fail and may
+    /// be treated as an implicit cancellation.
     ///
     /// During the initial copy stage, transaction boundaries are not a stable
-    /// global invariant across all tables. A source transaction may be
-    /// split across multiple streaming deliveries as some tables are
-    /// already ready for streaming and others are still being copied. In
-    /// practice, destinations should rely on per-table event ordering and
-    /// not assume that `begin`/`commit` boundaries always describe a
-    /// complete all-tables transaction until initial copy has fully
-    /// finished.
+    /// global invariant across all tables. A source transaction may be split
+    /// across multiple streaming deliveries as some tables are already ready
+    /// for streaming and others are still being copied. In practice,
+    /// destinations should rely on per-table event ordering and not assume that
+    /// `begin`/`commit` boundaries always describe a complete all-tables
+    /// transaction until initial copy has fully finished.
     ///
     /// Each data-bearing [`Event`] also carries its own
     /// [`ReplicatedTableSchema`], so destinations can react to the correct

@@ -1,8 +1,8 @@
 //! Configuration management for ETL applications.
 //!
 //! Provides environment detection, configuration loading from YAML files,
-//! secret handling, and shared configuration types for various ETL services
-//! and components.
+//! secret handling, and shared configuration types for various ETL services and
+//! components.
 
 mod ducklake;
 mod environment;

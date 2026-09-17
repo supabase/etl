@@ -16,9 +16,9 @@ pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
 /// transaction.
 pub(crate) const CDC_TX_ORDINAL_COLUMN_NAME: &str = "cdc_tx_ordinal";
 /// (For ReplacingMergeTree engine) version column. Holds the packed
-/// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the
-/// low 64 bits) as a UInt128, giving ReplacingMergeTree a total order across
-/// all events for tie-breaking under `FINAL`.
+/// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the low 64
+/// bits) as a UInt128, giving ReplacingMergeTree a total order across all
+/// events for tie-breaking under `FINAL`.
 pub(crate) const ETL_VERSION_COLUMN_NAME: &str = "_etl_version";
 /// (For ReplacingMergeTree engine) tombstone column.
 pub(crate) const ETL_DELETED_COLUMN_NAME: &str = "_etl_deleted";
@@ -154,10 +154,10 @@ fn render_clickhouse_default_expression(
         DefaultExpression::TimestampLiteral(expression) => {
             matches!(typ, &Type::TIMESTAMP).then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
         }
-        // `parseDateTime64BestEffort` (not `toDateTime64`) because Postgres renders
-        // `timestamptz` defaults with a UTC offset (for example
-        // `'2026-01-01 12:30:00+00'`), which `toDateTime64` string parsing rejects.
-        // The best-effort parser accepts the offset and normalizes to the timezone.
+        // `parseDateTime64BestEffort` (not `toDateTime64`) because Postgres renders `timestamptz`
+        // defaults with a UTC offset (for example `'2026-01-01 12:30:00+00'`), which `toDateTime64`
+        // string parsing rejects. The best-effort parser accepts the offset and normalizes to the
+        // timezone.
         DefaultExpression::TimestampTzLiteral(expression) => matches!(typ, &Type::TIMESTAMPTZ)
             .then(|| format!("parseDateTime64BestEffort({expression}, 6, 'UTC')")),
     }
@@ -265,12 +265,11 @@ where
 }
 
 /// Emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(_etl_version,
-/// _etl_deleted) ORDER BY (<pk cols>)`, with `<pk cols>` taken from the
-/// source primary key in `primary_key_ordinal_position` order. ClickHouse
-/// uses that `ORDER BY` as the sort + dedup key, so it must match the
-/// source PK exactly. Two trailing columns are appended after the user
-/// columns: `_etl_version UInt128` (packed `EventSequenceKey`) and
-/// `_etl_deleted UInt8` (tombstone).
+/// _etl_deleted) ORDER BY (<pk cols>)`, with `<pk cols>` taken from the source
+/// primary key in `primary_key_ordinal_position` order. ClickHouse uses that
+/// `ORDER BY` as the sort + dedup key, so it must match the source PK exactly.
+/// Two trailing columns are appended after the user columns: `_etl_version
+/// UInt128` (packed `EventSequenceKey`) and `_etl_deleted UInt8` (tombstone).
 ///
 /// Errors when the source schema has no PK columns.
 pub(super) fn create_replacing_merge_tree_sql<'a, I>(
@@ -383,8 +382,8 @@ mod tests {
             nullable: false,
             default_expression: None,
         }];
-        // Pre-encoded table name with embedded quotes to verify the SQL
-        // builder quotes/escapes the identifier itself.
+        // Pre-encoded table name with embedded quotes to verify the SQL builder
+        // quotes/escapes the identifier itself.
         let sql = create_merge_tree_sql("sche\"ma_ta\"ble", &schemas);
 
         assert!(
@@ -613,7 +612,8 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_composite_pk_orders_by_ordinal() {
-        // --- GIVEN: composite PK whose ordinal order differs from table order ---
+        // --- GIVEN: composite PK whose ordinal order differs from table order
+        // ---
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -716,7 +716,8 @@ mod tests {
         ];
         // --- WHEN: build the current-state view DDL ---
         let sql = create_current_view_sql("public_users", &schemas);
-        // --- THEN: __current suffix, FINAL read, tombstone filter, no etl cols ---
+        // --- THEN: __current suffix, FINAL read, tombstone filter, no etl cols
+        // ---
         assert!(sql.contains("CREATE VIEW IF NOT EXISTS \"public_users__current\""));
         assert!(sql.contains("SELECT \"id\", \"name\""));
         assert!(sql.contains("FROM \"public_users\" FINAL"));

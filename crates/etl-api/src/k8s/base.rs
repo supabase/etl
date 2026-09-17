@@ -4,10 +4,13 @@ use async_trait::async_trait;
 use etl_maintenance::DuckLakeMaintenancePolicy;
 use thiserror::Error;
 
-use crate::configs::{
-    destination::StoredDestinationConfig,
-    log::LogLevel,
-    pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
+use crate::{
+    config::ApiReplicatorHealthConfig,
+    configs::{
+        destination::StoredDestinationConfig,
+        log::LogLevel,
+        pipeline::{DuckLakeMaintenanceConfig, PipelineReplicatorResourceOverrideConfig},
+    },
 };
 
 /// Maximum time to wait for a Kubernetes deletion operation to complete.
@@ -95,6 +98,8 @@ pub struct DuckLakeMaintenanceResourceConfig {
 /// Input shared by the replicator StatefulSet and VPA materializers.
 #[derive(Debug, Clone)]
 pub struct ReplicatorWorkloadConfig {
+    /// Optional activity listener and probe configuration for this workload.
+    pub health: Option<ApiReplicatorHealthConfig>,
     /// Image for the replicator container.
     pub replicator_image: String,
     /// Optional pipeline-level replicator resource override.

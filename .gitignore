@@ -22,6 +22,7 @@ target/
 .DS_Store
 
 # Docs build directories
+node_modules/
 .astro/
 .next/
 .source/

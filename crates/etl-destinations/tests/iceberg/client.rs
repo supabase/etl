@@ -56,10 +56,11 @@ async fn create_namespace() {
     // namespace still exists
     assert!(client.namespace_exists(namespace).await.unwrap());
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
@@ -91,10 +92,11 @@ async fn create_hierarchical_namespace() {
     // child namespace should exist now
     assert!(client.namespace_exists(child_namespace).await.unwrap());
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_namespace(child_namespace).await.unwrap();
     client.drop_namespace(root_namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -191,8 +193,8 @@ async fn create_table_if_missing() {
     let table = client.load_table(namespace.to_owned(), table_name.clone()).await.unwrap();
     let identifier_field_ids: Vec<i32> =
         table.metadata().current_schema().identifier_field_ids().collect();
-    // The "id" column is the primary key and should be the only identifier field
-    // (field_id = 1).
+    // The "id" column is the primary key and should be the only identifier
+    // field (field_id = 1).
     assert_eq!(identifier_field_ids, vec![1]);
 
     // Creating the same table again should be a no-op (no error)
@@ -201,10 +203,11 @@ async fn create_table_if_missing() {
     // table should still exist
     assert!(client.table_exists(namespace, table_name.clone()).await.unwrap());
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -396,10 +399,11 @@ async fn insert_nullable_scalars() {
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -515,10 +519,11 @@ async fn insert_non_nullable_scalars() {
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -702,8 +707,8 @@ async fn insert_nullable_array() {
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
-    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
-    // String in Iceberg
+    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map
+    // to String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
@@ -726,10 +731,11 @@ async fn insert_nullable_array() {
     // Compare the actual values in the read_rows with expected table_rows
     assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -753,8 +759,8 @@ async fn insert_non_nullable_array() {
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
 
-    // Create a sample table schema with non-nullable array types for all supported
-    // types
+    // Create a sample table schema with non-nullable array types for all
+    // supported types
     let table_name = "test_non_nullable_array_table".to_owned();
     let column_schemas = vec![
         // Primary key
@@ -882,8 +888,8 @@ async fn insert_non_nullable_array() {
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
-    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
-    // String in Iceberg
+    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map
+    // to String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
@@ -908,10 +914,11 @@ async fn insert_non_nullable_array() {
     // Compare the actual values in the read_rows with expected table_rows
     assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();

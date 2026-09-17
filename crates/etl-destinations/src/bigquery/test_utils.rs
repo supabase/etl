@@ -30,8 +30,8 @@ use crate::{
 const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 600;
 /// Maximum number of times we poll for a table to report zero rows.
 ///
-/// Kept short: the expected end state is observable as soon as the deletes
-/// are applied, so this only absorbs propagation noise.
+/// Kept short: the expected end state is observable as soon as the deletes are
+/// applied, so this only absorbs propagation noise.
 const BIGQUERY_NO_ROWS_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
@@ -106,9 +106,9 @@ fn uncached_query_request(query: String) -> QueryRequest {
 
 /// Returns whether BigQuery integration tests should be skipped.
 ///
-/// Prints a warning and returns `true` when credentials are unavailable.
-/// Panics if [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, and credentials are
-/// not provided.
+/// Prints a warning and returns `true` when credentials are unavailable. Panics
+/// if [`REQUIRE_BIGQUERY_CREDENTIALS_ENV`] is set, and credentials are not
+/// provided.
 pub fn skip_if_missing_bigquery_env_vars() -> bool {
     let sa_key_path = std::env::var_os(BIGQUERY_SA_KEY_PATH_ENV);
     let has_project_id = std::env::var_os(BIGQUERY_PROJECT_ID_ENV).is_some();
@@ -261,12 +261,12 @@ impl BigQueryDatabase {
     /// Executes a SELECT * query against the specified table.
     ///
     /// Returns all rows from the table in the test dataset, polling until
-    /// BigQuery surfaces the streamed data or the retry budget is exhausted.
-    /// A 404 is retried within the same budget because a table queried right
+    /// BigQuery surfaces the streamed data or the retry budget is exhausted. A
+    /// 404 is retried within the same budget because a table queried right
     /// after being dropped and recreated can return a stale NOT_FOUND while
-    /// BigQuery metadata propagates. Use
-    /// [`BigQueryDatabase::wait_for_no_rows`] to assert that a table is
-    /// empty; this method treats absence as not-yet-visible.
+    /// BigQuery metadata propagates. Use [`BigQueryDatabase::wait_for_no_rows`]
+    /// to assert that a table is empty; this method treats absence as
+    /// not-yet-visible.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -306,11 +306,11 @@ impl BigQueryDatabase {
     /// Polls until a query against the table reports zero visible rows.
     ///
     /// Returns true once an empty result is observed and false if no empty
-    /// result is seen before the retry budget runs out. A 404 is retried
-    /// like a non-empty result: stale metadata can serve NOT_FOUND for a
-    /// table that still has rows, so only an actual empty response proves
-    /// the deletes were applied. Use this to assert that deletes emptied a
-    /// table; [`BigQueryDatabase::query_table`] waits for data instead.
+    /// result is seen before the retry budget runs out. A 404 is retried like a
+    /// non-empty result: stale metadata can serve NOT_FOUND for a table that
+    /// still has rows, so only an actual empty response proves the deletes were
+    /// applied. Use this to assert that deletes emptied a table;
+    /// [`BigQueryDatabase::query_table`] waits for data instead.
     pub async fn wait_for_no_rows(&self, table_name: TableName) -> bool {
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
         let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
@@ -319,9 +319,9 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_NO_ROWS_MAX_ATTEMPTS;
 
         loop {
-            // Only an observed empty result proves emptiness: a stale 404
-            // could hide a table that still has rows, so it is retried like
-            // a non-empty result.
+            // Only an observed empty result proves emptiness: a stale 404 could
+            // hide a table that still has rows, so it is retried like a
+            // non-empty result.
             let observed_empty = match retry_bigquery_test_operation("table no-rows check", || {
                 let request = uncached_query_request(query.clone());
                 async { self.client.job().query(&self.project_id, request).await }
@@ -358,7 +358,8 @@ impl BigQueryDatabase {
 
         // Use REGEXP_CONTAINS to match the sequenced table name format.
         // BigQuery table names have format: {schema}_{table}_{sequence_number}
-        // The regex matches the table_id followed by underscore and one or more digits.
+        // The regex matches the table_id followed by underscore and one or more
+        // digits.
         let query = format!(
             "SELECT column_name, data_type, ordinal_position FROM \
              `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` WHERE \
@@ -464,8 +465,8 @@ impl BigQueryDatabase {
 
     /// Creates a [`BigQueryDestination`] configured for this database instance.
     ///
-    /// Returns a destination suitable for ETL operations, configured with
-    /// zero staleness to ensure immediate consistency for testing.
+    /// Returns a destination suitable for ETL operations, configured with zero
+    /// staleness to ensure immediate consistency for testing.
     pub async fn build_destination<S>(
         &self,
         pipeline_id: PipelineId,
@@ -659,8 +660,8 @@ pub async fn setup_bigquery_database() -> BigQueryDatabase {
 /// Sets up a BigQuery database connection for testing without creating a
 /// dataset.
 ///
-/// Useful for validation tests that don't need an actual dataset.
-/// The dataset ID is still generated but not created in BigQuery.
+/// Useful for validation tests that don't need an actual dataset. The dataset
+/// ID is still generated but not created in BigQuery.
 ///
 /// # Panics
 ///
