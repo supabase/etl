@@ -31,7 +31,8 @@ use crate::{
     postgres::{OutOfBandSourcePool, client::PgReplicationClient},
     replication::state::{TableState, TableStateType},
     runtime::{
-        BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerState, concurrency::ShutdownResult,
+        BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerState,
+        concurrency::{ShutdownResult, with_shutdown},
     },
     schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
     store::{PipelineStore, SchemaStore, StateStore},
@@ -214,7 +215,7 @@ where
                     .drop_table_for_copy(&current_replication_table_schema, drop_result)
                     .await?;
                 let ShutdownResult::Ok(completed_drop_result) =
-                    pending_drop_result.with_shutdown(&shutdown_token).await
+                    with_shutdown!(pending_drop_result, shutdown_token)
                 else {
                     return Ok(TableSyncResult::Stopped);
                 };
@@ -248,9 +249,16 @@ where
             // If a slot already exists at this point, we could delete it and try to
             // recover, but it means that the state was somehow reset without
             // the slot being deleted, and we want to surface this.
-            let (replication_transaction, slot) = replication_client
-                .create_slot_with_transaction(&slot_name, config.replication_slot.failover)
-                .await?;
+            // Slot creation can wait for an unrelated source transaction. The
+            // persisted DataSync state makes cancellation restart the copy.
+            let ShutdownResult::Ok(created) = with_shutdown!(
+                replication_client
+                    .create_slot_with_transaction(&slot_name, config.replication_slot.failover),
+                shutdown_token,
+            ) else {
+                return Ok(TableSyncResult::Stopped);
+            };
+            let (replication_transaction, slot) = created?;
 
             let activity_registration =
                 ActivityRegistration::register(ActivityKind::InitialTableCopy);
@@ -372,7 +380,7 @@ where
                     .write_table_rows(&replicated_table_schema, None, Vec::new(), flush_result)
                     .await?;
                 let ShutdownResult::Ok(completed_flush_result) =
-                    pending_flush_result.with_shutdown(&shutdown_token).await
+                    with_shutdown!(pending_flush_result, shutdown_token)
                 else {
                     return Ok(TableSyncResult::Stopped);
                 };

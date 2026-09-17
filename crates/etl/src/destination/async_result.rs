@@ -9,13 +9,11 @@ use std::{
 use pin_project_lite::pin_project;
 use tokio::sync::oneshot;
 use tokio_postgres::types::PgLsn;
-use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    runtime::concurrency::ShutdownResult,
     schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
@@ -226,25 +224,6 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
     }
 }
 
-impl<T, M> PendingAsyncResult<T, M> {
-    /// Waits for completion or returns when shutdown is requested.
-    ///
-    /// An existing cancellation takes priority even if the result is ready.
-    /// Observing cancellation does not consume it, so later waits also stop.
-    pub(crate) async fn with_shutdown(
-        self,
-        shutdown_token: &CancellationToken,
-    ) -> ShutdownResult<CompletedAsyncResult<T, M>, ()> {
-        tokio::select! {
-            biased;
-
-            _ = shutdown_token.cancelled() => ShutdownResult::Shutdown(()),
-
-            completed = self => ShutdownResult::Ok(completed),
-        }
-    }
-}
-
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
@@ -319,69 +298,5 @@ mod tests {
 
         assert!(metadata.is_none());
         assert_eq!(result.unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_completes_before_shutdown() {
-        let shutdown_token = CancellationToken::new();
-        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        result_tx.send(Ok(7));
-
-        let ShutdownResult::Ok(completed) = pending_result.with_shutdown(&shutdown_token).await
-        else {
-            panic!("async result should complete before shutdown");
-        };
-
-        assert_eq!(completed.into_result().unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_observes_shutdown_requested_before_wait() {
-        let shutdown_token = CancellationToken::new();
-        let (_result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        shutdown_token.cancel();
-
-        let result = pending_result.with_shutdown(&shutdown_token).await;
-
-        assert!(matches!(result, ShutdownResult::Shutdown(())));
-    }
-
-    /// Cancellation interrupts an active wait and remains visible to later
-    /// waits.
-    #[test]
-    fn pending_async_result_observes_persistent_shutdown() {
-        let shutdown_token = CancellationToken::new();
-        let (_result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        let waiting = pending_result.with_shutdown(&shutdown_token);
-        tokio::pin!(waiting);
-        let mut context = Context::from_waker(std::task::Waker::noop());
-        assert!(waiting.as_mut().poll(&mut context).is_pending());
-
-        shutdown_token.cancel();
-        assert!(matches!(
-            waiting.as_mut().poll(&mut context),
-            Poll::Ready(ShutdownResult::Shutdown(()))
-        ));
-
-        let late_token = shutdown_token.clone();
-        let (_result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        let waiting = pending_result.with_shutdown(&late_token);
-        tokio::pin!(waiting);
-        assert!(matches!(
-            waiting.as_mut().poll(&mut context),
-            Poll::Ready(ShutdownResult::Shutdown(()))
-        ));
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_prioritizes_shutdown_over_completion() {
-        let shutdown_token = CancellationToken::new();
-        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        result_tx.send(Ok(7));
-        shutdown_token.cancel();
-
-        let result = pending_result.with_shutdown(&shutdown_token).await;
-
-        assert!(matches!(result, ShutdownResult::Shutdown(())));
     }
 }

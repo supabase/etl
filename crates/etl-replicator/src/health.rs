@@ -112,7 +112,6 @@ impl ReplicatorHealth {
     }
 
     /// Updates the lifecycle observed by subsequent probe requests.
-    #[cfg(feature = "any-destination")]
     pub(crate) fn set_replicator_state(&self, replicator_state: ReplicatorState) {
         *self.replicator_state.lock().unwrap_or_else(PoisonError::into_inner) = replicator_state;
     }

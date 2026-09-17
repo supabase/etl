@@ -9,8 +9,9 @@ use std::{
 };
 
 use metrics::gauge;
-use tokio::{task::JoinHandle, time::MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 use tokio_postgres::types::PgLsn;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
 use crate::{
@@ -151,23 +152,11 @@ pub(super) fn spawn_replication_lag_metrics_task(
     replication_lag_metrics: ReplicationLagMetrics,
     worker_type: WorkerType,
     table_sync_monitor_refresh_interval: Duration,
-) -> JoinHandle<()> {
-    tokio::spawn(run_replication_lag_metrics(
+) -> AbortOnDropHandle<()> {
+    AbortOnDropHandle::new(tokio::spawn(run_replication_lag_metrics(
         out_of_band_source_pool,
         replication_lag_metrics,
         worker_type,
         table_sync_monitor_refresh_interval,
-    ))
-}
-
-/// Joins the stopped sampler and warns on unexpected task failures.
-pub(super) async fn join(task: &mut JoinHandle<()>) {
-    if let Err(err) = task.await
-        && !err.is_cancelled()
-    {
-        warn!(
-            error = %err,
-            "replication lag sampler task failed before completing"
-        );
-    }
+    )))
 }

@@ -29,7 +29,7 @@ use crate::{
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::ShutdownResult,
+        concurrency::{ShutdownResult, with_shutdown},
         error_policy::{RetryDirective, build_error_handling_policy},
         table_sync::TableSyncWorkerId,
     },
@@ -237,21 +237,13 @@ impl TableSyncWorkerState {
             // We must drop the lock here so that state changes can actually happen.
             drop(inner);
 
-            tokio::select! {
-                biased;
+            if with_shutdown!(state_change_notified, shutdown_token).should_shutdown() {
+                info!(
+                    target_table_state_types = %format_state_types(target_state_types),
+                    "shutdown signal received, cancelling wait for state",
+                );
 
-                _ = shutdown_token.cancelled() => {
-                    info!(
-                        target_table_state_types = %format_state_types(target_state_types),
-                        "shutdown signal received, cancelling wait for state",
-                    );
-
-                    return ShutdownResult::Shutdown(());
-                }
-
-                _ = state_change_notified => {
-                    // State changed, loop to check if it's the desired state.
-                }
+                return ShutdownResult::Shutdown(());
             }
         }
     }
@@ -686,12 +678,17 @@ where
         // Note that this connection must be tied to the lifetime of this worker,
         // otherwise there will be problems when cleaning up the replication
         // slot.
-        let mut replication_client = PgReplicationClient::connect_for_table_sync_worker(
-            self.config.pg_connection.clone(),
-            self.pipeline_id,
-            self.table_id,
-        )
-        .await?;
+        let ShutdownResult::Ok(replication_client) = with_shutdown!(
+            PgReplicationClient::connect_for_table_sync_worker(
+                self.config.pg_connection.clone(),
+                self.pipeline_id,
+                self.table_id,
+            ),
+            self.shutdown_token,
+        ) else {
+            return Ok(TableSyncWorkerResult::Shutdown);
+        };
+        let mut replication_client = replication_client?;
 
         let table_sync_result = start_table_sync(
             self.pipeline_id,

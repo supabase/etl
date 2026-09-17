@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 
 use metrics::counter;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{info, warn};
 
 use crate::{
@@ -122,12 +123,16 @@ async fn run_schema_cleanup<S>(
 pub(super) fn spawn_schema_cleanup_task<S>(
     schema_store: S,
     worker_type: WorkerType,
-) -> (mpsc::Sender<SchemaCleanupRequest>, JoinHandle<()>)
+) -> (mpsc::Sender<SchemaCleanupRequest>, AbortOnDropHandle<()>)
 where
     S: SchemaStore + Send + 'static,
 {
     let (schema_cleanup_tx, schema_cleanup_rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
-    let task = tokio::spawn(run_schema_cleanup(schema_store, worker_type, schema_cleanup_rx));
+    let task = AbortOnDropHandle::new(tokio::spawn(run_schema_cleanup(
+        schema_store,
+        worker_type,
+        schema_cleanup_rx,
+    )));
     (schema_cleanup_tx, task)
 }
 
@@ -136,14 +141,10 @@ where
 /// Returns `false` when the bounded queue is full or the background worker
 /// has stopped. This method never waits for queue capacity.
 pub(super) fn try_queue(
-    schema_cleanup_tx: Option<&mpsc::Sender<SchemaCleanupRequest>>,
+    schema_cleanup_tx: &mpsc::Sender<SchemaCleanupRequest>,
     table_id: TableId,
     retention_snapshot_id: SnapshotId,
 ) -> bool {
-    let Some(schema_cleanup_tx) = schema_cleanup_tx else {
-        return false;
-    };
-
     let request = SchemaCleanupRequest { table_id, retention_snapshot_id };
     match schema_cleanup_tx.try_send(request) {
         Ok(()) => true,
@@ -153,24 +154,5 @@ pub(super) fn try_queue(
 
             false
         }
-    }
-}
-
-/// Joins the worker after its queue closes and accepted work finishes.
-pub(super) async fn join(task: &mut JoinHandle<()>, worker_type: WorkerType) {
-    // Graceful teardown finishes accepted cleanup. If teardown itself is
-    // cancelled, Drop aborts the worker and unfinished cleanup can be retried.
-    if let Err(err) = task.await {
-        counter!(
-            ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-            WORKER_TYPE_LABEL => worker_type.as_str(),
-        )
-        .increment(1);
-
-        warn!(
-            %worker_type,
-            error = %err,
-            "schema cleanup worker task failed before completing"
-        );
     }
 }

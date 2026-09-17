@@ -8,16 +8,17 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type},
     store::SharedStateStore,
+    task::{TaskGroup, TaskRegistry},
 };
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::{
@@ -107,7 +108,9 @@ pub struct IcebergDestination<S> {
     client: IcebergClient,
     store: S,
     inner: Arc<Mutex<Inner>>,
-    tasks: TaskSet,
+    /// Known limitation: tasks retain destination clones and this registry.
+    /// Call [`Destination::shutdown`] to break the ownership cycle.
+    tasks: TaskRegistry,
 }
 
 /// Namespace in the destination where the tables will be copied
@@ -172,7 +175,7 @@ where
             client,
             store,
             inner: Arc::new(Mutex::new(Inner { created_namespaces: HashSet::new(), namespace })),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
         }
     }
 
@@ -424,15 +427,25 @@ where
 
             // Process accumulated events for each table.
             if !table_id_to_data.is_empty() {
-                let mut join_set = JoinSet::new();
+                let mut join_set = TaskGroup::new();
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
-                    let (namespace, iceberg_table_name) = {
+                    let preparation_result = {
                         // We hold the lock for the entire preparation to avoid race conditions
                         // since the consistency of this code path is
                         // critical.
                         let mut inner = self.inner.lock().await;
-                        self.prepare_table_for_writes(&mut inner, &replicated_table_schema).await?
+                        self.prepare_table_for_writes(&mut inner, &replicated_table_schema).await
+                    };
+
+                    let (namespace, iceberg_table_name) = match preparation_result {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            return Err(match join_set.shutdown().await {
+                                Ok(()) => error,
+                                Err(cleanup_error) => vec![error, cleanup_error].into(),
+                            });
+                        }
                     };
 
                     let client = self.client.clone();
@@ -442,10 +455,7 @@ where
                     });
                 }
 
-                while let Some(insert_result) = join_set.join_next().await {
-                    insert_result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
-                }
+                join_set.wait().await?;
             }
 
             // Collect and deduplicate schemas from all truncate events.

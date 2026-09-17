@@ -394,6 +394,7 @@ async fn wait_for_table_copies(
             let table_id = notification.table_id;
             tokio::select! {
                 () = notification.finished.inner().notified() => Ok(()),
+
                 () = notification.errored.inner().notified() => {
                     bail!("Table {table_id} entered errored state during table-copy benchmark")
                 }
@@ -402,7 +403,10 @@ async fn wait_for_table_copies(
     }
 
     while let Some(result) = tasks.join_next().await {
-        result.context("Table-copy wait task panicked")??;
+        if let Err(error) = result.context("Table-copy wait task panicked").flatten() {
+            tasks.shutdown().await;
+            return Err(error);
+        }
     }
 
     Ok(())

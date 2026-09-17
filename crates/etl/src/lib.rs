@@ -219,6 +219,7 @@ mod runtime;
 pub mod schema;
 mod source_payload_metadata;
 pub mod store;
+pub mod task;
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

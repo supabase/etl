@@ -42,6 +42,7 @@ serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true, default-features = true }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "fmt"] }
 

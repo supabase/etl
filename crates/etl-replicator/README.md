@@ -32,6 +32,42 @@ Destinations: `bigquery`, `clickhouse`, `ducklake`, `iceberg`, `snowflake`.
 See [DEVELOPMENT.md](../../DEVELOPMENT.md). Do not commit
 `crates/etl-replicator/configuration/`.
 
+## Shutdown
+
+SIGINT (Ctrl-C) and SIGTERM cancel pending asynchronous store, destination,
+and pipeline initialization. A constructed pipeline also shuts down its
+destination if initialization fails or is cancelled.
+
+After startup, signals request pipeline shutdown and await its existing
+completion future. WAL apply stops intake and drains pending writes. Initial
+copy aborts and joins its child tasks; an interrupted copy is redone on restart.
+Background samplers are aborted and joined, and errors returned by workers or
+cleanup propagate to the process exit status. Existing error policies still
+apply: table errors can be recorded in the store, and shutdown during a timed
+retry wait ends that retry successfully. Memory sampling stays active while
+workers and the destination drain, then the pipeline aborts and joins its sampler.
+DuckLake does not handle process signals independently: native connections are
+interrupted by destination teardown after apply draining, or by query deadlines.
+
+When enabled, activity probes stay live and report unready during draining.
+The probe server is stopped and joined after pipeline teardown, including on
+initialization failure or cancellation.
+
+There is no internal grace-period timer or second-signal force-exit policy.
+An in-flight apply handler or destination drain can delay shutdown. Kubernetes
+enforces its termination grace period with SIGKILL, which cannot run cleanup;
+restart recovery uses persisted progress and destination replay semantics.
+Aborting an async task also cannot undo a remote write or stop native work
+already running through `spawn_blocking`. DuckDB query interruption and deadline
+watchdogs survive cancellation of the async caller while the runtime is running.
+Runtime teardown stops polling async watchdogs and still waits for native work,
+including setup, to return; SIGKILL remains the external limit for a stuck process.
+
+Postgres connection drivers terminate through client/observer channel closure;
+these drivers are not explicitly joined. Process-wide exporters and third-party
+SDK workers retain their library/runtime lifecycles rather than being stopped
+by an individual pipeline.
+
 ## Configuration
 
 ### Configuration Directory

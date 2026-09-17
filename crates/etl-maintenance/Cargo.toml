@@ -45,6 +45,7 @@ serde_json = { workspace = true, optional = true, features = ["arbitrary_precisi
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate", "chrono"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-util = { workspace = true }
 tokio-postgres = { workspace = true, optional = true }
 tracing = { workspace = true, default-features = true }
 url = { workspace = true, optional = true }

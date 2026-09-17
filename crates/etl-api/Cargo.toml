@@ -55,6 +55,7 @@ serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "macros", "postgres", "json", "migrate"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-util = { workspace = true }
 tokio-rustls = { workspace = true, features = ["aws-lc-rs", "logging", "tls12"] }
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["trace"] }

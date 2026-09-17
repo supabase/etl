@@ -76,8 +76,8 @@ use crate::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
         TableSyncWorkerState,
         concurrency::{
-            MemoryBackpressureStream, apply_worker_apply_stream_id,
-            table_sync_worker_apply_stream_id,
+            MemoryBackpressureStream, ShutdownResult, apply_worker_apply_stream_id,
+            table_sync_worker_apply_stream_id, with_shutdown,
         },
     },
     schema::{
@@ -841,29 +841,51 @@ where
         );
 
         let worker_type = worker_context.worker_type();
-        let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
-        let wal_sender_timeout = match wal_sender_timeout_result {
-            Ok(Some(wal_sender_timeout)) => wal_sender_timeout,
-            Ok(None) => {
-                warn!(
-                    %worker_type,
-                    "wal sender timeout is disabled; using fallback timeout",
-                );
+        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
 
-                DEFAULT_WAL_SENDER_TIMEOUT
-            }
-            Err(error) => {
-                warn!(
-                    %worker_type,
-                    error = %error,
-                    "failed to read wal sender timeout; using fallback timeout",
-                );
+        // No events or background tasks exist until the replication handshake
+        // completes, so stalled protocol setup can be cancelled as one unit.
+        let ShutdownResult::Ok(initialized) = with_shutdown!(
+            async {
+                let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
+                let wal_sender_timeout = match wal_sender_timeout_result {
+                    Ok(Some(wal_sender_timeout)) => wal_sender_timeout,
+                    Ok(None) => {
+                        warn!(
+                            %worker_type,
+                            "wal sender timeout is disabled; using fallback timeout",
+                        );
 
-                DEFAULT_WAL_SENDER_TIMEOUT
-            }
+                        DEFAULT_WAL_SENDER_TIMEOUT
+                    }
+                    Err(error) => {
+                        warn!(
+                            %worker_type,
+                            error = %error,
+                            "failed to read wal sender timeout; using fallback timeout",
+                        );
+
+                        DEFAULT_WAL_SENDER_TIMEOUT
+                    }
+                };
+                let keep_alive_deadline_duration =
+                    Self::compute_keep_alive_deadline_duration(wal_sender_timeout);
+
+                let stream = replication_client
+                    .start_logical_replication(
+                        &config.publication_name,
+                        &slot_name,
+                        start_lsn,
+                        Some(keep_alive_deadline_duration),
+                    )
+                    .await?;
+                Ok::<_, EtlError>((stream, wal_sender_timeout))
+            },
+            shutdown_token,
+        ) else {
+            return Ok(ApplyLoopResult::Paused);
         };
-        let keep_alive_deadline_duration =
-            Self::compute_keep_alive_deadline_duration(wal_sender_timeout);
+        let ((replication_message_stream, feedback), wal_sender_timeout) = initialized?;
 
         // A restart LSN is an inclusive WAL frontier, not an exact schema
         // snapshot. Use the maximum message LSN so a restart at a transaction's
@@ -872,17 +894,6 @@ where
 
         let replication_progress = ReplicationProgress::new(start_lsn);
         let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
-
-        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
-
-        let (replication_message_stream, feedback) = replication_client
-            .start_logical_replication(
-                &config.publication_name,
-                &slot_name,
-                start_lsn,
-                Some(keep_alive_deadline_duration),
-            )
-            .await?;
 
         let activity_registration =
             ActivityRegistration::register(ActivityKind::WalApply { wal_sender_timeout });
@@ -941,9 +952,13 @@ where
 
         let result = apply_loop.run(replication_client, replication_message_stream).await;
 
-        apply_loop.tasks.teardown(worker_type).await;
+        let teardown_result = apply_loop.tasks.teardown().await;
 
-        result
+        match (result, teardown_result) {
+            (Ok(result), Ok(())) => Ok(result),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(teardown_error)) => Err(vec![error, teardown_error].into()),
+        }
     }
 
     /// Runs the main event processing loop with its feedback sender already
@@ -1088,7 +1103,6 @@ where
                 )
                 .await?;
             }
-
         }
 
         Ok(self.try_finish_active_iteration())

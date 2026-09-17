@@ -3,9 +3,9 @@ use std::{sync::Arc, time::Duration};
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::slots::EtlReplicationSlot;
 use metrics::counter;
-use tokio::{sync::Semaphore, task::JoinHandle};
+use tokio::sync::Semaphore;
 use tokio_postgres::types::PgLsn;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{Instrument, error, info, warn};
 
 use crate::{
@@ -24,6 +24,7 @@ use crate::{
     replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext, WorkerType},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
+        concurrency::{ShutdownResult, with_shutdown},
         error_policy::{RetryDirective, build_error_handling_policy},
     },
     store::{PipelineStore, StateStore, TableStateLifecycleStore},
@@ -36,7 +37,7 @@ use crate::{
 /// handle enables waiting for worker completion and checking final results.
 #[derive(Debug)]
 pub(crate) struct ApplyWorkerHandle {
-    handle: JoinHandle<EtlResult<()>>,
+    handle: AbortOnDropHandle<EtlResult<()>>,
 }
 
 impl ApplyWorkerHandle {
@@ -45,21 +46,14 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    pub(crate) async fn wait(mut self) -> EtlResult<()> {
-        (&mut self.handle).await.map_err(|err| {
+    pub(crate) async fn wait(self) -> EtlResult<()> {
+        self.handle.await.map_err(|err| {
             if err.is_cancelled() {
                 etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", source: err)
             } else {
                 etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", source: err)
             }
         })?
-    }
-}
-
-/// Aborts the apply worker when its owner disappears without waiting.
-impl Drop for ApplyWorkerHandle {
-    fn drop(&mut self) {
-        self.handle.abort();
     }
 }
 
@@ -195,6 +189,7 @@ where
 
             _ = shutdown_token.cancelled() => {
                 info!("shutting down apply worker while waiting to retry");
+
                 Ok(true)
             }
 
@@ -218,7 +213,7 @@ where
         let apply_worker =
             self.guarded_run_apply_worker().instrument(apply_worker_span.or_current());
 
-        let handle = tokio::spawn(apply_worker);
+        let handle = AbortOnDropHandle::new(tokio::spawn(apply_worker));
 
         ApplyWorkerHandle { handle }
     }
@@ -255,20 +250,30 @@ where
 
     /// Runs a single apply worker attempt.
     async fn run_apply_worker(&self) -> EtlResult<()> {
-        let replication_client = PgReplicationClient::connect_for_apply_worker(
-            self.config.pg_connection.clone(),
-            self.pipeline_id,
-        )
-        .await?;
-
-        let start_lsn = get_start_lsn(
-            self.pipeline_id,
-            &replication_client,
-            &self.store,
-            &self.config.invalidated_slot_behavior,
-            self.config.replication_slot.failover,
-        )
-        .await?;
+        // Slot creation can wait indefinitely for source transactions. No apply
+        // work has been accepted yet, so cancellation can close this connection.
+        let ShutdownResult::Ok(initialized) = with_shutdown!(
+            async {
+                let replication_client = PgReplicationClient::connect_for_apply_worker(
+                    self.config.pg_connection.clone(),
+                    self.pipeline_id,
+                )
+                .await?;
+                let start_lsn = get_start_lsn(
+                    self.pipeline_id,
+                    &replication_client,
+                    &self.store,
+                    &self.config.invalidated_slot_behavior,
+                    self.config.replication_slot.failover,
+                )
+                .await?;
+                Ok::<_, EtlError>((replication_client, start_lsn))
+            },
+            self.shutdown_token,
+        ) else {
+            return Ok(());
+        };
+        let (replication_client, start_lsn) = initialized?;
 
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
@@ -539,44 +544,4 @@ async fn warn_if_tables_may_have_missed_changes<S: StateStore>(store: &S) -> Etl
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        future::{Future, pending, poll_fn},
-        task::Poll,
-        time::Duration,
-    };
-
-    use tokio::sync::oneshot;
-
-    use crate::{error::EtlResult, runtime::apply::worker::ApplyWorkerHandle};
-
-    #[tokio::test]
-    async fn dropping_pending_wait_aborts_apply_worker() {
-        let (started_tx, started_rx) = oneshot::channel();
-        let (dropped_tx, dropped_rx) = oneshot::channel::<()>();
-        let worker = tokio::spawn(async move {
-            let _dropped_tx = dropped_tx;
-            started_tx.send(()).expect("worker start receiver should remain open");
-            pending::<EtlResult<()>>().await
-        });
-        started_rx.await.expect("worker should start");
-
-        let worker = ApplyWorkerHandle { handle: worker };
-        let mut wait = Box::pin(worker.wait());
-        poll_fn(|context| {
-            assert!(wait.as_mut().poll(context).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-
-        drop(wait);
-
-        let dropped_result = tokio::time::timeout(Duration::from_secs(1), dropped_rx)
-            .await
-            .expect("apply worker should stop when its pending wait is dropped");
-        assert!(dropped_result.is_err(), "apply worker drop signal should close without a value");
-    }
 }

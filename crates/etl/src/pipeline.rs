@@ -7,8 +7,8 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_postgres::slots::EtlReplicationSlot;
-use tokio::sync::Semaphore;
-pub use tokio_util::sync::CancellationToken;
+use tokio::sync::{Mutex, Semaphore};
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -16,13 +16,13 @@ use crate::{
     config::PipelineConfig,
     destination::PipelineDestination,
     error::{ErrorKind, EtlResult},
-    etl_error,
     observability::register_metrics,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
     replication::state::TableState,
     runtime::{ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool},
     schema::TableId,
     store::PipelineStore,
+    task::abort_and_join,
 };
 
 /// Unique identifier for an ETL pipeline instance.
@@ -44,11 +44,11 @@ enum PipelineState {
     /// Pipeline is running with active workers.
     Started {
         /// Handle for the running apply worker.
-        apply_worker: ApplyWorkerHandle,
+        apply_worker: Mutex<Option<ApplyWorkerHandle>>,
         /// Pool that owns all table sync worker tasks.
         pool: Arc<TableSyncWorkerPool>,
-        /// Background memory monitor used by workers.
-        memory_monitor: MemoryMonitor,
+        /// Sampler owned independently of the readings shared with workers.
+        memory_monitor_task: Mutex<Option<AbortOnDropHandle<()>>>,
     },
 }
 
@@ -67,6 +67,10 @@ enum PipelineState {
 /// Multiple table sync workers run in parallel during the initial stage, while
 /// a single apply worker processes replication streams for tables that were
 /// already copied.
+///
+/// Dropping the pipeline aborts its workers and background monitors.
+/// Use [`Pipeline::shutdown_and_wait`] to drain writes and finish destination
+/// cleanup before returning.
 #[derive(Debug)]
 pub struct Pipeline<S, D> {
     config: Arc<PipelineConfig>,
@@ -107,17 +111,6 @@ where
     /// Returns the unique identifier for this pipeline.
     pub fn id(&self) -> PipelineId {
         self.config.id
-    }
-
-    /// Returns a token for requesting graceful shutdown of this pipeline.
-    ///
-    /// Calling [`CancellationToken::cancel`] on any clone requests the same
-    /// shutdown as [`Pipeline::shutdown`]. Cancellation is permanent and is
-    /// also observed by workers started after the request. Dropping a token
-    /// does not request shutdown. Use [`Pipeline::wait`] to wait for shutdown
-    /// to complete.
-    pub fn shutdown_token(&self) -> CancellationToken {
-        self.shutdown_token.clone()
     }
 
     /// Starts the pipeline and begins replication processing.
@@ -193,8 +186,7 @@ where
         // Start memory monitoring only after fallible startup work completes.
         // From this point onward, the monitor is owned by the started pipeline
         // and Pipeline::wait joins its refresh task after shutdown.
-        let memory_monitor = MemoryMonitor::new(
-            self.shutdown_token.clone(),
+        let (memory_monitor, memory_monitor_task) = MemoryMonitor::spawn(
             self.config.memory_backpressure.clone(),
             self.config.memory_refresh_interval_ms,
         );
@@ -209,11 +201,15 @@ where
             out_of_band_source_pool,
             self.shutdown_token.clone(),
             table_sync_worker_permits,
-            memory_monitor.clone(),
+            memory_monitor,
         )
         .spawn();
 
-        self.state = PipelineState::Started { apply_worker, pool, memory_monitor };
+        self.state = PipelineState::Started {
+            apply_worker: Mutex::new(Some(apply_worker)),
+            pool,
+            memory_monitor_task: Mutex::new(Some(memory_monitor_task)),
+        };
 
         Ok(())
     }
@@ -225,17 +221,25 @@ where
     /// this returns immediately. If any workers encounter errors, those
     /// errors are collected and returned.
     ///
+    /// This method may be called once after startup. It borrows the pipeline
+    /// so the owner can call [`Pipeline::shutdown`] while waiting.
+    /// Await it to completion for graceful cleanup: cancelling this future
+    /// aborts the apply worker and skips the remaining asynchronous teardown.
+    /// Other workers remain owned by the pipeline until it is dropped.
+    ///
     /// The wait process ensures proper shutdown ordering:
     /// 1. Apply worker completes first (may spawn additional table sync
     ///    workers)
     /// 2. All table sync workers complete
     /// 3. Any errors from workers are aggregated and returned
     /// 4. Background pipeline tasks complete after shutdown
-    pub async fn wait(self) -> EtlResult<()> {
-        let PipelineState::Started { apply_worker, pool, memory_monitor } = self.state else {
+    pub async fn wait(&self) -> EtlResult<()> {
+        let PipelineState::Started { apply_worker, pool, memory_monitor_task } = &self.state else {
             warn!("pipeline was not started, skipping wait");
-
             return Ok(());
+        };
+        let Some(apply_worker) = apply_worker.lock().await.take() else {
+            bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
         };
 
         let mut errors = vec![];
@@ -249,9 +253,11 @@ where
         let apply_worker_result = apply_worker.wait().await;
         if let Err(err) = apply_worker_result {
             errors.push(err);
-
-            self.shutdown_token.cancel();
         }
+
+        // No worker should outlive the apply worker, including when it exits
+        // without an explicit shutdown request.
+        self.shutdown();
 
         // We wait for all table sync workers to finish.
         debug!("waiting for table sync workers to complete");
@@ -268,19 +274,13 @@ where
             errors.push(err);
         }
 
-        // As last thing, we want the memory refresh to be done, so that we can cleanly
-        // terminate the process.
+        // Consumers need fresh readings while draining. Join the sampler last,
+        // including when earlier cleanup failed.
         debug!("waiting for memory monitor to complete");
-        if let Err(err) = memory_monitor.wait_for_refresh_task().await {
-            if err.is_cancelled() {
-                warn!(error = %err, "memory monitor task was cancelled");
-            } else {
-                errors.push(etl_error!(
-                    ErrorKind::InvalidState,
-                    "Memory monitor task panicked",
-                    source: err
-                ));
-            }
+        if let Some(task) = memory_monitor_task.lock().await.take()
+            && let Err(error) = abort_and_join(task).await
+        {
+            errors.push(error);
         }
 
         if !errors.is_empty() {
@@ -314,9 +314,13 @@ where
     /// This convenience method combines [`Pipeline::shutdown`] and
     /// [`Pipeline::wait`] to provide a single call that both initiates
     /// shutdown and waits for completion. Returns any errors encountered
-    /// during the shutdown process.
+    /// during the shutdown process. If startup failed or was cancelled before
+    /// workers were spawned, still shuts down the constructed destination.
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
+        if matches!(self.state, PipelineState::NotStarted) {
+            return self.destination.shutdown().await;
+        }
         self.wait().await
     }
 

@@ -274,6 +274,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
             info!("pipeline completed normally (this usually indicates an error condition)");
             result?;
         }
+
         _ = shutdown_signal => {
             info!("gracefully shutting down pipeline and cleaning up resources");
         }

@@ -16,6 +16,7 @@ use axum::{
     serve::Listener,
 };
 use base64::{Engine, prelude::BASE64_STANDARD};
+use etl::error::EtlError;
 use etl_config::{
     Environment,
     shared::{IntoConnectOptions, PgConnectionConfig},
@@ -31,6 +32,7 @@ use tokio::{
     net::{TcpListener as TokioTcpListener, TcpStream},
 };
 use tokio_rustls::{Accept, TlsAcceptor, server::TlsStream as ServerTlsStream};
+use tokio_util::task::AbortOnDropHandle;
 use tower::ServiceBuilder;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info};
@@ -142,7 +144,7 @@ const METADATA_STATEMENT_TIMEOUT: &str = "30s";
 const METADATA_LOCK_TIMEOUT: &str = "10s";
 
 /// Running API server task.
-pub type Server = tokio::task::JoinHandle<io::Result<()>>;
+pub type Server = AbortOnDropHandle<io::Result<()>>;
 
 /// Public and cluster-internal listeners used by the API application.
 pub struct ApplicationListeners {
@@ -398,7 +400,7 @@ impl Application {
 
     /// Runs the server until it receives a shutdown signal.
     pub async fn run_until_stopped(self) -> io::Result<()> {
-        self.server.await.map_err(io::Error::other)?
+        self.server.await.map_err(|error| io::Error::other(EtlError::from(error)))?
     }
 }
 
@@ -810,7 +812,7 @@ pub fn run(
     let listener = tokio::net::TcpListener::from_std(listener)?;
     internal_listener.set_nonblocking(true)?;
     let internal_listener = tokio::net::TcpListener::from_std(internal_listener)?;
-    let server = tokio::spawn(async move {
+    let server = AbortOnDropHandle::new(tokio::spawn(async move {
         let public_server = axum::serve(listener, app.into_make_service());
         if let Some(acceptor) = internal_tls_acceptor {
             let internal_server = axum::serve(
@@ -822,7 +824,7 @@ pub fn run(
             let internal_server = axum::serve(internal_listener, internal_app.into_make_service());
             tokio::try_join!(public_server, internal_server).map(|_| ())
         }
-    });
+    }));
 
     Ok(server)
 }

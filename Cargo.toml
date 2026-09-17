@@ -134,7 +134,7 @@ tokio = { version = "1.47.0", default-features = false }
 tokio-postgres = { git = "https://github.com/supabase/rust-postgres", default-features = false, rev = "8086f1fd19bd9abc0da86ba80f8b7dbdd676cb3e" }
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
-tokio-util = { version = "0.7.18", default-features = false }
+tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
 tonic = { version = "0.14.2", default-features = false }
 tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.6.8", default-features = false }

@@ -10,8 +10,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -22,6 +22,7 @@ use etl::{
         SchemaOperation, SchemaPlan, TableId, TableName, is_array_type,
     },
     store::DestinationStore,
+    task::TaskRegistry,
 };
 use etl_config::shared::{BigQueryTableOptions, BigQueryTableOptionsConfig};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
@@ -257,7 +258,9 @@ pub struct BigQueryDestination<S> {
     pipeline_id: PipelineId,
     state_store: S,
     inner: Arc<Mutex<Inner>>,
-    tasks: TaskSet,
+    /// Known limitation: tasks retain destination clones and this registry.
+    /// Call [`Destination::shutdown`] to break the ownership cycle.
+    tasks: TaskRegistry,
 }
 
 impl<S> BigQueryDestination<S>
@@ -287,7 +290,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
         }
     }
 
@@ -321,7 +324,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
         })
     }
 
@@ -353,7 +356,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
         })
     }
     /// Creates a new [`BigQueryDestination`] using Application Default
@@ -384,7 +387,7 @@ where
             pipeline_id,
             state_store,
             inner: Arc::new(Mutex::new(Inner::new())),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
         })
     }
 
@@ -429,7 +432,7 @@ where
             pipeline_id,
             state_store: store,
             inner: Arc::new(Mutex::new(Inner::new())),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
         })
     }
 

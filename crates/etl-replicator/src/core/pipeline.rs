@@ -1,124 +1,91 @@
-//! Pipeline execution and graceful shutdown owned by the replicator runner.
+//! Pipeline initialization and graceful shutdown owned by the replicator.
+
+use std::future::Future;
 
 use etl::{
-    destination::PipelineDestination, error::EtlResult, pipeline::Pipeline, store::PipelineStore,
+    destination::PipelineDestination, error::EtlError, pipeline::Pipeline, store::PipelineStore,
 };
-use tokio::signal::unix::{Signal, SignalKind, signal};
-use tracing::{error, info};
 
-use crate::{core::ReplicatorState, error::ReplicatorResult, health::ReplicatorHealth, metrics};
+use crate::{
+    core::{ReplicatorState, shutdown::ShutdownSignal},
+    error::ReplicatorResult,
+    health::ReplicatorHealth,
+    metrics,
+};
 
-/// Waits for a process termination request.
-async fn shutdown_requested(sigterm: &mut Signal) {
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            if let Err(error) = result {
-                error!(error = %error, "failed to listen for sigint, shutting down pipeline");
-            } else {
-                info!(signal = "sigint", "pipeline shutdown requested");
-            }
-        }
-
-        _ = sigterm.recv() => {
-            info!(signal = "sigterm", "pipeline shutdown requested");
-        }
-    }
-}
-
-/// Starts workers unless termination is requested, returning whether startup
-/// completed.
-async fn start_pipeline<S, D>(
-    pipeline: &mut Pipeline<S, D>,
+/// Initializes a destination and pipeline, then drains running workers on
+/// termination. Initialization is cancellable; a running completion future
+/// must remain alive until graceful teardown finishes.
+///
+/// The factory keeps only its captures in the async argument storage carried
+/// through the tracing wrapper. Current compiler layouts can reserve separate
+/// slots for a future argument and the child being awaited; constructing the
+/// initialization future inside avoids the extra large argument slot.
+#[tracing::instrument(skip(initialize, shutdown_signal, replicator_health))]
+pub(super) async fn start<S, D, F, Fut>(
+    initialize: F,
+    shutdown_signal: &mut ShutdownSignal,
     replicator_health: &ReplicatorHealth,
-    sigterm: &mut Signal,
-) -> EtlResult<bool>
-where
-    S: PipelineStore,
-    D: PipelineDestination,
-{
-    tokio::select! {
-        biased;
-
-        _ = shutdown_requested(sigterm) => {
-            replicator_health.set_replicator_state(ReplicatorState::Stopping);
-
-            // Pipeline startup spawns workers only after its final await, so
-            // cancelling pending initialization cannot leave workers behind.
-            Ok(false)
-        }
-
-        result = pipeline.start() => {
-            result?;
-            replicator_health.set_replicator_state(ReplicatorState::Running);
-
-            Ok(true)
-        }
-    }
-}
-
-/// Waits for running workers, requesting graceful shutdown on termination.
-async fn wait_for_pipeline<S, D>(
-    pipeline: Pipeline<S, D>,
-    replicator_health: &ReplicatorHealth,
-    sigterm: &mut Signal,
-) -> EtlResult<()>
-where
-    S: PipelineStore,
-    D: PipelineDestination,
-{
-    let shutdown_token = pipeline.shutdown_token();
-    let pipeline_completion = pipeline.wait();
-    tokio::pin!(pipeline_completion);
-
-    tokio::select! {
-        biased;
-
-        _ = shutdown_requested(sigterm) => {
-            replicator_health.set_replicator_state(ReplicatorState::Stopping);
-
-            shutdown_token.cancel();
-
-            pipeline_completion.await
-        }
-
-        pipeline_result = &mut pipeline_completion => {
-            replicator_health.set_replicator_state(ReplicatorState::Stopping);
-
-            pipeline_result
-        }
-    }
-}
-
-/// Runs the pipeline, updating lifecycle observations and draining on
-/// termination.
-#[tracing::instrument(skip(pipeline, replicator_health))]
-pub(super) async fn start<S, D>(
-    mut pipeline: Pipeline<S, D>,
-    replicator_health: ReplicatorHealth,
 ) -> ReplicatorResult<()>
 where
     S: PipelineStore,
     D: PipelineDestination,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ReplicatorResult<Pipeline<S, D>>>,
 {
-    // Register before startup so failure cannot leave started workers behind.
-    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut pipeline = tokio::select! {
+        biased;
 
-    // Try to start the pipeline.
-    if !start_pipeline(&mut pipeline, &replicator_health, &mut sigterm).await? {
-        return Ok(());
+        _ = shutdown_signal.wait() => return Ok(()),
+
+        result = initialize() => result?,
+    };
+
+    let startup_result = tokio::select! {
+        biased;
+
+        _ = shutdown_signal.wait() => None,
+
+        result = pipeline.start() => Some(result),
+    };
+    match startup_result {
+        Some(Ok(())) => replicator_health.set_replicator_state(ReplicatorState::Running),
+        result => {
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
+
+            // Pipeline startup spawns workers only after its final await.
+            // Cancel pending initialization, then close the constructed
+            // destination even when startup failed before workers existed.
+            let cleanup_result = pipeline.shutdown_and_wait().await;
+            let errors: Vec<_> = [result.unwrap_or(Ok(())), cleanup_result]
+                .into_iter()
+                .filter_map(Result::err)
+                .collect();
+            return if errors.is_empty() { Ok(()) } else { Err(EtlError::from(errors).into()) };
+        }
     }
 
-    // Report runtime metrics only after workers have started.
+    // Runtime metrics begin only once the pipeline has started successfully.
     let metrics_tasks = metrics::spawn_metrics_tasks();
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+    let result = tokio::select! {
+        biased;
 
-    // Wait for the pipeline to stop or be terminated.
-    let pipeline_result = wait_for_pipeline(pipeline, &replicator_health, &mut sigterm).await;
+        _ = shutdown_signal.wait() => {
+            // Kubernetes enforces the grace period with SIGKILL. Do not drop
+            // the completion future while transactions and writes drain.
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
+            pipeline.shutdown();
+            pipeline_wait.await
+        }
 
-    metrics_tasks.abort_and_wait().await;
-
-    pipeline_result?;
-
-    info!("pipeline stopped");
-
-    Ok(())
+        result = &mut pipeline_wait => {
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
+            result
+        }
+    };
+    let metrics_result = metrics_tasks.abort_and_wait().await;
+    let errors: Vec<_> = [result, metrics_result].into_iter().filter_map(Result::err).collect();
+    if errors.is_empty() { Ok(()) } else { Err(EtlError::from(errors).into()) }
 }

@@ -41,7 +41,7 @@
 use std::{
     pin::Pin,
     sync::{
-        Arc, Mutex, PoisonError, RwLock,
+        Arc, PoisonError, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -51,14 +51,10 @@ use std::{
 use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
 use metrics::{counter, gauge, histogram};
-use tokio::{
-    sync::watch,
-    task::{JoinError, JoinHandle},
-    time::MissedTickBehavior,
-};
+use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_stream::wrappers::WatchStream;
-use tokio_util::sync::CancellationToken;
-use tracing::{info, trace};
+use tokio_util::task::AbortOnDropHandle;
+use tracing::trace;
 
 use crate::observability::{
     DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
@@ -233,16 +229,12 @@ impl MemorySnapshot {
 /// Internal shared state for memory backpressure.
 #[derive(Debug)]
 struct MemoryMonitorInner {
-    /// Handle for the task that refreshes memory snapshots.
-    refresh_task: Mutex<Option<JoinHandle<()>>>,
     /// Optional backpressure state derived from memory snapshots.
     backpressure: Option<BackpressureMonitor>,
     /// Latest coherent used and total memory snapshot.
     snapshot: RwLock<MemorySnapshot>,
     /// Revision incremented after each complete snapshot update.
     snapshot_revision: AtomicU64,
-    /// Interval between memory refreshes in milliseconds.
-    memory_refresh_interval_ms: u64,
 }
 
 /// Shared backpressure state that exists only when backpressure is configured.
@@ -256,9 +248,9 @@ struct BackpressureMonitor {
 
 /// Shared memory monitor and emergency backpressure controller.
 ///
-/// This component owns a periodic task that samples memory usage and updates a
-/// boolean backpressure signal. Consumers can subscribe and pause polling when
-/// backpressure is active.
+/// A separately owned periodic task publishes memory snapshots and updates the
+/// backpressure signal. Consumers can share these readings without retaining
+/// the task handle.
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryMonitor {
     /// Shared sampler state and optional emergency backpressure controller.
@@ -266,12 +258,14 @@ pub(crate) struct MemoryMonitor {
 }
 
 impl MemoryMonitor {
-    /// Creates a new memory monitor and starts its refresh task.
-    pub(crate) fn new(
-        shutdown_token: CancellationToken,
+    /// Starts memory sampling and returns the shared readings and task handle.
+    ///
+    /// The caller owns the task and must abort and join it after consumers
+    /// drain.
+    pub(crate) fn spawn(
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
-    ) -> Self {
+    ) -> (Self, AbortOnDropHandle<()>) {
         // sysinfo docs suggest using a single `System` instance across the program.
         let mut system = sysinfo::System::new();
         let current_pid = sysinfo::get_current_pid().ok();
@@ -301,100 +295,79 @@ impl MemoryMonitor {
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
-                refresh_task: Mutex::new(None),
                 backpressure,
                 snapshot: RwLock::new(startup_snapshot),
                 snapshot_revision: AtomicU64::new(0),
-                memory_refresh_interval_ms,
             }),
         };
 
+        // Shared readings do not own the task, so retaining them creates no cycle.
         let this_clone = this.clone();
-        let refresh_task = tokio::spawn(async move {
-            let refresh_interval =
-                Duration::from_millis(this_clone.inner.memory_refresh_interval_ms);
+        let mut currently_backpressure_active = this.is_backpressure_active();
+        let refresh_task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let refresh_interval = Duration::from_millis(memory_refresh_interval_ms);
 
             let mut ticker = tokio::time::interval(refresh_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-            let mut currently_backpressure_active = this_clone.is_backpressure_active();
             let mut activation_started_at = currently_backpressure_active.then(Instant::now);
 
             loop {
-                tokio::select! {
-                    biased;
+                ticker.tick().await;
+                let previous_snapshot = this_clone.current_snapshot();
+                let refresh =
+                    MemorySnapshot::refresh(&mut system, current_pid, Some(previous_snapshot));
+                let snapshot = refresh.snapshot;
+                this_clone.publish_refresh(refresh);
 
-                    _ = shutdown_token.cancelled() => {
-                        info!("memory monitor stopped due to shutdown");
+                if let Some(backpressure) = this_clone.inner.backpressure.as_ref() {
+                    let used_percent = snapshot.used_percent();
+                    let next_backpressure_active = compute_next_backpressure_active(
+                        currently_backpressure_active,
+                        used_percent,
+                        backpressure.config.activate_threshold,
+                        backpressure.config.resume_threshold,
+                    );
 
-                        return;
-                    }
+                    trace!(
+                        used_memory_bytes = snapshot.used,
+                        total_memory_bytes = snapshot.total,
+                        memory_source = snapshot.source.as_str(),
+                        used_percent,
+                        backpressure_active = currently_backpressure_active,
+                        next_backpressure_active,
+                        "memory monitor refreshed memory snapshot"
+                    );
 
-                    _ = ticker.tick() => {
-                        let previous_snapshot = this_clone.current_snapshot();
-                        let refresh = MemorySnapshot::refresh(
-                            &mut system,
-                            current_pid,
-                            Some(previous_snapshot),
+                    if next_backpressure_active != currently_backpressure_active {
+                        trace!(
+                            backpressure_active = currently_backpressure_active,
+                            next_backpressure_active, used_percent, "memory monitor state changed"
                         );
-                        let snapshot = refresh.snapshot;
-                        this_clone.publish_refresh(refresh);
 
-                        if let Some(backpressure) = this_clone.inner.backpressure.as_ref() {
-                            let used_percent = snapshot.used_percent();
-                            let next_backpressure_active = compute_next_backpressure_active(
-                                currently_backpressure_active,
-                                used_percent,
-                                backpressure.config.activate_threshold,
-                                backpressure.config.resume_threshold,
-                            );
+                        emit_backpressure_active_metric(next_backpressure_active);
+                        emit_transition_metric(next_backpressure_active);
 
-                            trace!(
-                                used_memory_bytes = snapshot.used,
-                                total_memory_bytes = snapshot.total,
-                                memory_source = snapshot.source.as_str(),
-                                used_percent,
-                                backpressure_active = currently_backpressure_active,
-                                next_backpressure_active,
-                                "memory monitor refreshed memory snapshot"
-                            );
-
-                            if next_backpressure_active != currently_backpressure_active {
-                                trace!(
-                                    backpressure_active = currently_backpressure_active,
-                                    next_backpressure_active,
-                                    used_percent,
-                                    "memory monitor state changed"
-                                );
-
-                                emit_backpressure_active_metric(next_backpressure_active);
-                                emit_transition_metric(next_backpressure_active);
-
-                                if next_backpressure_active {
-                                    activation_started_at = Some(Instant::now());
-                                } else if let Some(started_at) = activation_started_at.take() {
-                                    emit_activation_duration_metric(started_at.elapsed());
-                                }
-                            }
-
-                            currently_backpressure_active = next_backpressure_active;
-                            this_clone.set_backpressure_active(next_backpressure_active);
-                        } else {
-                            trace!(
-                                used_memory_bytes = snapshot.used,
-                                total_memory_bytes = snapshot.total,
-                                memory_source = snapshot.source.as_str(),
-                                "memory monitor refreshed memory snapshot without backpressure"
-                            );
+                        if next_backpressure_active {
+                            activation_started_at = Some(Instant::now());
+                        } else if let Some(started_at) = activation_started_at.take() {
+                            emit_activation_duration_metric(started_at.elapsed());
                         }
                     }
+
+                    currently_backpressure_active = next_backpressure_active;
+                    this_clone.set_backpressure_active(next_backpressure_active);
+                } else {
+                    trace!(
+                        used_memory_bytes = snapshot.used,
+                        total_memory_bytes = snapshot.total,
+                        memory_source = snapshot.source.as_str(),
+                        "memory monitor refreshed memory snapshot without backpressure"
+                    );
                 }
             }
-        });
-        *this.inner.refresh_task.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some(refresh_task);
-
-        this
+        }));
+        (this, refresh_task)
     }
 
     /// Returns `true` when memory pressure currently activates backpressure.
@@ -436,18 +409,6 @@ impl MemoryMonitor {
     /// publish any associated data.
     pub(crate) fn snapshot_revision(&self) -> u64 {
         self.inner.snapshot_revision.load(Ordering::Relaxed)
-    }
-
-    /// Waits for the refresh task to finish after shutdown.
-    pub(crate) async fn wait_for_refresh_task(&self) -> Result<(), JoinError> {
-        let refresh_task =
-            self.inner.refresh_task.lock().unwrap_or_else(PoisonError::into_inner).take();
-
-        if let Some(refresh_task) = refresh_task {
-            refresh_task.await?;
-        }
-
-        Ok(())
     }
 
     /// Updates the backpressure active state and notifies subscribers when it
@@ -576,7 +537,6 @@ impl MemoryMonitor {
     pub(crate) fn new_for_test_with_backpressure(config: Option<MemoryBackpressureConfig>) -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
-                refresh_task: Mutex::new(None),
                 backpressure: config.map(|config| BackpressureMonitor {
                     active_tx: watch::channel(false).0,
                     config,
@@ -587,7 +547,6 @@ impl MemoryMonitor {
                     source: MemorySnapshotSource::System,
                 }),
                 snapshot_revision: AtomicU64::new(0),
-                memory_refresh_interval_ms: 100,
             }),
         }
     }
@@ -669,6 +628,25 @@ mod tests {
 
     use super::*;
     use crate::runtime::BatchMemoryGovernor;
+
+    /// Joining the sampler releases its state even when shared readers remain.
+    #[tokio::test(start_paused = true)]
+    async fn stopping_sampler_preserves_readings_without_refreshing() {
+        let (monitor, task) = MemoryMonitor::spawn(None, 100);
+        let reader = monitor.clone();
+        drop(monitor);
+        // Observe a real sample before exercising owner-driven teardown.
+        while reader.snapshot_revision() == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let revision = reader.snapshot_revision();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert_eq!(reader.snapshot_revision(), revision);
+        assert_eq!(Arc::strong_count(&reader.inner), 1);
+    }
 
     /// One captured gauge assignment.
     #[derive(Debug, PartialEq)]

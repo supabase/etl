@@ -4,7 +4,7 @@ use std::{
 };
 
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::trace;
 
 // Global cache for the Prometheus handle used by [`init_metrics_handle`].
@@ -21,7 +21,7 @@ use tracing::trace;
 // this caching mechanism is essential.
 static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 /// Global handle for the Prometheus upkeep task.
-static PROMETHEUS_UPKEEP_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static PROMETHEUS_UPKEEP_TASK: Mutex<Option<AbortOnDropHandle<()>>> = Mutex::new(None);
 
 /// Initializes metrics with manual endpoint management and returns a handle for
 /// rendering.
@@ -64,7 +64,7 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 
     // This task periodically performs upkeep to avoid unbounded memory growth due
     // to metrics collection.
-    let upkeep_task = tokio::spawn(async move {
+    let upkeep_task = AbortOnDropHandle::new(tokio::spawn(async move {
         loop {
             // upkeep_timeout hardcoded for now. Will make it configurable later if it
             // creates a problem
@@ -73,7 +73,7 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
             trace!("running metrics upkeep");
             handle_clone.run_upkeep();
         }
-    });
+    }));
     *PROMETHEUS_UPKEEP_TASK.lock().unwrap_or_else(PoisonError::into_inner) = Some(upkeep_task);
 
     Ok(handle)

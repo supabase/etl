@@ -18,8 +18,8 @@ use crate::{
     },
     error::EtlResult,
     event::Event,
-    runtime::concurrency::TaskSet,
     schema::{ReplicatedTableSchema, TableId},
+    task::TaskRegistry,
     test_utils::{
         event::{EventCondition, check_all_event_conditions, check_event_conditions},
         faults::{FaultAction, FaultInjector, FaultyOp, HoldHandle, apply_response_fault},
@@ -86,7 +86,7 @@ impl<D> Inner<D> {
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
-    tasks: TaskSet,
+    tasks: TaskRegistry,
     faults: FaultInjector,
 }
 
@@ -122,7 +122,7 @@ impl<D> TestDestinationWrapper<D> {
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
             faults: FaultInjector::new(),
         }
     }
