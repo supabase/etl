@@ -187,23 +187,27 @@ mod tests {
 
     use super::*;
 
-    /// Gives the scheduler bounded opportunity to run other tasks.
+    /// Lets other tasks make progress by yielding a bounded number of
+    /// scheduler turns.
     ///
-    /// Used before asserting that a task is still blocked; cooperative
-    /// yields avoid wall-clock sleeps while letting spawned work reach its
-    /// parked state.
-    async fn yield_rounds() {
+    /// Cooperative substitute for sleeping before a "still blocked"
+    /// assertion: it grants scheduling opportunity rather than wall-clock
+    /// time, so it cannot flake on a slow machine. Correct code stays
+    /// blocked after any number of turns; the budget only needs to be large
+    /// enough for broken code to finish and fail the assertion.
+    async fn let_other_tasks_run() {
         for _ in 0..64 {
             tokio::task::yield_now().await;
         }
     }
 
-    /// Spawns a task that panics and waits until the panic has completed.
+    /// Puts a task that has already finished panicking into the set.
     ///
-    /// The task signals `started` and panics in the same poll with no await
-    /// point between, so once the signal is received the task has already
-    /// finished panicking and its join result is observable.
-    async fn spawn_completed_panic(tasks: &TaskSet) {
+    /// On return, the panic has provably completed, so callers can assert
+    /// on join results without retry loops. This holds because the task
+    /// signals `started` and panics within a single poll, with no await
+    /// point between at which the two could be observed separately.
+    async fn spawn_panicked_task(tasks: &TaskSet) {
         let (started_tx, started_rx) = oneshot::channel();
         tasks
             .spawn(async move {
@@ -214,8 +218,11 @@ mod tests {
         started_rx.await.unwrap();
     }
 
-    /// Spawns a task parked on a oneshot channel and returns its release
-    /// sender.
+    /// Spawns a task parked on a oneshot channel (suspended at an await it
+    /// cannot pass) and returns its release sender.
+    ///
+    /// The sender is the remote control for the in-flight task: send to let
+    /// it finish, hold it to keep the task running indefinitely.
     async fn spawn_parked_task(tasks: &TaskSet) -> oneshot::Sender<()> {
         let (release_tx, release_rx) = oneshot::channel::<()>();
         tasks
@@ -228,9 +235,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn try_reap_surfaces_task_panic_past_the_reap_threshold() {
+    async fn try_reap_reports_task_panic_past_the_reap_threshold() {
         let tasks = TaskSet::new();
-        spawn_completed_panic(&tasks).await;
+        spawn_panicked_task(&tasks).await;
         // Parked fillers push the tracked count past the reap threshold so
         // the next reap must join the finished panicked task.
         let mut release_senders = Vec::new();
@@ -244,9 +251,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drain_surfaces_panic_deferred_by_try_reap() {
+    async fn drain_reports_panic_deferred_by_try_reap() {
         let tasks = TaskSet::new();
-        spawn_completed_panic(&tasks).await;
+        spawn_panicked_task(&tasks).await;
 
         // Below the reap threshold the panic is deliberately left unjoined.
         tasks.try_reap().await.unwrap();
@@ -254,7 +261,7 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::InvalidState);
 
         // The failed drain returned no guard, so the registry stays usable
-        // and the consumed panic does not resurface.
+        // and the consumed panic does not come back.
         let _guard = tasks.drain().await.unwrap();
     }
 
@@ -267,7 +274,7 @@ mod tests {
             let tasks = tasks.clone();
             async move { tasks.drain().await.map(drop) }
         });
-        yield_rounds().await;
+        let_other_tasks_run().await;
         assert!(!drain_handle.is_finished());
 
         release.send(()).unwrap();
@@ -283,7 +290,7 @@ mod tests {
             let tasks = tasks.clone();
             async move { tasks.spawn(async {}).await }
         });
-        yield_rounds().await;
+        let_other_tasks_run().await;
         assert!(!spawn_handle.is_finished());
 
         drop(guard);
@@ -300,9 +307,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_surfaces_task_panic() {
+    async fn shutdown_reports_task_panic() {
         let tasks = TaskSet::new();
-        spawn_completed_panic(&tasks).await;
+        spawn_panicked_task(&tasks).await;
 
         let error = tasks.shutdown().await.unwrap_err();
 
