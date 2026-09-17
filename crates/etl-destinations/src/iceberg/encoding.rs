@@ -143,8 +143,8 @@ impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
 ///
 /// This function creates an Arrow timestamp array with microsecond precision
 /// and a specified time zone. It processes [`Cell::TimestampTz`] values and
-/// converts them to microseconds since the Unix epoch while preserving
-/// time zone information in the array metadata.
+/// converts them to microseconds since the Unix epoch while preserving time
+/// zone information in the array metadata.
 ///
 /// Returns an [`ArrayRef`] containing a timestamp array with time zone
 /// metadata. Non-timestamp cells become null entries in the resulting array.
@@ -161,10 +161,9 @@ fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> Arr
 
 /// Builds a fixed-size binary array for UUID values from [`TableRow`]s.
 ///
-/// This function creates an Arrow fixed-size binary array specifically for
-/// UUID values, which are represented as 16-byte binary data. It extracts
-/// UUID bytes from [`Cell::Uuid`] values and creates null entries for
-/// non-UUID cells.
+/// This function creates an Arrow fixed-size binary array specifically for UUID
+/// values, which are represented as 16-byte binary data. It extracts UUID bytes
+/// from [`Cell::Uuid`] values and creates null entries for non-UUID cells.
 ///
 /// # Panics
 ///
@@ -191,8 +190,8 @@ fn build_uuid_array(rows: &[TableRow], field_idx: usize) -> ArrayRef {
 
 /// Converts a [`Cell`] to a boolean value.
 ///
-/// Extracts boolean values from [`Cell::Bool`] variants, returning [`None`]
-/// for all other cell types. This is used when building boolean Arrow arrays.
+/// Extracts boolean values from [`Cell::Bool`] variants, returning [`None`] for
+/// all other cell types. This is used when building boolean Arrow arrays.
 fn cell_to_bool(cell: &Cell) -> Option<bool> {
     match cell {
         Cell::Bool(v) => Some(*v),
@@ -231,8 +230,8 @@ fn cell_to_i64(cell: &Cell) -> Option<i64> {
 
 /// Converts a [`Cell`] to a 32-bit floating-point number.
 ///
-/// Extracts 32-bit float values from [`Cell::F32`] variants, returning
-/// [`None`] for all other cell types.
+/// Extracts 32-bit float values from [`Cell::F32`] variants, returning [`None`]
+/// for all other cell types.
 fn cell_to_f32(cell: &Cell) -> Option<f32> {
     match cell {
         Cell::F32(v) => Some(*v),
@@ -242,8 +241,8 @@ fn cell_to_f32(cell: &Cell) -> Option<f32> {
 
 /// Converts a [`Cell`] to a 64-bit floating-point number.
 ///
-/// Extracts 64-bit float values from [`Cell::F64`] variants, returning
-/// [`None`] for all other cell types.
+/// Extracts 64-bit float values from [`Cell::F64`] variants, returning [`None`]
+/// for all other cell types.
 fn cell_to_f64(cell: &Cell) -> Option<f64> {
     match cell {
         Cell::F64(v) => Some(*v),
@@ -253,8 +252,8 @@ fn cell_to_f64(cell: &Cell) -> Option<f64> {
 
 /// Converts a [`Cell`] to a byte vector.
 ///
-/// Extracts binary data from [`Cell::Bytes`] variants by cloning the
-/// underlying vector. Returns [`None`] for all other cell types.
+/// Extracts binary data from [`Cell::Bytes`] variants by cloning the underlying
+/// vector. Returns [`None`] for all other cell types.
 fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
     match cell {
         Cell::Bytes(v) => Some(v.clone()),
@@ -264,9 +263,9 @@ fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
 
 /// Converts a [`Cell`] to a 32-bit date value (days since Unix epoch).
 ///
-/// Transforms [`Cell::Date`] values into the number of days since the
-/// Unix epoch (1970-01-01) as required by Arrow's Date32 type. Returns
-/// [`None`] for non-date cell types.
+/// Transforms [`Cell::Date`] values into the number of days since the Unix
+/// epoch (1970-01-01) as required by Arrow's Date32 type. Returns [`None`] for
+/// non-date cell types.
 fn cell_to_date32(cell: &Cell) -> Option<i32> {
     match cell {
         Cell::Date(date) => Some(date.signed_duration_since(UNIX_EPOCH).num_days() as i32),
@@ -277,8 +276,8 @@ fn cell_to_date32(cell: &Cell) -> Option<i32> {
 /// Converts a [`Cell`] to a 64-bit time value (microseconds since midnight).
 ///
 /// Transforms [`Cell::Time`] values into microseconds since midnight as
-/// required by Arrow's Time64 type. Returns [`None`] if the duration cannot
-/// be represented in microseconds or for non-time cell types.
+/// required by Arrow's Time64 type. Returns [`None`] if the duration cannot be
+/// represented in microseconds or for non-time cell types.
 fn cell_to_time64(cell: &Cell) -> Option<i64> {
     match cell {
         Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds(),
@@ -289,9 +288,9 @@ fn cell_to_time64(cell: &Cell) -> Option<i64> {
 /// Converts a [`Cell`] to a 64-bit timestamp value (microseconds since Unix
 /// epoch).
 ///
-/// Transforms naive [`Cell::Timestamp`] values into microseconds since the
-/// Unix epoch by treating them as UTC timestamps. Returns [`None`] for
-/// non-timestamp cell types.
+/// Transforms naive [`Cell::Timestamp`] values into microseconds since the Unix
+/// epoch by treating them as UTC timestamps. Returns [`None`] for non-timestamp
+/// cell types.
 fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
     match cell {
         Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros()),
@@ -314,9 +313,8 @@ fn cell_to_timestamptz(cell: &Cell) -> Option<i64> {
 
 /// Extracts UUID bytes from a [`Cell`] value.
 ///
-/// This function attempts to extract the 16-byte representation of a UUID
-/// from a [`Cell::Uuid`] variant. For all other cell types, it returns
-/// [`None`].
+/// This function attempts to extract the 16-byte representation of a UUID from
+/// a [`Cell::Uuid`] variant. For all other cell types, it returns [`None`].
 ///
 /// Returns [`Some`] with a reference to the 16-byte UUID array if the cell
 /// contains a UUID, or [`None`] for all other cell types.
@@ -342,9 +340,8 @@ fn cell_to_uuid(cell: &Cell) -> Option<&[u8; UUID_BYTE_WIDTH as usize]> {
 /// - Offset-bearing times and JSON values use their serialized string form
 /// - Arrays use debug formatting
 ///
-/// Returns [`Some`] with the string representation for non-null values,
-/// or [`None`] for [`Cell::Null`] which becomes a null entry in the Arrow
-/// array.
+/// Returns [`Some`] with the string representation for non-null values, or
+/// [`None`] for [`Cell::Null`] which becomes a null entry in the Arrow array.
 fn cell_to_string(cell: &Cell) -> Option<String> {
     match cell {
         Cell::Null => None,
@@ -1589,8 +1586,8 @@ mod tests {
     fn rows_to_record_batch_unsupported_fallback() {
         use arrow::datatypes::{Field, Schema};
 
-        // Test with a data type that doesn't have a direct converter
-        // This will test the fallback to string conversion behavior
+        // Test with a data type that doesn't have a direct converter This will
+        // test the fallback to string conversion behavior
         let rows = vec![
             TableRow::new(vec![
                 Cell::I32(42),
@@ -1599,8 +1596,8 @@ mod tests {
             TableRow::new(vec![Cell::I32(100), Cell::Null]),
         ];
 
-        // Use a schema that expects a different type for JSON data
-        // This should trigger fallback behavior to string representation
+        // Use a schema that expects a different type for JSON data This should
+        // trigger fallback behavior to string representation
         let schema = Schema::new(vec![
             Field::new("id", DataType::Int32, false),
             Field::new("metadata", DataType::Utf8, true), // JSON as string
@@ -1626,7 +1623,8 @@ mod tests {
     fn rows_to_record_batch_schema_mismatch_length() {
         use arrow::datatypes::{Field, Schema};
 
-        // Test what happens when row has different number of columns than schema
+        // Test what happens when row has different number of columns than
+        // schema
         let rows = vec![TableRow::new(vec![
             Cell::I32(1),
             Cell::String("test".to_owned()),
@@ -1728,7 +1726,8 @@ mod tests {
         let field = Field::new("items", DataType::Boolean, true);
         let field_ref = Arc::new(field);
 
-        // Test with non-boolean array type - should fall back to string conversion
+        // Test with non-boolean array type - should fall back to string
+        // conversion
         let rows =
             vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(1), Some(0), None]))])];
 
@@ -1736,7 +1735,8 @@ mod tests {
         let array_ref = build_boolean_list_array(&rows, 0, field_ref);
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
-        // Should still create a list array but with string elements due to fallback
+        // Should still create a list array but with string elements due to
+        // fallback
         assert_eq!(list_array.len(), 1);
         assert!(!list_array.is_null(0));
     }
@@ -2643,8 +2643,8 @@ mod tests {
     fn build_list_array_dispatch() {
         use arrow::datatypes::Field;
 
-        // Test that build_list_array correctly dispatches to the right type-specific
-        // builders
+        // Test that build_list_array correctly dispatches to the right
+        // type-specific builders
         let test_cases = vec![
             (DataType::Boolean, "boolean list"),
             (DataType::Int32, "int32 list"),

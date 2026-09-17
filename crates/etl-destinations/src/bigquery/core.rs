@@ -218,9 +218,9 @@ fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlR
 #[derive(Debug)]
 struct Inner {
     /// Cache of views that have been created and the versioned table they point
-    /// to. This avoids redundant `CREATE OR REPLACE VIEW` calls for views
-    /// that already point to the correct table. Maps view name to the
-    /// versioned table it currently points to.
+    /// to. This avoids redundant `CREATE OR REPLACE VIEW` calls for views that
+    /// already point to the correct table. Maps view name to the versioned
+    /// table it currently points to.
     ///
     /// # Example
     /// `{ users_table: users_table_10, orders_table: orders_table_3 }`
@@ -267,9 +267,9 @@ where
     /// Creates a new [`BigQueryDestination`] with a pre-configured client.
     ///
     /// Accepts an existing [`BigQueryClient`] instance, allowing the caller to
-    /// control client creation separately from destination initialization.
-    /// This is useful for validation scenarios where you want to create and
-    /// validate the client first.
+    /// control client creation separately from destination initialization. This
+    /// is useful for validation scenarios where you want to create and validate
+    /// the client first.
     pub fn new(
         client: BigQueryClient,
         dataset_id: BigQueryDatasetId,
@@ -329,9 +329,9 @@ where
     /// string.
     ///
     /// Similar to [`BigQueryDestination::new_with_key_path`] but accepts the
-    /// key content directly rather than a file path. Useful when
-    /// credentials are stored in environment variables.
-    /// The `connection_pool_size` parameter controls the connection pool size.
+    /// key content directly rather than a file path. Useful when credentials
+    /// are stored in environment variables. The `connection_pool_size`
+    /// parameter controls the connection pool size.
     pub async fn new_with_key(
         project_id: String,
         dataset_id: BigQueryDatasetId,
@@ -394,8 +394,8 @@ where
     /// Initializes the BigQuery client with a flow authenticator using the
     /// provided secret and persistent file path. The `max_staleness_mins`
     /// parameter controls the maximum acceptable staleness of BigQuery query
-    /// results for tables created by this destination.
-    /// The `connection_pool_size` parameter controls the connection pool size.
+    /// results for tables created by this destination. The
+    /// `connection_pool_size` parameter controls the connection pool size.
     #[allow(clippy::too_many_arguments)]
     pub async fn new_with_flow_authenticator<Secret, Path>(
         project_id: String,
@@ -451,10 +451,9 @@ where
     ///
     /// Applied metadata is authoritative: it selects the current truncate
     /// sequence and proves that ETL completed table preparation for the
-    /// recorded snapshot and replication mask. The physical table is not
-    /// probed or recreated in that state because replacing a missing
-    /// applied table with an empty table would silently discard replicated
-    /// data.
+    /// recorded snapshot and replication mask. The physical table is not probed
+    /// or recreated in that state because replacing a missing applied table
+    /// with an empty table would silently discard replicated data.
     ///
     /// Initial creation is bracketed by `Creating` and `Applied`. A matching
     /// `Creating` endpoint safely resumes the idempotent DDL after a crash;
@@ -549,8 +548,9 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
     ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
-        // Serialize the complete table/view preparation so concurrent copy workers
-        // cannot race the durable metadata transition or derived view cache.
+        // Serialize the complete table/view preparation so concurrent copy
+        // workers cannot race the durable metadata transition or derived view
+        // cache.
         let mut inner = self.inner.lock().await;
         let sequenced_bigquery_table_id =
             self.resolve_or_create_table_for_schema(replicated_table_schema).await?;
@@ -563,10 +563,10 @@ where
         )
         .await?;
 
-        // Note: We return TableDescriptor by value for simplicity, which means callers
-        // clone it when creating multiple batches. This is acceptable because
-        // the descriptor is small (one String per column) and the cost is
-        // negligible compared to network I/O. If profiling shows this is a
+        // Note: We return TableDescriptor by value for simplicity, which means
+        // callers clone it when creating multiple batches. This is acceptable
+        // because the descriptor is small (one String per column) and the cost
+        // is negligible compared to network I/O. If profiling shows this is a
         // bottleneck, we could wrap it in Arc here and use Arc::unwrap_or_clone
         // at the call site to avoid redundant clones.
         let table_descriptor =
@@ -742,8 +742,9 @@ where
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
 
         let Some(metadata) = self.get_applied_destination_table_metadata(table_id).await? else {
-            // No metadata exists, this is a broken invariant since the metadata should
-            // have been recorded during write_table_rows before any Relation event.
+            // No metadata exists, this is a broken invariant since the metadata
+            // should have been recorded during write_table_rows before any
+            // Relation event.
             bail!(
                 ErrorKind::CorruptedTableSchema,
                 "Destination metadata missing for BigQuery schema change",
@@ -821,12 +822,14 @@ where
         validate_bigquery_schema_plan(new_replicated_table_schema, &plan)?;
         let sequenced_bigquery_table_id = metadata.table_id().parse()?;
 
-        // Mark as applying before making changes (with the NEW snapshot_id and mask).
+        // Mark as applying before making changes (with the NEW snapshot_id and
+        // mask).
         //
-        // NOTE: BigQuery does not support transactional DDL, so if the system crashes
-        // while in 'Applying' state, the destination table may be in an inconsistent
-        // state and manual intervention may be required. The previous endpoint is
-        // stored for debugging purposes but automatic recovery is not possible.
+        // NOTE: BigQuery does not support transactional DDL, so if the system
+        // crashes while in 'Applying' state, the destination table may be in an
+        // inconsistent state and manual intervention may be required. The
+        // previous endpoint is stored for debugging purposes but automatic
+        // recovery is not possible.
         let updated_metadata = DestinationTableMetadata::new_applied(
             metadata.table_id().to_owned(),
             current_snapshot_id,
@@ -856,12 +859,12 @@ where
             .store_destination_table_metadata(table_id, updated_metadata.to_applied())
             .await?;
 
-        // We must invalidate all connections here to make sure that caches on the
-        // connection side on BigQuery do not interfere with the schema changes.
-        // Each worker processes invalidations in channel order and this call
-        // waits for all workers to ack them. Parallel invalidations may
-        // interleave, but once this returns, later appends will
-        // use fresh connections.
+        // We must invalidate all connections here to make sure that caches on
+        // the connection side on BigQuery do not interfere with the schema
+        // changes. Each worker processes invalidations in channel order and
+        // this call waits for all workers to ack them. Parallel invalidations
+        // may interleave, but once this returns, later appends will use fresh
+        // connections.
         self.client.invalidate_all_connections().await;
 
         info!(
@@ -920,9 +923,10 @@ where
                         )
                         .await?;
 
-                    // BigQuery adds the column as nullable, leaving existing rows NULL. SET
-                    // DEFAULT affects only future inserts, so supported defaults are safe for
-                    // both physical table additions and publication-mask additions.
+                    // BigQuery adds the column as nullable, leaving existing
+                    // rows NULL. SET DEFAULT affects only future inserts, so
+                    // supported defaults are safe for both physical table
+                    // additions and publication-mask additions.
                     if let Some(default_expression) = column_default_sql(after_column_schema) {
                         self.client
                             .set_column_default(
@@ -962,8 +966,9 @@ where
                             );
                         }
                         ColumnAlterationKind::Nullability => {
-                            // Unsupported metadata changes can leave BigQuery intentionally
-                            // divergent, so later operations must tolerate that state.
+                            // Unsupported metadata changes can leave BigQuery
+                            // intentionally divergent, so later operations must
+                            // tolerate that state.
                             if !before.nullable && after.nullable {
                                 self.client
                                     .drop_column_not_null(
@@ -1029,23 +1034,24 @@ where
     ///
     /// Groups streaming operations (insert/update/delete) by table and
     /// processes them together, then handles truncate events separately by
-    /// creating new versioned tables. Uses the schema from the first event
-    /// of each table for table creation and descriptor building.
+    /// creating new versioned tables. Uses the schema from the first event of
+    /// each table for table creation and descriptor building.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut events_iter = events.into_iter().peekable();
 
         while events_iter.peek().is_some() {
-            // Maps table ID to (schema, rows). We are assuming that the table schema is the
-            // same for all events within two Relation event boundaries.
+            // Maps table ID to (schema, rows). We are assuming that the table
+            // schema is the same for all events within two Relation event
+            // boundaries.
             let mut table_id_to_data: HashMap<
                 TableId,
                 (ReplicatedTableSchema, Vec<BigQueryTableRow>),
             > = HashMap::new();
 
-            // Process events until we hit a truncate or relation event, or run out of
-            // events. Truncate and Relation events require flushing all batched
-            // data first before they can be processed, to maintain correct
-            // ordering.
+            // Process events until we hit a truncate or relation event, or run
+            // out of events. Truncate and Relation events require flushing all
+            // batched data first before they can be processed, to maintain
+            // correct ordering.
             while let Some(event) = events_iter.peek() {
                 if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                     break;
@@ -1146,8 +1152,9 @@ where
                 }
             }
 
-            // Process any Relation events (schema changes) that caused the batch to flush.
-            // Multiple consecutive Relation events are processed sequentially.
+            // Process any Relation events (schema changes) that caused the
+            // batch to flush. Multiple consecutive Relation events are
+            // processed sequentially.
             while let Some(Event::Relation(_)) = events_iter.peek() {
                 if let Some(Event::Relation(relation)) = events_iter.next() {
                     self.handle_relation_event(&relation.replicated_table_schema).await?;
@@ -1156,8 +1163,8 @@ where
 
             // Collect and deduplicate schemas from all truncate events.
             //
-            // This is done as an optimization since if we have multiple tables being
-            // truncated in a row without applying other events in the
+            // This is done as an optimization since if we have multiple tables
+            // being truncated in a row without applying other events in the
             // meanwhile, it doesn't make any sense to create new empty tables
             // for each of them.
             let mut truncate_schemas: HashMap<TableId, ReplicatedTableSchema> = HashMap::new();
@@ -1183,14 +1190,15 @@ where
     ///
     /// Creates fresh empty tables with incremented version numbers, updates
     /// views to point to new tables, and schedules cleanup of old table
-    /// versions. Uses the provided schemas directly instead of looking them
-    /// up from a store.
+    /// versions. Uses the provided schemas directly instead of looking them up
+    /// from a store.
     async fn process_truncate_for_schemas(
         &self,
         replicated_table_schemas: impl IntoIterator<Item = ReplicatedTableSchema>,
     ) -> EtlResult<()> {
-        // We want to lock for the entire processing to ensure that we don't have any
-        // race conditions and possible errors are easier to reason about.
+        // We want to lock for the entire processing to ensure that we don't
+        // have any race conditions and possible errors are easier to reason
+        // about.
         let mut inner = self.inner.lock().await;
 
         for replicated_table_schema in replicated_table_schemas {
@@ -1198,11 +1206,13 @@ where
             let bigquery_table_id =
                 table_name_to_bigquery_table_id(replicated_table_schema.name())?;
 
-            // We need to determine the current sequenced table ID for this table.
+            // We need to determine the current sequenced table ID for this
+            // table.
             //
-            // If no destination table metadata exists, it means the table was never created
-            // in BigQuery (e.g., due to validation errors during copy). In this
-            // case, we skip the truncate since there's nothing to truncate.
+            // If no destination table metadata exists, it means the table was
+            // never created in BigQuery (e.g., due to validation errors during
+            // copy). In this case, we skip the truncate since there's nothing
+            // to truncate.
             let Some(metadata) = self.get_applied_destination_table_metadata(table_id).await?
             else {
                 warn!(
@@ -1220,10 +1230,11 @@ where
             let sequenced_bigquery_table_id =
                 metadata_sequenced_table_id_for_base(&metadata, &bigquery_table_id)?;
 
-            // Find a new sequence table ID for this truncate event. An earlier attempt may
-            // have created the next version before failing to update the view or metadata.
-            // We must not replace that table because its creation-only layout may differ
-            // from the pipeline's current table options.
+            // Find a new sequence table ID for this truncate event. An earlier
+            // attempt may have created the next version before failing to
+            // update the view or metadata. We must not replace that table
+            // because its creation-only layout may differ from the pipeline's
+            // current table options.
             let mut obsolete_sequenced_bigquery_table_ids =
                 vec![sequenced_bigquery_table_id.clone()];
             let mut next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
@@ -1270,19 +1281,22 @@ where
             );
             self.state_store.store_destination_table_metadata(table_id, metadata).await?;
 
-            // The three statements above are not transactional. Retries use metadata as
-            // the durable authority and create another fresh table generation. For example,
-            // - Table created, but view update failed -> in this case the system will still
-            //   point to table 'n', so the restart will reprocess events on table 'n', the
-            //   already-created table 'n + 1' will be left unchanged, and a later fresh
-            //   generation will be created. No destination table metadata is changed.
-            // - Table created, view updated, but destination table metadata update failed
-            //   -> in this case the system will still point to table 'n' but the customer
-            //   will see the empty state of table 'n + 1' until the system heals. Healing
-            //   happens when the system is restarted, the destination table metadata points
-            //   to 'n' meaning that events will be reprocessed and applied on table 'n' and
-            //   then once the truncate is successfully processed, the system should be
-            //   consistent.
+            // The three statements above are not transactional. Retries use
+            // metadata as the durable authority and create another fresh table
+            // generation. For example,
+            // - Table created, but view update failed -> in this case the
+            //   system will still point to table 'n', so the restart will
+            //   reprocess events on table 'n', the already-created table 'n +
+            //   1' will be left unchanged, and a later fresh generation will be
+            //   created. No destination table metadata is changed.
+            // - Table created, view updated, but destination table metadata
+            //   update failed -> in this case the system will still point to
+            //   table 'n' but the customer will see the empty state of table 'n
+            //   + 1' until the system heals. Healing happens when the system is
+            //   restarted, the destination table metadata points to 'n' meaning
+            //   that events will be reprocessed and applied on table 'n' and
+            //   then once the truncate is successfully processed, the system
+            //   should be consistent.
 
             info!(
                 table_id = table_id.0,
@@ -1290,9 +1304,9 @@ where
                 "successfully processed truncate, view updated"
             );
 
-            // Schedule tracked cleanup of the previous table and any abandoned generations.
-            // The task handles cleanup errors internally because the view already points to
-            // the new data.
+            // Schedule tracked cleanup of the previous table and any abandoned
+            // generations. The task handles cleanup errors internally because
+            // the view already points to the new data.
             let client = self.client.clone();
             let dataset_id = self.dataset_id.clone();
             self.tasks
@@ -1331,16 +1345,18 @@ where
         let table_id = replicated_table_schema.id();
         let mut table_ids = HashSet::new();
 
-        // Always include the durable metadata target. BigQuery INFORMATION_SCHEMA
-        // can lag behind recently-created tables, but destination metadata is the
-        // source of truth for the table this pipeline last wrote to.
+        // Always include the durable metadata target. BigQuery
+        // INFORMATION_SCHEMA can lag behind recently-created tables, but
+        // destination metadata is the source of truth for the table this
+        // pipeline last wrote to.
         if let Some(metadata) = self.state_store.get_destination_table_metadata(table_id).await? {
             table_ids
                 .insert(metadata_sequenced_table_id_for_base(&metadata, &base_bigquery_table_id)?);
         }
 
-        // Discover physical table versions from BigQuery instead of the local cache.
-        // Older processes may have created versions this process never cached.
+        // Discover physical table versions from BigQuery instead of the local
+        // cache. Older processes may have created versions this process never
+        // cached.
         let listed_table_ids =
             self.client.list_sequenced_table_ids(&self.dataset_id, &base_bigquery_table_id).await?;
         let listed_sequenced_table_ids =
@@ -1352,8 +1368,8 @@ where
         // We first drop the view, so that the table is not queriable anymore.
         self.client.drop_view_if_exists(&self.dataset_id, &base_bigquery_table_id).await?;
 
-        // We then drop each table individually. If any of these operations fail, on the
-        // next restart the tables will be cleaned up.
+        // We then drop each table individually. If any of these operations
+        // fail, on the next restart the tables will be cleaned up.
         for sequenced_bigquery_table_id in &table_ids {
             self.client
                 .drop_table_if_exists(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
@@ -1361,11 +1377,13 @@ where
         }
 
         // Invalidate Storage Write API connections after dropping the physical
-        // tables. A subsequent copy can recreate a table with the same ID, and a
-        // cached connection may still refer to the previous table incarnation.
+        // tables. A subsequent copy can recreate a table with the same ID, and
+        // a cached connection may still refer to the previous table
+        // incarnation.
         self.client.invalidate_all_connections().await;
 
-        // Once destination cleanup is done, remove the stale derived view target.
+        // Once destination cleanup is done, remove the stale derived view
+        // target.
         let mut inner = self.inner.lock().await;
         inner.clear_view_cache(&base_bigquery_table_id);
 
@@ -1642,10 +1660,9 @@ fn bigquery_update_rows(
     sequence_key: EventSequenceKey,
 ) -> EtlResult<Vec<BigQueryTableRow>> {
     let primary_key_changed = match old_table_row.as_ref() {
-        // PostgreSQL omits the old-side image only when the publisher
-        // determined it was unnecessary. For primary-key identity, that means
-        // the destination key did not change. `FULL` updates are expected to
-        // carry an old row from pgoutput.
+        // PostgreSQL omits the old-side image only when the publisher determined it was
+        // unnecessary. For primary-key identity, that means the destination key did not change.
+        // `FULL` updates are expected to carry an old row from pgoutput.
         Some(old_table_row) => {
             bigquery_primary_key_changed(replicated_table_schema, old_table_row, &new_table_row)?
         }
@@ -1981,8 +1998,9 @@ fn calculate_target_batches_for_table_copy(table_rows: &[BigQueryTableRow]) -> E
     // Calculate how many rows would fit in target batch size.
     let rows_per_batch = MAX_BATCH_SIZE_BYTES.checked_div(estimated_row_size).unwrap_or(total_rows);
 
-    // Calculate target number of batches, ensuring at least 1. We don't care about
-    // the limit of inflight requests since that is enforced by the client.
+    // Calculate target number of batches, ensuring at least 1. We don't care
+    // about the limit of inflight requests since that is enforced by the
+    // client.
     let target_batches = if rows_per_batch > 0 { total_rows.div_ceil(rows_per_batch) } else { 1 };
 
     debug!(
@@ -2675,8 +2693,8 @@ mod tests {
 
         let encoded = row.encode_to_vec();
 
-        // Field tags must line up with the descriptor numbering:
-        // 1 => id, 4 => _CHANGE_TYPE, 5 => _CHANGE_SEQUENCE_NUMBER.
+        // Field tags must line up with the descriptor numbering: 1 => id, 4 =>
+        // _CHANGE_TYPE, 5 => _CHANGE_SEQUENCE_NUMBER.
         assert!(encoded.windows(2).any(|window| window == [0x08, 0x2a]));
         assert!(
             encoded

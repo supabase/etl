@@ -64,8 +64,8 @@ impl CommitEvent {
 
 /// Row insertion event from Postgres logical replication.
 ///
-/// [`InsertEvent`] represents a new row being added to a table. It contains
-/// the complete row data for the inserted source row.
+/// [`InsertEvent`] represents a new row being added to a table. It contains the
+/// complete row data for the inserted source row.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct InsertEvent {
@@ -116,8 +116,8 @@ pub struct UpdateEvent {
     ///
     /// [`UpdatedTableRow::Full`] means ETL knows every replicated column value.
     /// [`UpdatedTableRow::Partial`] means some replicated columns were emitted
-    /// by PostgreSQL as `UnchangedToast` and could not be reconstructed
-    /// safely from the old-side row image.
+    /// by PostgreSQL as `UnchangedToast` and could not be reconstructed safely
+    /// from the old-side row image.
     pub updated_table_row: UpdatedTableRow,
     /// Previous row data before the update, when PostgreSQL emitted one.
     ///
@@ -204,11 +204,10 @@ impl TruncateEvent {
 /// cache and can re-emit schema metadata during replay. ETL also emits this
 /// event when a stored schema snapshot is materialized for a following insert,
 /// update, or delete because pgoutput omitted a protocol relation. Truncate
-/// does not use that path: pgoutput emits a protocol relation first. This
-/// event intentionally has no LSN, transaction ordinal, or sequence key
-/// because such metadata would not be a durable replay identity. Consumers
-/// should instead treat it as an ordered schema barrier for the row events
-/// that follow it.
+/// does not use that path: pgoutput emits a protocol relation first. This event
+/// intentionally has no LSN, transaction ordinal, or sequence key because such
+/// metadata would not be a durable replay identity. Consumers should instead
+/// treat it as an ordered schema barrier for the row events that follow it.
 ///
 /// The carried [`crate::schema::SnapshotId`] identifies the underlying stored
 /// table schema, and it is created as `0:0` when a table is just copied. Then
@@ -332,10 +331,10 @@ impl EventSequenceKey {
         Self { commit_lsn, tx_ordinal }
     }
 
-    /// Returns the canonical packed `u128` form: `commit_lsn` in the high
-    /// 64 bits, `tx_ordinal` in the low 64 bits. Used by destinations that
-    /// need a single totally-ordered numeric key for CDC dedup (e.g.
-    /// ClickHouse's `ReplacingMergeTree` version column).
+    /// Returns the canonical packed `u128` form: `commit_lsn` in the high 64
+    /// bits, `tx_ordinal` in the low 64 bits. Used by destinations that need a
+    /// single totally-ordered numeric key for CDC dedup (e.g. ClickHouse's
+    /// `ReplacingMergeTree` version column).
     pub fn as_u128(self) -> u128 {
         (u128::from(u64::from(self.commit_lsn)) << 64) | u128::from(self.tx_ordinal)
     }

@@ -453,8 +453,8 @@ async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
     assert_eq!(truncate.truncated_tables[0].id(), table_id);
 
     // Insert after no-op DDL has no protocol relation, so apply emits the
-    // relation event from the pending schema snapshot. Truncate after no-op
-    // DDL receives a protocol relation first; apply does not synthesize one.
+    // relation event from the pending schema snapshot. Truncate after no-op DDL
+    // receives a protocol relation first; apply does not synthesize one.
     assert_eq!(
         insert.replicated_table_schema.inner().snapshot_id,
         insert_relation.replicated_table_schema.inner().snapshot_id
@@ -549,8 +549,8 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
-    // We take the relation events count after we applied the schema change so that
-    // we can use that for the next assertion.
+    // We take the relation events count after we applied the schema change so
+    // that we can use that for the next assertion.
     let events_before_restart = destination.get_events().await;
     let grouped_events_before_restart = group_events_by_type_and_table_id(&events_before_restart);
     let relation_count_before_restart =
@@ -1272,7 +1272,8 @@ async fn ddl_metric_labels_preserve_supported_tags_and_bound_unknown_tags() {
     let transaction = client.transaction().await.unwrap();
     for command_tag in &unexpected_tags {
         payload["command_tag"] = command_tag.clone().into();
-        // Unknown tags retain existing behavior for tracked and untracked tables.
+        // Unknown tags retain existing behavior for tracked and untracked
+        // tables.
         for oid in [table_id.into_inner(), 0] {
             payload["oid"] = oid.into();
             transaction

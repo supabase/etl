@@ -5,15 +5,15 @@ use utoipa::{
     openapi::{RefOr, schema::Schema},
 };
 
-/// Represents an update field where the API distinguishes an omitted field
-/// from an explicit JSON `null`.
+/// Represents an update field where the API distinguishes an omitted field from
+/// an explicit JSON `null`.
 ///
 /// Omitted fields preserve the stored value, explicit `null` clears optional
 /// values or resets defaulted values, and non-null values replace the stored
 /// value.
 ///
-/// These semantics apply only at the field containing [`UpdateField`]. When
-/// `T` is a structured configuration, a non-null value is deserialized as a
+/// These semantics apply only at the field containing [`UpdateField`]. When `T`
+/// is a structured configuration, a non-null value is deserialized as a
 /// complete `T` and replaces the complete stored value. Members omitted inside
 /// that value use `T`'s deserialization defaults; they do not preserve members
 /// from the stored value. Nested member-by-member patching requires a dedicated
@@ -87,8 +87,8 @@ impl<T> UpdateField<T> {
         }
     }
 
-    /// Applies this update to a concrete stored value, using a default when
-    /// the field is cleared.
+    /// Applies this update to a concrete stored value, using a default when the
+    /// field is cleared.
     pub(crate) fn apply_to_value(self, stored: T, default: impl FnOnce() -> T) -> T {
         match self {
             Self::Preserve => stored,

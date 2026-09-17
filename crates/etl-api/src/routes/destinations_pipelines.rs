@@ -565,9 +565,10 @@ pub(crate) async fn delete_destination_and_pipeline(
             .map_err(DestinationPipelineError::SourcePipelineState)?;
     }
 
-    // Retain control-plane records and the pipeline lock through source metadata
-    // and slot cleanup so failures leave enough information to reclaim source
-    // state. If this commit fails, a retry can repeat the idempotent cleanup.
+    // Retain control-plane records and the pipeline lock through source
+    // metadata and slot cleanup so failures leave enough information to reclaim
+    // source state. If this commit fails, a retry can repeat the idempotent
+    // cleanup.
     api_txn.commit().await?;
 
     Ok(Json(DeleteDestinationPipelineResponse {

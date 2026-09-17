@@ -7,6 +7,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use etl::{
+    activity,
     data::{Cell, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyBatchId,
@@ -156,7 +157,8 @@ impl Destination for DeferredEventsDestination {
 
         if events.is_empty() {
             assert_eq!(durability, WriteEventsDurability::RequireDurable);
-            // Hold the empty barrier so the test can prove completion waits for it.
+            // Hold the empty barrier so the test can prove completion waits for
+            // it.
             assert!(
                 self.writes_tx
                     .send(DeferredEventsWrite::DurabilityBarrier { result: async_result })
@@ -434,8 +436,8 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     let _scenario = FailScenario::setup();
-    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times, so
-    // that on the 3rd time, the system switches to manual retry.
+    // Since we have table_error_retry_max_attempts: 2, we want to fail 3 times,
+    // so that on the 3rd time, the system switches to manual retry.
     fail::cfg(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, "3*return(timed_retry)").unwrap();
 
     init_test_tracing();
@@ -460,8 +462,8 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
         destination.clone(),
     );
 
-    // Register notifications for waiting on the manual retry which is expected to
-    // be flipped by the max attempts handling.
+    // Register notifications for waiting on the manual retry which is expected
+    // to be flipped by the max attempts handling.
     let users_ready_notify = store
         .notify_on_table_state(database_schema.users_schema().id, |state| {
             matches!(state, TableState::Errored { retry_policy: TableRetryPolicy::ManualRetry, .. })
@@ -675,8 +677,8 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     sync_done_notify.notified().await;
 
     // Make the first apply-owned table event a no-op DDL. ETL stores a new
-    // schema snapshot for its transactional DDL message, but pgoutput keeps
-    // the warmed relation cache and therefore emits no protocol relation.
+    // schema snapshot for its transactional DDL message, but pgoutput keeps the
+    // warmed relation cache and therefore emits no protocol relation.
     let schema_stored_notify = store.notify_on_table_schema_count(table_id, 2).await;
 
     database
@@ -935,10 +937,10 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     pipeline.start().await.unwrap();
     finished_copy_notify.notified().await;
 
-    // Advance the physical schema while both logical connections are alive,
-    // but emit no DML that would make pgoutput send a new Relation. The DDL
-    // event trigger emits a transactional logical message. Keep the table-sync
-    // pause armed until the apply slot confirms a WAL frontier after that
+    // Advance the physical schema while both logical connections are alive, but
+    // emit no DML that would make pgoutput send a new Relation. The DDL event
+    // trigger emits a transactional logical message. Keep the table-sync pause
+    // armed until the apply slot confirms a WAL frontier after that
     // transaction, so the later catchup target must include the DDL.
     database
         .run_sql(&format!(
@@ -1170,7 +1172,8 @@ impl Destination for HoldingDmlDispatchDestination {
             if let Some(gate) = gate {
                 *self.first_held_dml_commit_lsn.lock().unwrap() = Some(first_dml_commit_lsn);
                 // Hold before forwarding the batch or its result handle, so the
-                // inner destination cannot write or acknowledge it until release.
+                // inner destination cannot write or acknowledge it until
+                // release.
                 gate.apply(Ok(())).await?;
             }
         }
@@ -1181,12 +1184,11 @@ impl Destination for HoldingDmlDispatchDestination {
 /// Observes fresh feedback on the same WAL sender throughout a suspension.
 ///
 /// Ignore the initial reply timestamp and observe fresh replies across three
-/// PostgreSQL timeout periods.
-/// Poll at PostgreSQL's half-timeout keepalive cadence, allowing two full
-/// timeouts to observe each reply. A missing or replaced WAL sender fails the
-/// assertion, so reconnecting cannot satisfy it. When DML dispatch is held,
-/// every observed slot checkpoint must remain below the first held DML event's
-/// transaction commit LSN.
+/// PostgreSQL timeout periods. Poll at PostgreSQL's half-timeout keepalive
+/// cadence, allowing two full timeouts to observe each reply. A missing or
+/// replaced WAL sender fails the assertion, so reconnecting cannot satisfy it.
+/// When DML dispatch is held, every observed slot checkpoint must remain below
+/// the first held DML event's transaction commit LSN.
 async fn assert_apply_feedback_during_stall(
     database: &PgDatabase<Client>,
     pipeline_id: PipelineId,
@@ -1281,9 +1283,16 @@ async fn feedback_continues_during_destination_dispatch() {
 
     hold.wait_reached().await;
 
+    // Independent feedback must not refresh a blocked worker's observation.
+    let activities = activity::snapshot();
+    assert_eq!(activities.len(), 1);
+    let observed_at = activities[0].last_observed_at();
+
     let first_held_dml_commit_lsn = first_held_dml_commit_lsn.lock().unwrap().unwrap();
     assert_apply_feedback_during_stall(&database, pipeline_id, Some(first_held_dml_commit_lsn))
         .await;
+
+    assert_eq!(activity::snapshot()[0].last_observed_at(), observed_at);
 
     assert!(!inner.events().await.iter().any(|event| matches!(event, Event::Insert(_))));
 
@@ -1346,8 +1355,8 @@ async fn apply_feedback_continues_during_table_sync_catchup() {
 
     tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, catchup_entered.notified()).await.unwrap();
 
-    // The failpoint is reached only after apply requests catchup and waits
-    // for this worker. Keep it suspended across multiple PostgreSQL timeouts.
+    // The failpoint is reached only after apply requests catchup and waits for
+    // this worker. Keep it suspended across multiple PostgreSQL timeouts.
     assert_apply_feedback_during_stall(&database, pipeline_id, None).await;
 
     release_tx.send(()).unwrap();
@@ -1522,8 +1531,8 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
         destination.clone(),
     );
 
-    // We wait until 4 inserts have been reached, the previous ones + the current
-    // ones.
+    // We wait until 4 inserts have been reached, the previous ones + the
+    // current ones.
     let new_inserts_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 4)])
         .await;
@@ -2480,8 +2489,8 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
 
     init_test_tracing();
 
-    // --- GIVEN: a pipeline whose table sync worker is paused after copy, so both
-    // worker connections are alive ---
+    // --- GIVEN: a pipeline whose table sync worker is paused after copy, so
+    // both worker connections are alive ---
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -2680,6 +2689,9 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
     let (first_lsn, result) = test.next_batch().await;
     result.send(Ok(DestinationWriteStatus::Accepted));
     let barrier = test.next_barrier().await;
+    let activities = activity::snapshot();
+    assert_eq!(activities.len(), 1);
+    let observed_at = activities[0].last_observed_at();
 
     let received_target = test.database.current_wal_flush_lsn().await.unwrap();
     test.insert(2).await;
@@ -2709,6 +2721,9 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
     .unwrap();
     assert!(tokio::time::timeout(Duration::from_secs(2), test.writes_rx.recv()).await.is_err());
     assert!(test.confirmed_lsn().await < first_lsn);
+    // The loop remains active while it can process source messages, even with
+    // a pending destination barrier.
+    assert!(activity::snapshot()[0].last_observed_at() > observed_at);
 
     barrier.send(Ok(DestinationWriteStatus::Durable));
     let (second_lsn, second_result) = test.next_batch().await;

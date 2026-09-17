@@ -256,7 +256,8 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We query BigQuery directly to get the data which has been inserted by tests.
+    // We query BigQuery directly to get the data which has been inserted by
+    // tests.
     let users_rows =
         bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
@@ -272,13 +273,14 @@ async fn table_copy_and_streaming_with_restart() {
         vec![BigQueryOrder::new(1, "description_1"), BigQueryOrder::new(2, "description_2"),]
     );
 
-    // Rebuild the destination for the restart so the test exercises state/schema
-    // recovery instead of relying on a reused, previously shut-down wrapper.
+    // Rebuild the destination for the restart so the test exercises
+    // state/schema recovery instead of relying on a reused, previously
+    // shut-down wrapper.
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
-    // We restart the pipeline and check that we can process events since we have
-    // loaded the table schema from persisted state.
+    // We restart the pipeline and check that we can process events since we
+    // have loaded the table schema from persisted state.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -311,7 +313,8 @@ async fn table_copy_and_streaming_with_restart() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // We query BigQuery directly to get the data which has been inserted by tests.
+    // We query BigQuery directly to get the data which has been inserted by
+    // tests.
     let users_rows =
         bigquery_database.query_table(database_schema.users_schema().name).await.unwrap();
     let parsed_users_rows = parse_bigquery_table_rows::<BigQueryUser>(users_rows);
@@ -596,8 +599,8 @@ async fn table_subsequent_updates() {
         .await
         .unwrap();
 
-    // Create two transactions A and B on separate connections to make sure that the
-    // updates are ordered correctly.
+    // Create two transactions A and B on separate connections to make sure that
+    // the updates are ordered correctly.
     let transaction_a = database_1.begin_transaction().await;
     transaction_a
         .update_values(
@@ -681,8 +684,8 @@ async fn table_primary_key_update_rewrites_row() {
         .await;
 
     // With default primary-key replica identity, changing the source primary
-    // key is a valid PostgreSQL shape: the update carries an old key row plus
-    // a full new row image.
+    // key is a valid PostgreSQL shape: the update carries an old key row plus a
+    // full new row image.
     let updated_id = 10i64;
     let updated_name = "user_10".to_owned();
     let updated_age = 10i32;

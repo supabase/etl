@@ -62,8 +62,8 @@ pub enum DestinationWriteStatus {
     /// `Accepted`, ETL still sends a terminal empty write after every copy
     /// worker finishes. `Durable` from that barrier must cover every accepted
     /// write in the current table-copy attempt before ETL stores
-    /// `FinishedCopy`. Empty and skipped tables must also return `Durable`
-    /// from their empty initialization write before the copy can finish.
+    /// `FinishedCopy`. Empty and skipped tables must also return `Durable` from
+    /// their empty initialization write before the copy can finish.
     Durable,
 }
 
@@ -98,9 +98,8 @@ pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 /// Durability requirement for a streaming destination write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteEventsDurability {
-    /// The destination may report either
-    /// [`DestinationWriteStatus::Accepted`] or
-    /// [`DestinationWriteStatus::Durable`].
+    /// The destination may report either [`DestinationWriteStatus::Accepted`]
+    /// or [`DestinationWriteStatus::Durable`].
     MayDefer,
     /// The destination must report [`DestinationWriteStatus::Durable`] for the
     /// write and all earlier accepted writes in the same ordered apply-loop
@@ -135,9 +134,9 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// For immediate destinations this can advance the last flush LSN and
     /// persisted checkpoint when the write returns
     /// [`DestinationWriteStatus::Durable`]. For deferred destinations, the
-    /// apply loop carries this LSN across
-    /// [`DestinationWriteStatus::Accepted`] results and advances only when a
-    /// later cumulative durable result covers the carried LSN.
+    /// apply loop carries this LSN across [`DestinationWriteStatus::Accepted`]
+    /// results and advances only when a later cumulative durable result covers
+    /// the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,
     /// Durability requirement supplied with the dispatched write.
     pub durability: WriteEventsDurability,

@@ -24,8 +24,8 @@ use crate::{
 /// VPA when inspection fails.
 ///
 /// Uses the current API pipeline and source configuration supplied by the
-/// caller, which must also be used to materialize the replacement. These
-/// values may differ from the running Pod's configuration after an API update.
+/// caller, which must also be used to materialize the replacement. These values
+/// may differ from the running Pod's configuration after an API update.
 /// Inspection uses the source connection's statement and lock timeouts.
 async fn restart_would_perform_table_sync(
     pipeline_id: i64,
@@ -84,19 +84,19 @@ async fn restart_would_perform_table_sync(
 ///
 /// Before reconciliation, checks current publication membership and durable
 /// table state. If any table would perform initial sync, it deletes the VPA so
-/// reconciliation restores its configured bounds and initial update mode.
-/// This covers table sync even when copying existing rows is skipped. With
-/// `Off`, the replacement Pod starts with the configured resources; this does
-/// not guarantee that memory stays at that level throughout initial sync.
-/// The recommender may retain usage history. Inspection failures and timeouts
+/// reconciliation restores its configured bounds and initial update mode. This
+/// covers table sync even when copying existing rows is skipped. With `Off`,
+/// the replacement Pod starts with the configured resources; this does not
+/// guarantee that memory stays at that level throughout initial sync. The
+/// recommender may retain usage history. Inspection failures and timeouts
 /// preserve the VPA and do not block restart.
 ///
 /// State or publication changes after inspection can race this decision.
 /// Internal pipeline retries, container restarts, and Kubernetes-initiated Pod
-/// replacements bypass it, including during initial sync. They do not reset
-/// the VPA: the current Pod retains its resources, and a replacement may
-/// receive an existing recommendation. Resource allocation outside this API
-/// path is therefore governed by Kubernetes and the VPA's live policy.
+/// replacements bypass it, including during initial sync. They do not reset the
+/// VPA: the current Pod retains its resources, and a replacement may receive an
+/// existing recommendation. Resource allocation outside this API path is
+/// therefore governed by Kubernetes and the VPA's live policy.
 ///
 /// If Kubernetes support is unavailable, or the pipeline has no active
 /// Kubernetes resources, the call returns `false` without reconciling.
@@ -140,6 +140,7 @@ pub(crate) async fn restart_replicator_if_running(
         destination,
         api_config.supabase_api_url.as_deref(),
         api_config.replicator.destination_defaults.ducklake.copy_buffer,
+        api_config.k8s.replicator_health,
         source_tls_config.get_tls_config(),
         true,
     )

@@ -1212,8 +1212,8 @@ async fn logical_replication_replays_consecutive_ddl_only_transactions_without_r
     )
     .await;
 
-    // Each ALTER runs in its own transaction. With no DML, pgoutput carries
-    // the self-describing DDL messages but has no reason to emit Relation.
+    // Each ALTER runs in its own transaction. With no DML, pgoutput carries the
+    // self-describing DDL messages but has no reason to emit Relation.
     database
         .run_sql(&format!("alter table {quoted_table_name} add column b integer"))
         .await
@@ -1640,8 +1640,8 @@ async fn logical_replication_emits_relation_before_truncate() {
         .unwrap();
 
     // No-op DDL stores a new schema snapshot without invalidating pgoutput's
-    // relation cache. Truncate still emits a protocol relation per table
-    // before the truncate message, unlike a later insert.
+    // relation cache. Truncate still emits a protocol relation per table before
+    // the truncate message, unlike a later insert.
     database.run_sql(&format!("alter table {first_quoted} owner to current_user")).await.unwrap();
     database.run_sql(&format!("alter table {second_quoted} owner to current_user")).await.unwrap();
     database.run_sql(&format!("truncate table {first_quoted}, {second_quoted}")).await.unwrap();

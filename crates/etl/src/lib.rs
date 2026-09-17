@@ -44,19 +44,18 @@
 //! checkpoints, and destination table metadata, providing a single interface
 //! for all state-related storage operations.
 //!
-//! The [`store::SchemaStore`] trait handles versioned table schemas,
-//! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
-//! reset, and deletion operations that must update state, schema, and metadata
-//! consistently.
-//! [`store::SharedStateStore`], [`store::DestinationStore`], and
+//! The [`store::SchemaStore`] trait handles versioned table schemas, and
+//! [`store::TableStateLifecycleStore`] handles table-scoped preparation, reset,
+//! and deletion operations that must update state, schema, and metadata
+//! consistently. [`store::SharedStateStore`], [`store::DestinationStore`], and
 //! [`store::PipelineStore`] are facade traits for code that needs common
 //! combinations of these capabilities.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it
 //! must be able to persist data durably. The crate itself provides no
 //! durability guarantees as it only transfers data between Postgres and the
-//! destination relying on the store traits to provide the required
-//! data when needed.
+//! destination relying on the store traits to provide the required data when
+//! needed.
 //!
 //! ## Error Handling
 //! All operations return [`error::EtlResult<T>`] which provides detailed error
@@ -191,6 +190,7 @@ compile_error!(
     "Either the `tls-rustls-ring` or the `tls-rustls-aws-lc-rs` feature must be enabled."
 );
 
+pub mod activity;
 pub mod config;
 mod constants;
 pub mod data;

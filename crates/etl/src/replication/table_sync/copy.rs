@@ -20,10 +20,10 @@ use tokio::{
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, info};
 
-use super::monitor::TableSyncMonitor;
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
+    activity::ActivityHandle,
     bail,
     destination::{
         Destination, DestinationWriteStatus, TableCopyAttemptId, TableCopyBatchId,
@@ -46,6 +46,7 @@ use crate::{
             PgReplicationTransaction, PostgresConnectionUpdate,
         },
     },
+    replication::table_sync::monitor::TableSyncMonitor,
     runtime::{
         BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
@@ -176,8 +177,8 @@ fn target_ctid_partition_count(
     // We try to estimate the number of partitions given the worker count.
     let worker_target = max_copy_connections.saturating_mul(CTID_PARTITIONS_PER_COPY_WORKER).max(1);
 
-    // We try to estimate the number of partitions also using the total number of
-    // estimated rows for the table(s).
+    // We try to estimate the number of partitions also using the total number
+    // of estimated rows for the table(s).
     let row_target = total_estimated_rows.filter(|estimated_rows| *estimated_rows > 0).map_or(
         1,
         |estimated_rows| {
@@ -227,6 +228,7 @@ fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
 /// Copies a table through ctid work items, using worker child connections.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
+    activity_handle: &ActivityHandle,
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,
@@ -242,44 +244,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyResult> {
-    run_table_copy(
-        replication_transaction,
-        table_id,
-        replicated_table_schema,
-        publication_name,
-        slot_name,
-        max_copy_connections.max(1),
-        consistent_point,
-        out_of_band_source_pool,
-        table_sync_monitor_interval,
-        batch_config,
-        shutdown_rx,
-        destination,
-        memory_monitor,
-        batch_memory_governor,
-    )
-    .await
-}
-
-/// Copies a table by assigning physical ctid ranges to child-connection
-/// workers.
-#[expect(clippy::too_many_arguments)]
-async fn run_table_copy<D: Destination + Clone + Send + 'static>(
-    replication_transaction: &PgReplicationTransaction<'_>,
-    table_id: TableId,
-    replicated_table_schema: ReplicatedTableSchema,
-    publication_name: Option<&str>,
-    slot_name: String,
-    max_copy_connections: u16,
-    consistent_point: PgLsn,
-    out_of_band_source_pool: OutOfBandSourcePool,
-    table_sync_monitor_interval: Duration,
-    batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
-    destination: D,
-    memory_monitor: MemoryMonitor,
-    batch_memory_governor: BatchMemoryGovernor,
-) -> EtlResult<TableCopyResult> {
+    let max_copy_connections = max_copy_connections.max(1);
     let start_time = Instant::now();
     let copy_partitions =
         plan_table_copy_partitions(replication_transaction, table_id, max_copy_connections).await?;
@@ -324,10 +289,11 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
     );
 
     for worker_index in 0..worker_count {
-        // We fork the connection for each worker since the main replication transaction
-        // has to remain open for the whole duration of the copy. This is needed
-        // since the snapshot exported by the replication transaction is only
-        // valid while that transaction's connection is active.
+        // We fork the connection for each worker since the main replication
+        // transaction has to remain open for the whole duration of the copy.
+        // This is needed since the snapshot exported by the replication
+        // transaction is only valid while that transaction's connection is
+        // active.
         let child_replication_client = match replication_transaction.fork_child().await {
             Ok(child_replication_client) => child_replication_client,
             Err(error) => {
@@ -350,8 +316,10 @@ async fn run_table_copy<D: Destination + Clone + Send + 'static>(
         let memory_monitor = memory_monitor.clone();
         let batch_memory_governor = batch_memory_governor.clone();
 
+        let activity_handle = activity_handle.clone();
         join_set.spawn(async move {
             table_copy_worker(
+                activity_handle,
                 worker_index,
                 child_replication_client,
                 snapshot_id,
@@ -555,6 +523,7 @@ async fn plan_table_copy_partitions(
 /// Runs one child connection until there is no more copy work to claim.
 #[expect(clippy::too_many_arguments)]
 async fn table_copy_worker<D>(
+    activity_handle: ActivityHandle,
     worker_index: usize,
     mut child_replication_client: ChildPgReplicationClient,
     snapshot_id: String,
@@ -574,7 +543,7 @@ where
 {
     let child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
-    let mut progress = TableCopyProgress::default();
+    let mut total_progress = TableCopyProgress::default();
 
     loop {
         if is_shutdown_requested(&shutdown_rx) {
@@ -589,10 +558,11 @@ where
             // means all CTID work has been claimed.
             child_replication_transaction.commit().await?;
 
-            return Ok(TableCopyWorkerOutcome::Completed(progress));
+            return Ok(TableCopyWorkerOutcome::Completed(total_progress));
         };
 
         match table_copy_partition_rows(
+            &activity_handle,
             &child_replication_transaction,
             &batch_id_generator,
             table_id,
@@ -607,9 +577,7 @@ where
         )
         .await?
         {
-            ShutdownResult::Ok(partition_progress) => {
-                progress.merge(partition_progress);
-            }
+            ShutdownResult::Ok(partition_progress) => total_progress.merge(partition_progress),
             ShutdownResult::Shutdown(_) => return Ok(TableCopyWorkerOutcome::Shutdown),
         }
     }
@@ -618,6 +586,7 @@ where
 /// Copies a single physical ctid range into the destination.
 #[expect(clippy::too_many_arguments)]
 async fn table_copy_partition_rows<D>(
+    activity_handle: &ActivityHandle,
     child_replication_transaction: &PgChildReplicationTransaction<'_>,
     batch_id_generator: &TableCopyBatchIdGenerator,
     table_id: TableId,
@@ -673,6 +642,7 @@ where
     pin!(table_copy_stream);
 
     let progress = match table_copy_rows_from_stream(
+        activity_handle,
         table_copy_stream.as_mut(),
         shutdown_rx,
         connection_updates_rx,
@@ -707,6 +677,7 @@ where
 /// Copies rows from a batched table-copy stream into the destination with
 /// prioritized shutdown handling.
 async fn table_copy_rows_from_stream<D, S>(
+    activity_handle: &ActivityHandle,
     mut table_copy_stream: Pin<&mut S>,
     mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
@@ -793,6 +764,7 @@ where
                         flush_result,
                     )
                     .await?;
+
                 let ShutdownResult::Ok(completed_flush_result) = pending_flush_result
                     .with_shutdown(&mut shutdown_rx)
                     .await
@@ -802,6 +774,10 @@ where
                 let (_, completed_at, result) =
                     completed_flush_result.into_parts_with_completion();
                 let write_status = result?;
+
+                // Observe completed destination writes, including accepted
+                // batches whose durability is confirmed by the final barrier.
+                activity_handle.ping();
 
                 table_copy_batch_metadata.record_processed(D::name());
                 counter!(

@@ -4,24 +4,23 @@
 //! production destination path (schema DDL, `cell_to_clickhouse_value`,
 //! RowBinary encoding, HTTP insert), reads them back from ClickHouse, and
 //! asserts the stored value equals the written one. ClickHouse itself is the
-//! storage oracle. Expected values are computed independently of the
-//! production encoder where practical (hex for `bytea`, clock components for
-//! `time`, `Date32` day offsets and raw microsecond ticks for temporals).
-//! For `numeric` and `jsonb` the format pin shares the production
-//! `to_string` path, so those properties additionally parse the stored text
-//! back and compare values, failing on any rendering that changes
-//! information.
+//! storage oracle. Expected values are computed independently of the production
+//! encoder where practical (hex for `bytea`, clock components for `time`,
+//! `Date32` day offsets and raw microsecond ticks for temporals). For `numeric`
+//! and `jsonb` the format pin shares the production `to_string` path, so those
+//! properties additionally parse the stored text back and compare values,
+//! failing on any rendering that changes information.
 //!
 //! Every property runs new random cases until a wall-clock budget elapses,
-//! using the shared runner in `etl::test_utils::property`. See that module
-//! for the `PROPERTY_TEST_BUDGET_SECS` budget knob and the
-//! `PROPERTY_TEST_SEED` failure replay knob.
+//! using the shared runner in `etl::test_utils::property`. See that module for
+//! the `PROPERTY_TEST_BUDGET_SECS` budget knob and the `PROPERTY_TEST_SEED`
+//! failure replay knob.
 //!
 //! The generated envelope mirrors what the Postgres codec can produce (no NUL
 //! bytes in text, microsecond temporal precision) and stays inside the ranges
 //! the destination accepts, e.g. ClickHouse `Date32`'s
-//! `1900-01-01..=2299-12-31`. Out-of-range values are covered separately by
-//! the loud-rejection property.
+//! `1900-01-01..=2299-12-31`. Out-of-range values are covered separately by the
+//! loud-rejection property.
 
 use std::sync::{
     Arc,
@@ -188,12 +187,11 @@ fn expected_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Renders the text expected for a `time` value, computed from clock
-/// components independently of the chrono `Display` path the production
-/// encoder uses.
+/// Renders the text expected for a `time` value, computed from clock components
+/// independently of the chrono `Display` path the production encoder uses.
 ///
-/// Mirrors the stored format's fraction rules: no fractional digits for
-/// whole seconds, three digits for whole milliseconds, six otherwise.
+/// Mirrors the stored format's fraction rules: no fractional digits for whole
+/// seconds, three digits for whole milliseconds, six otherwise.
 fn expected_time_string(time: &NaiveTime) -> String {
     let micros = time.nanosecond() / 1_000;
     let base = format!("{:02}:{:02}:{:02}", time.hour(), time.minute(), time.second());
@@ -222,9 +220,9 @@ fn assert_numeric_reparses(stored: &str, written: &PgNumeric) -> Result<(), Test
 
 /// Asserts stored json text parses back to the document that was written.
 ///
-/// `serde_json`'s parser is an independent inverse of the production
-/// rendering, so a `to_string` that changes a value fails here even though
-/// the format pin cannot see it.
+/// `serde_json`'s parser is an independent inverse of the production rendering,
+/// so a `to_string` that changes a value fails here even though the format pin
+/// cannot see it.
 fn assert_json_parses_back(stored: &str, written: &serde_json::Value) -> Result<(), TestCaseError> {
     let parsed: serde_json::Value = serde_json::from_str(stored)
         .map_err(|err| TestCaseError::fail(format!("stored json does not parse: {err}")))?;
@@ -490,9 +488,9 @@ async fn string_mapped_values_roundtrip_through_destination() {
             prop_assert_eq!(&row.vbytes, &vbytes.as_deref().map(expected_hex));
             prop_assert_eq!(&row.wbytes, &expected_hex(wbytes));
 
-            // Value oracles for the columns whose format pins share
-            // production code: the stored text must parse back to the value
-            // that was written.
+            // Value oracles for the columns whose format pins share production
+            // code: the stored text must parse back to the value that was
+            // written.
             if let (Some(stored), Some(written)) = (&row.vn, vn) {
                 assert_numeric_reparses(stored, written)?;
             }
@@ -710,11 +708,11 @@ struct TimestampRejectRow {
 /// Out-of-range writes must never silently change values: either the write
 /// fails loudly or the stored value reads back equal to what was written.
 ///
-/// Unlike dates, timestamps outside `DateTime64(6)`'s documented
-/// `1900..=2299` range have no local range check. Empirically ClickHouse
-/// accepts the raw microsecond ticks and reads them back bit-exact, so the
-/// values survive storage unchanged; this property pins that behavior and
-/// fails if either side ever starts mutating such values silently.
+/// Unlike dates, timestamps outside `DateTime64(6)`'s documented `1900..=2299`
+/// range have no local range check. Empirically ClickHouse accepts the raw
+/// microsecond ticks and reads them back bit-exact, so the values survive
+/// storage unchanged; this property pins that behavior and fails if either side
+/// ever starts mutating such values silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     let table = PropertyTable::create(
@@ -946,14 +944,14 @@ struct RecoveryMaskRow {
 ///
 /// # WHEN
 ///
-/// The recovery path runs with a schema carrying snapshot 100 -- a stale
-/// replay arriving before the interrupted change's relation event.
+/// The recovery path runs with a schema carrying snapshot 100 -- a stale replay
+/// arriving before the interrupted change's relation event.
 ///
 /// # THEN
 ///
-/// The write fails with `ErrorKind::DestinationSchemaRewind` instead of
-/// diffing against the stale schema and wrongly marking the interrupted
-/// change as applied.
+/// The write fails with `ErrorKind::DestinationSchemaRewind` instead of diffing
+/// against the stale schema and wrongly marking the interrupted change as
+/// applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
     init_test_tracing();
@@ -1043,8 +1041,8 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 }
 
-/// Tests that interrupted schema-change recovery replays the diff and marks
-/// the change applied when the arriving schema matches the recovery target.
+/// Tests that interrupted schema-change recovery replays the diff and marks the
+/// change applied when the arriving schema matches the recovery target.
 ///
 /// # GIVEN
 ///

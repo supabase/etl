@@ -5,8 +5,8 @@ use crate::{
 
 /// Converts a Postgres bytea hex string to a byte array.
 ///
-/// This function parses Postgres's hex-encoded bytea format, which uses
-/// the `\x` prefix followed by hexadecimal digits. Each pair of hex digits
+/// This function parses Postgres's hex-encoded bytea format, which uses the
+/// `\x` prefix followed by hexadecimal digits. Each pair of hex digits
 /// represents one byte in the output array.
 pub(crate) fn parse_bytea_hex_string(value: &str) -> EtlResult<Vec<u8>> {
     let Some(value) = value.as_bytes().strip_prefix(b"\\x") else {

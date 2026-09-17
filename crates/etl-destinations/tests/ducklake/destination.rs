@@ -1124,8 +1124,8 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
         async move { destination.acquire_external_maintenance_pause().await }
     });
 
-    // The existing copy session holds shared session access, so this proves
-    // the exclusive maintenance request is waiting for it to drain.
+    // The existing copy session holds shared session access, so this proves the
+    // exclusive maintenance request is waiting for it to drain.
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut pause_task).await.is_err());
 
     let second_write = tokio::time::timeout(
