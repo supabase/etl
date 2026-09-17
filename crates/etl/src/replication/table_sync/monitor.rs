@@ -16,8 +16,8 @@ use crate::{
 /// Background monitor for a table sync worker's in-flight table copy.
 ///
 /// Periodically reports table-copy end-to-end replication lag and checks the
-/// worker's replication slot for invalidation, so the caller can abort the
-/// copy instead of continuing against a slot PostgreSQL has already dropped.
+/// worker's replication slot for invalidation, so the caller can abort the copy
+/// instead of continuing against a slot PostgreSQL has already dropped.
 #[derive(Debug)]
 pub(crate) struct TableSyncMonitor {
     handle: JoinHandle<()>,
@@ -65,8 +65,9 @@ impl TableSyncMonitor {
                                     "replication slot was invalidated during table copy"
                                 );
 
-                                // Ignore send errors: if the receiver was already
-                                // dropped, the copy has already finished on its own.
+                                // Ignore send errors: if the receiver was
+                                // already dropped, the copy has already
+                                // finished on its own.
                                 let _ = slot_invalidated_tx.send(true);
 
                                 break;

@@ -19,8 +19,9 @@ pub fn make_span<B>(request: &Request<B>) -> Span {
     );
 
     if let Some(project) = request.headers().get("tenant_id") {
-        // We convert lossily to a string to be able to read at least part of the
-        // project ref in case of invalid UTF-8. This is useful for debugging.
+        // We convert lossily to a string to be able to read at least part of
+        // the project ref in case of invalid UTF-8. This is useful for
+        // debugging.
         let project = String::from_utf8_lossy(project.as_bytes());
         span.record("project", project.as_ref());
     }

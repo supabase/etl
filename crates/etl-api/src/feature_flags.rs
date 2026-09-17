@@ -45,8 +45,8 @@ pub fn init_feature_flags(
 
 /// Returns the maximum number of pipelines allowed per tenant.
 ///
-/// Checks the `maximumPipelinesPerTenant` feature flag and falls back to
-/// the default if the flag is not set or the client is unavailable.
+/// Checks the `maximumPipelinesPerTenant` feature flag and falls back to the
+/// default if the flag is not set or the client is unavailable.
 pub async fn get_max_pipelines_per_tenant(
     client: Option<&FeatureFlagsClient>,
     tenant_id: &str,

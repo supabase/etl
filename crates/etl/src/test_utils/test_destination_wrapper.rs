@@ -141,8 +141,8 @@ impl<D> TestDestinationWrapper<D> {
     /// condition.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the condition is not met. This prevents tests
-    /// from hanging indefinitely.
+    /// specified timeout if the condition is not met. This prevents tests from
+    /// hanging indefinitely.
     pub async fn notify_on_events<F>(&self, condition: F) -> TimedNotify
     where
         F: Fn(&[Event]) -> bool + Send + Sync + 'static,
@@ -289,8 +289,8 @@ where
         let (wrapped_drop_result, pending_drop_result) = DropTableForCopyResult::new(());
         destination.drop_table_for_copy(replicated_table_schema, wrapped_drop_result).await?;
 
-        // We send the result back before doing the internal checks for this utility, to
-        // avoid checking before the apply loop received the result.
+        // We send the result back before doing the internal checks for this
+        // utility, to avoid checking before the apply loop received the result.
         let result = apply_response_fault(fault, pending_drop_result.await.into_result()).await;
         let should_record_drop = result.is_ok();
         async_result.send(result);
@@ -346,8 +346,8 @@ where
             )
             .await?;
 
-        // We send the result back before doing the internal checks for this utility, to
-        // avoid checking before the apply loop received the result.
+        // We send the result back before doing the internal checks for this
+        // utility, to avoid checking before the apply loop received the result.
         let result = apply_response_fault(fault, pending_flush_result.await.into_result()).await;
         let should_record_table_rows = result.is_ok();
         async_result.send(result);
@@ -391,20 +391,22 @@ where
             });
         destination.write_events(events.clone(), durability, wrapped_flush_result).await?;
 
-        // We spawn a task to handle the result, this way the wrapper behaves like a
-        // transparent layer that doesn't block on the result of the inner
-        // destination, effectively exhibiting the fully asynchronous behavior
-        // that a destination could have.
+        // We spawn a task to handle the result, this way the wrapper behaves
+        // like a transparent layer that doesn't block on the result of the
+        // inner destination, effectively exhibiting the fully asynchronous
+        // behavior that a destination could have.
         //
-        // For the other destination methods with async result this is not needed since
-        // the methods on the outside block on the result right after calling
-        // the method, so it's not needed to simulate asynchronous work to make
-        // the code continue and do something else in the meanwhile.
+        // For the other destination methods with async result this is not
+        // needed since the methods on the outside block on the result right
+        // after calling the method, so it's not needed to simulate asynchronous
+        // work to make the code continue and do something else in the
+        // meanwhile.
         let inner = Arc::clone(&self.inner);
         self.tasks
             .spawn_with(move || async move {
-                // We send the result back before doing the internal checks for this utility, to
-                // avoid checking before the apply loop received the result.
+                // We send the result back before doing the internal checks for
+                // this utility, to avoid checking before the apply loop
+                // received the result.
                 let result =
                     apply_response_fault(fault, pending_flush_result.await.into_result()).await;
                 let should_record_events = result.is_ok();

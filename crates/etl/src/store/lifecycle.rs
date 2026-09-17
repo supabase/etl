@@ -61,10 +61,10 @@ pub enum TableStateOperation {
 pub trait TableStateLifecycleStore: Sync {
     /// Applies a table state lifecycle `operation`.
     ///
-    /// This is the single implementation point for lifecycle semantics.
-    /// Prefer the focused convenience methods below at call sites unless the
-    /// caller needs to choose the operation dynamically. Returns the number of
-    /// table state entries affected by the operation:
+    /// This is the single implementation point for lifecycle semantics. Prefer
+    /// the focused convenience methods below at call sites unless the caller
+    /// needs to choose the operation dynamically. Returns the number of table
+    /// state entries affected by the operation:
     /// - `0` for copy preparation because table state is preserved.
     /// - The number of reset table states for pipeline resync.
     /// - `1` when a table removal deletes an existing table state, otherwise
@@ -78,9 +78,9 @@ pub trait TableStateLifecycleStore: Sync {
     ///
     /// Removes destination table metadata, all stored table schemas, and
     /// durable table-sync progress while preserving the table state. This is
-    /// used after the destination object has been dropped and
-    /// before a fresh `0:0` table-copy schema is stored. This is a convenience
-    /// wrapper around [`TableStateOperation::PrepareForCopy`].
+    /// used after the destination object has been dropped and before a fresh
+    /// `0:0` table-copy schema is stored. This is a convenience wrapper around
+    /// [`TableStateOperation::PrepareForCopy`].
     fn prepare_table_state_for_copy(
         &self,
         table_id: TableId,
@@ -93,8 +93,8 @@ pub trait TableStateLifecycleStore: Sync {
         }
     }
 
-    /// Resets all current table states to
-    /// [`crate::store::TableState::Init`] for resync.
+    /// Resets all current table states to [`crate::store::TableState::Init`]
+    /// for resync.
     ///
     /// Deletes durable apply-worker progress because the apply slot lineage is
     /// being replaced. Preserves table schemas, destination table metadata, and

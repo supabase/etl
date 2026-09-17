@@ -89,8 +89,8 @@ pub(crate) const WRITE_STATUS_LABEL: &str = "status";
 /// Returns a bounded DDL command tag for metrics and logging.
 ///
 /// Source triggers emit `ALTER TABLE` and `ALTER PUBLICATION`. Logical messages
-/// can also be emitted directly, so all other tags map to `unknown`.
-/// Keep this classification separate from the raw tag used by replication.
+/// can also be emitted directly, so all other tags map to `unknown`. Keep this
+/// classification separate from the raw tag used by replication.
 pub(crate) fn ddl_command_tag_label(command_tag: &str) -> &'static str {
     match command_tag {
         "ALTER TABLE" => "ALTER TABLE",

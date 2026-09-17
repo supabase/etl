@@ -1,76 +1,124 @@
-//! Pipeline runtime helpers.
+//! Pipeline execution and graceful shutdown owned by the replicator runner.
 
-use etl::{destination::PipelineDestination, pipeline::Pipeline, store::PipelineStore};
-use tokio::signal::unix::{SignalKind, signal};
-use tracing::{error, info, warn};
+use etl::{
+    destination::PipelineDestination, error::EtlResult, pipeline::Pipeline, store::PipelineStore,
+};
+use tokio::signal::unix::{Signal, SignalKind, signal};
+use tracing::{error, info};
 
-use crate::{error::ReplicatorResult, metrics};
+use crate::{core::ReplicatorState, error::ReplicatorResult, health::ReplicatorHealth, metrics};
 
-/// Starts a pipeline and handles graceful shutdown signals.
-///
-/// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT,
-/// and ensures proper cleanup on shutdown. The pipeline will attempt to
-/// finish processing current batches before terminating.
-#[tracing::instrument(skip(pipeline))]
-pub(super) async fn start<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
+/// Waits for a process termination request.
+async fn shutdown_requested(sigterm: &mut Signal) {
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                error!(error = %error, "failed to listen for sigint, shutting down pipeline");
+            } else {
+                info!(signal = "sigint", "pipeline shutdown requested");
+            }
+        }
+
+        _ = sigterm.recv() => {
+            info!(signal = "sigterm", "pipeline shutdown requested");
+        }
+    }
+}
+
+/// Starts workers unless termination is requested, returning whether startup
+/// completed.
+async fn start_pipeline<S, D>(
+    pipeline: &mut Pipeline<S, D>,
+    replicator_health: &ReplicatorHealth,
+    sigterm: &mut Signal,
+) -> EtlResult<bool>
 where
     S: PipelineStore,
     D: PipelineDestination,
 {
-    // Start the pipeline.
-    pipeline.start().await?;
+    tokio::select! {
+        biased;
 
-    // We spawn metrics collection after the pipeline was started, so that if we
-    // crash before starting we don't keep emitting metrics that make it look as
-    // if the system is running.
+        _ = shutdown_requested(sigterm) => {
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
+
+            // Pipeline startup spawns workers only after its final await, so
+            // cancelling pending initialization cannot leave workers behind.
+            Ok(false)
+        }
+
+        result = pipeline.start() => {
+            result?;
+            replicator_health.set_replicator_state(ReplicatorState::Running);
+
+            Ok(true)
+        }
+    }
+}
+
+/// Waits for running workers, requesting graceful shutdown on termination.
+async fn wait_for_pipeline<S, D>(
+    pipeline: Pipeline<S, D>,
+    replicator_health: &ReplicatorHealth,
+    sigterm: &mut Signal,
+) -> EtlResult<()>
+where
+    S: PipelineStore,
+    D: PipelineDestination,
+{
+    let pipeline_shutdown_tx = pipeline.shutdown_tx();
+    let pipeline_completion = pipeline.wait();
+    tokio::pin!(pipeline_completion);
+
+    tokio::select! {
+        biased;
+
+        _ = shutdown_requested(sigterm) => {
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
+
+            let _ = pipeline_shutdown_tx.shutdown();
+
+            pipeline_completion.await
+        }
+
+        pipeline_result = &mut pipeline_completion => {
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
+
+            pipeline_result
+        }
+    }
+}
+
+/// Runs the pipeline, updating lifecycle observations and draining on
+/// termination.
+#[tracing::instrument(skip(pipeline, replicator_health))]
+pub(super) async fn start<S, D>(
+    mut pipeline: Pipeline<S, D>,
+    replicator_health: ReplicatorHealth,
+) -> ReplicatorResult<()>
+where
+    S: PipelineStore,
+    D: PipelineDestination,
+{
+    // Register before startup so failure cannot leave started workers behind.
+    let mut sigterm = signal(SignalKind::terminate())?;
+
+    // Try to start the pipeline.
+    if !start_pipeline(&mut pipeline, &replicator_health, &mut sigterm).await? {
+        return Ok(());
+    }
+
+    // Report runtime metrics only after workers have started.
     let metrics_tasks = metrics::spawn_metrics_tasks();
 
-    // Spawn a task to listen for shutdown signals and trigger shutdown.
-    let shutdown_tx = pipeline.shutdown_tx();
-    let shutdown_handle = tokio::spawn(async move {
-        // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
-        //
-        // If the process is killed before shutdown completes, the pipeline may become
-        // corrupted, depending on the store and destination
-        // implementations.
-        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
-            error!("failed to register sigterm handler, shutting down pipeline");
+    // Wait for the pipeline to stop or be terminated.
+    let pipeline_result = wait_for_pipeline(pipeline, &replicator_health, &mut sigterm).await;
 
-            if let Err(err) = shutdown_tx.shutdown() {
-                warn!(error = %err, "failed to send shutdown signal");
-            }
-
-            return;
-        };
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("sigint (ctrl+c) received, shutting down pipeline");
-            }
-            _ = sigterm.recv() => {
-                info!("sigterm received, shutting down pipeline");
-            }
-        }
-
-        if let Err(err) = shutdown_tx.shutdown() {
-            warn!(error = %err, "failed to send shutdown signal");
-        }
-    });
-
-    // Wait for the pipeline to finish (either normally or via shutdown).
-    let result = pipeline.wait().await;
-
-    // Ensure the shutdown task is finished before returning.
-    // If the pipeline finished before Ctrl+C, we want to abort the shutdown task.
-    // If Ctrl+C was pressed, the shutdown task will have already triggered
-    // shutdown. We don't care about the result of the shutdown_handle, but we
-    // should abort it if it's still running.
-    shutdown_handle.abort();
-    let _ = shutdown_handle.await;
     metrics_tasks.abort_and_wait().await;
 
-    // Propagate any pipeline error.
-    result?;
+    pipeline_result?;
+
+    info!("pipeline stopped");
 
     Ok(())
 }

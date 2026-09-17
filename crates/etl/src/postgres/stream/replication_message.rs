@@ -1,263 +1,121 @@
+//! Logical replication intake and construction of independent feedback.
+
 use std::{
-    fmt::{Display, Formatter},
+    fmt::{self, Debug, Formatter},
+    future::Future,
     pin::Pin,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-use etl_postgres::time::POSTGRES_EPOCH;
-use futures::Stream;
-use metrics::counter;
-use pin_project_lite::pin_project;
-use postgres_replication::{
-    LogicalReplicationStream,
-    protocol::{LogicalReplicationMessage, ReplicationMessage},
-};
-use tokio_postgres::types::PgLsn;
-use tracing::debug;
-#[cfg(feature = "failpoints")]
-use tracing::warn;
+use bytes::Bytes;
+use futures::{Stream, StreamExt, ready, stream::SplitStream};
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use tokio_postgres::CopyBothDuplex;
 
-#[cfg(feature = "failpoints")]
-use crate::failpoints::{SEND_STATUS_UPDATE_FP, etl_fail_point_active};
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    observability::{
-        ETL_STATUS_UPDATES_SKIPPED_TOTAL, ETL_STATUS_UPDATES_TOTAL, FORCED_LABEL,
-        STATUS_UPDATE_TYPE_LABEL,
-    },
+    postgres::FeedbackHandle,
 };
 
-/// Minimum interval between non-forced status updates when the flush frontier
-/// has not advanced.
-///
-/// PostgreSQL can emit a primary keepalive for every transaction that pgoutput
-/// skips because it contains no published changes when synchronous replication
-/// is active. The apply loop attempts a status response for each keepalive,
-/// including those that do not request an immediate reply. This interval
-/// prevents such bursts from producing an equally large burst of redundant
-/// responses.
-const STATUS_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
+/// Decodes replication messages using the existing pgoutput protocol parser.
+fn decode_message(bytes: Bytes) -> EtlResult<ReplicationMessage<LogicalReplicationMessage>> {
+    let message = ReplicationMessage::parse(&bytes).map_err(|error| {
+        etl_error!(
+            ErrorKind::DeserializationError, "Failed to decode replication message", source: error
+        )
+    })?;
 
-/// The status update type when sending a status update message back to
-/// Postgres.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum StatusUpdateType {
-    /// Represents an update in response to a keep alive from Postgres.
-    KeepAlive,
-    /// Represents a periodic heartbeat sent while the apply loop is otherwise
-    /// idle.
-    PeriodicKeepAlive,
-    /// Represents an update before shutdown that requests an immediate reply
-    /// from Postgres.
-    ShutdownFlush,
-}
+    match message {
+        ReplicationMessage::XLogData(body) => {
+            let body = body.map_data(|bytes| LogicalReplicationMessage::parse(&bytes)).map_err(
+                |error| {
+                    etl_error!(
+                        ErrorKind::DeserializationError,
+                        "Failed to decode logical replication message",
+                        source: error
+                    )
+                },
+            )?;
 
-impl StatusUpdateType {
-    /// Returns `true` whether this status update type requires a reply from
-    /// Postgres, `false` otherwise.
-    fn request_reply(&self) -> bool {
-        match self {
-            Self::KeepAlive => false,
-            Self::PeriodicKeepAlive => true,
-            Self::ShutdownFlush => true,
+            Ok(ReplicationMessage::XLogData(body))
         }
-    }
-
-    /// Returns the metric label for this status update type.
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::KeepAlive => "keep_alive",
-            Self::PeriodicKeepAlive => "periodic_keep_alive",
-            Self::ShutdownFlush => "shutdown_flush",
+        ReplicationMessage::PrimaryKeepAlive(body) => {
+            Ok(ReplicationMessage::PrimaryKeepAlive(body))
         }
+        _ => Err(etl_error!(ErrorKind::DeserializationError, "Unsupported replication message")),
     }
 }
 
-impl Display for StatusUpdateType {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-pin_project! {
-    /// A stream that yields replication messages from a Postgres logical
-    /// replication stream and tracks the last sent status updates.
-    pub(crate) struct ReplicationMessageStream {
-        #[pin]
-        stream: LogicalReplicationStream,
-        last_update: Option<Instant>,
-        last_write_lsn: Option<PgLsn>,
-        last_flush_lsn: Option<PgLsn>,
-    }
+/// Read-only logical WAL stream.
+pub struct ReplicationMessageStream {
+    /// The read half never holds the transport lock across a pending poll.
+    stream: SplitStream<CopyBothDuplex<Bytes>>,
 }
 
 impl ReplicationMessageStream {
-    /// Creates a new [`ReplicationMessageStream`] from a
-    /// [`LogicalReplicationStream`].
-    pub(crate) fn wrap(stream: LogicalReplicationStream) -> Self {
-        Self { stream, last_update: None, last_write_lsn: None, last_flush_lsn: None }
+    /// Creates WAL intake and optional independent feedback on one connection.
+    ///
+    /// Supplying an interval returns a feedback handle and its sender future.
+    /// The caller must own the handle, spawn the future, and stop its task when
+    /// replication ends. With `None`, no feedback is sent, allowing tests to
+    /// replay the slot without acknowledging it. Neither mode opens another
+    /// PostgreSQL connection.
+    pub(crate) fn create(
+        stream: CopyBothDuplex<Bytes>,
+        keep_alive_deadline_duration: Option<Duration>,
+    ) -> (Self, Option<(FeedbackHandle, impl Future<Output = EtlResult<()>>)>) {
+        let (sink, stream) = stream.split();
+        let feedback =
+            keep_alive_deadline_duration.map(|duration| FeedbackHandle::create(sink, duration));
+
+        (Self { stream }, feedback)
     }
+}
 
-    /// Sends a status update to the Postgres server.
-    ///
-    /// Primary keepalives do not all request an immediate response. In
-    /// particular, a synchronous logical walsender may send one after pgoutput
-    /// skips a transaction with no published changes. The apply loop still
-    /// calls this method for that keepalive so new flush progress can be
-    /// reported promptly, but passes `force = false` when PostgreSQL did not
-    /// request a reply.
-    ///
-    /// PostgreSQL normally requests an immediate reply only after roughly half
-    /// of `wal_sender_timeout` has elapsed without hearing from ETL. Once it
-    /// sends that requested heartbeat, the walsender waits for the response
-    /// instead of issuing more requested heartbeats. Keepalives emitted for
-    /// skipped transactions do not request a reply.
-    ///
-    /// A non-forced call with an unchanged flush frontier is therefore
-    /// debounced. In normal operation, [`StatusUpdateResult::Skipped`] means
-    /// ETL suppressed that redundant response locally; it does not mean a
-    /// status message was sent and rejected by PostgreSQL. Outside test fault
-    /// injection, forced heartbeat and shutdown responses always bypass this
-    /// interval.
-    pub(crate) async fn send_status_update(
-        self: Pin<&mut Self>,
-        mut write_lsn: PgLsn,
-        mut flush_lsn: PgLsn,
-        force: bool,
-        status_update_type: StatusUpdateType,
-    ) -> EtlResult<()> {
-        // If the failpoint is active, we do not send any status update. This is useful
-        // for testing the system when we want to check what happens when no
-        // status updates are sent.
-        #[cfg(feature = "failpoints")]
-        if etl_fail_point_active(SEND_STATUS_UPDATE_FP) {
-            warn!("not sending status update due to active failpoint");
-
-            return Ok(());
-        }
-
-        let this = self.project();
-
-        // If the new write lsn is less than the last one, we can safely ignore it,
-        // since we only want to report monotonically increasing values.
-        if let Some(last_write_lsn) = this.last_write_lsn
-            && write_lsn < *last_write_lsn
-        {
-            write_lsn = *last_write_lsn;
-        }
-
-        // If the new flush lsn is less than the last one, we can safely ignore it,
-        // since we only want to report monotonically increasing values.
-        if let Some(last_flush_lsn) = this.last_flush_lsn
-            && flush_lsn < *last_flush_lsn
-        {
-            flush_lsn = *last_flush_lsn;
-        }
-
-        // This invariant is important since if `flush_lsn` becomes bigger, it means
-        // that there was a problem during replication.
-        debug_assert!(write_lsn >= flush_lsn);
-
-        // Debounce only optional replies. PostgreSQL may generate many primary
-        // keepalives for consecutive transactions that pgoutput filtered to
-        // empty, but replying again before either the flush frontier or this
-        // interval advances would provide no new durability information.
-        if !force
-            && let (Some(last_update), Some(last_flush_lsn)) =
-                (this.last_update.as_mut(), this.last_flush_lsn.as_mut())
-        {
-            // Only a changed flush frontier bypasses the interval because it
-            // provides PostgreSQL with new confirmed progress. `write_lsn`
-            // tracks receipt and can advance for every incoming message,
-            // including keepalives, without advancing that safe frontier while
-            // ETL still has unresolved work.
-            //
-            // Checking `write_lsn` here would defeat the debounce: each new
-            // keepalive could trigger another optional response even though the
-            // reported flush and apply positions were unchanged.
-            if flush_lsn == *last_flush_lsn && last_update.elapsed() < STATUS_UPDATE_INTERVAL {
-                counter!(
-                    ETL_STATUS_UPDATES_SKIPPED_TOTAL,
-                    STATUS_UPDATE_TYPE_LABEL => status_update_type.as_str(),
-                )
-                .increment(1);
-
-                debug!(
-                    %flush_lsn,
-                    last_update_elapsed_secs = last_update.elapsed().as_secs(),
-                    %status_update_type,
-                    "skipping status update"
-                );
-
-                return Ok(());
-            }
-        }
-
-        // The client's system clock at the time of transmission, as microseconds since
-        // midnight on 2000-01-01.
-        let ts = POSTGRES_EPOCH
-            .elapsed()
-            .map_err(
-                |err| etl_error!(ErrorKind::InvalidState, "Invalid PostgreSQL epoch", source: err),
-            )?
-            .as_micros() as i64;
-
-        // We will send the `flush_lsn` as `apply_lsn` since in our case, we don't
-        // distinguish between them as Postgres does. The reason is that
-        // `apply_lsn` is used to mark when an LSN is both durable and visible,
-        // but from ETL's perspective we are fine with just it being durable, which
-        // is marked via the `flush_lsn`.
-        //
-        // This outgoing request flag is separate from `force`. For a primary
-        // keepalive, `force` mirrors PostgreSQL's incoming reply-request flag.
-        // Periodic and shutdown status updates are forced locally and also ask
-        // PostgreSQL to answer so the connection gets a round-trip heartbeat.
-        let request_reply: u8 = status_update_type.request_reply().into();
-        this.stream
-            .standby_status_update(write_lsn, flush_lsn, flush_lsn, ts, request_reply)
-            .await?;
-
-        counter!(
-            ETL_STATUS_UPDATES_TOTAL,
-            FORCED_LABEL => if force { "true" } else { "false" },
-            STATUS_UPDATE_TYPE_LABEL => status_update_type.as_str(),
-        )
-        .increment(1);
-
-        debug!(
-            %write_lsn,
-            %flush_lsn,
-            apply_lsn = %flush_lsn,
-            force,
-            %status_update_type,
-            "status update sent"
-        );
-
-        // Update the state after successful send.
-        *this.last_update = Some(Instant::now());
-        *this.last_write_lsn = Some(write_lsn);
-        *this.last_flush_lsn = Some(flush_lsn);
-
-        Ok(())
+impl Debug for ReplicationMessageStream {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // CopyBothDuplex does not implement Debug, so omit the opaque
+        // transport.
+        f.debug_struct("ReplicationMessageStream").finish_non_exhaustive()
     }
 }
 
 impl Stream for ReplicationMessageStream {
     type Item = EtlResult<ReplicationMessage<LogicalReplicationMessage>>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        match this.stream.poll_next(cx) {
-            // A successful message.
-            Poll::Ready(Some(Ok(item))) => Poll::Ready(Some(Ok(item))),
-            // An error occurred on the server side.
-            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err.into()))),
-            // The connection had an error and/or was dropped.
-            Poll::Ready(None) => Poll::Ready(None),
-            // No message available.
-            Poll::Pending => Poll::Pending,
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(
+            ready!(Pin::new(&mut self.stream).poll_next(cx))
+                .map(|result| result.map_err(Into::into).and_then(decode_message)),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use bytes::Bytes;
+
+    use crate::{error::ErrorKind, postgres::stream::replication_message::decode_message};
+
+    /// Invalid transport frames and logical payloads retain their parse errors
+    /// instead of being classified as retryable connection failures.
+    #[test]
+    fn malformed_messages_preserve_deserialization_errors() {
+        let invalid_transport_frame = Bytes::from_static(b"w");
+        // A valid XLogData header reaches the logical parser with a truncated
+        // Begin.
+        let mut invalid_logical_frame = vec![b'w'];
+        invalid_logical_frame.extend_from_slice(&[0; 24]);
+        invalid_logical_frame.push(b'B');
+
+        for frame in [invalid_transport_frame, Bytes::from(invalid_logical_frame)] {
+            let error = decode_message(frame).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DeserializationError);
+            assert!(error.source().is_some());
         }
     }
 }

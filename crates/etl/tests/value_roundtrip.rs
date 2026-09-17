@@ -1,21 +1,21 @@
 //! Differential roundtrip properties for the Postgres text codec.
 //!
-//! Each property generates typed values, has a real Postgres render them in
-//! the text format that replication tuples and COPY carry, parses that text
-//! with the production codec, and asserts the parsed cell equals the value
-//! Postgres stores. Postgres itself is the oracle, so these properties catch
-//! silent value corruption, not just parser panics.
+//! Each property generates typed values, has a real Postgres render them in the
+//! text format that replication tuples and COPY carry, parses that text with
+//! the production codec, and asserts the parsed cell equals the value Postgres
+//! stores. Postgres itself is the oracle, so these properties catch silent
+//! value corruption, not just parser panics.
 //!
 //! Every property runs new random cases until a wall-clock budget elapses,
-//! using the shared runner in `etl::test_utils::property`. See that module
-//! for the `PROPERTY_TEST_BUDGET_SECS` budget knob and the
-//! `PROPERTY_TEST_SEED` failure replay knob.
+//! using the shared runner in `etl::test_utils::property`. See that module for
+//! the `PROPERTY_TEST_BUDGET_SECS` budget knob and the `PROPERTY_TEST_SEED`
+//! failure replay knob.
 //!
 //! Known codec gaps stay outside the generated envelope and are documented on
-//! the strategies that would otherwise reach them: temporal `infinity`
-//! values, `BC` dates, years above 9999, and the `24:00:00` time are all
-//! legal in Postgres but are rejected by the codec today. Multidimensional
-//! arrays are also rejected; their property pins reject-not-corrupt.
+//! the strategies that would otherwise reach them: temporal `infinity` values,
+//! `BC` dates, years above 9999, and the `24:00:00` time are all legal in
+//! Postgres but are rejected by the codec today. Multidimensional arrays are
+//! also rejected; their property pins reject-not-corrupt.
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -258,14 +258,13 @@ async fn float8_array_values_roundtrip_through_text_codec() {
 /// Decimal literal strings covering integers, fractions, scientific notation,
 /// and the numeric specials.
 ///
-/// Exponents are tiered: most cases stay small so typical magnitudes
-/// dominate, while the two boundary tiers reach the extremes the codec and
-/// Postgres share, `1e131071` on the weight side and `1e-16383` on the
-/// scale side. With up to 45 integer and 45 fractional digits, exponents in
-/// `[-16_338, 131_027]` always stay inside Postgres's accepted range
-/// (verified empirically: one step past either bound overflows the numeric
-/// format), so Postgres stays a render oracle and never rejects a generated
-/// literal.
+/// Exponents are tiered: most cases stay small so typical magnitudes dominate,
+/// while the two boundary tiers reach the extremes the codec and Postgres
+/// share, `1e131071` on the weight side and `1e-16383` on the scale side. With
+/// up to 45 integer and 45 fractional digits, exponents in `[-16_338, 131_027]`
+/// always stay inside Postgres's accepted range (verified empirically: one step
+/// past either bound overflows the numeric format), so Postgres stays a render
+/// oracle and never rejects a generated literal.
 fn numeric_literal() -> impl Strategy<Value = String> {
     let digits = |max: usize| proptest::collection::vec(0u8..=9, 1..=max);
 
@@ -335,11 +334,11 @@ async fn numeric_values_roundtrip_through_text_codec() {
 
 /// Dates over the four-digit ISO year range.
 ///
-/// Postgres also legally emits `BC`-suffixed years and years above 9999
-/// (dates up to year 5874897, timestamps up to 294276), plus the special
-/// `infinity`/`-infinity` values, but the codec rejects all of them today.
-/// They stay outside the generated envelope until the codec handles them; see
-/// the findings recorded with this harness.
+/// Postgres also legally emits `BC`-suffixed years and years above 9999 (dates
+/// up to year 5874897, timestamps up to 294276), plus the special
+/// `infinity`/`-infinity` values, but the codec rejects all of them today. They
+/// stay outside the generated envelope until the codec handles them; see the
+/// findings recorded with this harness.
 fn pg_date() -> impl Strategy<Value = NaiveDate> {
     let min = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().num_days_from_ce();
     let max = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap().num_days_from_ce();
@@ -415,8 +414,8 @@ async fn timestamptz_array_values_roundtrip_through_text_codec() {
     let client = database.client.as_ref().unwrap();
     let render = client.prepare("select ($1::timestamptz[])::text").await.unwrap();
 
-    // Rendered timestamptz array elements contain spaces, so they exercise
-    // the quoted-element path of the array parser.
+    // Rendered timestamptz array elements contain spaces, so they exercise the
+    // quoted-element path of the array parser.
     let element = (pg_date(), pg_time()).prop_map(|(date, time)| {
         DateTime::<Utc>::from_naive_utc_and_offset(NaiveDateTime::new(date, time), Utc)
     });
@@ -465,9 +464,9 @@ async fn timetz_values_roundtrip_through_text_codec() {
     });
 }
 
-/// JSON documents whose text form is stable through jsonb normalization:
-/// no floats (jsonb canonicalizes numeric text) and no NUL escapes (jsonb
-/// rejects them).
+/// JSON documents whose text form is stable through jsonb normalization: no
+/// floats (jsonb canonicalizes numeric text) and no NUL escapes (jsonb rejects
+/// them).
 fn jsonb_value() -> impl Strategy<Value = serde_json::Value> {
     let leaf = prop_oneof![
         Just(serde_json::Value::Null),
@@ -508,8 +507,8 @@ async fn bytea_array_values_roundtrip_through_text_codec() {
     let render = client.prepare("select ($1::bytea[])::text").await.unwrap();
 
     // Rendered bytea array elements are quoted hex strings with doubled
-    // backslashes, so they exercise the escape path of the array parser
-    // feeding into the hex parser.
+    // backslashes, so they exercise the escape path of the array parser feeding
+    // into the hex parser.
     let strategy = proptest::collection::vec(
         option::of(proptest::collection::vec(any::<u8>(), 0..=16)),
         0..=8,

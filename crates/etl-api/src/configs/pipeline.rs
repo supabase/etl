@@ -41,10 +41,10 @@ fn default_memory_backpressure_option() -> Option<MemoryBackpressureConfig> {
 
 /// Optional pipeline-level overrides for replicator CPU and memory.
 ///
-/// Requests inherit from the API-wide defaults when omitted.
-/// Supplying a request fixes that resource's VPA minimum and maximum to the
-/// same value. The generated StatefulSet always copies its resolved requests
-/// into its limits to preserve Guaranteed QoS.
+/// Requests inherit from the API-wide defaults when omitted. Supplying a
+/// request fixes that resource's VPA minimum and maximum to the same value. The
+/// generated StatefulSet always copies its resolved requests into its limits to
+/// preserve Guaranteed QoS.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct PipelineReplicatorResourceOverrideConfig {
     /// CPU request for the replicator container, in millicores.
@@ -251,9 +251,9 @@ pub enum PipelineConfigUpdateError {
 ///
 /// Omission preserves values only for the top-level fields defined here. A
 /// provided structured field, such as [`Self::batch`], replaces that complete
-/// nested configuration. Members omitted inside the provided object receive
-/// the nested type's deserialization defaults rather than values from the
-/// stored configuration.
+/// nested configuration. Members omitted inside the provided object receive the
+/// nested type's deserialization defaults rather than values from the stored
+/// configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct UpdateApiPipelineConfig {
     #[schema(example = "my_publication", value_type = Option<String>)]
@@ -504,8 +504,8 @@ impl StoredPipelineConfig {
             table_sync_copy: self.table_sync_copy,
             invalidated_slot_behavior: self.invalidated_slot_behavior,
             max_copy_connections_per_table: self.max_copy_connections_per_table,
-            // The API-managed pipelines run with an elevated role, so keep the
-            // existing behavior of installing source migrations on start.
+            // The API-managed pipelines run with an elevated role, so keep the existing behavior of
+            // installing source migrations on start.
             run_source_migrations: true,
         }
     }

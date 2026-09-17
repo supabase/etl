@@ -1,8 +1,7 @@
 //! Validation framework for ETL sources, destinations, and pipelines.
 //!
-//! Provides a trait-based validation framework for checking configuration
-//! and runtime requirements before creating sources, destinations, or
-//! pipelines.
+//! Provides a trait-based validation framework for checking configuration and
+//! runtime requirements before creating sources, destinations, or pipelines.
 
 mod validators;
 
@@ -29,9 +28,8 @@ use crate::{
 pub struct ValidationContext {
     /// Runtime environment for environment-specific configuration.
     pub environment: Environment,
-    /// Connection pool to the source PostgreSQL database.
-    /// Required for source and pipeline validation, optional for destination
-    /// validation.
+    /// Connection pool to the source PostgreSQL database. Required for source
+    /// and pipeline validation, optional for destination validation.
     pub source_pool: Option<PgPool>,
     /// Trusted username used to validate the source role profile.
     pub trusted_username: Option<String>,
@@ -157,9 +155,9 @@ pub enum ValidationError {
 /// Trait for implementing validation checks.
 #[async_trait]
 pub trait Validator: Send + Sync {
-    /// Executes the validation check and returns a list of failures.
-    /// An empty list means validation passed. Returns an error if validation
-    /// could not be completed due to connection or configuration issues.
+    /// Executes the validation check and returns a list of failures. An empty
+    /// list means validation passed. Returns an error if validation could not
+    /// be completed due to connection or configuration issues.
     async fn validate(
         &self,
         ctx: &ValidationContext,

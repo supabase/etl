@@ -135,9 +135,10 @@ jobs:
       - name: Generate Release Notes
         id: notes
         shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ needs.version.outputs.tag }}"
           {
             echo "body<<MARKER"
             echo "Release ${TAG}"

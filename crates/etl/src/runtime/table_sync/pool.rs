@@ -20,8 +20,8 @@ use crate::{
 /// Unique identifier for a table sync worker run.
 ///
 /// Each spawned worker is identified by its table ID and a monotonically
-/// increasing run ID. This allows tracking all worker runs across restarts
-/// for the same table.
+/// increasing run ID. This allows tracking all worker runs across restarts for
+/// the same table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TableSyncWorkerId {
     /// Identifier of the table being synchronized by this worker.
@@ -76,9 +76,8 @@ impl TableSyncWorkerPool {
     /// table.
     ///
     /// If a worker for the given table already exists and is still running,
-    /// logs a warning and skips spawning. If no worker exists or the
-    /// previous worker has finished, spawns a new worker with a unique run
-    /// ID.
+    /// logs a warning and skips spawning. If no worker exists or the previous
+    /// worker has finished, spawns a new worker with a unique run ID.
     ///
     /// The locking order is: workers_join_set -> workers (write). This ensures
     /// that if [`Self::wait_all`] is in progress, this method blocks until it
@@ -87,7 +86,8 @@ impl TableSyncWorkerPool {
     where
         F: Future<Output = EtlResult<TableSyncWorkerResult>> + Send + 'static,
     {
-        // Lock workers_join_set first to ensure we block if wait_all is in progress.
+        // Lock workers_join_set first to ensure we block if wait_all is in
+        // progress.
         let mut workers_join_set = self.workers_join_set.lock().await;
         let mut workers = self.workers.write().await;
 
@@ -144,9 +144,9 @@ impl TableSyncWorkerPool {
     /// Waits for all workers in the pool to complete.
     ///
     /// This method holds the workers_join_set lock while draining all tasks,
-    /// which blocks any new spawn attempts. For each completed task, it
-    /// briefly acquires a write lock on the workers map to remove the entry
-    /// only if the worker_id matches.
+    /// which blocks any new spawn attempts. For each completed task, it briefly
+    /// acquires a write lock on the workers map to remove the entry only if the
+    /// worker_id matches.
     ///
     /// If any workers encounter supervision errors, those errors are collected
     /// and returned.
@@ -157,12 +157,13 @@ impl TableSyncWorkerPool {
         while let Some(result) = workers_join_set.join_next().await {
             match result {
                 Ok((worker_id, worker_result)) => {
-                    // Only remove from workers map if the worker_id matches.
-                    // A new worker with the same table_id but different run_id
+                    // Only remove from workers map if the worker_id matches. A
+                    // new worker with the same table_id but different run_id
                     // may have been spawned, so we must not remove it.
                     //
-                    // We lock only after the join was completed, since we want to allow the active
-                    // workers to be read while waiting for all to complete.
+                    // We lock only after the join was completed, since we want
+                    // to allow the active workers to be read while waiting for
+                    // all to complete.
                     {
                         let mut workers = self.workers.write().await;
                         if let Some(handle) = workers.get(&worker_id.table_id)
@@ -180,10 +181,11 @@ impl TableSyncWorkerPool {
                             debug!(%worker_id, "table sync worker completed after shutdown");
                         }
                         Ok(TableSyncWorkerResult::Errored) => {
-                            // The worker must persist the table error before returning this result.
-                            // Waiting on the pool happens after the apply worker completes, so
-                            // `wait_all` cannot be the first place that releases apply-side
-                            // waiters.
+                            // The worker must persist the table error before
+                            // returning this result. Waiting on the pool
+                            // happens after the apply worker completes, so
+                            // `wait_all` cannot be the first place that
+                            // releases apply-side waiters.
                             debug!(
                                 %worker_id,
                                 "table sync worker completed after persisting error state"

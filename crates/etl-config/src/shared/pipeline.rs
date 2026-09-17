@@ -17,23 +17,22 @@ pub struct BatchConfig {
     /// filled batch.
     ///
     /// This is the latency bound for stream batching: once the first item
-    /// enters a batch, the batch is flushed when this timer elapses, even
-    /// if the byte target was not met.
+    /// enters a batch, the batch is flushed when this timer elapses, even if
+    /// the byte target was not met.
     ///
     /// In practice, flush happens on the first trigger between this timeout and
-    /// the memory-based byte target driven by
-    /// [`Self::memory_budget_ratio`].
+    /// the memory-based byte target driven by [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
     /// Maximum ratio of memory capacity targeted for decoded source batches.
     ///
-    /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The resulting global target is divided across registered batch slots.
+    /// This value is expressed as a ratio in the `(0.0, 1.0]` interval. The
+    /// resulting global target is divided across registered batch slots.
     ///
     /// Together with [`Self::max_fill_ms`], this controls stream flushes:
-    /// batches flush either when their accumulated size estimate reaches
-    /// the advisory per-batch byte target or when the fill timeout elapses,
+    /// batches flush either when their accumulated size estimate reaches the
+    /// advisory per-batch byte target or when the fill timeout elapses,
     /// whichever happens first.
     ///
     /// This is a batching heuristic, not a memory allocator or a hard bound.
@@ -335,9 +334,9 @@ pub struct PipelineConfig {
     /// Optional Postgres connection configuration for pipeline state storage.
     ///
     /// When `None`, the pipeline state store should use
-    /// [`Self::pg_connection`]. This allows logical replication and table
-    /// copy to read from a standby while keeping the Postgres-backed state
-    /// store on a writable endpoint.
+    /// [`Self::pg_connection`]. This allows logical replication and table copy
+    /// to read from a standby while keeping the Postgres-backed state store on
+    /// a writable endpoint.
     #[serde(default)]
     pub store_pg_connection: Option<PgConnectionConfig>,
     /// Configuration for the pipeline's logical replication slots.
@@ -384,26 +383,24 @@ pub struct PipelineConfig {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
-    /// Number of milliseconds between periodic table sync monitor checks,
-    /// such as reporting replication lag and checking replication slot
-    /// validity during table copy. Also used by the apply worker's periodic
-    /// replication lag sampling.
+    /// Number of milliseconds between periodic table sync monitor checks, such
+    /// as reporting replication lag and checking replication slot validity
+    /// during table copy. Also used by the apply worker's periodic replication
+    /// lag sampling.
     #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
     pub table_sync_monitor_refresh_interval_ms: u64,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Whether `Pipeline::start` should run the source migrations that
-    /// install the schema helper functions and the `ddl_command_end` event
-    /// trigger.
+    /// Whether `Pipeline::start` should run the source migrations that install
+    /// the schema helper functions and the `ddl_command_end` event trigger.
     ///
     /// Defaults to `true`, preserving the existing behavior. Set to `false`
     /// when the replication role is intentionally de-elevated and lacks the
-    /// superuser privilege required to `CREATE EVENT TRIGGER`; in that case
-    /// the source objects must be installed out-of-band by an admin (see
-    /// the source migrations under `crates/etl/migrations/source`).
-    /// Pipelines that do not rely on DDL-change propagation can safely run
-    /// with this disabled.
+    /// superuser privilege required to `CREATE EVENT TRIGGER`; in that case the
+    /// source objects must be installed out-of-band by an admin (see the source
+    /// migrations under `crates/etl/migrations/source`). Pipelines that do not
+    /// rely on DDL-change propagation can safely run with this disabled.
     #[serde(default = "default_run_source_migrations")]
     pub run_source_migrations: bool,
 }
@@ -539,9 +536,8 @@ const fn default_run_source_migrations() -> bool {
     true
 }
 
-/// Same as [`PipelineConfig`] but without secrets. This type
-/// implements [`Serialize`] because it does not contains secrets
-/// so is safe to serialize.
+/// Same as [`PipelineConfig`] but without secrets. This type implements
+/// [`Serialize`] because it does not contains secrets so is safe to serialize.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineConfigWithoutSecrets {
     /// The unique identifier for this pipeline.

@@ -143,8 +143,8 @@ impl ClickHouseTestDatabase {
         .await
     }
 
-    /// Builds a [`ClickHouseDestination`] scoped to this test database with
-    /// a caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
+    /// Builds a [`ClickHouseDestination`] scoped to this test database with a
+    /// caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
     /// eagerly so tests fail fast on engine/version mismatch.
     pub async fn build_destination_with_config<S>(
         &self,

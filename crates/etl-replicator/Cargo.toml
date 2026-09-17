@@ -24,7 +24,7 @@ snowflake = ["any-destination", "etl-destinations/snowflake"]
 egress = ["etl/egress"]
 
 [dependencies]
-
+axum = { workspace = true, features = ["http1", "tokio"] }
 configcat = { workspace = true }
 etl = { workspace = true, features = ["tls-rustls-ring"] }
 etl-config = { workspace = true, features = ["supabase"] }
