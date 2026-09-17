@@ -9,28 +9,22 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    future::Future,
     pin::Pin,
     str::FromStr,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use etl_config::shared::PipelineConfig;
 use futures::StreamExt;
-use metrics::{counter, gauge, histogram};
+use metrics::{counter, histogram};
 use postgres_replication::{
     protocol,
     protocol::{LogicalReplicationMessage, ReplicationMessage},
 };
 use tokio::{
     pin,
-    sync::{Semaphore, mpsc, watch},
-    task::JoinHandle,
-    time::MissedTickBehavior,
+    sync::{Semaphore, watch},
 };
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
@@ -38,6 +32,7 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active_for_parameter};
 use crate::{
+    activity::{ActivityHandle, ActivityKind, ActivityRegistration},
     bail,
     data::SizeHint,
     destination::{
@@ -49,20 +44,17 @@ use crate::{
     etl_error,
     event::{Event, RelationEvent},
     observability::{
-        CDC_REPLICATION_PATH, COMMAND_TAG_LABEL, CONFIRMATION_LABEL,
-        ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
-        ETL_APPLY_LOOP_FLUSH_LAG_BYTES, ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
-        ETL_DDL_SCHEMA_CHANGE_COLUMNS, ETL_DDL_SCHEMA_CHANGES_TOTAL,
-        ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS, ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
+        CDC_REPLICATION_PATH, COMMAND_TAG_LABEL, CONFIRMATION_LABEL, ETL_DDL_SCHEMA_CHANGE_COLUMNS,
+        ETL_DDL_SCHEMA_CHANGES_TOTAL, ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS,
+        ETL_DESTINATION_DURABILITY_DURATION_SECONDS,
         ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS, ETL_EVENTS_PROCESSED_TOTAL,
-        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-        ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL, ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
-        ETL_SCHEMA_CLEANUPS_TOTAL, ETL_TRANSACTION_SIZE, ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL,
-        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL, ddl_command_tag_label,
+        ETL_EVENTS_RECEIVED_TOTAL, ETL_REPLICATION_MESSAGES_TOTAL, ETL_TRANSACTION_SIZE,
+        ETL_TRANSACTIONS_TOTAL, OUTCOME_LABEL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
+        WRITE_STATUS_LABEL, ddl_command_tag_label,
     },
     pipeline::PipelineId,
     postgres::{
-        OutOfBandSourcePool, ReplicationMessageStream, StatusUpdateType,
+        OutOfBandSourcePool, ReplicationMessageStream,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
@@ -76,13 +68,14 @@ use crate::{
     },
     replication::{
         PreviousRelationMasks, TableDecodingState, WorkerType,
-        state::{TableState, TableStateType},
+        apply::tasks::{ApplyLoopTasks, ReplicationLagMetrics},
+        state::TableState,
     },
     runtime::{
-        BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorker,
-        TableSyncWorkerPool, TableSyncWorkerState,
+        BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
+        TableSyncWorkerState,
         concurrency::{
-            MemoryBackpressureStream, ShutdownResult, ShutdownRx, apply_worker_apply_stream_id,
+            MemoryBackpressureStream, ShutdownRx, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id,
         },
     },
@@ -90,14 +83,15 @@ use crate::{
         IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId, TableSchema,
     },
     source_payload_metadata::StreamingPayloadMetadata,
-    store::{PipelineStore, SchemaStore, SharedStateStore, StateStore},
+    store::{PipelineStore, StateStore},
 };
 
-/// Default keep alive value if it can't be fetched from Postgres.
+mod tasks;
+
+/// Fallback source timeout when PostgreSQL disables it or cannot report it.
 ///
-/// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so we will use the
-/// same.
-const DEFAULT_KEEP_ALIVE_DURATION: Duration = Duration::from_secs(60);
+/// Matches PostgreSQL's default `wal_sender_timeout` of 60 seconds.
+const DEFAULT_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(60);
 /// Fraction of `wal_sender_timeout` used for the proactive keep alive deadline.
 ///
 /// PostgreSQL normally emits an idle keep alive around `wal_sender_timeout /
@@ -122,15 +116,6 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// accumulates the next batch. Register both positions so each receives a share
 /// of the configured decoded-batch capacity.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
-/// Maximum number of table schema cleanups buffered per apply loop.
-///
-/// Each queue entry contains one table identifier and one frozen retention
-/// boundary. A capacity of 1024 accommodates large bursts of relation messages
-/// while keeping queue memory bounded. Queueing is non-blocking, so additional
-/// candidates remain pending in the apply loop and are retried after a later
-/// durable flush result.
-const SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY: usize = 1024;
-
 /// Result type for the apply loop execution.
 ///
 /// Indicates the reason why the apply loop terminated, enabling appropriate
@@ -287,96 +272,6 @@ impl ReplicationProgress {
     }
 }
 
-/// Tracks replication lag measurements shared with the sampler task.
-#[derive(Debug, Clone)]
-struct ReplicationLagMetrics {
-    /// Shared atomic LSN positions used for lag gauges.
-    inner: Arc<ReplicationLagMetricsInner>,
-}
-
-/// Atomic replication lag positions shared by the apply loop and sampler task.
-#[derive(Debug)]
-struct ReplicationLagMetricsInner {
-    /// Last source WAL LSN observed by the out-of-band sampler.
-    last_source_current_lsn: AtomicU64,
-    /// The highest LSN received from PostgreSQL so far.
-    last_received_lsn: AtomicU64,
-    /// The highest LSN whose destination write completed durably.
-    last_flush_lsn: AtomicU64,
-    /// The highest safe frontier selected from received-or-flushed progress.
-    ///
-    /// PostgreSQL feedback uses this quiescent-or-flushed selection rule.
-    /// Durable ETL checkpoints advance only after destination flushes.
-    last_checkpoint_lsn: AtomicU64,
-}
-
-impl ReplicationLagMetrics {
-    /// Creates replication lag metrics initialized to the given LSN.
-    fn new(initial_lsn: PgLsn) -> Self {
-        let initial_lsn = u64::from(initial_lsn);
-
-        Self {
-            inner: Arc::new(ReplicationLagMetricsInner {
-                last_source_current_lsn: AtomicU64::new(initial_lsn),
-                last_received_lsn: AtomicU64::new(initial_lsn),
-                last_flush_lsn: AtomicU64::new(initial_lsn),
-                last_checkpoint_lsn: AtomicU64::new(initial_lsn),
-            }),
-        }
-    }
-
-    /// Updates the last source current LSN if it advanced.
-    fn update_last_source_current_lsn(&self, lsn: PgLsn) {
-        Self::update_lsn(&self.inner.last_source_current_lsn, lsn);
-    }
-
-    /// Updates lag metric positions derived from apply-loop progress.
-    fn update_from_progress(&self, progress: ReplicationProgress, checkpoint_lsn: PgLsn) {
-        Self::update_lsn(&self.inner.last_received_lsn, progress.last_received_lsn());
-        Self::update_lsn(&self.inner.last_flush_lsn, progress.last_flush_lsn());
-        Self::update_lsn(&self.inner.last_checkpoint_lsn, checkpoint_lsn);
-    }
-
-    /// Emits lag gauges from the current atomic progress positions.
-    fn emit_lag_metrics(&self, worker_type: WorkerType) {
-        let last_source_current_lsn = self.inner.last_source_current_lsn.load(Ordering::Relaxed);
-        let last_received_lsn = self.inner.last_received_lsn.load(Ordering::Relaxed);
-        let last_flush_lsn = self.inner.last_flush_lsn.load(Ordering::Relaxed);
-        let last_checkpoint_lsn = self.inner.last_checkpoint_lsn.load(Ordering::Relaxed);
-
-        let worker_type = worker_type.as_str();
-
-        gauge!(
-            ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_source_current_lsn.saturating_sub(last_received_lsn) as f64);
-        gauge!(
-            ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_received_lsn.saturating_sub(last_checkpoint_lsn) as f64);
-        gauge!(
-            ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_received_lsn.saturating_sub(last_flush_lsn) as f64);
-        gauge!(
-            ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
-            WORKER_TYPE_LABEL => worker_type
-        )
-        .set(last_source_current_lsn.saturating_sub(last_checkpoint_lsn) as f64);
-    }
-
-    /// Updates a stored LSN monotonically.
-    fn update_lsn(stored_lsn: &AtomicU64, lsn: PgLsn) {
-        let new_lsn = u64::from(lsn);
-        let _ = stored_lsn.try_update(Ordering::Relaxed, Ordering::Relaxed, |current_lsn| {
-            (new_lsn > current_lsn).then_some(new_lsn)
-        });
-    }
-}
-
 /// Row-decoding schema resolved for a DML message.
 #[derive(Debug)]
 struct ResolvedTableSchema {
@@ -450,29 +345,6 @@ impl HandleMessageResult {
     }
 }
 
-/// Immutable retention boundary for one asynchronous table schema cleanup.
-///
-/// The apply loop builds this request immediately after persisting
-/// commit-boundary progress and reading destination metadata. The background
-/// worker must use this frozen boundary rather than reloading newer state:
-/// arbitrary queue delay can then only make the request conservative.
-///
-/// Concurrent schema insertion is also safe: ordered replication cannot later
-/// introduce a schema at or below persisted progress, and pruning always
-/// preserves every snapshot newer than the frozen boundary.
-///
-/// Pruning is idempotent and does not rely on request order. Each boundary
-/// preserves the greatest schema snapshot at or below it and every newer
-/// snapshot, so replaying a request—or processing an older request after a
-/// newer one—cannot remove a schema retained by the newer boundary.
-#[derive(Debug)]
-struct SchemaCleanupRequest {
-    /// Table whose obsolete schema versions may be pruned.
-    table_id: TableId,
-    /// Inclusive retention boundary captured at the durable flush result.
-    retention_snapshot_id: SnapshotId,
-}
-
 /// Returns the earliest safe schema-cleanup boundary.
 ///
 /// A persisted checkpoint at LSN `X` covers every transaction committed
@@ -485,245 +357,6 @@ fn schema_cleanup_retention_snapshot_id(
     destination_retention_snapshot_id: SnapshotId,
 ) -> SnapshotId {
     SnapshotId::at_lsn(persisted_checkpoint_lsn).min(destination_retention_snapshot_id)
-}
-
-/// Background tasks owned by an apply loop invocation.
-#[derive(Debug)]
-struct ApplyLoopTasks {
-    /// Sender for serialized background schema cleanup requests.
-    schema_cleanup_tx: Option<mpsc::Sender<SchemaCleanupRequest>>,
-    /// Background worker that serially processes schema cleanup requests.
-    schema_cleanup_worker_task: JoinHandle<()>,
-    /// Background replication lag sampler task owned by this apply loop.
-    replication_lag_sampler_task: JoinHandle<()>,
-}
-
-impl ApplyLoopTasks {
-    /// Creates task ownership and starts background workers.
-    fn start<S>(
-        schema_store: S,
-        out_of_band_source_pool: OutOfBandSourcePool,
-        replication_lag_metrics: ReplicationLagMetrics,
-        worker_type: WorkerType,
-        table_sync_monitor_refresh_interval: Duration,
-    ) -> Self
-    where
-        S: SchemaStore + Send + Sync + 'static,
-    {
-        let (schema_cleanup_tx, schema_cleanup_rx) =
-            mpsc::channel(SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY);
-        let schema_cleanup_worker_task =
-            Self::spawn_schema_cleanup_worker(schema_store, schema_cleanup_rx, worker_type);
-
-        let replication_lag_sampler_task = Self::spawn_replication_lag_sampler(
-            out_of_band_source_pool,
-            replication_lag_metrics,
-            worker_type,
-            table_sync_monitor_refresh_interval,
-        );
-
-        Self {
-            schema_cleanup_tx: Some(schema_cleanup_tx),
-            schema_cleanup_worker_task,
-            replication_lag_sampler_task,
-        }
-    }
-
-    /// Tries to queue a schema cleanup request for one table.
-    ///
-    /// Returns `false` when the bounded queue is full or the background worker
-    /// has stopped. This method never waits for queue capacity.
-    fn try_queue_schema_cleanup(
-        &self,
-        table_id: TableId,
-        retention_snapshot_id: SnapshotId,
-    ) -> bool {
-        let Some(schema_cleanup_tx) = &self.schema_cleanup_tx else {
-            return false;
-        };
-
-        let request = SchemaCleanupRequest { table_id, retention_snapshot_id };
-        match schema_cleanup_tx.try_send(request) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => false,
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                error!("schema cleanup worker stopped before accepting cleanup request");
-
-                false
-            }
-        }
-    }
-
-    /// Starts the worker that serially prunes requested table schema versions.
-    fn spawn_schema_cleanup_worker<S>(
-        schema_store: S,
-        mut schema_cleanup_rx: mpsc::Receiver<SchemaCleanupRequest>,
-        worker_type: WorkerType,
-    ) -> JoinHandle<()>
-    where
-        S: SchemaStore + Send + Sync + 'static,
-    {
-        tokio::spawn(async move {
-            while let Some(request) = schema_cleanup_rx.recv().await {
-                // Coalesce up to one bounded batch of available requests to
-                // retain batched store cleanup without making the apply loop
-                // wait for it.
-                let mut retention_snapshot_ids = BTreeMap::new();
-                retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
-
-                for _ in 1..SCHEMA_CLEANUP_QUEUE_TABLE_CAPACITY {
-                    let Ok(request) = schema_cleanup_rx.try_recv() else {
-                        break;
-                    };
-
-                    retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
-                }
-
-                let table_count = retention_snapshot_ids.len() as u64;
-                match schema_store.prune_table_schemas(retention_snapshot_ids).await {
-                    Ok(pruned_count) => {
-                        counter!(
-                            ETL_SCHEMA_CLEANUPS_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(1);
-
-                        counter!(
-                            ETL_SCHEMA_CLEANUP_TABLES_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(table_count);
-
-                        counter!(
-                            ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(pruned_count);
-
-                        if pruned_count > 0 {
-                            info!(
-                                %worker_type,
-                                pruned_count,
-                                "obsolete table schema cleanup completed"
-                            );
-                        }
-                    }
-                    Err(err) => {
-                        // Cleanup is best-effort. Do not block later requests behind a
-                        // permanently failing one: a later relation for the table,
-                        // including its first relation after restart, will enqueue a
-                        // fresh cleanup attempt.
-                        counter!(
-                            ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-                            WORKER_TYPE_LABEL => worker_type.as_str(),
-                        )
-                        .increment(1);
-
-                        error!(
-                            %worker_type,
-                            error = %err,
-                            "failed to clean up obsolete table schemas"
-                        );
-                    }
-                };
-            }
-        })
-    }
-
-    /// Aborts and joins the replication lag sampler task.
-    async fn handle_replication_lag_sampler_task_result(&mut self) {
-        // We abort the task, so that awaiting on the handle is as quick as possible.
-        //
-        // It's fine to abort this task midway, since it's not going to affect
-        // consistency.
-        self.replication_lag_sampler_task.abort();
-
-        if let Err(err) = (&mut self.replication_lag_sampler_task).await
-            && !err.is_cancelled()
-        {
-            warn!(
-                error = %err,
-                "replication lag sampler task failed before completing"
-            );
-        }
-    }
-
-    async fn handle_schema_cleanup_task_result(&mut self, worker_type: WorkerType) {
-        // Closing the sender lets the cleanup worker finish every accepted
-        // request before the apply loop returns.
-        //
-        // We don't want to call abort on the task, just to prevent possible errors from
-        // partial completion around await points. In practice, it could be suspendable
-        // midway, but it's safer to avoid it, also since the pruning of schemas
-        // should be relatively quick.
-        self.schema_cleanup_tx.take();
-
-        if let Err(err) = (&mut self.schema_cleanup_worker_task).await {
-            counter!(
-                ETL_SCHEMA_CLEANUP_ERRORS_TOTAL,
-                WORKER_TYPE_LABEL => worker_type.as_str(),
-            )
-            .increment(1);
-
-            error!(
-                %worker_type,
-                error = %err,
-                "schema cleanup worker task failed before completing"
-            );
-        }
-    }
-
-    /// Stops and joins all owned background tasks.
-    async fn teardown(&mut self, worker_type: WorkerType) {
-        self.handle_replication_lag_sampler_task_result().await;
-        self.handle_schema_cleanup_task_result(worker_type).await;
-    }
-
-    /// Starts the replication lag sampler for an apply loop.
-    fn spawn_replication_lag_sampler(
-        out_of_band_source_pool: OutOfBandSourcePool,
-        replication_lag_metrics: ReplicationLagMetrics,
-        worker_type: WorkerType,
-        table_sync_monitor_refresh_interval: Duration,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            Self::run_replication_lag_sampler(
-                out_of_band_source_pool,
-                replication_lag_metrics,
-                worker_type,
-                table_sync_monitor_refresh_interval,
-            )
-            .await;
-        })
-    }
-
-    /// Runs the best-effort replication lag sampler.
-    async fn run_replication_lag_sampler(
-        out_of_band_source_pool: OutOfBandSourcePool,
-        replication_lag_metrics: ReplicationLagMetrics,
-        worker_type: WorkerType,
-        table_sync_monitor_refresh_interval: Duration,
-    ) {
-        let mut interval = tokio::time::interval(table_sync_monitor_refresh_interval);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        loop {
-            interval.tick().await;
-
-            match out_of_band_source_pool.get_current_wal_lsn().await {
-                Ok(source_current_lsn) => {
-                    replication_lag_metrics.update_last_source_current_lsn(source_current_lsn);
-                    replication_lag_metrics.emit_lag_metrics(worker_type);
-                }
-                Err(err) => {
-                    warn!(
-                        error = %err,
-                        "replication lag sampler failed to poll source database"
-                    );
-                }
-            }
-        }
-    }
 }
 
 /// A buffered batch of events waiting to be sent to the destination.
@@ -817,6 +450,9 @@ struct PendingDurabilityInterval {
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
+    /// This loop's activity observation, suspended during intentional catchup
+    /// waits.
+    activity_handle: ActivityHandle,
     /// The highest commit end LSN that should be attached to the next
     /// destination write.
     ///
@@ -860,8 +496,6 @@ struct ApplyLoopState {
     draining_for_shutdown: bool,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
-    /// The deadline for the next proactive keep alive status update.
-    keep_alive_deadline: Instant,
     /// Destination write result waiting to advance the last flush LSN.
     pending_flush_result: Option<PendingWriteEventsResult>,
     /// The strongest exit that this apply loop invocation should eventually
@@ -885,20 +519,18 @@ struct ApplyLoopState {
     /// [`SnapshotId::at_lsn`] frontier, so a first `RELATION` message can
     /// resolve the latest schema committed at or before the start point.
     bootstrap_snapshot_id: SnapshotId,
-    /// Replication slot name used by this loop.
-    slot_name: String,
 }
 
 impl ApplyLoopState {
     /// Creates a new [`ApplyLoopState`] with initial replication progress.
     fn new(
+        activity_handle: ActivityHandle,
         replication_progress: ReplicationProgress,
         replication_lag_metrics: ReplicationLagMetrics,
-        keep_alive_deadline_duration: Duration,
         bootstrap_snapshot_id: SnapshotId,
-        slot_name: String,
     ) -> Self {
         Self {
+            activity_handle,
             last_commit_end_lsn: None,
             pending_durability_interval: None,
             pending_relation_table_ids: HashSet::new(),
@@ -910,12 +542,10 @@ impl ApplyLoopState {
             next_tx_ordinal: 0,
             draining_for_shutdown: false,
             flush_deadline: None,
-            keep_alive_deadline: Instant::now() + keep_alive_deadline_duration,
             pending_flush_result: None,
             exit_intent: None,
             processing_paused: false,
             bootstrap_snapshot_id,
-            slot_name,
         }
     }
 
@@ -923,11 +553,6 @@ impl ApplyLoopState {
     /// state.
     fn bootstrap_snapshot_id(&self) -> SnapshotId {
         self.bootstrap_snapshot_id
-    }
-
-    /// Returns the replication slot name used by this loop.
-    fn slot_name(&self) -> &str {
-        &self.slot_name
     }
 
     /// Sets the batch flush deadline, if not already set.
@@ -950,11 +575,6 @@ impl ApplyLoopState {
         self.flush_deadline = None;
 
         debug!("reset batch flush timer");
-    }
-
-    /// Resets the keep alive deadline using the configured duration.
-    fn reset_keep_alive_deadline(&mut self, keep_alive_deadline_duration: Duration) {
-        self.keep_alive_deadline = Instant::now() + keep_alive_deadline_duration;
     }
 
     /// Updates the last commit end LSN to track transaction boundaries.
@@ -986,8 +606,11 @@ impl ApplyLoopState {
 
     /// Snapshots apply-loop progress into the replication lag metrics.
     fn update_replication_lag_metrics_from_progress(&self) {
-        self.replication_lag_metrics
-            .update_from_progress(self.replication_progress, self.checkpoint_lsn());
+        self.replication_lag_metrics.update_progress(
+            self.replication_progress.last_received_lsn(),
+            self.replication_progress.last_flush_lsn(),
+            self.checkpoint_lsn(),
+        );
     }
 
     /// Returns the last received LSN that should be reported as written to the
@@ -1038,7 +661,7 @@ impl ApplyLoopState {
     ///
     /// Starting new work after a quiescent checkpoint can make this computed
     /// value lower than a value already reported on the connection. The
-    /// replication stream keeps PostgreSQL feedback monotonic, so the
+    /// feedback sender keeps PostgreSQL feedback monotonic, so the
     /// wire-level checkpoint never moves backward.
     fn checkpoint_lsn(&self) -> PgLsn {
         if self.is_quiescent() {
@@ -1181,9 +804,6 @@ pub(crate) struct ApplyLoop<S, D> {
     batch_memory_governor: BatchMemoryGovernor,
     /// Maximum duration to wait before forcibly flushing a batch.
     max_batch_fill_duration: Duration,
-    /// Deadline duration used before proactively sending a periodic status
-    /// update.
-    keep_alive_deadline_duration: Duration,
     /// Background tasks owned by this apply loop.
     tasks: ApplyLoopTasks,
     /// Mutable loop state.
@@ -1221,28 +841,29 @@ where
 
         let worker_type = worker_context.worker_type();
         let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
-        let keep_alive_deadline_duration = match wal_sender_timeout_result {
-            Ok(Some(wal_sender_timeout)) => {
-                Self::compute_keep_alive_deadline_duration(wal_sender_timeout)
-            }
+        let wal_sender_timeout = match wal_sender_timeout_result {
+            Ok(Some(wal_sender_timeout)) => wal_sender_timeout,
             Ok(None) => {
                 warn!(
                     %worker_type,
-                    "wal sender timeout is disabled; using heuristic keep alive deadline",
+                    "wal sender timeout is disabled; using fallback timeout",
                 );
 
-                Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
+                DEFAULT_WAL_SENDER_TIMEOUT
             }
             Err(error) => {
                 warn!(
                     %worker_type,
                     error = %error,
-                    "failed to read wal sender timeout; using heuristic keep alive deadline",
+                    "failed to read wal sender timeout; using fallback timeout",
                 );
 
-                Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
+                DEFAULT_WAL_SENDER_TIMEOUT
             }
         };
+        let keep_alive_deadline_duration =
+            Self::compute_keep_alive_deadline_duration(wal_sender_timeout);
+
         // A restart LSN is an inclusive WAL frontier, not an exact schema
         // snapshot. Use the maximum message LSN so a restart at a transaction's
         // commit LSN can select the last DDL within that committed transaction.
@@ -1253,6 +874,22 @@ where
 
         let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
 
+        let (replication_message_stream, feedback) = replication_client
+            .start_logical_replication(
+                &config.publication_name,
+                &slot_name,
+                start_lsn,
+                Some(keep_alive_deadline_duration),
+            )
+            .await?;
+
+        let activity_registration =
+            ActivityRegistration::register(ActivityKind::WalApply { wal_sender_timeout });
+
+        // Apply loops always supply a deadline; only protocol tests disable feedback.
+        let (feedback_handle, feedback_sender_future) = feedback
+            .expect("A keep-alive deadline must create a feedback handle and sender future");
+
         let table_sync_monitor_refresh_interval =
             Duration::from_millis(config.table_sync_monitor_refresh_interval_ms);
         let tasks = ApplyLoopTasks::start(
@@ -1261,14 +898,15 @@ where
             replication_lag_metrics.clone(),
             worker_type,
             table_sync_monitor_refresh_interval,
+            feedback_handle,
+            feedback_sender_future,
         );
 
         let state = ApplyLoopState::new(
+            activity_registration.handle(),
             replication_progress,
             replication_lag_metrics,
-            keep_alive_deadline_duration,
             bootstrap_snapshot_id,
-            slot_name,
         );
 
         let mut table_decoding_states = HashMap::new();
@@ -1296,48 +934,31 @@ where
             memory_monitor,
             batch_memory_governor,
             max_batch_fill_duration: Duration::from_millis(config.batch.max_fill_ms),
-            keep_alive_deadline_duration,
             tasks,
             state,
         };
 
-        apply_loop.run_with_teardown(replication_client, start_lsn).await
-    }
+        let result = apply_loop.run(replication_client, replication_message_stream).await;
 
-    /// Runs the apply loop and performs teardown work before returning.
-    async fn run_with_teardown(
-        &mut self,
-        replication_client: &PgReplicationClient,
-        start_lsn: PgLsn,
-    ) -> EtlResult<ApplyLoopResult> {
-        let result = self.run(replication_client, start_lsn).await;
-
-        self.tasks.teardown(self.worker_context.worker_type()).await;
+        apply_loop.tasks.teardown(worker_type).await;
 
         result
     }
 
-    /// Runs the main event processing loop.
+    /// Runs the main event processing loop with its feedback sender already
+    /// owned.
     async fn run(
         &mut self,
         replication_client: &PgReplicationClient,
-        start_lsn: PgLsn,
+        replication_message_stream: ReplicationMessageStream,
     ) -> EtlResult<ApplyLoopResult> {
-        let logical_replication_stream = replication_client
-            .start_logical_replication(
-                &self.config.publication_name,
-                self.state.slot_name(),
-                start_lsn,
-            )
-            .await?;
-
-        let replication_message_stream = ReplicationMessageStream::wrap(logical_replication_stream);
         let replication_message_stream = MemoryBackpressureStream::wrap(
             replication_message_stream,
             self.worker_context.apply_stream_id(),
             self.memory_monitor.subscribe(),
         );
         pin!(replication_message_stream);
+
         // Keep an independent subscription for flushing the apply loop's decoded
         // batch. The source wrapper must remain free to stop PostgreSQL intake,
         // while this subscription lets already-owned memory continue draining.
@@ -1347,7 +968,6 @@ where
         loop {
             let iteration_result = if self.state.is_draining_for_shutdown() {
                 self.run_draining_shutdown_iteration(
-                    replication_message_stream.as_mut(),
                     &mut connection_updates_rx,
                     &mut batch_memory_subscription,
                 )
@@ -1360,10 +980,14 @@ where
                     &mut batch_memory_subscription,
                 )
                 .await
-            };
+            }?;
+
+            // Only completed iterations count; independent feedback cannot
+            // hide a blocked loop.
+            self.state.activity_handle.ping();
 
             // If we have a result from the apply loop, we should stop the loop.
-            if let Some(result) = iteration_result? {
+            if let Some(result) = iteration_result {
                 return Ok(result);
             }
         }
@@ -1383,19 +1007,14 @@ where
     /// 4. Memory-pressure batch flushing.
     /// 5. Batch flush deadline expiry.
     /// 6. Incoming replication messages.
-    /// 7. Periodic heartbeats once the computed keep alive deadline expires.
     ///
-    /// PostgreSQL normally sends keep alives at roughly half of
-    /// `wal_sender_timeout`. We wait a little longer than that before
-    /// proactively emitting our own status update so that normal PostgreSQL
-    /// keep alives still drive the loop, but long stalls can still be recovered
-    /// without waiting for the full server timeout. This timeout branch is
-    /// therefore a last-resort mechanism, not the primary source of
-    /// progress. It matters when the loop is healthy but effectively stuck
-    /// on in-flight work, such as waiting for an older batch to flush before a
-    /// queued batch can be dispatched, or when keep alives are temporarily not
-    /// reaching the loop because the stream is backpressured or the source
-    /// is not sending them promptly.
+    /// The feedback sender task owns the only heartbeat timer and continues
+    /// sending while any handler below is awaiting work. Incoming
+    /// PostgreSQL keepalives drive idle durability settlement; while intake
+    /// is backpressured, both settlement and publication of fresh progress
+    /// wait for intake to resume. A failed feedback sender is detected by the
+    /// next keepalive response enqueue or a source connection failure; it does
+    /// not interrupt an in-flight handler.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may
@@ -1426,7 +1045,7 @@ where
             // PRIORITY 1: Handle shutdown signals.
             // Shutdown stops new intake first and then lets the loop drain or wait as needed.
             _ = self.shutdown_rx.changed() => {
-                self.handle_shutdown_signal(replication_message_stream.as_mut()).await?;
+                self.handle_shutdown_signal();
             }
 
             // PRIORITY 2: Handle PostgreSQL connection lifecycle updates.
@@ -1463,31 +1082,12 @@ where
             // New WAL messages are only accepted while the loop is still actively ingesting.
             maybe_message = replication_message_stream.next(), if self.state.can_process_messages() => {
                 self.handle_stream_message(
-                    replication_message_stream.as_mut(),
                     maybe_message,
                     replication_client,
                 )
                 .await?;
             }
 
-            // PRIORITY 7: Emit a periodic status update once the computed keep alive deadline
-            // expires. This intentionally resends the same checkpoint LSN so PostgreSQL keeps
-            // the standby connection open during long stalls, including cases where the loop is
-            // paused behind an in-flight flush and therefore not making visible progress yet. This
-            // is only a fallback path: most status updates should still be triggered by incoming
-            // PostgreSQL primary keep alive messages during normal operation.
-            _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
-                self.send_status_update(
-                    replication_message_stream.as_mut(),
-                    true,
-                    StatusUpdateType::PeriodicKeepAlive,
-                )
-                .await?;
-
-                self.state
-                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
-                self.maybe_settle_idle_durability().await?;
-            }
         }
 
         Ok(self.try_finish_active_iteration())
@@ -1503,7 +1103,9 @@ where
     /// 2. Pending destination flush results.
     /// 3. Memory-pressure batch flushing.
     /// 4. Batch flush deadline expiry.
-    /// 5. Periodic keep alive status updates.
+    ///
+    /// The feedback sender task continues heartbeats independently during this
+    /// drain.
     ///
     /// Shutdown drain does not start new quiescent table-sync coordination. If
     /// permanent completion already started a required-durability barrier,
@@ -1511,21 +1113,16 @@ where
     /// is allowed to return.
     ///
     /// A write that already resolved as [`DestinationWriteStatus::Accepted`] is
-    /// no longer pending work. If no later write makes it durable, the final
-    /// status update stays at the last durable flush LSN and replay handles it
-    /// after restart.
+    /// no longer pending work. If no later write makes it durable, it remains
+    /// unacknowledged and is replayed after restart. Shutdown does not enqueue
+    /// final feedback or wait for transmission.
     async fn run_draining_shutdown_iteration(
         &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
         connection_updates_rx: &mut watch::Receiver<PostgresConnectionUpdate>,
         batch_memory_subscription: &mut Option<MemoryMonitorSubscription>,
     ) -> EtlResult<Option<ApplyLoopResult>> {
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await?;
-
             return Ok(Some(self.finish_shutdown()));
         }
 
@@ -1557,25 +1154,10 @@ where
             _ = Self::wait_for_batch_deadline(self.state.flush_deadline), if self.state.can_wait_for_deadline() => {
                 self.flush_batch("flush deadline reached during shutdown drain").await?;
             }
-
-            // PRIORITY 5: Emit a periodic status update while shutdown is draining.
-            _ = Self::wait_for_keep_alive_deadline(self.state.keep_alive_deadline) => {
-                self.send_status_update(
-                    replication_message_stream.as_mut(),
-                    true,
-                    StatusUpdateType::PeriodicKeepAlive,
-                )
-                .await?;
-
-                self.state
-                    .reset_keep_alive_deadline(self.keep_alive_deadline_duration);
-            }
         }
 
         // If we are done with unresolved work, we can finish the shutdown.
         if !self.state.has_unresolved_batch_work() {
-            self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await?;
-
             return Ok(Some(self.finish_shutdown()));
         }
 
@@ -1643,11 +1225,6 @@ where
         }
     }
 
-    /// Waits until the keep alive deadline expires.
-    async fn wait_for_keep_alive_deadline(deadline: Instant) {
-        tokio::time::sleep_until(deadline.into()).await;
-    }
-
     /// Computes the keep alive deadline from PostgreSQL's `wal_sender_timeout`.
     ///
     /// PostgreSQL normally sends a keep alive after roughly half of this
@@ -1661,34 +1238,22 @@ where
             .max(MIN_KEEP_ALIVE_DEADLINE_DURATION)
     }
 
-    /// Handles a shutdown signal.
+    /// Stops intake and drains buffered or in-flight destination work.
     ///
-    /// Shutdown stops new message intake immediately. If there is already
-    /// buffered or in-flight destination work, the loop first drains that work
-    /// so the best durable position can advance before sending the final
-    /// shutdown status update. A write that has already completed as
-    /// [`DestinationWriteStatus::Accepted`] is not waited on again; without a
-    /// later durable write, the final status update remains at the last durable
-    /// flush LSN. Otherwise, the loop sends that update immediately and exits.
+    /// Writes already completed as [`DestinationWriteStatus::Accepted`] are
+    /// not waited on again. Without a later durable write, they remain outside
+    /// the persisted checkpoint and are replayed after restart. The feedback
+    /// sender continues during draining and is stopped at teardown without a
+    /// final status update.
     ///
-    /// Note: the shutdown system is best-effort. Graceful shutdown may not
-    /// complete if we are blocked on non-interruptible code. It is the
-    /// responsibility of the caller to forcefully kill the process if shutdown
-    /// does not complete within an acceptable timeframe.
-    async fn handle_shutdown_signal(
-        &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
-    ) -> EtlResult<()> {
+    /// Graceful shutdown cannot interrupt a handler already awaiting work.
+    /// The caller remains responsible for enforcing an overall shutdown limit.
+    fn handle_shutdown_signal(&mut self) {
         let worker_type = self.worker_context.worker_type();
 
-        // Shutdown always means this apply loop invocation will eventually return, even
-        // if a later quiescent state upgrades the final result from pause to
-        // complete.
+        // Preserve a stronger completion intent if one was already recorded.
         self.state.record_exit_intent(Some(ExitIntent::Pause));
 
-        // If there is unresolved work, we want to drain it before shutting down.
         if self.state.has_unresolved_batch_work() {
             info!(
                 %worker_type,
@@ -1697,70 +1262,10 @@ where
                 processing_paused = self.state.processing_paused,
                 "shutdown signal received, stopping new intake and entering shutdown drain",
             );
-
             self.state.start_draining_for_shutdown();
-
-            return Ok(());
+        } else {
+            info!(%worker_type, "shutdown signal received, no unresolved work left");
         }
-
-        info!(
-            %worker_type,
-            "shutdown signal received, no unresolved work left, sending final status update",
-        );
-
-        self.send_shutdown_flush_status_update(replication_message_stream.as_mut()).await
-    }
-
-    /// Sends the final shutdown status update to let Postgres advance its
-    /// replication state once more.
-    ///
-    /// The update uses the loop's [`ApplyLoopState::checkpoint_lsn`], which may
-    /// select received progress while quiescent or flushed progress while work
-    /// is unresolved.
-    async fn send_shutdown_flush_status_update(
-        &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
-    ) -> EtlResult<()> {
-        self.send_status_update(
-            replication_message_stream.as_mut(),
-            true,
-            StatusUpdateType::ShutdownFlush,
-        )
-        .await?;
-
-        Ok(())
-    }
-
-    /// Sends a status update to PostgreSQL using the current write and flush
-    /// positions.
-    ///
-    /// Some callers intentionally resend the same checkpoint LSN with
-    /// `force = true`. Those updates are about keeping the replication
-    /// connection alive while the system is idle, not about advertising
-    /// newly flushed progress. Keepalive replies from the main replication
-    /// stream and the final shutdown update still use this same helper.
-    async fn send_status_update(
-        &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
-        force: bool,
-        status_update_type: StatusUpdateType,
-    ) -> EtlResult<()> {
-        replication_message_stream
-            .as_mut()
-            .stream_mut()
-            .send_status_update(
-                self.state.last_received_lsn(),
-                self.state.checkpoint_lsn(),
-                force,
-                status_update_type,
-            )
-            .await?;
-
-        Ok(())
     }
 
     /// Tries to queue best-effort cleanup for relation tables covered by
@@ -2123,9 +1628,6 @@ where
     /// Processes the message and manages batch timing.
     async fn handle_stream_message(
         &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
         maybe_message: Option<EtlResult<ReplicationMessage<LogicalReplicationMessage>>>,
         replication_client: &PgReplicationClient,
     ) -> EtlResult<()> {
@@ -2139,8 +1641,7 @@ where
         // If the Postgres had an error, we want to raise it immediately.
         let message = message?;
 
-        self.handle_replication_message_and_flush(replication_message_stream.as_mut(), message)
-            .await
+        self.handle_replication_message_and_flush(message).await
     }
 
     /// Creates an error for when the replication stream ends unexpectedly.
@@ -2173,13 +1674,9 @@ where
     /// Handles a replication message and flushes the batch if necessary.
     async fn handle_replication_message_and_flush(
         &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<()> {
-        let result =
-            self.handle_replication_message(replication_message_stream.as_mut(), message).await?;
+        let result = self.handle_replication_message(message).await?;
 
         if let Some((event, relation)) = result.event {
             // A schema snapshot that pgoutput did not accompany with a protocol
@@ -2256,6 +1753,13 @@ where
     /// The empty write captures the carried commit in its result metadata.
     /// Later events may fill the next batch, but cannot be dispatched until
     /// this result completes. Shutdown never starts a new idle barrier.
+    ///
+    /// Only incoming PostgreSQL keepalives trigger idle settlement. While
+    /// intake is backpressured, those messages wait, so no new idle barrier is
+    /// started and fresh feedback positions are not published through this
+    /// path. Existing destination results can still complete. The independent
+    /// feedback sender task keeps the connection alive by repeating the last
+    /// supplied safe positions until intake resumes.
     async fn maybe_settle_idle_durability(&mut self) -> EtlResult<()> {
         if !self.state.can_settle_idle_durability() {
             return Ok(());
@@ -2322,9 +1826,6 @@ where
     /// Dispatches replication protocol messages to appropriate handlers.
     async fn handle_replication_message(
         &mut self,
-        mut replication_message_stream: Pin<
-            &mut MemoryBackpressureStream<ReplicationMessageStream>,
-        >,
         message: ReplicationMessage<LogicalReplicationMessage>,
     ) -> EtlResult<HandleMessageResult> {
         counter!(
@@ -2371,8 +1872,8 @@ where
                 // without emitting any published change, for example after a
                 // write to a table outside the publication. A burst of such
                 // commits can therefore produce a burst of primary keepalives.
-                // We attempt a response to each one, but the stream-level
-                // status-update debounce suppresses redundant optional replies.
+                // We enqueue a response to each one, but the feedback sender
+                // debounces redundant optional replies.
                 // In either case this is a decoded-WAL frontier, not necessarily
                 // an emitted-event frontier: it may advance through an
                 // uncommitted transaction whose changes remain in the server's
@@ -2386,20 +1887,29 @@ where
                 let end_lsn = PgLsn::from(message.wal_end());
                 self.state.update_last_received_lsn(end_lsn);
 
+                // PostgreSQL sends 1 after roughly half of wal_sender_timeout
+                // without feedback, or during orderly shutdown while waiting
+                // for final progress confirmation. Informational keepalives
+                // and replies to our own feedback requests carry 0. This flag
+                // forces our response; it does not request another reply.
+                let reply_requested = message.reply() == 1;
+
                 debug!(
                     wal_end = %end_lsn,
-                    reply_requested = message.reply() == 1,
+                    reply_requested,
                     "received keep alive",
                 );
 
-                self.send_status_update(
-                    replication_message_stream.as_mut(),
-                    message.reply() == 1,
-                    StatusUpdateType::KeepAlive,
-                )
-                .await?;
+                // Publish only the apply loop's safe frontier. Enqueueing does
+                // not wait for transmission; the sender alone owns wire sends.
+                self.tasks
+                    .enqueue_status_update(
+                        self.state.last_received_lsn(),
+                        self.state.checkpoint_lsn(),
+                        reply_requested,
+                    )
+                    .await?;
 
-                self.state.reset_keep_alive_deadline(self.keep_alive_deadline_duration);
                 self.maybe_settle_idle_durability().await?;
 
                 Ok(HandleMessageResult::no_event())
@@ -3389,6 +2899,7 @@ where
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_after_commit_event(
                     ctx,
+                    &self.state.activity_handle,
                     lsn,
                     table_decoding_states,
                 )
@@ -3577,6 +3088,7 @@ where
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_when_quiescent(
                     ctx,
+                    &self.state.activity_handle,
                     current_lsn,
                     table_decoding_states,
                 )
@@ -3622,7 +3134,26 @@ where
 
 /// Functions specific to the apply worker.
 mod apply_worker {
-    use super::*;
+    use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+
+    use tokio_postgres::types::PgLsn;
+    use tracing::{debug, error, info};
+
+    use crate::{
+        activity::ActivityHandle,
+        destination::PipelineDestination,
+        error::EtlResult,
+        replication::{
+            TableDecodingState, WorkerType,
+            apply::{ApplyWorkerContext, ExitIntent, get_syncing_tables},
+            state::{TableState, TableStateType},
+        },
+        runtime::{
+            TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState, concurrency::ShutdownResult,
+        },
+        schema::TableId,
+        store::{PipelineStore, SchemaStore, SharedStateStore},
+    };
 
     /// Why the apply worker is waiting for table-sync catchup.
     #[derive(Debug)]
@@ -3713,6 +3244,7 @@ mod apply_worker {
     /// Does NOT perform SyncDone → Ready transitions.
     pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
@@ -3723,6 +3255,7 @@ mod apply_worker {
         for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
             let exit_intent = process_single_syncing_table_after_commit_event(
                 ctx,
+                activity_handle,
                 table_id,
                 table_state,
                 current_lsn,
@@ -3741,6 +3274,7 @@ mod apply_worker {
     /// Waits for a table-sync worker in catchup to hand the table back.
     async fn wait_for_table_sync_worker_catchup<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         table_id: TableId,
         worker_state: &TableSyncWorkerState,
         catchup_lsn: PgLsn,
@@ -3768,6 +3302,7 @@ mod apply_worker {
 
         // We wait for both states since if the table sync worker errors, we don't want
         // to stall forever.
+        let _activity_suspension = activity_handle.suspend();
         let result = worker_state
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
@@ -3817,6 +3352,7 @@ mod apply_worker {
     /// Does NOT handle SyncDone → Ready transitions.
     async fn process_single_syncing_table_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         table_id: TableId,
         table_state: TableState,
         current_lsn: PgLsn,
@@ -3865,6 +3401,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -3888,6 +3425,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -4149,6 +3687,7 @@ mod apply_worker {
     /// a later durable apply flush advances the persisted checkpoint.
     pub(super) async fn process_syncing_tables_when_quiescent<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
@@ -4169,6 +3708,7 @@ mod apply_worker {
         for (table_id, table_state) in syncing_tables {
             let exit_intent = process_single_syncing_table_when_quiescent(
                 ctx,
+                activity_handle,
                 table_id,
                 table_state,
                 current_lsn,
@@ -4191,6 +3731,7 @@ mod apply_worker {
     /// for workers already in Catchup, and spawns workers.
     async fn process_single_syncing_table_when_quiescent<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         table_id: TableId,
         table_state: TableState,
         current_lsn: PgLsn,
@@ -4248,6 +3789,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -4294,6 +3836,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -4489,7 +4032,20 @@ mod apply_worker {
 
 /// Functions specific to the table sync worker.
 mod table_sync_worker {
-    use super::*;
+    use tokio_postgres::types::PgLsn;
+    use tracing::{debug, info};
+
+    use crate::{
+        error::{ErrorKind, EtlResult},
+        etl_error,
+        replication::{
+            TableDecodingState, WorkerType,
+            apply::{ExitIntent, TableSyncWorkerContext},
+            state::TableState,
+        },
+        schema::TableId,
+        store::SharedStateStore,
+    };
 
     /// Returns whether the worker's catchup target has been received.
     pub(super) async fn catchup_target_reached<S>(
@@ -4663,14 +4219,28 @@ mod table_sync_worker {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc, time::Instant};
 
-    use tokio_postgres::types::Type;
+    use tokio_postgres::types::{PgLsn, Type};
 
-    use super::*;
     use crate::{
-        replication::state::StoredTableDecodingState,
-        schema::{ColumnSchema, TableName},
+        activity::{ActivityKind, ActivityRegistration},
+        data::SizeHint,
+        destination::{ApplyLoopAsyncResultMetadata, WriteEventsDurability, WriteEventsResult},
+        event::Event,
+        replication::{
+            TableDecodingState,
+            apply::{
+                ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
+                schema_cleanup_retention_snapshot_id, tasks::ReplicationLagMetrics,
+            },
+            state::{StoredTableDecodingState, TableState},
+        },
+        schema::{
+            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId,
+            TableId, TableName, TableSchema,
+        },
+        source_payload_metadata::StreamingPayloadMetadata,
     };
 
     /// Creates a synthetic composite snapshot ID for tests.
@@ -4815,12 +4385,14 @@ mod tests {
 
     #[test]
     fn idle_durability_requires_idle_accepted_work() {
+        let activity_registration = ActivityRegistration::register(ActivityKind::WalApply {
+            wal_sender_timeout: std::time::Duration::from_secs(60),
+        });
         let mut state = ApplyLoopState::new(
+            activity_registration.handle(),
             ReplicationProgress::new(100.into()),
             ReplicationLagMetrics::new(100.into()),
-            Duration::from_secs(6),
             SnapshotId::initial(),
-            "test_slot".to_owned(),
         );
 
         // Only accepted work at an idle boundary may start a durability barrier.

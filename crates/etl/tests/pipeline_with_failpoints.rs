@@ -1,8 +1,13 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use chrono::{DateTime, Utc};
 use etl::{
+    activity,
     data::{Cell, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyBatchId,
@@ -24,8 +29,9 @@ use etl::{
             wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
-        faults::FaultyOp,
+        faults::{FaultAction, FaultyOp, HoldGate},
         memory_destination::MemoryDestination,
+        notify::DEFAULT_NOTIFY_TIMEOUT,
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_database_and_sync_done_pipeline_with_table, create_pipeline,
@@ -58,6 +64,9 @@ use tokio_postgres::{
     Client,
     types::{PgLsn, Type},
 };
+
+/// PostgreSQL inactivity timeout used by the suspended-feedback tests.
+const FEEDBACK_TEST_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
@@ -1098,6 +1107,260 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
         store.get_table_state(table_id).await.unwrap(),
         Some(TableState::SyncDone { .. })
     ));
+
+    pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// Holds the first dispatch containing a data modification (DML) event.
+///
+/// Holding dispatch proves feedback continues while the apply loop awaits the
+/// destination method, before it can poll an asynchronous write result.
+/// Inserts, updates, deletes, and truncates qualify; transaction markers and
+/// schema-only batches pass through.
+#[derive(Clone)]
+struct HoldingDmlDispatchDestination {
+    /// Existing in-memory destination supplies normal schema and event
+    /// behavior.
+    inner: MemoryDestination<NotifyingStore>,
+    /// One test-controlled dispatch hold, taken without holding a lock across
+    /// await.
+    gate: Arc<Mutex<Option<HoldGate>>>,
+    /// Transaction commit LSN carried by the first DML event in the held batch.
+    /// Feedback must stay below this LSN while dispatch is held, including when
+    /// the batch spans multiple transactions.
+    first_held_dml_commit_lsn: Arc<Mutex<Option<PgLsn>>>,
+}
+
+impl Destination for HoldingDmlDispatchDestination {
+    fn name() -> &'static str {
+        "holding_dml_dispatch"
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        schema: &ReplicatedTableSchema,
+        result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.drop_table_for_copy(schema, result).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
+        rows: Vec<TableRow>,
+        result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        self.inner.write_table_rows(schema, batch_id, rows, result).await
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        if let Some(first_dml_commit_lsn) = events.iter().find_map(|event| match event {
+            Event::Insert(insert) => Some(insert.commit_lsn),
+            Event::Update(update) => Some(update.commit_lsn),
+            Event::Delete(delete) => Some(delete.commit_lsn),
+            Event::Truncate(truncate) => Some(truncate.commit_lsn),
+            Event::Begin(_) | Event::Commit(_) | Event::Relation(_) | Event::Unsupported => None,
+        }) {
+            let gate = self.gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                *self.first_held_dml_commit_lsn.lock().unwrap() = Some(first_dml_commit_lsn);
+                // Hold before forwarding the batch or its result handle, so the
+                // inner destination cannot write or acknowledge it until release.
+                gate.apply(Ok(())).await?;
+            }
+        }
+        self.inner.write_events(events, durability, result).await
+    }
+}
+
+/// Observes fresh feedback on the same WAL sender throughout a suspension.
+///
+/// Ignore the initial reply timestamp and observe fresh replies across three
+/// PostgreSQL timeout periods.
+/// Poll at PostgreSQL's half-timeout keepalive cadence, allowing two full
+/// timeouts to observe each reply. A missing or replaced WAL sender fails the
+/// assertion, so reconnecting cannot satisfy it. When DML dispatch is held,
+/// every observed slot checkpoint must remain below the first held DML event's
+/// transaction commit LSN.
+async fn assert_apply_feedback_during_stall(
+    database: &PgDatabase<Client>,
+    pipeline_id: PipelineId,
+    first_held_dml_commit_lsn: Option<PgLsn>,
+) {
+    let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let client = database.client.as_ref().unwrap();
+    let statement = client
+        .prepare(
+            "select r.pid, r.reply_time, s.confirmed_flush_lsn from pg_stat_replication r join \
+             pg_replication_slots s on s.active_pid = r.pid where s.slot_name = $1",
+        )
+        .await
+        .unwrap();
+
+    let row = client.query_one(&statement, &[&slot_name]).await.unwrap();
+    let backend_pid = row.get::<_, i32>(0);
+    let mut last_reply_time = row.get::<_, Option<DateTime<Utc>>>(1);
+    let started = tokio::time::Instant::now();
+
+    while started.elapsed() < FEEDBACK_TEST_WAL_SENDER_TIMEOUT * 3 {
+        last_reply_time = tokio::time::timeout(FEEDBACK_TEST_WAL_SENDER_TIMEOUT * 2, async {
+            loop {
+                tokio::time::sleep(FEEDBACK_TEST_WAL_SENDER_TIMEOUT / 2).await;
+
+                let row = client.query_one(&statement, &[&slot_name]).await.unwrap();
+                assert_eq!(row.get::<_, i32>(0), backend_pid);
+                if let Some(first_dml_commit_lsn) = first_held_dml_commit_lsn {
+                    assert!(row.get::<_, PgLsn>(2) < first_dml_commit_lsn);
+                }
+
+                let reply_time = row.get::<_, Option<DateTime<Utc>>>(1);
+                if reply_time.is_some() && reply_time != last_reply_time {
+                    return reply_time;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for fresh apply feedback while processing was suspended");
+    }
+}
+
+/// Feedback continues without acknowledging the first held DML transaction
+/// while destination dispatch is suspended.
+#[tokio::test(flavor = "multi_thread")]
+async fn feedback_continues_during_destination_dispatch() {
+    let mut database = spawn_source_database().await;
+    database
+        .run_sql(&format!(
+            "alter database {} set wal_sender_timeout = '{}ms'",
+            quote_identifier(&database.config.name),
+            FEEDBACK_TEST_WAL_SENDER_TIMEOUT.as_millis(),
+        ))
+        .await
+        .unwrap();
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let inner = MemoryDestination::new(store.clone());
+    let (fault, hold) = FaultAction::hold();
+    let FaultAction::HoldResponse(gate) = fault else {
+        panic!("FaultAction::hold must produce a hold gate");
+    };
+    let first_held_dml_commit_lsn = Arc::new(Mutex::new(None));
+    let destination = TestDestinationWrapper::wrap(HoldingDmlDispatchDestination {
+        inner: inner.clone(),
+        gate: Arc::new(Mutex::new(Some(gate))),
+        first_held_dml_commit_lsn: Arc::clone(&first_held_dml_commit_lsn),
+    });
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    synced.notified().await;
+
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+
+    hold.wait_reached().await;
+
+    // Independent feedback must not refresh a blocked worker's observation.
+    let activities = activity::snapshot();
+    assert_eq!(activities.len(), 1);
+    let observed_at = activities[0].last_observed_at();
+
+    let first_held_dml_commit_lsn = first_held_dml_commit_lsn.lock().unwrap().unwrap();
+    assert_apply_feedback_during_stall(&database, pipeline_id, Some(first_held_dml_commit_lsn))
+        .await;
+
+    assert_eq!(activity::snapshot()[0].last_observed_at(), observed_at);
+
+    assert!(!inner.events().await.iter().any(|event| matches!(event, Event::Insert(_))));
+
+    hold.release_ok();
+
+    applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    assert_eq!(events.iter().filter(|event| matches!(event, Event::Insert(_))).count(), 1);
+}
+
+/// Apply feedback continues across multiple PostgreSQL timeout periods while
+/// table-sync catchup is suspended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn apply_feedback_continues_during_table_sync_catchup() {
+    let _scenario = FailScenario::setup();
+    let catchup_entered = Arc::new(tokio::sync::Notify::new());
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    let entered = Arc::clone(&catchup_entered);
+    fail::cfg_callback(TABLE_SYNC_WORKER_BEFORE_STREAMING_FP, move || {
+        entered.notify_one();
+        // Let Tokio run other tasks while this synchronous failpoint waits.
+        tokio::task::block_in_place(|| {
+            // The sender also drops on assertion failure, releasing the worker.
+            let _ = release_rx.lock().unwrap().recv();
+        });
+    })
+    .unwrap();
+
+    let database = spawn_source_database().await;
+    database
+        .run_sql(&format!(
+            "alter database {} set wal_sender_timeout = '{}ms'",
+            quote_identifier(&database.config.name),
+            FEEDBACK_TEST_WAL_SENDER_TIMEOUT.as_millis(),
+        ))
+        .await
+        .unwrap();
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = database_schema.users_schema().id;
+
+    let store = NotifyingStore::new();
+    let destination = MemoryDestination::new(store.clone());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        database_schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+
+    let sync_done = store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
+
+    pipeline.start().await.unwrap();
+
+    tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, catchup_entered.notified()).await.unwrap();
+
+    // The failpoint is reached only after apply requests catchup and waits
+    // for this worker. Keep it suspended across multiple PostgreSQL timeouts.
+    assert_apply_feedback_during_stall(&database, pipeline_id, None).await;
+
+    release_tx.send(()).unwrap();
+
+    sync_done.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 }
@@ -2367,7 +2630,8 @@ impl IdleDurabilityTest {
         (commit_end_lsn, result)
     }
 
-    /// Receives an empty barrier, including the 36-second periodic fallback.
+    /// Receives an empty barrier driven by an incoming primary keepalive,
+    /// including a reply requested by ETL's periodic feedback.
     async fn next_barrier(&mut self) -> WriteEventsResult {
         let write = tokio::time::timeout(Duration::from_secs(50), self.writes_rx.recv())
             .await
@@ -2424,6 +2688,9 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
     let (first_lsn, result) = test.next_batch().await;
     result.send(Ok(DestinationWriteStatus::Accepted));
     let barrier = test.next_barrier().await;
+    let activities = activity::snapshot();
+    assert_eq!(activities.len(), 1);
+    let observed_at = activities[0].last_observed_at();
 
     let received_target = test.database.current_wal_flush_lsn().await.unwrap();
     test.insert(2).await;
@@ -2453,6 +2720,9 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
     .unwrap();
     assert!(tokio::time::timeout(Duration::from_secs(2), test.writes_rx.recv()).await.is_err());
     assert!(test.confirmed_lsn().await < first_lsn);
+    // The loop remains active while it can process source messages, even with
+    // a pending destination barrier.
+    assert!(activity::snapshot()[0].last_observed_at() > observed_at);
 
     barrier.send(Ok(DestinationWriteStatus::Durable));
     let (second_lsn, second_result) = test.next_batch().await;
