@@ -2197,6 +2197,7 @@ dependencies = [
 name = "etl-replicator"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "configcat",
  "etl",
  "etl-config",

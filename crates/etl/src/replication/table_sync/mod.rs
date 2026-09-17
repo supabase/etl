@@ -19,6 +19,7 @@ use crate::failpoints::{
     etl_fail_point,
 };
 use crate::{
+    activity::{ActivityKind, ActivityRegistration},
     bail,
     destination::{
         DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
@@ -251,6 +252,10 @@ where
                 .create_slot_with_transaction(&slot_name, config.replication_slot.failover)
                 .await?;
 
+            let activity_registration =
+                ActivityRegistration::register(ActivityKind::InitialTableCopy);
+            let activity_handle = activity_registration.handle();
+
             // We copy the table schema and write it both to the state store and
             // destination.
             //
@@ -311,6 +316,7 @@ where
             // We check if the table should be copied, or we can skip it.
             if config.table_sync_copy.should_copy_table(table_id.into_inner()) {
                 let result = table_copy(
+                    &activity_handle,
                     &replication_transaction,
                     table_id,
                     replicated_table_schema.clone(),
@@ -372,7 +378,7 @@ where
                 };
 
                 match completed_flush_result.into_result()? {
-                    DestinationWriteStatus::Durable => {}
+                    DestinationWriteStatus::Durable => activity_handle.ping(),
                     DestinationWriteStatus::Accepted => bail!(
                         ErrorKind::DestinationError,
                         "Table copy durability barrier did not confirm durability"

@@ -191,6 +191,7 @@ compile_error!(
     "Either the `tls-rustls-ring` or the `tls-rustls-aws-lc-rs` feature must be enabled."
 );
 
+pub mod activity;
 pub mod config;
 mod constants;
 pub mod data;

@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
+    activity::{self, ActivityKind},
     data::{Cell, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
@@ -1192,6 +1193,12 @@ async fn table_copy_waits_for_durable_terminal_barrier_after_accepted_write() {
 
     // The destination now holds the terminal barrier result.
     barrier_reached_notify.notified().await;
+
+    // Copy observation must outlive source commit and include the durability
+    // barrier.
+    assert!(
+        activity::snapshot().iter().any(|entry| { entry.kind() == ActivityKind::InitialTableCopy })
+    );
 
     // A later Durable batch must not advance the table while the terminal
     // barrier remains pending.
