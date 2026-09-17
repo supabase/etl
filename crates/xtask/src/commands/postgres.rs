@@ -13,9 +13,8 @@ use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_
 
 const COMPOSE_FILE: &str = "./scripts/docker/docker-compose.yaml";
 
-/// Returns the program and initial args for docker compose.
-/// Prefers `docker compose` (v2 plugin) and falls back to `docker-compose`
-/// (standalone).
+/// Returns the program and initial args for docker compose. Prefers `docker
+/// compose` (v2 plugin) and falls back to `docker-compose` (standalone).
 fn docker_compose_command() -> (&'static str, &'static [&'static str]) {
     if Command::new("docker")
         .args(["compose", "version"])
@@ -129,8 +128,8 @@ impl StartArgs {
 
         let tls_files = if self.no_tls { None } else { Some(self.prepare_tls_files()?) };
 
-        // Start the full stack on the base port unless the caller only needs source
-        // Postgres.
+        // Start the full stack on the base port unless the caller only needs
+        // source Postgres.
         let first_shard_services =
             if self.source_only { &SOURCE_POSTGRES_SERVICES[..] } else { &[] };
         self.start_cluster(None, self.base_port, first_shard_services, tls_files.as_ref())?;

@@ -20,12 +20,12 @@
 //! controls against the container leaf in that arrangement and accounts for
 //! ancestors only when the runtime exposes them. An unconstrained Linux process
 //! instead uses host-wide memory, avoiding a misleading ratio based only on the
-//! process's leaf-cgroup charge divided by all host RAM.
-//! The full cgroup charge is used instead of resident set size because the
-//! kernel's memory controller also accounts for page cache, socket buffers,
-//! and kernel memory that contribute to the enforced limit. If a previously
-//! available cgroup read fails transiently, the last cgroup snapshot is kept
-//! rather than falling back to a potentially larger host limit.
+//! process's leaf-cgroup charge divided by all host RAM. The full cgroup charge
+//! is used instead of resident set size because the kernel's memory controller
+//! also accounts for page cache, socket buffers, and kernel memory that
+//! contribute to the enforced limit. If a previously available cgroup read
+//! fails transiently, the last cgroup snapshot is kept rather than falling back
+//! to a potentially larger host limit.
 //!
 //! Platforms without Linux memory cgroups, including macOS, use sysinfo's
 //! system-wide used and total memory readings. One shared sampler performs
@@ -33,10 +33,10 @@
 //! operating-system files themselves.
 //!
 //! Emergency backpressure pauses new source polling while destination results
-//! and already-owned batches continue to drain. Resume is deliberately based
-//! on the same full-domain measurement. If measured usage keeps that domain
-//! above the resume threshold, the pipeline stays paused rather than probing
-//! with more source data and risking an OOM kill.
+//! and already-owned batches continue to drain. Resume is deliberately based on
+//! the same full-domain measurement. If measured usage keeps that domain above
+//! the resume threshold, the pipeline stays paused rather than probing with
+//! more source data and risking an OOM kill.
 
 use std::{
     pin::Pin,
@@ -150,9 +150,9 @@ impl MemorySnapshot {
             return MemoryRefresh::fresh(snapshot);
         }
 
-        // Once the process cgroup has been observed, a missing read is treated as
-        // transient. Falling back to host memory could momentarily expand the batch
-        // budget far beyond the pod's actual limit.
+        // Once the process cgroup has been observed, a missing read is treated
+        // as transient. Falling back to host memory could momentarily expand
+        // the batch budget far beyond the pod's actual limit.
         if let Some(previous @ Self { source: MemorySnapshotSource::ProcessCgroup, .. }) = previous
         {
             trace!(
@@ -195,8 +195,8 @@ impl MemorySnapshot {
     /// visible hierarchy and is not necessarily the literal `memory.current` of
     /// any one cgroup.
     fn from_cgroup_limits(cgroup: &sysinfo::CGroupLimits, source: MemorySnapshotSource) -> Self {
-        // `rss` only contains anonymous resident memory and misses other charges
-        // enforced by the memory controller.
+        // `rss` only contains anonymous resident memory and misses other
+        // charges enforced by the memory controller.
         Self {
             used: cgroup.total_memory.saturating_sub(cgroup.free_memory),
             total: cgroup.total_memory,
@@ -266,7 +266,8 @@ impl MemoryMonitor {
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
     ) -> (Self, AbortOnDropHandle<()>) {
-        // sysinfo docs suggest using a single `System` instance across the program.
+        // sysinfo docs suggest using a single `System` instance across the
+        // program.
         let mut system = sysinfo::System::new();
         let current_pid = sysinfo::get_current_pid().ok();
         if let Some(current_pid) = current_pid {
@@ -277,8 +278,8 @@ impl MemoryMonitor {
             );
         }
 
-        // Initialize from a real memory snapshot so startup state reflects current
-        // pressure.
+        // Initialize from a real memory snapshot so startup state reflects
+        // current pressure.
         let startup_snapshot = MemorySnapshot::refresh(&mut system, current_pid, None).snapshot;
         emit_memory_snapshot_metrics(startup_snapshot, None);
         let backpressure = memory_backpressure_config.map(|config| {
@@ -301,7 +302,8 @@ impl MemoryMonitor {
             }),
         };
 
-        // Shared readings do not own the task, so retaining them creates no cycle.
+        // Shared readings do not own the task, so retaining them creates no
+        // cycle.
         let this_clone = this.clone();
         let mut currently_backpressure_active = this.is_backpressure_active();
         let refresh_task = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -384,8 +386,8 @@ impl MemoryMonitor {
     pub(crate) fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
         let backpressure = self.inner.backpressure.as_ref()?;
 
-        // Retain a receiver for current-state reads while the stream yields only
-        // changes that occur after subscription.
+        // Retain a receiver for current-state reads while the stream yields
+        // only changes that occur after subscription.
         let rx = backpressure.active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
@@ -450,9 +452,9 @@ impl MemoryMonitor {
             *current = snapshot;
 
             // Wrapping is intentional. Governor readers compare revisions for
-            // inequality, so `u64::MAX -> 0` still denotes a new snapshot. Update
-            // it while the snapshot is write-locked so readers cannot pair this
-            // snapshot with the preceding revision.
+            // inequality, so `u64::MAX -> 0` still denotes a new snapshot.
+            // Update it while the snapshot is write-locked so readers cannot
+            // pair this snapshot with the preceding revision.
             self.inner.snapshot_revision.fetch_add(1, Ordering::Relaxed);
 
             previous_source

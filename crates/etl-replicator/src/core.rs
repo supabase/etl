@@ -140,7 +140,8 @@ pub(crate) async fn start_replicator_with_config(
 
     replicator_health.set_replicator_state(ReplicatorState::Stopping);
 
-    // Probes are disposable, but joining still reports server failures and panics.
+    // Probes are disposable, but joining still reports server failures and
+    // panics.
     let health_result = if let Some(health_server_task) = health_server_task {
         abort_and_join(health_server_task).await.and_then(|result| result.unwrap_or(Ok(())))
     } else {

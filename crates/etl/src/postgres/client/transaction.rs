@@ -122,11 +122,11 @@ fn plan_ctid_partitions_for_table_blocks(
 
 /// Planning statistics used to split table copy work.
 ///
-/// These values are cheap physical/catalog estimates observed at planning
-/// time, not MVCC snapshot-visible row counts. They are used only to size CTID
-/// work ranges; the actual copied rows are selected later by COPY queries that
-/// run inside the exported snapshot. CTID planning therefore keeps the first
-/// and last ranges open-ended so a stale physical-size estimate cannot exclude
+/// These values are cheap physical/catalog estimates observed at planning time,
+/// not MVCC snapshot-visible row counts. They are used only to size CTID work
+/// ranges; the actual copied rows are selected later by COPY queries that run
+/// inside the exported snapshot. CTID planning therefore keeps the first and
+/// last ranges open-ended so a stale physical-size estimate cannot exclude
 /// visible tuples at the relation edges.
 #[derive(Debug)]
 pub struct TableCopyPlanningEstimate {
@@ -264,8 +264,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
         table_schema: &TableSchema,
         publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
-        // Column filtering in publications was added in Postgres 15. For earlier
-        // versions, all columns are replicated.
+        // Column filtering in publications was added in Postgres 15. For
+        // earlier versions, all columns are replicated.
         if below_version!(self.server_version, POSTGRES_15) {
             return Ok(table_schema
                 .column_schemas
@@ -274,10 +274,10 @@ impl<'a> PgReplicationTransactionCore<'a> {
                 .collect());
         }
 
-        // Query pg_publication_tables using unnest() to properly decode the attnames
-        // array. This correctly handles column names containing special
-        // characters (spaces, commas, quotes) that would break naive string
-        // parsing.
+        // Query pg_publication_tables using unnest() to properly decode the
+        // attnames array. This correctly handles column names containing
+        // special characters (spaces, commas, quotes) that would break naive
+        // string parsing.
         let column_query = format!(
             "select true as table_in_publication, u.column_name
              from pg_publication_tables pt
@@ -606,8 +606,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
         );
 
         // TODO: there's a lot of code using simple_query but only checking for
-        // SimpleQueryMessage::Row, a small optimization could be done here if we
-        // upgraded tokio-postgres to a newer version in order to use
+        // SimpleQueryMessage::Row, a small optimization could be done here if
+        // we upgraded tokio-postgres to a newer version in order to use
         // https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw
         // to filter on SimpleQueryMessage::Row and avoid useless allocations.
         for message in self.transaction.simple_query(&schema_snapshot_query).await? {
@@ -656,20 +656,21 @@ impl<'a> PgReplicationTransactionCore<'a> {
         table_id: TableId,
         publication_name: Option<&str>,
     ) -> EtlResult<Option<String>> {
-        // Row filters on publications were added in Postgres 15. For any earlier
-        // versions we know that there is no row filter.
+        // Row filters on publications were added in Postgres 15. For any
+        // earlier versions we know that there is no row filter.
         if below_version!(self.server_version, POSTGRES_15) {
             return Ok(None);
         }
 
-        // If we don't have a publication the row filter is implicitly non-existent.
+        // If we don't have a publication the row filter is implicitly
+        // non-existent.
         let Some(publication_name) = publication_name else {
             return Ok(None);
         };
 
-        // This uses the same query as the `pg_publication_tables`, but with some minor
-        // tweaks (COALESCE, only return the rowfilter, filter on oid and
-        // pubname). All of these are available >= Postgres 15.
+        // This uses the same query as the `pg_publication_tables`, but with
+        // some minor tweaks (COALESCE, only return the rowfilter, filter on oid
+        // and pubname). All of these are available >= Postgres 15.
         let row_filter_query = format!(
             "select pt.rowfilter as row_filter
                 from pg_publication_tables pt
@@ -763,8 +764,8 @@ impl<'a> PgReplicationTransaction<'a> {
     /// publication.
     ///
     /// Returns a [`HashSet`] containing the names of columns from the given
-    /// [`TableSchema`] that are included in the specified publication for
-    /// the given [`TableId`].
+    /// [`TableSchema`] that are included in the specified publication for the
+    /// given [`TableId`].
     pub async fn get_replicated_column_names(
         &self,
         table_id: TableId,

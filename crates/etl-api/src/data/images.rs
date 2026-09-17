@@ -98,7 +98,8 @@ pub async fn update_image(
 
     // If this is to be the new default image, first unset any existing default.
     if is_default {
-        // Check the target image first, so missing updates cannot change defaults.
+        // Check the target image first, so missing updates cannot change
+        // defaults.
         if sqlx::query(
             r#"
         select id

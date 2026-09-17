@@ -22,8 +22,8 @@ const RESTART_POLL_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// Ordered rolling updates can wait indefinitely for an unready pod. Once the
 /// controller observes the applied generation, delete that pod with a UID
-/// precondition so a concurrent replacement cannot be deleted accidentally.
-/// A newer generation supersedes this request. Missing or terminating resources
+/// precondition so a concurrent replacement cannot be deleted accidentally. A
+/// newer generation supersedes this request. Missing or terminating resources
 /// are left to Kubernetes, and an already updated pod is never restarted again.
 ///
 /// Returns after deletion is accepted, without waiting for termination or
@@ -55,7 +55,8 @@ pub(super) async fn restart_outdated_pod(
     tokio::time::timeout(RESTART_TIMEOUT, async {
         loop {
             // Read the pod before checking the generation so a newer request's
-            // replacement cannot be mistaken for an outdated pod of this request.
+            // replacement cannot be mistaken for an outdated pod of this
+            // request.
             let pod = pods.get_opt(pod_name).await?;
             let Some(current) = stateful_sets.get_opt(&name).await? else {
                 return Ok(());
@@ -93,8 +94,8 @@ pub(super) async fn restart_outdated_pod(
                 return Ok(());
             }
 
-            // A matching name alone does not establish ownership, especially
-            // if the StatefulSet was deleted and recreated.
+            // A matching name alone does not establish ownership, especially if
+            // the StatefulSet was deleted and recreated.
             if !pod.owner_references().iter().any(|owner| {
                 owner.controller == Some(true) && owner.kind == "StatefulSet" && &owner.uid == uid
             }) {
@@ -104,14 +105,15 @@ pub(super) async fn restart_outdated_pod(
                 });
             }
 
-            // An updated pod has already received this restart, even if its
-            // new configuration still fails. Do not create a restart loop.
+            // An updated pod has already received this restart, even if its new
+            // configuration still fails. Do not create a restart loop.
             if pod.annotations().get(RESTARTED_AT_ANNOTATION) == Some(restart) {
                 return Ok(());
             }
 
-            // Pod names are reused. Guard deletion with the observed UID so
-            // a concurrent replacement survives, and retain normal graceful shutdown.
+            // Pod names are reused. Guard deletion with the observed UID so a
+            // concurrent replacement survives, and retain normal graceful
+            // shutdown.
             let pod_uid = pod.metadata.uid.ok_or_else(|| K8sError::InvalidRestartResource {
                 kind: "Pod",
                 name: pod_name.to_owned(),
@@ -123,8 +125,8 @@ pub(super) async fn restart_outdated_pod(
             match pods.delete(pod_name, &params).await {
                 // Acceptance is enough: the StatefulSet controller completes replacement.
                 Ok(_) => return Ok(()),
-                // Re-read both resources after a deletion race; never retry
-                // deletion by name alone against a potentially different pod.
+                // Re-read both resources after a deletion race; never retry deletion by name alone
+                // against a potentially different pod.
                 Err(kube::Error::Api(error)) if matches!(error.code, 404 | 409) => {
                     tokio::time::sleep(RESTART_POLL_INTERVAL).await;
                     continue;

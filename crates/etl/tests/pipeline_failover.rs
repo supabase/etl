@@ -90,8 +90,8 @@ async fn wait_for_synchronized_failover_slot(
     slot_name: &str,
 ) {
     // Advance the logical slot through a fresh running-xacts snapshot before
-    // asking the standby to build its synchronized slot. This keeps the
-    // primary slot's catalog horizon from falling behind the standby's.
+    // asking the standby to build its synchronized slot. This keeps the primary
+    // slot's catalog horizon from falling behind the standby's.
     let synchronization_lsn = database.log_standby_snapshot().await.unwrap();
     wait_for_replication_slot_flush_lsn(
         database.client.as_ref().unwrap(),

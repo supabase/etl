@@ -11,8 +11,7 @@ use super::{
     },
 };
 
-/// Value used when PostgreSQL does not support
-/// `idle_replication_slot_timeout`.
+/// Value used when PostgreSQL does not support `idle_replication_slot_timeout`.
 const UNSUPPORTED_IDLE_REPLICATION_SLOT_TIMEOUT_SECONDS: i64 = 0;
 /// Low idle replication slot timeout warning threshold in seconds.
 ///

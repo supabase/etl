@@ -45,9 +45,9 @@ impl SizeHint for TableCopyRow {
 pin_project! {
     /// A stream that yields rows from a Postgres COPY operation.
     ///
-    /// This stream wraps a [`CopyOutStream`] and converts each row into a [`TableRow`]
-    /// using the provided column schemas. The conversion process handles both text and
-    /// binary format data.
+    /// This stream wraps a [`CopyOutStream`] and converts each row into a
+    /// [`TableRow`] using the provided column schemas. The conversion process
+    /// handles both text and binary format data.
     #[must_use = "streams do nothing unless polled"]
     pub(crate) struct TableCopyStream {
         #[pin]
@@ -74,8 +74,8 @@ impl Stream for TableCopyStream {
     /// error handling.
     ///
     /// This method handles the complex process of converting raw Postgres COPY
-    /// data into structured [`TableRow`] objects, with detailed error
-    /// reporting for various failure modes.
+    /// data into structured [`TableRow`] objects, with detailed error reporting
+    /// for various failure modes.
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
 
@@ -85,8 +85,9 @@ impl Stream for TableCopyStream {
             Poll::Ready(Some(Ok(row))) => {
                 let metadata = TableCopyPayloadMetadata::new(row.len() as u64);
 
-                // Conversion step: transform raw bytes into structured TableRow.
-                // This is where most errors occur due to data format or type issues.
+                // Conversion step: transform raw bytes into structured
+                // TableRow. This is where most errors occur due to data format
+                // or type issues.
                 match parse_table_row_from_postgres_copy_bytes(&row, this.column_schemas.as_slice())
                 {
                     Ok(row) => Poll::Ready(Some(Ok(TableCopyRow { row, metadata }))),

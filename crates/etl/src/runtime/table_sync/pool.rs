@@ -20,8 +20,8 @@ use crate::{
 /// Unique identifier for a table sync worker run.
 ///
 /// Each spawned worker is identified by its table ID and a monotonically
-/// increasing run ID. This allows tracking all worker runs across restarts
-/// for the same table.
+/// increasing run ID. This allows tracking all worker runs across restarts for
+/// the same table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TableSyncWorkerId {
     /// Identifier of the table being synchronized by this worker.
@@ -87,7 +87,8 @@ impl TableSyncWorkerPool {
     where
         F: Future<Output = EtlResult<TableSyncWorkerResult>> + Send + 'static,
     {
-        // Lock workers_join_set first to ensure we block if wait_all is in progress.
+        // Lock workers_join_set first to ensure we block if wait_all is in
+        // progress.
         let mut workers_join_set = self.workers_join_set.lock().await;
         let mut workers = self.workers.write().await;
 
@@ -144,9 +145,9 @@ impl TableSyncWorkerPool {
     /// Waits for all workers in the pool to complete.
     ///
     /// This method holds the workers_join_set lock while draining all tasks,
-    /// which blocks any new spawn attempts. For each completed task, it
-    /// briefly acquires a write lock on the workers map to remove the entry
-    /// only if the worker_id matches.
+    /// which blocks any new spawn attempts. For each completed task, it briefly
+    /// acquires a write lock on the workers map to remove the entry only if the
+    /// worker_id matches.
     ///
     /// If any workers encounter supervision errors, those errors are collected
     /// and returned.

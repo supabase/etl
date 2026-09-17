@@ -95,8 +95,9 @@ where
     /// consistency between pipeline identity and configuration settings.
     pub fn new(config: PipelineConfig, store: S, destination: D) -> Self {
         // Register metrics here during pipeline creation to avoid burdening the
-        // users of etl crate to explicitly calling it. Since this method is safe to
-        // call multiple times, it is ok even if there are multiple pipelines created.
+        // users of etl crate to explicitly calling it. Since this method is
+        // safe to call multiple times, it is ok even if there are multiple
+        // pipelines created.
         register_metrics();
 
         Self {
@@ -150,29 +151,28 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We load the destination table metadata and schemas from the store to have
-        // them cached for quick access.
+        // We load the destination table metadata and schemas from the store to
+        // have them cached for quick access.
         //
-        // It's really important to load the metadata and schemas before starting the
-        // apply worker since downstream code relies on the assumption that they
-        // are loaded in the cache.
+        // It's really important to load the metadata and schemas before
+        // starting the apply worker since downstream code relies on the
+        // assumption that they are loaded in the cache.
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
 
-        // We load the table states by checking the table ids of a publication and
-        // loading/creating the table states based on the current
-        // state.
+        // We load the table states by checking the table ids of a publication
+        // and loading/creating the table states based on the current state.
         self.initialize_table_states(&replication_client).await?;
 
         // We then let destinations perform their startup sequence if any.
         self.destination.startup().await?;
 
-        // We create the table sync workers pool to manage all table sync workers in a
-        // central place.
+        // We create the table sync workers pool to manage all table sync
+        // workers in a central place.
         let pool = Arc::new(TableSyncWorkerPool::new());
 
-        // We create the permits semaphore which is used to control how many table sync
-        // workers can be running at the same time.
+        // We create the permits semaphore which is used to control how many
+        // table sync workers can be running at the same time.
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
@@ -218,8 +218,8 @@ where
     ///
     /// This method blocks until both the apply worker and all table sync
     /// workers have finished their work. If the pipeline was never started,
-    /// this returns immediately. If any workers encounter errors, those
-    /// errors are collected and returned.
+    /// this returns immediately. If any workers encounter errors, those errors
+    /// are collected and returned.
     ///
     /// This method may be called once after startup. It borrows the pipeline
     /// so the owner can call [`Pipeline::shutdown`] while waiting.
@@ -244,11 +244,11 @@ where
 
         let mut errors = vec![];
 
-        // We first wait for the apply worker to finish, since that must be done before
-        // waiting for the table sync workers to finish, otherwise if we wait
-        // for sync workers first, we might be having the apply worker that
-        // spawns new sync workers after we waited for the current
-        // ones to finish.
+        // We first wait for the apply worker to finish, since that must be done
+        // before waiting for the table sync workers to finish, otherwise if we
+        // wait for sync workers first, we might be having the apply worker that
+        // spawns new sync workers after we waited for the current ones to
+        // finish.
         debug!("waiting for apply worker to complete");
         let apply_worker_result = apply_worker.wait().await;
         if let Err(err) = apply_worker_result {
@@ -266,7 +266,8 @@ where
             errors.push(err);
         }
 
-        // Once all workers completed, we notify the destination of shutting down.
+        // Once all workers completed, we notify the destination of shutting
+        // down.
         debug!("waiting for destination shutdown to complete");
         if let Err(err) = self.destination.shutdown().await {
             warn!("destination shutdown failed, collecting errors");
@@ -324,8 +325,8 @@ where
         self.wait().await
     }
 
-    /// Initializes table states for tables in the publication and
-    /// purges state for tables removed from it.
+    /// Initializes table states for tables in the publication and purges state
+    /// for tables removed from it.
     ///
     /// Ensures each table currently in the Postgres publication has a
     /// corresponding table state; tables without existing states are
@@ -374,8 +375,8 @@ where
 
         // Detect and purge tables that have been removed from the publication.
         //
-        // The purging doesn't delete any data in the destination, it just removes
-        // internal state for that table.
+        // The purging doesn't delete any data in the destination, it just
+        // removes internal state for that table.
         let publication_set: HashSet<TableId> = publication_table_ids.iter().copied().collect();
         for &table_id in table_states.keys() {
             if !publication_set.contains(&table_id) {
@@ -384,8 +385,9 @@ where
                     "table removed from publication, purging stored state and slot"
                 );
 
-                // We delete all table state before removing the slot, so that we don't
-                // incur in the case where we have a slot tied to an invalid state.
+                // We delete all table state before removing the slot, so that
+                // we don't incur in the case where we have a slot tied to an
+                // invalid state.
                 self.store.delete_table_state(table_id).await?;
 
                 // We try to delete the replication slot.

@@ -26,8 +26,8 @@ const MAX_INITIAL_DECIMAL_DIGITS_CAPACITY: usize = 1024;
 
 /// Sign indicator for Postgres numeric values.
 ///
-/// [`Sign`] represents whether a numeric value is positive or negative,
-/// used internally in the Postgres numeric wire format representation.
+/// [`Sign`] represents whether a numeric value is positive or negative, used
+/// internally in the Postgres numeric wire format representation.
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Clone)]
 pub enum Sign {
     /// Positive numeric value.
@@ -83,8 +83,8 @@ pub enum PgNumeric {
     Value {
         /// Sign of the numeric value.
         sign: Sign,
-        /// Weight represents the power of 10000 for the first digit.
-        /// For example, if weight=2, the first digit represents multiples of
+        /// Weight represents the power of 10000 for the first digit. For
+        /// example, if weight=2, the first digit represents multiples of
         /// 10000^2.
         weight: i16,
         /// Number of decimal digits after the decimal point for display
@@ -238,8 +238,8 @@ impl std::error::Error for ParseNumericError {}
 
 /// Parses special numeric values like NaN, Infinity, and -Infinity.
 ///
-/// This function handles Postgres's special numeric values when they appear
-/// in string format. NaN cannot have a negative sign, while infinity values
+/// This function handles Postgres's special numeric values when they appear in
+/// string format. NaN cannot have a negative sign, while infinity values
 /// respect the sign parameter. The candidates are ASCII, so case-insensitive
 /// ASCII comparison accepts and rejects the same inputs the previous
 /// Unicode-lowercasing comparison did, without allocating.
@@ -277,7 +277,8 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
     let mut decimal_digits =
         Vec::with_capacity(bytes.len().min(MAX_INITIAL_DECIMAL_DIGITS_CAPACITY));
     let mut have_decimal_point = false;
-    // Decimal weight is the number of digits before the decimal point minus one.
+    // Decimal weight is the number of digits before the decimal point minus
+    // one.
     let mut dweight = -1i32;
     // Decimal scale is the number of digits after the decimal point.
     let mut dscale = 0u32;
@@ -357,9 +358,9 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
                     pos += 1;
                     exponent = exponent * 10 + i64::from(byte - b'0');
                     // This is an arithmetic overflow guard, not the Postgres
-                    // numeric range check. Weight and scale bounds are
-                    // enforced below after the exponent is applied to the
-                    // parsed decimal shape.
+                    // numeric range check. Weight and scale bounds are enforced
+                    // below after the exponent is applied to the parsed decimal
+                    // shape.
                     if exponent > i32::MAX as i64 / 2 {
                         return Err(ParseNumericError::ValueOutOfRange);
                     }
@@ -398,8 +399,8 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
 /// Converts decimal digits to Postgres's base-10000 internal format.
 ///
 /// This function transforms a sequence of decimal digits into Postgres's
-/// efficient base-10000 representation, where each internal digit represents
-/// up to 10000 in decimal. This format balances storage efficiency with
+/// efficient base-10000 representation, where each internal digit represents up
+/// to 10000 in decimal. This format balances storage efficiency with
 /// calculation performance.
 fn convert_to_base_10000(
     decimal_digits: &[u8],
@@ -482,8 +483,8 @@ fn format_numeric_value(
     scale: u16,
     digits: &[i16],
 ) -> std::fmt::Result {
-    // Handle zero case. Postgres preserves the display scale of zero values,
-    // so `0.000` keeps its three fractional zeros.
+    // Handle zero case. Postgres preserves the display scale of zero values, so
+    // `0.000` keeps its three fractional zeros.
     if digits.is_empty() {
         write!(f, "0")?;
         if scale > 0 {
@@ -778,9 +779,9 @@ mod tests {
 
     #[test]
     fn zero_display_preserves_scale_from_exponent() {
-        // Regression for the value-roundtrip property: Postgres renders
-        // `0e-1` as `0.0`, so the display scale of zero must survive the
-        // parse/format roundtrip.
+        // Regression for the value-roundtrip property: Postgres renders `0e-1`
+        // as `0.0`, so the display scale of zero must survive the parse/format
+        // roundtrip.
         for (s, expected) in [("0e-1", "0.0"), ("0e-6", "0.000000"), ("0.00e-1", "0.000")] {
             let num = PgNumeric::from_str(s).unwrap();
             assert_eq!(num.to_string(), expected);
@@ -808,7 +809,8 @@ mod tests {
 
     #[test]
     fn weight_ignores_trailing_fraction_groups() {
-        // 0.0012000 has groups [12, 0], and weight must stay at -1 after stripping.
+        // 0.0012000 has groups [12, 0], and weight must stay at -1 after
+        // stripping.
         let num = PgNumeric::from_str("0.0012000").unwrap();
         assert_eq!(num.to_string(), "0.0012000");
 
@@ -879,15 +881,17 @@ mod tests {
             // String form should be stable across two parses.
             assert_eq!(printed, reparsed.to_string(), "unstable print for {case}");
 
-            // Value representation should be equal across parse, print, and parse.
+            // Value representation should be equal across parse, print, and
+            // parse.
             assert_eq!(parsed, reparsed, "unstable internal value for {case}");
         }
     }
 
     #[test]
     fn large_integer_weight() {
-        // 1,200,000 is 120 * 10000 + 0, giving digits [120, 0] before stripping.
-        // We expect trailing zero group to be stripped, weight stays 1.
+        // 1,200,000 is 120 * 10000 + 0, giving digits [120, 0] before
+        // stripping. We expect trailing zero group to be stripped, weight stays
+        // 1.
         let num = PgNumeric::from_str("1200000").unwrap();
         assert_eq!(num.to_string(), "1200000");
 

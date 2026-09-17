@@ -47,8 +47,8 @@ pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(3 * 60
 /// Stable log and error label for DuckDB blocking operations.
 const DUCKDB_BLOCKING_OPERATION_KIND: &str = "foreground";
 /// Extra time allowed for a timed-out DuckDB operation to return after
-/// interrupt() has been called. If the operation is still stuck after this,
-/// the process is no longer safe to keep running.
+/// interrupt() has been called. If the operation is still stuck after this, the
+/// process is no longer safe to keep running.
 const BLOCKING_ABORT_GRACE: Duration = Duration::from_secs(30);
 /// Description used when DuckLake rejects new blocking work during shutdown.
 const DUCKLAKE_SHUTDOWN_REQUESTED: &str = "DuckLake shutdown requested";
@@ -786,8 +786,8 @@ pub(super) async fn build_warm_ducklake_pool(
             .min_idle(Some(0))
             .connection_timeout(Duration::from_mins(4))
             .test_on_check_out(true)
-            // Callers log the returned pool initialization failure once, so
-            // suppress r2d2's internal per-attempt logging here.
+            // Callers log the returned pool initialization failure once, so suppress r2d2's
+            // internal per-attempt logging here.
             .error_handler(Box::new(r2d2::NopErrorHandler))
             .build(manager)
             .map_err(|e| {
@@ -971,8 +971,8 @@ where
         "wait for ducklake blocking slot"
     );
 
-    // This is needed to make sure we properly interrupt the blocking operation if
-    // it exceeds the timeout, we don't just cancel the task and leave the
+    // This is needed to make sure we properly interrupt the blocking operation
+    // if it exceeds the timeout, we don't just cancel the task and leave the
     // connection active.
     let mut watchdog = DuckDbQueryWatchdog::spawn(deadline);
     let watchdog_task = watchdog.async_task_handle()?;
@@ -994,8 +994,9 @@ where
     }));
 
     let blocking_work = move || -> EtlResult<R> {
-        // Please if you modify the code inside this blocking task do not add any
-        // blocking operations that could delay other tasks waiting on this slot.
+        // Please if you modify the code inside this blocking task do not add
+        // any blocking operations that could delay other tasks waiting on this
+        // slot.
         let _permit = permit;
         provider.with_connection(deadline, timeout, move |pooled_conn| {
             if pooled_conn.broken {
@@ -1379,7 +1380,8 @@ mod tests {
             move |_conn, context| {
                 started_tx.send(()).unwrap();
                 release_rx.recv().unwrap();
-                // The timeout runs on Tokio while this closure keeps the native slot.
+                // The timeout runs on Tokio while this closure keeps the native
+                // slot.
                 while context.interrupt_state.reason() == DuckLakeInterruptReason::None {
                     std::thread::yield_now();
                 }

@@ -200,10 +200,10 @@ pub struct PublicationConfig {
 /// The request-body counterpart of [`PublicationTableConfig`].
 ///
 /// A table is identified for writes by [`PublicationTableConfigInput::id`]
-/// alone, so this type has no `schema`/`name` fields to set: there is
-/// nothing to ignore, because there is nothing to supply. Publication reads
-/// use [`PublicationTableConfig`], which adds those fields back as
-/// server-resolved display metadata.
+/// alone, so this type has no `schema`/`name` fields to set: there is nothing
+/// to ignore, because there is nothing to supply. Publication reads use
+/// [`PublicationTableConfig`], which adds those fields back as server-resolved
+/// display metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PublicationTableConfigInput {
     /// The table's Postgres OID in the source database.
@@ -305,9 +305,9 @@ impl From<PublicationConfigInput> for PublicationConfig {
 pub struct PublicationDetails {
     /// The publication name.
     pub name: String,
-    /// The publication's current configuration, with tables resolved to
-    /// their current schema and name. [`PublicationConfigInput`] is the
-    /// counterpart accepted by the put endpoint.
+    /// The publication's current configuration, with tables resolved to their
+    /// current schema and name. [`PublicationConfigInput`] is the counterpart
+    /// accepted by the put endpoint.
     pub config: PublicationConfig,
     /// Tables currently exposed by the publication.
     pub tables: Vec<SourceTable>,
@@ -777,8 +777,8 @@ fn validate_row_filters(tables: &[PublicationTableConfig]) -> Result<(), Publica
 /// expression.
 ///
 /// PostgreSQL remains responsible for parsing and validating the expression.
-/// This scanner only prevents the text from closing the parenthesis supplied
-/// by ETL or commenting out the trusted suffix of the DDL statement.
+/// This scanner only prevents the text from closing the parenthesis supplied by
+/// ETL or commenting out the trusted suffix of the DDL statement.
 fn is_contained_sql_expression(expression: &str) -> bool {
     /// The quoted construct currently being scanned.
     enum Quote<'a> {

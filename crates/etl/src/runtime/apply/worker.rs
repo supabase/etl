@@ -222,8 +222,8 @@ where
     ///
     /// Timed retry scheduling intentionally reuses the same settings used by
     /// table sync workers (`table_error_retry_delay_ms` and
-    /// `table_error_retry_max_attempts`) so retry behavior is
-    /// coherent across worker types.
+    /// `table_error_retry_max_attempts`) so retry behavior is coherent across
+    /// worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
         let mut retry_attempts: u32 = 0;
 
@@ -251,7 +251,8 @@ where
     /// Runs a single apply worker attempt.
     async fn run_apply_worker(&self) -> EtlResult<()> {
         // Slot creation can wait indefinitely for source transactions. No apply
-        // work has been accepted yet, so cancellation can close this connection.
+        // work has been accepted yet, so cancellation can close this
+        // connection.
         let ShutdownResult::Ok(initialized) = with_shutdown!(
             async {
                 let replication_client = PgReplicationClient::connect_for_apply_worker(
@@ -304,8 +305,8 @@ where
         )
         .await?;
 
-        // The apply loop when used via the apply worker, should never complete since
-        // it's always streaming indefinitely.
+        // The apply loop when used via the apply worker, should never complete
+        // since it's always streaming indefinitely.
         debug_assert!(!matches!(apply_loop_result, ApplyLoopResult::Completed));
 
         match apply_loop_result {
@@ -321,8 +322,8 @@ where
     }
 }
 
-/// Determines the position from which the apply worker should start reading
-/// the replication stream.
+/// Determines the position from which the apply worker should start reading the
+/// replication stream.
 ///
 /// This function implements critical replication consistency logic by managing
 /// the apply worker's replication slot. The slot serves as a persistent marker
@@ -350,10 +351,10 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
 
-    // Inspect the slot before creating it so a stale checkpoint from the previous
-    // lineage can be deleted first. Creating the slot before cleanup would leave
-    // a crash window where a later restart could pair the new slot with old
-    // persisted checkpoint.
+    // Inspect the slot before creating it so a stale checkpoint from the
+    // previous lineage can be deleted first. Creating the slot before cleanup
+    // would leave a crash window where a later restart could pair the new slot
+    // with old persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
         Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
@@ -366,8 +367,8 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         Err(err) => return Err(err),
     };
 
-    // Once we have the slot, we determine the start lsn, which is the consistent
-    // point from which Postgres tells us to start streaming from.
+    // Once we have the slot, we determine the start lsn, which is the
+    // consistent point from which Postgres tells us to start streaming from.
     let slot_start_lsn = slot.get_start_lsn();
 
     match &slot {
@@ -392,8 +393,8 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     if let GetOrCreateSlotResult::GetSlot(_) = &slot {
         let slot_state = replication_client.get_slot_state(&slot_name).await?;
 
-        // If the slot was invalidated, we need to handle its invalidation based on the
-        // configured rules.
+        // If the slot was invalidated, we need to handle its invalidation based
+        // on the configured rules.
         if slot_state == SlotState::Invalidated {
             return handle_invalidated_slot(
                 pipeline_id,
@@ -408,15 +409,16 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
 
         // An apply slot may predate this setting. Reconcile a valid slot before
         // reuse so enabling failover does not leave it ineligible for standby
-        // synchronization. Invalidated slots are handled above instead of altered.
+        // synchronization. Invalidated slots are handled above instead of
+        // altered.
         if failover {
             replication_client.ensure_slot_failover(&slot_name).await?;
         }
     }
 
-    // If the slot was created, we don't need an invalidation check. The previous
-    // lineage's persisted checkpoint was deleted before creation, so replication
-    // can start directly from the new slot's consistent point.
+    // If the slot was created, we don't need an invalidation check. The
+    // previous lineage's persisted checkpoint was deleted before creation, so
+    // replication can start directly from the new slot's consistent point.
     if matches!(slot, GetOrCreateSlotResult::CreateSlot(_)) {
         return Ok(slot_start_lsn);
     }
@@ -429,8 +431,8 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     };
 
     // The two frontiers can legitimately differ because checkpoint persistence
-    // and PostgreSQL status feedback are separate operations. The checkpoint
-    // is selected from a completed destination flush boundary. PostgreSQL slot
+    // and PostgreSQL status feedback are separate operations. The checkpoint is
+    // selected from a completed destination flush boundary. PostgreSQL slot
     // feedback may advance farther while the loop is quiescent, so startup
     // chooses the later available frontier.
     let start_lsn = persisted_checkpoint_lsn.max(slot_start_lsn);

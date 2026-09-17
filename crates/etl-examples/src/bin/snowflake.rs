@@ -139,8 +139,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Parse command line arguments
     let args = AppArgs::parse();
 
-    // Configure Postgres connection settings
-    // Note: TLS is disabled in this example - enable for production use
+    // Configure Postgres connection settings Note: TLS is disabled in this
+    // example - enable for production use
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
         hostaddr: None,
@@ -155,9 +155,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create a persistent store for tracking table states and
-    // schemas. This runs the Postgres store migrations; Pipeline::start()
-    // runs the source migrations required by replication.
+    // Create a persistent store for tracking table states and schemas. This
+    // runs the Postgres store migrations; Pipeline::start() runs the source
+    // migrations required by replication.
     let pipeline_id = 1;
     let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
 

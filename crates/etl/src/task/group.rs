@@ -94,7 +94,7 @@ impl<T: 'static> TaskGroup<T> {
                 result?;
             }
         }
-        
+
         Ok(())
     }
 

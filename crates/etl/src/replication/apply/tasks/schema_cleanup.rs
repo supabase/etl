@@ -50,9 +50,8 @@ async fn run_schema_cleanup<S>(
     S: SchemaStore,
 {
     while let Some(request) = schema_cleanup_rx.recv().await {
-        // Coalesce up to one bounded batch of available requests to
-        // retain batched store cleanup without making the apply loop
-        // wait for it.
+        // Coalesce up to one bounded batch of available requests to retain
+        // batched store cleanup without making the apply loop wait for it.
         let mut retention_snapshot_ids = BTreeMap::new();
         retention_snapshot_ids.insert(request.table_id, request.retention_snapshot_id);
 
@@ -118,8 +117,8 @@ async fn run_schema_cleanup<S>(
 ///
 /// Each queue entry contains one table identifier and one frozen retention
 /// boundary. Buffering accommodates bursts of relation messages. Queueing is
-/// non-blocking, so excess candidates remain pending in the apply loop and
-/// are retried after a later durable flush result.
+/// non-blocking, so excess candidates remain pending in the apply loop and are
+/// retried after a later durable flush result.
 pub(super) fn spawn_schema_cleanup_task<S>(
     schema_store: S,
     worker_type: WorkerType,
@@ -138,8 +137,8 @@ where
 
 /// Tries to queue a schema cleanup request for one table.
 ///
-/// Returns `false` when the bounded queue is full or the background worker
-/// has stopped. This method never waits for queue capacity.
+/// Returns `false` when the bounded queue is full or the background worker has
+/// stopped. This method never waits for queue capacity.
 pub(super) fn try_queue(
     schema_cleanup_tx: &mpsc::Sender<SchemaCleanupRequest>,
     table_id: TableId,

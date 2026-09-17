@@ -55,8 +55,8 @@ where
     /// Returns a copy of all events stored in this destination.
     ///
     /// This method is useful for testing and verification of pipeline behavior.
-    /// It provides access to all replication events that have been written
-    /// to this destination since creation or the last clear operation.
+    /// It provides access to all replication events that have been written to
+    /// this destination since creation or the last clear operation.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn events(&self) -> Vec<Event> {
         let inner = self.inner.lock().await;
@@ -66,8 +66,8 @@ where
     /// Returns a copy of all table rows stored in this destination.
     ///
     /// This method is useful for testing and verification of pipeline behavior.
-    /// It provides access to all table row data that has been written
-    /// to this destination, organized by table ID.
+    /// It provides access to all table row data that has been written to this
+    /// destination, organized by table ID.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn table_rows(&self) -> HashMap<TableId, Vec<TableRow>> {
         let inner = self.inner.lock().await;
@@ -138,8 +138,8 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        // For table drops, we simulate removing all table rows for a specific table and
-        // also the events of that table.
+        // For table drops, we simulate removing all table rows for a specific
+        // table and also the events of that table.
         let mut inner = self.inner.lock().await;
 
         let table_id = replicated_table_schema.id();
@@ -176,8 +176,8 @@ where
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
 
-        // Store destination table metadata on first write, like real destinations
-        // (BigQuery, Iceberg) do.
+        // Store destination table metadata on first write, like real
+        // destinations (BigQuery, Iceberg) do.
         self.sync_destination_table_metadata(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;

@@ -10,12 +10,12 @@ use prost::bytes;
 ///
 /// Formatting cells such as dates, numerics, UUIDs, and JSON into their
 /// Protocol Buffer string representation is comparatively expensive, and
-/// [`prost::Message::encoded_len`] and [`prost::Message::encode_raw`] are
-/// each invoked at least once per row by callers that budget a batch by
-/// length before encoding it. Encoding once up front, at row-construction
-/// time, and keeping only the resulting bytes means formatting happens
-/// exactly once per row and the source cells don't have to be kept alive
-/// alongside their encoding.
+/// [`prost::Message::encoded_len`] and [`prost::Message::encode_raw`] are each
+/// invoked at least once per row by callers that budget a batch by length
+/// before encoding it. Encoding once up front, at row-construction time, and
+/// keeping only the resulting bytes means formatting happens exactly once per
+/// row and the source cells don't have to be kept alive alongside their
+/// encoding.
 #[derive(Debug)]
 pub(super) struct BigQueryTableRow(Vec<u8>);
 

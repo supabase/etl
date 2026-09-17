@@ -108,8 +108,8 @@ fn sqlstate_is_timeout(code: &str) -> bool {
     // API source sessions configure statement, lock, and idle-in-transaction
     // timeouts and do not issue explicit query cancellation or NOWAIT queries.
     // PostgreSQL uses the broader query_canceled and lock_not_available codes
-    // when the first two timeouts expire. Newer PostgreSQL versions also
-    // define a transaction_timeout code.
+    // when the first two timeouts expire. Newer PostgreSQL versions also define
+    // a transaction_timeout code.
     matches!(code, "57014" | "55P03" | "25P03" | "25P04")
 }
 

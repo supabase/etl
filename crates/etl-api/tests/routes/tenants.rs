@@ -416,7 +416,8 @@ async fn tenant_deletion_api_commit_failure_keeps_tenant_discoverable_for_retry(
     let (app, tenant_id, pipeline_id, source_pool, source_config) =
         setup_tenant_with_source_state().await;
     let api_pool = get_connection_pool(app.database_config());
-    // Defer failure until commit to exercise the boundary after the API cascade.
+    // Defer failure until commit to exercise the boundary after the API
+    // cascade.
     api_pool
         .execute(
             r#"

@@ -140,7 +140,7 @@ impl TaskRegistry {
     /// returned only after all remaining tasks have been joined.
     pub async fn shutdown(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
-        
+
         inner.shutdown().await
     }
 }

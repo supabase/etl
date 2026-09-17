@@ -200,7 +200,8 @@ impl BatchMemoryGovernor {
         }
 
         // The target is advisory and independently atomic. Recalculation is
-        // serialized separately, so observing the preceding value briefly is safe.
+        // serialized separately, so observing the preceding value briefly is
+        // safe.
         self.state.batch_size_target_bytes.load(Ordering::Acquire)
     }
 
@@ -209,9 +210,9 @@ impl BatchMemoryGovernor {
         let mut update = match self.state.update_state.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(error)) => error.into_inner(),
-            // Another caller is already refreshing the target or changing the
-            // slot count. Since this is advisory, use the current target for
-            // this item instead of making concurrent batch producers queue.
+            // Another caller is already refreshing the target or changing the slot count. Since
+            // this is advisory, use the current target for this item instead of making concurrent
+            // batch producers queue.
             Err(TryLockError::WouldBlock) => return,
         };
 

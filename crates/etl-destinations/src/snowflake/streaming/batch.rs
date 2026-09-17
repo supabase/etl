@@ -32,8 +32,8 @@ const MAX_UNCOMPRESSED_ROW_BYTES: usize = 2 * 1024 * 1024;
 
 /// Pre-allocated capacity for the per-row serialization scratch buffer.
 ///
-/// One memory page covers most rows without reallocation, the buffer
-/// grows automatically for larger rows and retains its high-water mark.
+/// One memory page covers most rows without reallocation, the buffer grows
+/// automatically for larger rows and retains its high-water mark.
 const SCRATCH_INITIAL_CAPACITY: usize = 4096;
 
 /// Compression level.
@@ -114,8 +114,8 @@ impl RowBatch {
 /// Builds compressed row batches with streaming zstd compression.
 ///
 /// Rows are serialized into a scratch buffer first, then written to the zstd
-/// encoder. When the compressed output approaches `BATCH_SPLIT_THRESHOLD`,
-/// the current batch is finished and a new encoder is started.
+/// encoder. When the compressed output approaches `BATCH_SPLIT_THRESHOLD`, the
+/// current batch is finished and a new encoder is started.
 pub struct RowBatchBuilder {
     encoder: Encoder<'static, Vec<u8>>,
     scratch: Vec<u8>,

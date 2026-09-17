@@ -191,8 +191,8 @@ where
     }
 
     /// Sets the time between periodic table sync monitor checks, such as
-    /// reporting replication lag and checking replication slot validity
-    /// during table copy.
+    /// reporting replication lag and checking replication slot validity during
+    /// table copy.
     pub fn with_table_sync_monitor_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
         self.table_sync_monitor_refresh_interval_ms = interval_ms;
         self

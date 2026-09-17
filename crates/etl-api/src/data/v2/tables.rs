@@ -32,8 +32,8 @@ pub struct SourceTable {
     /// Whether the table can own partitions.
     pub kind: SourceTableKind,
     /// The direct partition parent's OID, or `null` for a partition root or
-    /// ordinary table. When discovery is schema-filtered, the referenced
-    /// parent can be outside the response.
+    /// ordinary table. When discovery is schema-filtered, the referenced parent
+    /// can be outside the response.
     pub partition_parent_id: Option<u32>,
 }
 

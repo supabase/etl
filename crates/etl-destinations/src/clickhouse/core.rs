@@ -45,17 +45,17 @@ const MAX_ERROR_COLUMN_NAMES: usize = 12;
 
 /// Postgres CDC operation kind. Written to the `cdc_operation` column as the
 /// matching uppercase string (`"INSERT"`, `"UPDATE"`, `"DELETE"`) so downstream
-/// consumers (ReplacingMergeTree dedup, materialized views, etc.) can filter
-/// or branch on operation type.
+/// consumers (ReplacingMergeTree dedup, materialized views, etc.) can filter or
+/// branch on operation type.
 #[derive(Copy, Clone)]
 enum CdcOperation {
     /// New row inserted on the source.
     Insert,
     /// Existing row updated on the source. Carries the post-update values.
     Update,
-    /// Row deleted on the source. Carries pre-delete values for the PK
-    /// columns; non-PK columns are filled in by `expand_key_row` (NULL for
-    /// nullable columns, type-appropriate zero for non-nullable).
+    /// Row deleted on the source. Carries pre-delete values for the PK columns;
+    /// non-PK columns are filled in by `expand_key_row` (NULL for nullable
+    /// columns, type-appropriate zero for non-nullable).
     Delete,
 }
 
@@ -78,8 +78,8 @@ struct PendingRow {
     /// `cdc_lsn`; ReplacingMergeTree stores the complete packed key in
     /// `_etl_version`.
     sequence_key: EventSequenceKey,
-    /// User column values in source schema order. The trailing CDC columns
-    /// are appended at encode time and are not present here.
+    /// User column values in source schema order. The trailing CDC columns are
+    /// appended at encode time and are not present here.
     cells: Vec<Cell>,
 }
 
@@ -117,9 +117,9 @@ fn clickhouse_type_expects_nullable_marker(type_name: &str) -> bool {
     type_name.starts_with("Nullable(")
 }
 
-/// Returns expected ClickHouse column names for a replicated schema under
-/// the given engine: user columns in source order, then the engine's
-/// trailing CDC columns.
+/// Returns expected ClickHouse column names for a replicated schema under the
+/// given engine: user columns in source order, then the engine's trailing CDC
+/// columns.
 fn expected_clickhouse_column_names(
     schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
@@ -362,8 +362,8 @@ fn summarize_column_names<'a>(column_names: impl IntoIterator<Item = &'a str>) -
 /// evolution.
 ///
 /// The column-count and column-order checks are an integrity guard: if the
-/// destination has otherwise drifted from `ReplicatedTableSchema`, we surface
-/// a `CorruptedTableSchema` error rather than emit misaligned RowBinary bytes.
+/// destination has otherwise drifted from `ReplicatedTableSchema`, we surface a
+/// `CorruptedTableSchema` error rather than emit misaligned RowBinary bytes.
 fn nullable_flags_from_clickhouse_columns(
     clickhouse_table_name: &str,
     expected_column_names: &[String],
@@ -432,8 +432,8 @@ pub struct ClickHouseInserterConfig {
 
 impl ClickHouseInserterConfig {
     /// Default per-INSERT byte cap. 64 MiB lands in the upper end of
-    /// ClickHouse's recommended bulk-insert range (10k - 100k rows per
-    /// INSERT) for typical CDC payload widths.
+    /// ClickHouse's recommended bulk-insert range (10k - 100k rows per INSERT)
+    /// for typical CDC payload widths.
     ///
     /// See <https://clickhouse.com/docs/optimize/bulk-inserts>.
     pub const DEFAULT_MAX_BYTES_PER_INSERT: u64 = 64 * 1024 * 1024;
@@ -491,8 +491,8 @@ impl ClickHouseClientConfig {
         }
     }
 
-    /// Client-side `tokio::time::timeout` for `op`:
-    /// `server_timeout_for(op) + client_timeout_epsilon`.
+    /// Client-side `tokio::time::timeout` for `op`: `server_timeout_for(op) +
+    /// client_timeout_epsilon`.
     pub(crate) fn client_timeout_for(&self, op: ClickHouseOperationKind) -> Duration {
         self.server_timeout_for(op) + self.client_timeout_epsilon
     }
@@ -564,15 +564,15 @@ pub struct ClickHouseDestination<S> {
     /// Per-INSERT byte budget; gates intermediate flushes within a single
     /// `write_table_rows` / `write_events` call.
     inserter_config: ClickHouseInserterConfig,
-    /// Schema/state store used to persist destination table metadata
-    /// (Creating / Applying / Applied) and to look up replicated schemas.
+    /// Schema/state store used to persist destination table metadata (Creating
+    /// / Applying / Applied) and to look up replicated schemas.
     store: Arc<S>,
     /// Source table ID -> validated applied ClickHouse table state.
     ///
-    /// Populated lazily on first encounter of a table and consulted on the
-    /// hot insert path. `std::sync::RwLock` is sufficient: every critical
-    /// section is a brief in-memory map op with no `.await` inside, so the
-    /// async `tokio::sync::RwLock` would be needless overhead.
+    /// Populated lazily on first encounter of a table and consulted on the hot
+    /// insert path. `std::sync::RwLock` is sufficient: every critical section
+    /// is a brief in-memory map op with no `.await` inside, so the async
+    /// `tokio::sync::RwLock` would be needless overhead.
     table_cache: Arc<RwLock<HashMap<TableId, Arc<ClickHouseTableCacheEntry>>>>,
     /// Per-`table_id` locks serialising first-time table creation.
     ///
@@ -580,13 +580,12 @@ pub struct ClickHouseDestination<S> {
     /// this destination (it is `Clone` over `Arc` state), so without a guard
     /// both fall through the cache miss in [`Self::prepare_table_for_writes`]
     /// and issue racing `CREATE TABLE` / `CREATE VIEW` statements. On
-    /// ClickHouse Cloud the replicated `... IF NOT EXISTS` is not atomic
-    /// across replicas, so the loser fails with "DDL failed". A
-    /// `tokio::sync::Mutex` (held across the DDL `.await`) per table makes
-    /// the second worker wait, then fall through the post-lock cache
-    /// re-check. The outer map is guarded by a brief, await-free
-    /// `parking_lot::Mutex` and grows at most one entry per replicated
-    /// table.
+    /// ClickHouse Cloud the replicated `... IF NOT EXISTS` is not atomic across
+    /// replicas, so the loser fails with "DDL failed". A `tokio::sync::Mutex`
+    /// (held across the DDL `.await`) per table makes the second worker wait,
+    /// then fall through the post-lock cache re-check. The outer map is guarded
+    /// by a brief, await-free `parking_lot::Mutex` and grows at most one entry
+    /// per replicated table.
     create_locks: Arc<Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
@@ -675,9 +674,9 @@ where
     /// 3. Persist `Applied` metadata.
     ///
     /// Recovery is handled by `prepare_table_for_writes`: on restart, a
-    /// `Creating` row signals that the previous run died mid-creation, so
-    /// it re-runs the idempotent DDL and transitions the metadata to
-    /// `Applied` itself.
+    /// `Creating` row signals that the previous run died mid-creation, so it
+    /// re-runs the idempotent DDL and transitions the metadata to `Applied`
+    /// itself.
     async fn create_table_with_metadata(
         &self,
         table_id: TableId,
@@ -701,12 +700,13 @@ where
     }
 
     // ClickHouse Cloud transparently substitutes the MergeTree family with its
-    // shared-storage variants (`ReplacingMergeTree` -> `SharedReplacingMergeTree`).
-    // These are drop-in equivalents, so `system.tables.engine` reads back the
-    // `Shared`-prefixed name even though the pipeline configured the plain one.
+    // shared-storage variants (`ReplacingMergeTree` ->
+    // `SharedReplacingMergeTree`). These are drop-in equivalents, so
+    // `system.tables.engine` reads back the `Shared`-prefixed name even though
+    // the pipeline configured the plain one.
 
-    /// Rejects writing to a pre-existing ClickHouse table whose engine does
-    /// not match the configured one. No-op if the table doesn't exist yet.
+    /// Rejects writing to a pre-existing ClickHouse table whose engine does not
+    /// match the configured one. No-op if the table doesn't exist yet.
     async fn ensure_engine_matches(&self, clickhouse_table_name: &str) -> EtlResult<()> {
         let Some(existing) = self.client.table_engine(clickhouse_table_name).await? else {
             return Ok(());
@@ -729,8 +729,8 @@ where
     }
 
     /// Issues the engine-correct `CREATE TABLE`, and under ReplacingMergeTree
-    /// also the companion `CREATE VIEW "<table>__current"`. Both statements
-    /// are `IF NOT EXISTS`, so retries on the recovery path are idempotent.
+    /// also the companion `CREATE VIEW "<table>__current"`. Both statements are
+    /// `IF NOT EXISTS`, so retries on the recovery path are idempotent.
     async fn issue_create_table_stmt(
         &self,
         clickhouse_table_name: &str,
@@ -854,10 +854,11 @@ where
             Some(_) => {}
         }
 
-        // Compute nullable flags from the actual ClickHouse schema. This matters after
-        // `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced to
-        // `Nullable(T)` even when the Postgres column is `NOT NULL`, so RowBinary must
-        // include the nullable marker byte ClickHouse expects.
+        // Compute nullable flags from the actual ClickHouse schema. This
+        // matters after `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are
+        // forced to `Nullable(T)` even when the Postgres column is `NOT NULL`,
+        // so RowBinary must include the nullable marker byte ClickHouse
+        // expects.
         let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
         let expected_column_names =
             expected_clickhouse_column_names(schema, self.inserter_config.engine);
@@ -1036,9 +1037,9 @@ where
         Ok(())
     }
 
-    /// Writes an initial-copy batch directly to the destination table,
-    /// awaiting the write inline instead of reporting through the trait's
-    /// async completion result.
+    /// Writes an initial-copy batch directly to the destination table, awaiting
+    /// the write inline instead of reporting through the trait's async
+    /// completion result.
     ///
     /// Test-only entrypoint for exercising the production write path without
     /// pipeline plumbing.
@@ -1051,9 +1052,9 @@ where
         self.write_table_rows_inner(schema, table_rows).await
     }
 
-    /// Writes a streaming event batch directly to the destination, awaiting
-    /// the write inline instead of reporting through the trait's async
-    /// completion result.
+    /// Writes a streaming event batch directly to the destination, awaiting the
+    /// write inline instead of reporting through the trait's async completion
+    /// result.
     ///
     /// Test-only entrypoint for exercising the production write path without
     /// pipeline plumbing.
@@ -1075,10 +1076,11 @@ where
             .map(|table_row| {
                 let mut values: Vec<ClickHouseValue> =
                     table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
-                // Initial-copy rows are tagged as INSERT with LSN 0 / tx_ordinal 0
-                // (sentinel meaning "this row pre-dates the streaming cursor"). For
-                // ReplacingMergeTree, any streaming event then wins on FINAL because its packed
-                // `_etl_version` is non-zero.
+                // Initial-copy rows are tagged as INSERT with LSN 0 /
+                // tx_ordinal 0 (sentinel meaning "this row pre-dates the
+                // streaming cursor"). For ReplacingMergeTree, any streaming
+                // event then wins on FINAL because its packed `_etl_version` is
+                // non-zero.
                 append_cdc_columns(
                     &mut values,
                     CdcOperation::Insert,
@@ -1109,9 +1111,9 @@ where
         let new_snapshot_id = new_schema.inner().snapshot_id;
         let new_replication_mask = new_schema.replication_mask().clone();
 
-        // Serialize cache reconstruction and schema transitions. This ensures
-        // a cold-cache writer cannot repopulate an old RowBinary layout after
-        // the relation handler invalidates it.
+        // Serialize cache reconstruction and schema transitions. This ensures a
+        // cold-cache writer cannot repopulate an old RowBinary layout after the
+        // relation handler invalidates it.
         let table_lock = self.table_preparation_lock(table_id);
         let _preparation_guard = table_lock.lock().await;
 
@@ -1447,11 +1449,11 @@ where
     /// 3. Processes any Relation events (schema changes) sequentially.
     /// 4. Drains consecutive Truncate events (deduplicated) and executes them.
     ///
-    /// Schema changes are applied only after all preceding inserts in the
-    /// batch are complete: step 2 awaits every INSERT before step 3 runs any
-    /// DDL, and the client pins `wait_for_async_insert = 1`, so an insert
-    /// acknowledgement implies the rows were flushed into the table and
-    /// cannot be overtaken by a following `ALTER TABLE`.
+    /// Schema changes are applied only after all preceding inserts in the batch
+    /// are complete: step 2 awaits every INSERT before step 3 runs any DDL, and
+    /// the client pins `wait_for_async_insert = 1`, so an insert
+    /// acknowledgement implies the rows were flushed into the table and cannot
+    /// be overtaken by a following `ALTER TABLE`.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -1459,7 +1461,8 @@ where
             let mut pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)> =
                 HashMap::new();
 
-            // Accumulate data events until we hit a Truncate or Relation boundary.
+            // Accumulate data events until we hit a Truncate or Relation
+            // boundary.
             while let Some(event) = event_iter.peek() {
                 if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                     break;
@@ -1561,8 +1564,8 @@ where
     /// ClickHouse, one task per table. No-op if `pending` is empty.
     ///
     /// All `prepare_table_for_writes` calls run sequentially before any insert
-    /// is spawned, so a schema-resolution failure aborts the whole pass
-    /// without any partial-write side effects.
+    /// is spawned, so a schema-resolution failure aborts the whole pass without
+    /// any partial-write side effects.
     async fn flush_pending_rows(
         &self,
         pending: HashMap<TableId, (ReplicatedTableSchema, Vec<PendingRow>)>,
@@ -1618,12 +1621,12 @@ where
 /// sort and deduplication key.
 ///
 /// The destination emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(...)
-/// ORDER BY (<pk cols>)`, so the table's sort and dedup keys are bound to
-/// those PK column names. ClickHouse `ALTER TABLE` can change column shapes
-/// but cannot rewrite the ORDER BY expression, so a PK drop or rename would
-/// leave the ORDER BY referring to a column that no longer exists (or has a
-/// different meaning), silently breaking dedup. We error before the ALTER
-/// reaches the server.
+/// ORDER BY (<pk cols>)`, so the table's sort and dedup keys are bound to those
+/// PK column names. ClickHouse `ALTER TABLE` can change column shapes but
+/// cannot rewrite the ORDER BY expression, so a PK drop or rename would leave
+/// the ORDER BY referring to a column that no longer exists (or has a different
+/// meaning), silently breaking dedup. We error before the ALTER reaches the
+/// server.
 fn reject_pk_alters_under_replacing_merge_tree(
     clickhouse_table_name: &str,
     diff: &SchemaDiff,
@@ -1898,9 +1901,9 @@ fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResul
             if col.primary_key_ordinal_position.is_some() {
                 key_iter.next().unwrap_or(Cell::Null)
             } else if col.nullable && !is_array_type(&col.typ) {
-                // Nullable scalars -> NULL. Array columns are never nullable
-                // in ClickHouse (Array(Nullable(T)) without outer Nullable),
-                // so they must use an empty array default instead.
+                // Nullable scalars -> NULL. Array columns are never nullable in
+                // ClickHouse (Array(Nullable(T)) without outer Nullable), so
+                // they must use an empty array default instead.
                 Cell::Null
             } else {
                 default_cell(&col.typ)
@@ -1914,9 +1917,8 @@ fn expand_key_row(key_row: TableRow, schema: &ReplicatedTableSchema) -> EtlResul
 /// in key-only DELETE tombstones. Array types produce empty arrays. All other
 /// non-primitive types fall through to an empty String, which is a valid zero
 /// value for every ClickHouse String-mapped type (numeric, time, timetz,
-/// interval, json, bytea).
-/// Date, Timestamp, and UUID use typed zero values because their ClickHouse
-/// wire format is not String.
+/// interval, json, bytea). Date, Timestamp, and UUID use typed zero values
+/// because their ClickHouse wire format is not String.
 fn default_cell(typ: &Type) -> Cell {
     use etl::data::ArrayCell;
 
@@ -1963,11 +1965,11 @@ where
     // The trait methods below intentionally do not use `?` on the inner work.
     // Errors must reach the caller via `async_result.send(result)`, not via the
     // outer `EtlResult<()>`; using `?` would short-circuit before `send` runs
-    // and leave the receiver waiting. The outer return value just signals
-    // "work accepted, watch the channel for completion". `AsyncResult::send`
-    // itself returns `()`, and its `Drop` impl synthesizes a "dropped without
-    // sending" error if the path ever skips `send`, so the receiver is never
-    // silently abandoned.
+    // and leave the receiver waiting. The outer return value just signals "work
+    // accepted, watch the channel for completion". `AsyncResult::send` itself
+    // returns `()`, and its `Drop` impl synthesizes a "dropped without sending"
+    // error if the path ever skips `send`, so the receiver is never silently
+    // abandoned.
 
     async fn drop_table_for_copy(
         &self,
@@ -2110,7 +2112,8 @@ mod tests {
 
     #[test]
     fn clickhouse_engine_matches_accepts_cloud_shared_variants() {
-        // Cloud `Shared` variants are equivalent to their plain configured forms.
+        // Cloud `Shared` variants are equivalent to their plain configured
+        // forms.
         assert!(clickhouse_engine_matches("SharedReplacingMergeTree", "ReplacingMergeTree"));
         assert!(clickhouse_engine_matches("SharedMergeTree", "MergeTree"));
         assert!(clickhouse_engine_matches("ReplacingMergeTree", "ReplacingMergeTree"));
@@ -2398,8 +2401,8 @@ mod tests {
         ensure_engine_supported(ClickHouseEngine::ReplacingMergeTree, (24, 1)).unwrap();
     }
 
-    /// Schema with composite PK `(tenant_id, id)` plus a non-PK `value`
-    /// column. Used by the PK-ALTER-guard tests.
+    /// Schema with composite PK `(tenant_id, id)` plus a non-PK `value` column.
+    /// Used by the PK-ALTER-guard tests.
     fn replicated_schema_for_pk_alters() -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(7),
@@ -2466,7 +2469,8 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
-        // The error should identify the primary-key column that blocks the operation.
+        // The error should identify the primary-key column that blocks the
+        // operation.
         assert!(err.to_string().contains("tenant_id"));
     }
 

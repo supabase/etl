@@ -494,9 +494,9 @@ pub fn get_connection_pool(config: &PgConnectionConfig) -> PgPool {
 
 /// Creates and configures the HTTP server with all routes and middleware.
 ///
-/// Sets up authentication, tracing, Swagger UI, and all API endpoints. The
-/// The Kubernetes client and source TLS configuration are fully initialized
-/// before the server starts accepting requests.
+/// Sets up authentication, tracing, Swagger UI, and all API endpoints. The The
+/// Kubernetes client and source TLS configuration are fully initialized before
+/// the server starts accepting requests.
 pub fn run(
     config: ApiConfig,
     listeners: ApplicationListeners,
@@ -663,12 +663,11 @@ pub fn run(
 
     let openapi = ApiDoc::openapi();
 
-    // Routes in this scope can carry source/destination credentials,
-    // connection config, table/publication metadata, replication config, or
-    // source-derived data. Keep new routes here when their request, response,
-    // path/query values, validation errors, or Sentry extras may include
-    // secrets or customer data. Leave only low-sensitivity metadata routes
-    // outside.
+    // Routes in this scope can carry source/destination credentials, connection
+    // config, table/publication metadata, replication config, or source-derived
+    // data. Keep new routes here when their request, response, path/query
+    // values, validation errors, or Sentry extras may include secrets or
+    // customer data. Leave only low-sensitivity metadata routes outside.
     let sensitive_routes = Router::new()
         .route("/sources", post(create_source).get(read_all_sources))
         .route("/sources/validate", post(validate_source))

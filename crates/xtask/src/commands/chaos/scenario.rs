@@ -102,8 +102,8 @@ pub(crate) enum Scenario {
     },
     /// Limit the network bandwidth available to the app pod
     Bandwidth {
-        /// Maximum throughput, e.g. "1mbps", "500kbps", "10mbps".
-        /// Not required when using --delete.
+        /// Maximum throughput, e.g. "1mbps", "500kbps", "10mbps". Not required
+        /// when using --delete.
         rate: Option<String>,
 
         /// Target hostname, IP, CIDR, or "host:port"

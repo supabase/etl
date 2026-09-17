@@ -516,8 +516,8 @@ pub struct DuckLakeDestination<S> {
     /// Global gate that excludes external maintenance from foreground and
     /// table-scoped mutations after pinned copy sessions have drained.
     checkpoint_gate: Arc<RwLock<()>>,
-    /// Gate held by connection-pinned copy sessions and acquired exclusively
-    /// by maintenance before it queues on [`Self::checkpoint_gate`].
+    /// Gate held by connection-pinned copy sessions and acquired exclusively by
+    /// maintenance before it queues on [`Self::checkpoint_gate`].
     copy_session_gate: Arc<RwLock<()>>,
     /// Known limitation: tasks retain destination clones and this registry.
     /// Call [`Destination::shutdown`] to break the ownership cycle.
@@ -780,7 +780,8 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        // The pipeline drains apply writes before requesting destination teardown.
+        // The pipeline drains apply writes before requesting destination
+        // teardown.
         let interrupted_connections = self.manager.interrupt_all_connections_for_shutdown();
         info!(
             interrupted_connections,
@@ -1085,8 +1086,8 @@ fn tombstone_columns_to_cleanup_ducklake(
         .collect()
 }
 
-/// Rejects recovery plans whose old and target schemas have the same cycle
-/// name set and therefore cannot be distinguished without a durable marker.
+/// Rejects recovery plans whose old and target schemas have the same cycle name
+/// set and therefore cannot be distinguished without a durable marker.
 fn ensure_ducklake_schema_plan_recoverable(
     table_name: &DuckLakeTableName,
     plan: &SchemaPlan,
@@ -2265,8 +2266,8 @@ where
     /// ambiguous post-commit failure can detect already applied rows.
     ///
     /// Initial-copy rows are written directly to Parquet files. This avoids
-    /// accumulating large snapshot loads in the catalog when source batches
-    /// are smaller than the regular streaming inline threshold.
+    /// accumulating large snapshot loads in the catalog when source batches are
+    /// smaller than the regular streaming inline threshold.
     async fn write_table_rows_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -2496,8 +2497,8 @@ where
         Ok(())
     }
 
-    /// Reserves process-wide accepted-copy capacity, flushing the current
-    /// table first when its existing staged rows are preventing progress.
+    /// Reserves process-wide accepted-copy capacity, flushing the current table
+    /// first when its existing staged rows are preventing progress.
     async fn reserve_copy_buffer_capacity(
         &self,
         table_name: &DuckLakeTableName,
@@ -2858,8 +2859,8 @@ where
                 if !active_sort_order_matches(&active, &columns) {
                     statements.push(build_set_sorted_by_sql_ducklake(table_name, &columns));
                 }
-                // Keep foreground insert latency unchanged. Flush and compaction
-                // still use the table's active sort order.
+                // Keep foreground insert latency unchanged. Flush and
+                // compaction still use the table's active sort order.
                 statements.push(build_disable_sort_on_insert_sql_ducklake(table_name));
                 statements.join(";\n")
             }
@@ -3063,7 +3064,8 @@ where
             let mut table_id_to_mutations: HashMap<TableId, Vec<TableMutationSegment>> =
                 HashMap::new();
 
-            // Accumulate row events, stopping at the first DDL or truncate boundary.
+            // Accumulate row events, stopping at the first DDL or truncate
+            // boundary.
             while let Some(event) = event_iter.peek() {
                 if matches!(event, Event::Relation(_) | Event::Truncate(_)) {
                     break;
@@ -3209,7 +3211,8 @@ where
                                 );
                                 continue;
                             }
-                            // Schema reconciliation also acquires the table write slot.
+                            // Schema reconciliation also acquires the table
+                            // write slot.
                             drop(replay_table_write_permit);
                             let ready_table_name = destination
                                 .ensure_table_ready_for_streaming_schema(
@@ -3265,15 +3268,16 @@ where
                 join_set.wait().await?;
             }
 
-            // Apply schema changes sequentially before any later row events
-            // are encoded with the new replicated schema.
+            // Apply schema changes sequentially before any later row events are
+            // encoded with the new replicated schema.
             while let Some(Event::Relation(_)) = event_iter.peek() {
                 if let Some(Event::Relation(relation)) = event_iter.next() {
                     self.handle_relation_event(&relation.replicated_table_schema).await?;
                 }
             }
 
-            // Collect contiguous truncate events while preserving table-local order.
+            // Collect contiguous truncate events while preserving table-local
+            // order.
             let mut truncate_table_ids: HashMap<
                 TableId,
                 (ReplicatedTableSchema, Vec<TrackedTruncateEvent>),
@@ -3326,7 +3330,8 @@ where
                             );
                             return Ok(());
                         }
-                        // Schema reconciliation also acquires the table write slot.
+                        // Schema reconciliation also acquires the table write
+                        // slot.
                         drop(replay_table_write_permit);
                         let ready_table_name = destination
                             .ensure_table_ready_for_streaming_schema(&replicated_table_schema)

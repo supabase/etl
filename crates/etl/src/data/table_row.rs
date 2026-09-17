@@ -190,10 +190,10 @@ impl SizeHint for UpdatedTableRow {
 /// - [`OldTableRow::Key`] means PostgreSQL emitted only the replica-identity
 ///   columns.
 ///
-/// Key rows are stored densely in replicated table-column order after
-/// filtering to just the identity columns. They are therefore not necessarily
-/// the table's primary key; they represent whatever the source table exposed as
-/// replica identity.
+/// Key rows are stored densely in replicated table-column order after filtering
+/// to just the identity columns. They are therefore not necessarily the table's
+/// primary key; they represent whatever the source table exposed as replica
+/// identity.
 #[derive(Debug, PartialEq)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum OldTableRow {

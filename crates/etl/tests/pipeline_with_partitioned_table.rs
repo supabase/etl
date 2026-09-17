@@ -290,7 +290,8 @@ async fn assert_nested_partition_pipeline_case(
         assert_eq!(inserts.len(), expected_count);
     }
 
-    // We check the table rows again just to validate that no new ones were added.
+    // We check the table rows again just to validate that no new ones were
+    // added.
     let table_rows = destination.get_table_rows().await;
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
@@ -374,8 +375,8 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
 
-/// Tests that initial COPY replicates all rows from a partitioned table.
-/// Only the parent table is tracked, not individual child partitions.
+/// Tests that initial COPY replicates all rows from a partitioned table. Only
+/// the parent table is tracked, not individual child partitions.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_copy_replicates_existing_data() {
     init_test_tracing();
@@ -579,8 +580,8 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     assert_eq!(parent_inserts.len(), 1);
 }
 
-/// Tests that a new leaf partition is discovered after restart when changes
-/// are published using leaf identities.
+/// Tests that a new leaf partition is discovered after restart when changes are
+/// published using leaf identities.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_partition_with_leaf_identity_is_discovered_after_restart() {
     init_test_tracing();
@@ -1168,13 +1169,13 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
 
     let _ = pipeline.shutdown_and_wait().await;
 
-    // The pipeline state should still only track the parent table (not the detached
-    // partition) because it hasn't re-scanned for new tables.
+    // The pipeline state should still only track the parent table (not the
+    // detached partition) because it hasn't re-scanned for new tables.
     let table_states_after = state_store.get_table_states().await;
     assert!(table_states_after.contains_key(&parent_table_id));
 
-    // The detached partition insert should NOT be replicated in this pipeline run
-    // because the pipeline hasn't discovered it as a new table.
+    // The detached partition insert should NOT be replicated in this pipeline
+    // run because the pipeline hasn't discovered it as a new table.
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let detached_inserts =
@@ -1260,8 +1261,8 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // Shutdown the pipeline.
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Restart the pipeline. It should now discover the detached partition as a new
-    // table.
+    // Restart the pipeline. It should now discover the detached partition as a
+    // new table.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1302,7 +1303,8 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires 15+).
+    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires
+    // 15+).
     if below_version!(database.server_version(), POSTGRES_15) {
         eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
@@ -1436,7 +1438,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires 15+).
+    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires
+    // 15+).
     if below_version!(database.server_version(), POSTGRES_15) {
         eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
@@ -1511,8 +1514,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // Shutdown the pipeline.
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Restart the pipeline. It should now discover the detached partition as a new
-    // table.
+    // Restart the pipeline. It should now discover the detached partition as a
+    // new table.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

@@ -47,8 +47,8 @@ static PROMETHEUS_UPKEEP_TASK: Mutex<Option<AbortOnDropHandle<()>>> = Mutex::new
 pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
     let mut prometheus_handle = PROMETHEUS_HANDLE
         .lock()
-        // We still get the poisoned lock since we assume that a poisoned lock doesn't
-        // invalidate the handle contents.
+        // We still get the poisoned lock since we assume that a poisoned lock doesn't invalidate
+        // the handle contents.
         .unwrap_or_else(PoisonError::into_inner);
 
     if let Some(handle) = &*prometheus_handle {
@@ -62,12 +62,12 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 
     let handle_clone = handle.clone();
 
-    // This task periodically performs upkeep to avoid unbounded memory growth due
-    // to metrics collection.
+    // This task periodically performs upkeep to avoid unbounded memory growth
+    // due to metrics collection.
     let upkeep_task = AbortOnDropHandle::new(tokio::spawn(async move {
         loop {
-            // upkeep_timeout hardcoded for now. Will make it configurable later if it
-            // creates a problem
+            // upkeep_timeout hardcoded for now. Will make it configurable later
+            // if it creates a problem
             let upkeep_timeout = Duration::from_secs(5);
             tokio::time::sleep(upkeep_timeout).await;
             trace!("running metrics upkeep");

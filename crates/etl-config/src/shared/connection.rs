@@ -203,9 +203,8 @@ impl Config for PgConnectionConfig {
     const LIST_PARSE_KEYS: &'static [&'static str] = &[];
 }
 
-/// Same as [`PgConnectionConfig`] but without secrets. This type
-/// implements [`Serialize`] because it does not contains secrets
-/// so is safe to serialize.
+/// Same as [`PgConnectionConfig`] but without secrets. This type implements
+/// [`Serialize`] because it does not contains secrets so is safe to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PgConnectionConfigWithoutSecrets {
     /// Hostname or IP address of the Postgres server.
@@ -310,9 +309,8 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
     fn without_db(&self, options: Option<&PgConnectionOptions>) -> SqlxConnectOptions {
         let host = self.hostaddr.map_or_else(|| self.host.clone(), |hostaddr| hostaddr.to_string());
         let ssl_mode = match (self.tls.enabled, self.hostaddr) {
-            // sqlx 0.8.6 does not expose libpq's separate hostaddr field. When
-            // dialing a numeric address, verify the CA but avoid hostname
-            // verification against the IP literal.
+            // sqlx 0.8.6 does not expose libpq's separate hostaddr field. When dialing a numeric
+            // address, verify the CA but avoid hostname verification against the IP literal.
             (true, Some(_)) => SqlxSslMode::VerifyCa,
             (true, None) => SqlxSslMode::VerifyFull,
             (false, _) => SqlxSslMode::Prefer,
@@ -329,8 +327,8 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
         connect_options = connect_options
             .password(self.password.as_ref().map_or("", |password| password.expose_secret()));
 
-        // TODO: Enable TCP keepalive once available in sqlx.
-        // The tcp_keepalive_time() method was added in PR #3559 but may not be
+        // TODO: Enable TCP keepalive once available in sqlx. The
+        // tcp_keepalive_time() method was added in PR #3559 but may not be
         // available in the current sqlx version (0.8.6). When upgrading sqlx,
         // uncomment the following to enable keepalive for API/state
         // connections:
@@ -366,9 +364,9 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
             .port(self.port)
             .user(self.username.clone())
             //
-            // We set only ssl_mode from the tls config here and not trusted_root_certs
-            // because we are using rustls for tls connections and rust_postgres
-            // crate doesn't yet support rustls. See the following for details:
+            // We set only ssl_mode from the tls config here and not trusted_root_certs because we
+            // are using rustls for tls connections and rust_postgres crate doesn't yet support
+            // rustls. See the following for details:
             //
             // * PgReplicationClient::connect_tls method
             // * https://github.com/sfackler/rust-postgres/issues/421
@@ -386,9 +384,9 @@ impl IntoConnectOptions<TokioPgConnectOptions> for PgConnectionConfig {
 
         // Always enable TCP keepalive to prevent idle connection timeouts,
         // especially on managed Postgres services like Supabase. This is
-        // critical during parallel table copies where the main
-        // connection holds an exported snapshot but sits idle while
-        // child connections perform the actual data copy.
+        // critical during parallel table copies where the main connection holds
+        // an exported snapshot but sits idle while child connections perform
+        // the actual data copy.
         config
             .keepalives(true)
             .keepalives_idle(Duration::from_secs(self.keepalive.idle_secs))

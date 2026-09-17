@@ -1209,8 +1209,8 @@ impl DuckDbMaintenanceExecutor {
         let watchdog_timed_out = Arc::clone(&watchdog.timed_out);
         let abort_deadline = deadline + BLOCKING_ABORT_GRACE;
 
-        // The blocking closure owns both guards: cancelling its async caller must
-        // not disable native interruption or the hard deadline.
+        // The blocking closure owns both guards: cancelling its async caller
+        // must not disable native interruption or the hard deadline.
         let (blocking_done_tx, blocking_done_rx) = oneshot::channel::<()>();
         let abort_task = AbortOnDropHandle::new(tokio::spawn(async move {
             tokio::select! {
@@ -1426,8 +1426,9 @@ impl DuckDbMaintenanceExecutor {
             ),
         }
 
-        // Join both monitors before reporting completion, retaining operation and
-        // cleanup failures. The guards also cover cancellation during these joins.
+        // Join both monitors before reporting completion, retaining operation
+        // and cleanup failures. The guards also cover cancellation
+        // during these joins.
         let watchdog_result = watchdog_task.await.map_err(EtlError::from);
         let abort_result = abort_task.await.map_err(EtlError::from);
         match (blocking_result, watchdog_result, abort_result) {
@@ -1743,7 +1744,8 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
 /// The returned timestamp must be used directly for expiration because calendar
 /// arithmetic can change an interval's effective retention between queries.
 fn expire_snapshots_cutoff(conn: &duckdb::Connection, older_than: &str) -> EtlResult<String> {
-    // Compare timestamps because interval ordering assumes every month has 30 days.
+    // Compare timestamps because interval ordering assumes every month has 30
+    // days.
     let sql = format!(
         "select cast(cutoff as varchar), cutoff <= cast(now() as timestamp) - cast({} as \
          interval) from (select cast(now() as timestamp) - cast({} as interval) as cutoff);",
@@ -3810,9 +3812,8 @@ mod tests {
             "-1 day",
             "23 hours",
             "1 day -1 microsecond",
-            // DuckDB compares years as 12 * 30 days: -360 + 361 = 1 day,
-            // exactly the old minimum. Calendar subtraction instead moves the
-            // cutoff 4 or 5 days into the future.
+            // DuckDB compares years as 12 * 30 days: -360 + 361 = 1 day, exactly the old minimum.
+            // Calendar subtraction instead moves the cutoff 4 or 5 days into the future.
             "-1 year 361 days",
             "",
             "not an interval",

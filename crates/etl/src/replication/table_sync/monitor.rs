@@ -17,8 +17,8 @@ use crate::{
 /// Background monitor for a table sync worker's in-flight table copy.
 ///
 /// Periodically reports table-copy end-to-end replication lag and checks the
-/// worker's replication slot for invalidation, so the caller can abort the
-/// copy instead of continuing against a slot PostgreSQL has already dropped.
+/// worker's replication slot for invalidation, so the caller can abort the copy
+/// instead of continuing against a slot PostgreSQL has already dropped.
 #[derive(Debug)]
 pub(crate) struct TableSyncMonitor {
     handle: AbortOnDropHandle<()>,
@@ -37,7 +37,8 @@ impl TableSyncMonitor {
         let (slot_invalidated_tx, slot_invalidated_rx) = watch::channel(false);
 
         let handle = AbortOnDropHandle::new(tokio::spawn(async move {
-            // The copy owner aborts disposable sampling, including in-flight queries.
+            // The copy owner aborts disposable sampling, including in-flight
+            // queries.
             let mut ticker = tokio::time::interval(refresh_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -68,7 +69,8 @@ impl TableSyncMonitor {
                             slot_name, "replication slot disappeared during table copy"
                         );
 
-                        // A missing slot is just as unusable as an invalidated slot.
+                        // A missing slot is just as unusable as an invalidated
+                        // slot.
                         let _ = slot_invalidated_tx.send(true);
 
                         break;
