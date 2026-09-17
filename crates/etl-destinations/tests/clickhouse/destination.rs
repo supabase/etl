@@ -962,6 +962,87 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
     assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
 }
 
+/// A live schema change on a legacy MergeTree table is rejected before any
+/// ALTER runs or metadata advances, mirroring the DML and recovery paths.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_merge_tree_rejects_schema_change_before_altering() {
+    // GIVEN: a legacy MergeTree table with retained rows and applied metadata.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+
+    // Use the previous release's DDL, not the current schema generator.
+    database
+        .db_client()
+        .query(
+            "create table retained_rows (id Int64, value String, cdc_operation String, cdc_lsn \
+             UInt64) engine = MergeTree() order by tuple()",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a newer source snapshot adds a column before any row is written.
+    let new_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            schema.id(),
+            schema.name().clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("note".to_owned(), Type::TEXT, -1, 3, true),
+            ],
+            test_snapshot_id(1, 1),
+        ))
+        .await
+        .unwrap();
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let error = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: ReplicatedTableSchema::all(new_schema),
+        })])
+        .await
+        .unwrap_err();
+
+    // THEN: the upgrade error surfaces with rows, columns, and metadata untouched.
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+    assert_eq!(
+        error.description(),
+        Some("ClickHouse MergeTree table requires a transaction ordinal upgrade")
+    );
+    drop(destination);
+
+    assert_eq!(
+        database.query::<(i64, String)>("select id, value from retained_rows").await,
+        vec![(1, "retained".to_owned())]
+    );
+    assert_eq!(
+        database
+            .query::<String>(
+                "select name from system.columns where database = currentDatabase() and table = \
+                 'retained_rows' order by position",
+            )
+            .await,
+        vec!["id", "value", "cdc_operation", "cdc_lsn"]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
+}
+
 /// The previous ReplacingMergeTree layout and current-state view remain usable
 /// without ALTER or recopy when a new destination loads retained metadata.
 #[tokio::test(flavor = "multi_thread")]

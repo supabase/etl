@@ -1277,6 +1277,17 @@ where
                 new_schema,
             )?;
         }
+        // Applied metadata proves the table is at the current layout, so the
+        // current endpoint alone identifies a closed-alpha MergeTree table.
+        // Reject it before any cache, metadata, or DDL mutation so the operator
+        // sees the upgrade instruction with the table and metadata untouched,
+        // exactly as the DML and recovery paths behave.
+        let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+        reject_legacy_merge_tree_layout(
+            clickhouse_table_name,
+            &expected_clickhouse_column_names(&current_schema, self.inserter_config.engine),
+            &actual_columns,
+        )?;
         // A cached RowBinary layout is valid only for Applied metadata. Remove
         // it before persisting Applying so cancellation cannot leave pending
         // durable metadata reachable through the old cache. If the metadata
