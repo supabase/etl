@@ -2,7 +2,7 @@ use etl_config::{
     Environment,
     shared::{
         DuckLakeCopyBufferConfig, DuckLakeMaintenanceMode, ReplicatorConfigWithoutSecrets,
-        SupabaseConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
+        ReplicatorHealthConfig, SupabaseConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
     },
 };
 use etl_maintenance::{
@@ -13,6 +13,7 @@ use secrecy::ExposeSecret;
 use thiserror::Error;
 
 use crate::{
+    config::ApiReplicatorHealthConfig,
     configs::{
         destination::{StoredDestinationConfig, StoredIcebergConfig},
         pipeline::StoredPipelineConfig,
@@ -127,6 +128,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
     destination: Destination,
     supabase_api_url: Option<&str>,
     ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
+    health: Option<ApiReplicatorHealthConfig>,
     tls_config: TlsConfig,
     wait: bool,
 ) -> Result<(), K8sCoreError> {
@@ -165,6 +167,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         pipeline.config,
         supabase_config,
         ducklake_copy_buffer_default,
+        health.and_then(|health| health.listener_config()),
         tls_config,
     )?;
 
@@ -209,6 +212,7 @@ pub async fn create_or_update_pipeline_runtime_in_k8s(
         &resource_prefix,
         &identity,
         ReplicatorWorkloadConfig {
+            health,
             replicator_image,
             replicator_resource_override,
             destination_type,
@@ -405,6 +409,7 @@ fn build_secrets_from_configs(
 /// pipeline, source, and destination configurations. It uses the provided
 /// trusted root certificates for TLS configuration. Secrets are managed
 /// separately through Kubernetes secret resources.
+#[expect(clippy::too_many_arguments)]
 fn build_replicator_config_without_secrets(
     pipeline_id: u64,
     source_config: StoredSourceConfig,
@@ -412,10 +417,12 @@ fn build_replicator_config_without_secrets(
     pipeline_config: StoredPipelineConfig,
     supabase_config: SupabaseConfigWithoutSecrets,
     ducklake_copy_buffer_default: DuckLakeCopyBufferConfig,
+    health: Option<ReplicatorHealthConfig>,
     tls_config: TlsConfig,
 ) -> Result<ReplicatorConfigWithoutSecrets, ValidationError> {
     let pg_connection_config = source_config.into_connection_config(tls_config);
     let config = ReplicatorConfigWithoutSecrets {
+        health,
         destination: destination_config
             .into_etl_config_with_ducklake_copy_buffer_default(ducklake_copy_buffer_default)
             .into(),
@@ -669,7 +676,7 @@ mod tests {
         SerializableSecretString,
         shared::{
             BigQueryTableOptions, BigQueryTableOptionsConfig, ClickHouseEngine,
-            DestinationConfigWithoutSecrets,
+            DestinationConfigWithoutSecrets, ReplicatorHealthConfig,
         },
     };
 
@@ -810,6 +817,7 @@ mod tests {
             pipeline_config,
             supabase_config,
             DuckLakeCopyBufferConfig::default(),
+            None,
             TlsConfig::disabled(),
         )
         .unwrap_err();
@@ -845,6 +853,7 @@ mod tests {
                     api_url: None,
                 },
                 api_default,
+                None,
                 TlsConfig::disabled(),
             )
             .unwrap();
@@ -854,6 +863,45 @@ mod tests {
                 unreachable!("destination kind should remain DuckLake");
             };
             assert_eq!(copy_buffer, expected);
+        }
+    }
+
+    /// Generated configs preserve custom listener settings and omit disabled
+    /// listeners.
+    #[test]
+    fn replicator_config_builder_preserves_optional_health() {
+        for health in
+            [None, Some(ReplicatorHealthConfig { port: 19001, stall_timeout_ms: 120_000 })]
+        {
+            let pipeline_config = serde_json::from_value(serde_json::json!({
+                "publication_name": "example_publication"
+            }))
+            .unwrap();
+            let config = build_replicator_config_without_secrets(
+                1,
+                source_config_with_password(),
+                ducklake_destination_config(None),
+                pipeline_config,
+                SupabaseConfigWithoutSecrets {
+                    project_ref: "example-project-ref".to_owned(),
+                    api_url: None,
+                },
+                DuckLakeCopyBufferConfig::default(),
+                health,
+                TlsConfig::disabled(),
+            )
+            .unwrap();
+
+            assert_eq!(config.health, health);
+            let serialized = serde_json::to_value(&config).unwrap();
+            if health.is_some() {
+                assert_eq!(
+                    serialized["health"],
+                    serde_json::json!({"port": 19001, "stall_timeout_ms": 120000})
+                );
+            } else {
+                assert!(serialized.get("health").is_none());
+            }
         }
     }
 
@@ -1128,6 +1176,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             ReplicatorWorkloadConfig {
+                health: None,
                 replicator_image: "etl-replicator:test".to_owned(),
                 replicator_resource_override: None,
                 destination_type: DestinationType::ClickHouse { password_secret_required: false },
@@ -1150,6 +1199,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             ReplicatorWorkloadConfig {
+                health: None,
                 replicator_image: "etl-replicator:test".to_owned(),
                 replicator_resource_override: Some(PipelineReplicatorResourceOverrideConfig {
                     cpu_request_millicores: Some(500),
@@ -1175,6 +1225,7 @@ mod tests {
             "tenant-42",
             &pipeline_runtime_identity(),
             ReplicatorWorkloadConfig {
+                health: None,
                 replicator_image: "etl-replicator:test".to_owned(),
                 replicator_resource_override: Some(
                     PipelineReplicatorResourceOverrideConfig::default(),

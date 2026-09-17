@@ -7,6 +7,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use etl::{
+    activity,
     data::{Cell, TableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, TableCopyBatchId,
@@ -1282,9 +1283,16 @@ async fn feedback_continues_during_destination_dispatch() {
 
     hold.wait_reached().await;
 
+    // Independent feedback must not refresh a blocked worker's observation.
+    let activities = activity::snapshot();
+    assert_eq!(activities.len(), 1);
+    let observed_at = activities[0].last_observed_at();
+
     let first_held_dml_commit_lsn = first_held_dml_commit_lsn.lock().unwrap().unwrap();
     assert_apply_feedback_during_stall(&database, pipeline_id, Some(first_held_dml_commit_lsn))
         .await;
+
+    assert_eq!(activity::snapshot()[0].last_observed_at(), observed_at);
 
     assert!(!inner.events().await.iter().any(|event| matches!(event, Event::Insert(_))));
 
@@ -2681,6 +2689,9 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
     let (first_lsn, result) = test.next_batch().await;
     result.send(Ok(DestinationWriteStatus::Accepted));
     let barrier = test.next_barrier().await;
+    let activities = activity::snapshot();
+    assert_eq!(activities.len(), 1);
+    let observed_at = activities[0].last_observed_at();
 
     let received_target = test.database.current_wal_flush_lsn().await.unwrap();
     test.insert(2).await;
@@ -2710,6 +2721,9 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
     .unwrap();
     assert!(tokio::time::timeout(Duration::from_secs(2), test.writes_rx.recv()).await.is_err());
     assert!(test.confirmed_lsn().await < first_lsn);
+    // The loop remains active while it can process source messages, even with
+    // a pending destination barrier.
+    assert!(activity::snapshot()[0].last_observed_at() > observed_at);
 
     barrier.send(Ok(DestinationWriteStatus::Durable));
     let (second_lsn, second_result) = test.next_batch().await;

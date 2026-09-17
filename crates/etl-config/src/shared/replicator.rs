@@ -4,8 +4,8 @@ use crate::{
     Config,
     shared::{
         DestinationConfig, DestinationConfigWithoutSecrets, PipelineConfigWithoutSecrets,
-        SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets, Validate, ValidationError,
-        pipeline::PipelineConfig,
+        ReplicatorHealthConfig, SentryConfig, SupabaseConfig, SupabaseConfigWithoutSecrets,
+        Validate, ValidationError, pipeline::PipelineConfig,
     },
 };
 
@@ -19,6 +19,8 @@ use crate::{
 /// leaking secrets in the config into serialized forms.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReplicatorConfig {
+    /// Optional activity probe listener and timeout policy.
+    pub health: Option<ReplicatorHealthConfig>,
     /// Configuration for the replication destination.
     pub destination: DestinationConfig,
     /// Configuration for the replication pipeline.
@@ -47,6 +49,9 @@ impl Validate for ReplicatorConfig {
     fn validate(&self) -> Result<(), ValidationError> {
         self.destination.validate()?;
         self.pipeline.validate()?;
+        if let Some(health) = &self.health {
+            health.validate()?;
+        }
 
         if let Some(sentry) = &self.sentry {
             sentry.validate()?;
@@ -69,6 +74,9 @@ impl Config for ReplicatorConfig {
 /// is safe to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicatorConfigWithoutSecrets {
+    /// Optional activity probe listener and timeout policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health: Option<ReplicatorHealthConfig>,
     /// Configuration for the replication destination.
     pub destination: DestinationConfigWithoutSecrets,
     /// Configuration for the replication pipeline.
@@ -86,6 +94,9 @@ impl Validate for ReplicatorConfigWithoutSecrets {
     fn validate(&self) -> Result<(), ValidationError> {
         self.destination.validate()?;
         self.pipeline.validate()?;
+        if let Some(health) = &self.health {
+            health.validate()?;
+        }
 
         if let Some(supabase) = &self.supabase {
             supabase.validate()?;
@@ -98,6 +109,7 @@ impl Validate for ReplicatorConfigWithoutSecrets {
 impl From<ReplicatorConfig> for ReplicatorConfigWithoutSecrets {
     fn from(value: ReplicatorConfig) -> Self {
         ReplicatorConfigWithoutSecrets {
+            health: value.health,
             destination: value.destination.into(),
             pipeline: value.pipeline.into(),
             supabase: value.supabase.map(Into::into),
@@ -148,6 +160,7 @@ mod tests {
     #[test]
     fn replicator_validation_recurses_with_and_without_secrets() {
         let config = ReplicatorConfig {
+            health: None,
             destination: DestinationConfig::BigQuery {
                 project_id: "example-project".to_owned(),
                 dataset_id: "example_dataset".to_owned(),

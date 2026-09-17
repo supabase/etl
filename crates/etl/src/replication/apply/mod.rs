@@ -32,6 +32,7 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active_for_parameter};
 use crate::{
+    activity::{ActivityHandle, ActivityKind, ActivityRegistration},
     bail,
     data::SizeHint,
     destination::{
@@ -87,11 +88,10 @@ use crate::{
 
 mod tasks;
 
-/// Default keep alive value if it can't be fetched from Postgres.
+/// Fallback source timeout when PostgreSQL disables it or cannot report it.
 ///
-/// PostgreSQL defaults `wal_sender_timeout` to 60 seconds, so we will use the
-/// same.
-const DEFAULT_KEEP_ALIVE_DURATION: Duration = Duration::from_secs(60);
+/// Matches PostgreSQL's default `wal_sender_timeout` of 60 seconds.
+const DEFAULT_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(60);
 /// Fraction of `wal_sender_timeout` used for the proactive keep alive deadline.
 ///
 /// PostgreSQL normally emits an idle keep alive around `wal_sender_timeout /
@@ -450,6 +450,9 @@ struct PendingDurabilityInterval {
 /// Mutable runtime state that evolves throughout the apply loop.
 #[derive(Debug)]
 struct ApplyLoopState {
+    /// This loop's activity observation, suspended during intentional catchup
+    /// waits.
+    activity_handle: ActivityHandle,
     /// The highest commit end LSN that should be attached to the next
     /// destination write.
     ///
@@ -520,11 +523,13 @@ struct ApplyLoopState {
 impl ApplyLoopState {
     /// Creates a new [`ApplyLoopState`] with initial replication progress.
     fn new(
+        activity_handle: ActivityHandle,
         replication_progress: ReplicationProgress,
         replication_lag_metrics: ReplicationLagMetrics,
         bootstrap_snapshot_id: SnapshotId,
     ) -> Self {
         Self {
+            activity_handle,
             last_commit_end_lsn: None,
             pending_durability_interval: None,
             pending_relation_table_ids: HashSet::new(),
@@ -835,28 +840,29 @@ where
 
         let worker_type = worker_context.worker_type();
         let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
-        let keep_alive_deadline_duration = match wal_sender_timeout_result {
-            Ok(Some(wal_sender_timeout)) => {
-                Self::compute_keep_alive_deadline_duration(wal_sender_timeout)
-            }
+        let wal_sender_timeout = match wal_sender_timeout_result {
+            Ok(Some(wal_sender_timeout)) => wal_sender_timeout,
             Ok(None) => {
                 warn!(
                     %worker_type,
-                    "wal sender timeout is disabled; using heuristic keep alive deadline",
+                    "wal sender timeout is disabled; using fallback timeout",
                 );
 
-                Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
+                DEFAULT_WAL_SENDER_TIMEOUT
             }
             Err(error) => {
                 warn!(
                     %worker_type,
                     error = %error,
-                    "failed to read wal sender timeout; using heuristic keep alive deadline",
+                    "failed to read wal sender timeout; using fallback timeout",
                 );
 
-                Self::compute_keep_alive_deadline_duration(DEFAULT_KEEP_ALIVE_DURATION)
+                DEFAULT_WAL_SENDER_TIMEOUT
             }
         };
+        let keep_alive_deadline_duration =
+            Self::compute_keep_alive_deadline_duration(wal_sender_timeout);
+
         // A restart LSN is an inclusive WAL frontier, not an exact schema
         // snapshot. Use the maximum message LSN so a restart at a transaction's
         // commit LSN can select the last DDL within that committed transaction.
@@ -876,6 +882,9 @@ where
             )
             .await?;
 
+        let activity_registration =
+            ActivityRegistration::register(ActivityKind::WalApply { wal_sender_timeout });
+
         // Apply loops always supply a deadline; only protocol tests disable
         // feedback.
         let (feedback_handle, feedback_sender_future) = feedback
@@ -894,6 +903,7 @@ where
         );
 
         let state = ApplyLoopState::new(
+            activity_registration.handle(),
             replication_progress,
             replication_lag_metrics,
             bootstrap_snapshot_id,
@@ -971,10 +981,14 @@ where
                     &mut batch_memory_subscription,
                 )
                 .await
-            };
+            }?;
+
+            // Only completed iterations count; independent feedback cannot
+            // hide a blocked loop.
+            self.state.activity_handle.ping();
 
             // If we have a result from the apply loop, we should stop the loop.
-            if let Some(result) = iteration_result? {
+            if let Some(result) = iteration_result {
                 return Ok(result);
             }
         }
@@ -2908,6 +2922,7 @@ where
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_after_commit_event(
                     ctx,
+                    &self.state.activity_handle,
                     lsn,
                     table_decoding_states,
                 )
@@ -3095,6 +3110,7 @@ where
             WorkerContext::Apply(ctx) => {
                 apply_worker::process_syncing_tables_when_quiescent(
                     ctx,
+                    &self.state.activity_handle,
                     current_lsn,
                     table_decoding_states,
                 )
@@ -3146,6 +3162,7 @@ mod apply_worker {
     use tracing::{debug, error, info};
 
     use crate::{
+        activity::ActivityHandle,
         destination::PipelineDestination,
         error::EtlResult,
         replication::{
@@ -3245,6 +3262,7 @@ mod apply_worker {
     /// SyncDone → Ready transitions.
     pub(super) async fn process_syncing_tables_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
@@ -3255,6 +3273,7 @@ mod apply_worker {
         for (table_id, table_state) in get_syncing_tables(&ctx.store).await? {
             let exit_intent = process_single_syncing_table_after_commit_event(
                 ctx,
+                activity_handle,
                 table_id,
                 table_state,
                 current_lsn,
@@ -3273,6 +3292,7 @@ mod apply_worker {
     /// Waits for a table-sync worker in catchup to hand the table back.
     async fn wait_for_table_sync_worker_catchup<S, D>(
         ctx: &ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         table_id: TableId,
         worker_state: &TableSyncWorkerState,
         catchup_lsn: PgLsn,
@@ -3300,6 +3320,7 @@ mod apply_worker {
 
         // We wait for both states since if the table sync worker errors, we
         // don't want to stall forever.
+        let _activity_suspension = activity_handle.suspend();
         let result = worker_state
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
@@ -3349,6 +3370,7 @@ mod apply_worker {
     /// transitions.
     async fn process_single_syncing_table_after_commit_event<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         table_id: TableId,
         table_state: TableState,
         current_lsn: PgLsn,
@@ -3398,6 +3420,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -3421,6 +3444,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -3683,6 +3707,7 @@ mod apply_worker {
     /// a later durable apply flush advances the persisted checkpoint.
     pub(super) async fn process_syncing_tables_when_quiescent<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         current_lsn: PgLsn,
         table_decoding_states: &mut HashMap<TableId, TableDecodingState>,
     ) -> EtlResult<Option<ExitIntent>>
@@ -3703,6 +3728,7 @@ mod apply_worker {
         for (table_id, table_state) in syncing_tables {
             let exit_intent = process_single_syncing_table_when_quiescent(
                 ctx,
+                activity_handle,
                 table_id,
                 table_state,
                 current_lsn,
@@ -3725,6 +3751,7 @@ mod apply_worker {
     /// for workers already in Catchup, and spawns workers.
     async fn process_single_syncing_table_when_quiescent<S, D>(
         ctx: &mut ApplyWorkerContext<S, D>,
+        activity_handle: &ActivityHandle,
         table_id: TableId,
         table_state: TableState,
         current_lsn: PgLsn,
@@ -3783,6 +3810,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -3829,6 +3857,7 @@ mod apply_worker {
 
                     if let Some(exit_intent) = wait_for_table_sync_worker_catchup(
                         ctx,
+                        activity_handle,
                         table_id,
                         &worker_state,
                         catchup_lsn,
@@ -4216,6 +4245,7 @@ mod tests {
     use tokio_postgres::types::{PgLsn, Type};
 
     use crate::{
+        activity::{ActivityKind, ActivityRegistration},
         data::SizeHint,
         destination::{ApplyLoopAsyncResultMetadata, WriteEventsDurability, WriteEventsResult},
         event::Event,
@@ -4376,7 +4406,11 @@ mod tests {
 
     #[test]
     fn idle_durability_requires_idle_accepted_work() {
+        let activity_registration = ActivityRegistration::register(ActivityKind::WalApply {
+            wal_sender_timeout: std::time::Duration::from_secs(60),
+        });
         let mut state = ApplyLoopState::new(
+            activity_registration.handle(),
             ReplicationProgress::new(100.into()),
             ReplicationLagMetrics::new(100.into()),
             SnapshotId::initial(),

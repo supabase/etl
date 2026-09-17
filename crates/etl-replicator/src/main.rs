@@ -4,6 +4,21 @@
 //! replication and routes data to configured destinations. Includes telemetry,
 //! error handling, and graceful shutdown capabilities.
 
+use std::process::ExitCode;
+
+use ::tracing::{debug, error, info};
+use etl_config::shared::ReplicatorConfig;
+
+use crate::{
+    core::start_replicator_with_config,
+    error::{ReplicatorError, ReplicatorResult},
+    error_notification::ErrorNotificationClient,
+};
+
+/// The name of the environment variable which contains version information for
+/// this replicator.
+const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
+
 /// Jemalloc allocator for better memory management in high-throughput async
 /// workloads.
 #[cfg(not(target_env = "msvc"))]
@@ -42,44 +57,65 @@ static malloc_conf: &[u8] =
 static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
 
-use std::process::ExitCode;
-
-use ::tracing::{debug, error};
-use etl_config::shared::ReplicatorConfig;
-use tracing::info;
-
-use crate::{
-    core::start_replicator_with_config,
-    error::{ReplicatorError, ReplicatorResult},
-    error_notification::ErrorNotificationClient,
-};
-
 mod core;
 mod error;
 mod error_notification;
 mod error_reporting;
+mod health;
 mod init;
 #[cfg(feature = "any-destination")]
 mod metrics;
 mod sentry;
 
-/// The name of the environment variable which contains version information for
-/// this replicator.
-const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
-
-/// Entry point for the replicator service.
+/// Main async entry point that starts the replicator pipeline.
 ///
-/// Loads configuration, initializes tracing and Sentry, starts the async
-/// runtime, and launches the replicator pipeline. Handles all errors and
-/// ensures proper service initialization sequence.
-fn main() -> ExitCode {
-    match try_main() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("{}", err.render_report());
-            ExitCode::FAILURE
+/// Launches the replicator with the provided configuration and captures any
+/// errors to Sentry and optionally sends notifications to the Supabase API.
+async fn async_main(
+    replicator_config: ReplicatorConfig,
+    notification_client: Option<ErrorNotificationClient>,
+) -> ReplicatorResult<()> {
+    // Keep the feature flags client alive for the full async runtime lifetime.
+    let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
+
+    info!("replicator bootstrap completed");
+
+    let Err(error) =
+        Box::pin(start_replicator_with_config(replicator_config, notification_client.clone()))
+            .await
+    else {
+        return Ok(());
+    };
+
+    sentry::capture_error(&error);
+    error!(error = %error, "replicator failed");
+
+    let Some(notification_client) = notification_client else {
+        return Err(error);
+    };
+
+    let error_message = error.to_string();
+    match &error {
+        ReplicatorError::Etl(etl_error) => {
+            notification_client.notify_error(error_message, etl_error).await;
+        }
+        _ => {
+            notification_client.notify_error(error_message.clone(), error_message).await;
         }
     }
+
+    Err(error)
+}
+
+/// Builds the Tokio runtime and runs the async replicator entry point.
+fn run_async_runtime(
+    replicator_config: ReplicatorConfig,
+    notification_client: Option<ErrorNotificationClient>,
+) -> ReplicatorResult<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(replicator_config, notification_client))
 }
 
 /// Runs the replicator service and propagates typed errors.
@@ -100,7 +136,7 @@ fn try_main() -> ReplicatorResult<()> {
     let _log_flusher = init::init_tracing(&replicator_config)?;
     let _sentry_guard = init::init_sentry(&replicator_config)?;
 
-    info!("replicator bootstrap initialized");
+    debug!("replicator bootstrap initialized");
 
     // We prepare the notification client used to send errors.
     let notification_client = init::init_error_notification(&replicator_config);
@@ -114,54 +150,17 @@ fn try_main() -> ReplicatorResult<()> {
     run_async_runtime(replicator_config, notification_client)
 }
 
-/// Builds the Tokio runtime and runs the async replicator entry point.
-fn run_async_runtime(
-    replicator_config: ReplicatorConfig,
-    notification_client: Option<ErrorNotificationClient>,
-) -> ReplicatorResult<()> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main(replicator_config, notification_client))
-}
-
-/// Main async entry point that starts the replicator pipeline.
+/// Entry point for the replicator service.
 ///
-/// Launches the replicator with the provided configuration and captures any
-/// errors to Sentry and optionally sends notifications to the Supabase API.
-async fn async_main(
-    replicator_config: ReplicatorConfig,
-    notification_client: Option<ErrorNotificationClient>,
-) -> ReplicatorResult<()> {
-    // Keep the feature flags client alive for the full async runtime lifetime.
-    let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
-
-    info!("replicator bootstrap completed");
-
-    if let Err(err) =
-        Box::pin(start_replicator_with_config(replicator_config, notification_client.clone())).await
-    {
-        // We send the error to Sentry.
-        sentry::capture_error(&err);
-
-        // We log the error.
-        error!("{err}");
-
-        // We send an error notification if a client is available.
-        if let Some(client) = notification_client {
-            let error_message = err.to_string();
-            match &err {
-                ReplicatorError::Etl(etl_err) => {
-                    client.notify_error(error_message.clone(), etl_err).await;
-                }
-                _ => {
-                    client.notify_error(error_message.clone(), error_message).await;
-                }
-            }
+/// Loads configuration, initializes tracing and Sentry, starts the async
+/// runtime, and launches the replicator pipeline. Handles all errors and
+/// ensures proper service initialization sequence.
+fn main() -> ExitCode {
+    match try_main() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("{}", err.render_report());
+            ExitCode::FAILURE
         }
-
-        return Err(err);
     }
-
-    Ok(())
 }

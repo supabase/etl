@@ -145,6 +145,72 @@ export APP_CONFIG_DIR=/etc/etl-api/config
 ./etl-api
 ```
 
+### Replicator probes
+
+Probes are opt-in and configured independently. Omit `k8s.replicator_health`, or
+leave it empty, to generate no probes and no health listener. Supplying only
+`readiness` enables readiness alone; add `startup` and `liveness` when ready to
+roll them out. Each supplied probe requires all three timing/count fields.
+Use replicator images that support these endpoints.
+
+This example uses a five-minute inactivity allowance and, with PostgreSQL's
+default `wal_sender_timeout`, starts termination after roughly 30 minutes
+without observed activity:
+
+```yaml
+k8s:
+  replicator_health:
+    replicator:
+      port: 9001
+      stall_timeout_ms: 300000
+    startup:
+      period_seconds: 5
+      timeout_seconds: 2
+      failure_threshold_count: 60
+    readiness:
+      period_seconds: 10
+      timeout_seconds: 2
+      failure_threshold_count: 3
+    liveness:
+      period_seconds: 30
+      timeout_seconds: 2
+      failure_threshold_count: 50
+  replicator_termination_grace_period_seconds: 300
+```
+
+The nested `replicator` block configures the replicator itself; its `port` and
+`stall_timeout_ms` default to the values shown. Probe timings have no
+implicit defaults: a missing probe block disables it. All durations and failure
+counts must be positive. The container port name remains `health`.
+
+| Field | Meaning |
+| --- | --- |
+| `period_seconds` | Interval between checks. Kubernetes may check readiness more often while unready. |
+| `timeout_seconds` | Maximum wait for an HTTP response; expiry counts as one failed check. |
+| `failure_threshold_count` | Consecutive failures before acting. One success resets the count. |
+| `replicator.stall_timeout_ms` | Inactivity allowance before the listener reports stalled work. Apply loops allow at least PostgreSQL's `wal_sender_timeout`. |
+| `replicator_termination_grace_period_seconds` | Pod drain time before forced termination; defaults to 300 seconds even with probes disabled. |
+
+Startup uses `/livez` and gates the other probes until one success; it does not
+wait for initial sync to finish. Readiness uses `/readyz` and marks the Pod unready
+without pausing replication or restarting it. Liveness uses `/livez` and triggers
+a restart after repeated failures. With the example settings and PostgreSQL's
+default timeout, readiness marks the Pod unready after roughly five minutes plus
+20–30 seconds; liveness starts termination after roughly 30 minutes. The drain
+allowance can delay forced termination by another five minutes. A nonresponsive
+listener starts accumulating failures immediately, without the inactivity allowance.
+
+The endpoints observe completed apply-loop iterations and destination copy
+batches, not durable replication progress. Slot acquisition and intentional
+catchup waits are exempt. With no observations, the process is live but unready;
+during graceful shutdown, it remains live and unready. Initial sync need not be
+complete for readiness to succeed. When `wal_sender_timeout` is disabled or
+unavailable, the listener uses a 60-second fallback for the apply-loop allowance.
+
+API configuration changes affect newly generated Pod templates when pipelines
+start, restart, or otherwise reconcile; editing the API configuration alone does
+not update every existing StatefulSet.
+
 ### Replicator Resources
 
 The ETL API configuration must define the default Kubernetes requests for
