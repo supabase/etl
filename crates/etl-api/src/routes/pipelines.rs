@@ -859,7 +859,7 @@ pub(crate) async fn read_pipeline(
     tag = "Pipelines"
 )]
 // Axum gives the static /pipelines/stop route precedence over this dynamic route.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn update_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
@@ -1525,7 +1525,7 @@ async fn reset_table_state(
     ),
     tag = "Pipelines"
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn rollback_tables(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,
@@ -1691,7 +1691,7 @@ pub(crate) async fn rollback_tables(
     ),
     tag = "Pipelines"
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn update_pipeline_version(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,

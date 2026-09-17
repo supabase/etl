@@ -360,7 +360,7 @@ pub(crate) async fn create_destination_and_pipeline(
     ),
     tag = "Destinations and Pipelines"
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn update_destination_and_pipeline(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,

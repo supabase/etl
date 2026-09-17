@@ -361,7 +361,7 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
                     // numeric range check. Weight and scale bounds are enforced
                     // below after the exponent is applied to the parsed decimal
                     // shape.
-                    if exponent > i32::MAX as i64 / 2 {
+                    if exponent > i64::from(i32::MAX) / 2 {
                         return Err(ParseNumericError::ValueOutOfRange);
                     }
                 }
@@ -380,7 +380,11 @@ fn parse_numeric_value(bytes: &[u8], sign: Sign) -> Result<PgNumeric, ParseNumer
         }
 
         dweight += exponent as i32;
-        dscale = if (dscale as i64 - exponent) < 0 { 0 } else { (dscale as i64 - exponent) as u32 };
+        dscale = if (i64::from(dscale) - exponent) < 0 {
+            0
+        } else {
+            (i64::from(dscale) - exponent) as u32
+        };
     }
 
     // The caller trims surrounding whitespace, so any remaining byte is junk.
@@ -450,7 +454,7 @@ fn convert_to_base_10000(
                 .ok()
                 .and_then(|index| decimal_digits.get(index).copied())
                 .unwrap_or(0);
-            digit = digit * 10 + decimal_digit as i16;
+            digit = digit * 10 + i16::from(decimal_digit);
         }
         base_10000_digits.push(digit);
     }
@@ -532,7 +536,7 @@ fn format_numeric_value(
     if scale > 0 {
         write!(f, ".")?;
 
-        let mut remaining_scale = scale as i32;
+        let mut remaining_scale = i32::from(scale);
         let mut d = weight + 1;
 
         while remaining_scale > 0 {

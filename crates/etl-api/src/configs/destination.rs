@@ -455,7 +455,7 @@ where
 ///
 /// Variants mirror the stable serialized patch shapes, so they remain inline
 /// even though the DuckLake variant is larger than the others.
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdateApiDestinationConfig {
@@ -1852,7 +1852,7 @@ impl Encrypt<EncryptedStoredDestinationConfig> for StoredDestinationConfig {
 ///
 /// Variants mirror the stable serialized config shapes, so they remain inline
 /// even though the DuckLake variant is larger than the others.
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptedStoredDestinationConfig {

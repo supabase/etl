@@ -396,7 +396,7 @@ where
     /// parameter controls the maximum acceptable staleness of BigQuery query
     /// results for tables created by this destination. The
     /// `connection_pool_size` parameter controls the connection pool size.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_flow_authenticator<Secret, Path>(
         project_id: String,
         dataset_id: BigQueryDatasetId,

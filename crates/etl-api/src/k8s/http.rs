@@ -1901,7 +1901,7 @@ fn get_restarted_at_annotation_value() -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::redundant_test_prefix)]
+#[expect(clippy::redundant_test_prefix)]
 mod tests {
     use etl_config::shared::{
         BatchConfig, DestinationConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig,

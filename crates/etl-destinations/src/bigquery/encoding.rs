@@ -113,7 +113,7 @@ fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) -> Res
             prost::encoding::string::encode(tag, s, buf);
         }
         Cell::I16(i) => {
-            let val = *i as i32;
+            let val = i32::from(*i);
             prost::encoding::int32::encode(tag, &val, buf);
         }
         Cell::I32(i) => {

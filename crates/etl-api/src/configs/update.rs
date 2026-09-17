@@ -158,7 +158,7 @@ mod tests {
         value: UpdateField<String>,
     }
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     #[derive(ToSchema)]
     struct PatchSchema {
         value: UpdateField<String>,
