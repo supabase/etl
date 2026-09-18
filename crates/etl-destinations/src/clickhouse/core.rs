@@ -728,9 +728,35 @@ impl EventBatchFences {
 
         let mut guards = Vec::with_capacity(fences.len());
         for fence in fences {
+            #[cfg(feature = "test-utils")]
+            if fence.try_lock().is_err() {
+                notify_fence_wait_for_tests();
+            }
             guards.push(fence.lock_owned().await);
         }
         guards
+    }
+}
+
+/// Tests waiting to hear that a batch dispatch had to wait for a fence.
+#[cfg(feature = "test-utils")]
+static FENCE_WAIT_OBSERVERS: Mutex<Vec<tokio::sync::oneshot::Sender<()>>> = Mutex::new(Vec::new());
+
+/// Returns a receiver that fires the next time a batch dispatch finds one of
+/// its fences held by an earlier batch and waits for it. Each receiver fires
+/// once.
+#[cfg(feature = "test-utils")]
+pub fn notify_on_fence_wait_for_tests() -> tokio::sync::oneshot::Receiver<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    FENCE_WAIT_OBSERVERS.lock().push(sender);
+    receiver
+}
+
+/// Fires every armed fence-wait observer.
+#[cfg(feature = "test-utils")]
+fn notify_fence_wait_for_tests() {
+    for observer in FENCE_WAIT_OBSERVERS.lock().drain(..) {
+        let _ = observer.send(());
     }
 }
 
@@ -2230,6 +2256,10 @@ pub fn arm_fail_drop_table_for_copy_once_for_tests() {
 mod tests {
     use etl::{
         data::{ArrayCell, PartialTableRow},
+        event::{
+            BeginEvent, CommitEvent, DeleteEvent, InsertEvent, RelationEvent, TruncateEvent,
+            UpdateEvent,
+        },
         schema::{
             ColumnSchema, IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema,
         },
@@ -2251,6 +2281,88 @@ mod tests {
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
+    }
+
+    /// Builds a minimal replicated schema for `table_id`; only the id matters.
+    fn schema_for_table(table_id: u32) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(table_id),
+            TableName::new("public".to_owned(), format!("table_{table_id}")),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+        ));
+        ReplicatedTableSchema::all(table_schema)
+    }
+
+    /// Every event kind that writes a table contributes that table to the
+    /// fence set, including each table of a multi-table truncate, while
+    /// transaction markers and unsupported events contribute nothing.
+    #[test]
+    fn batch_table_ids_cover_every_written_table() {
+        let lsn = PgLsn::from(100);
+        let events = vec![
+            Event::Begin(BeginEvent { commit_lsn: lsn, tx_ordinal: 0, timestamp: 0, xid: 1 }),
+            Event::Insert(InsertEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: schema_for_table(1),
+                table_row: TableRow::new(vec![Cell::I32(1)]),
+            }),
+            Event::Update(UpdateEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 2,
+                replicated_table_schema: schema_for_table(2),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![Cell::I32(1)])),
+                old_table_row: None,
+            }),
+            Event::Delete(DeleteEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 3,
+                replicated_table_schema: schema_for_table(3),
+                old_table_row: None,
+            }),
+            Event::Relation(RelationEvent { replicated_table_schema: schema_for_table(4) }),
+            Event::Truncate(TruncateEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 4,
+                options: 0,
+                truncated_tables: vec![
+                    schema_for_table(5),
+                    schema_for_table(6),
+                    schema_for_table(1),
+                ],
+            }),
+            Event::Commit(CommitEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 5,
+                flags: 0,
+                end_lsn: lsn,
+                timestamp: 0,
+            }),
+            Event::Unsupported,
+        ];
+
+        let table_ids: Vec<TableId> = batch_table_ids(&events).into_iter().collect();
+
+        assert_eq!(table_ids, (1..=6).map(TableId::new).collect::<Vec<_>>());
+    }
+
+    /// Batches with no table writes hold no fences.
+    #[test]
+    fn batch_table_ids_of_marker_only_batch_are_empty() {
+        let lsn = PgLsn::from(100);
+        let events = vec![
+            Event::Begin(BeginEvent { commit_lsn: lsn, tx_ordinal: 0, timestamp: 0, xid: 1 }),
+            Event::Commit(CommitEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                flags: 0,
+                end_lsn: lsn,
+                timestamp: 0,
+            }),
+        ];
+
+        assert!(batch_table_ids(&events).is_empty());
+        assert!(batch_table_ids(&[]).is_empty());
     }
 
     #[test]

@@ -30,7 +30,10 @@ use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active_for_parameter};
+use crate::failpoints::{
+    APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, STORE_REPLICATION_CHECKPOINT_FP,
+    etl_fail_point_active_for_parameter,
+};
 use crate::{
     activity::{ActivityHandle, ActivityKind, ActivityRegistration},
     bail,
@@ -1834,6 +1837,23 @@ where
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
         self.destination.write_events(events, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
+
+        // Models a source failure right after dispatch: the loop exits with a
+        // retriable error while the destination still owns the batch.
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active_for_parameter(
+            APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
+            self.worker_context.worker_type().as_str(),
+        ) {
+            bail!(
+                ErrorKind::WithTimedRetry,
+                "Failpoint triggered an error",
+                format!(
+                    "Failpoint '{APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP}' failed the apply loop \
+                     after dispatching an event batch"
+                )
+            );
+        }
 
         // Reset only after dispatch. A batch deferred behind an in-flight write
         // keeps its deadline until that write completes and dispatch is

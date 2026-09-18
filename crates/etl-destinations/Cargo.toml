@@ -154,9 +154,10 @@ zstd = { workspace = true, optional = true }
 base64 = { workspace = true }
 
 chrono = { workspace = true }
-etl = { workspace = true, features = ["test-utils"] }
+etl = { workspace = true, features = ["test-utils", "failpoints"] }
 etl-postgres = { workspace = true, features = ["test-utils", "tokio"] }
 etl-telemetry = { workspace = true }
+fail = { workspace = true }
 futures = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 proptest = { workspace = true }
