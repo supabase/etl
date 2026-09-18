@@ -1,6 +1,6 @@
 use std::{any::Any, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
 use etl_postgres::slots::EtlReplicationSlot;
 use futures::FutureExt;
@@ -64,6 +64,17 @@ fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
     };
 
     etl_error!(ErrorKind::TableSyncWorkerPanic, "Table sync worker panicked", detail)
+}
+
+/// Constructs a timed retry without overflowing the duration or timestamp.
+fn timed_retry_policy(delay: Duration, now: DateTime<Utc>) -> EtlResult<TableRetryPolicy> {
+    let delay = ChronoDuration::from_std(delay).map_err(
+        |err| etl_error!(ErrorKind::ConfigError, "Table retry delay is out of range", source: err),
+    )?;
+    let next_retry = now.checked_add_signed(delay).ok_or_else(|| {
+        etl_error!(ErrorKind::ConfigError, "Table retry timestamp is out of range")
+    })?;
+    Ok(TableRetryPolicy::TimedRetry { next_retry })
 }
 
 /// Internal state of [`TableSyncWorkerState`].
@@ -391,9 +402,10 @@ where
         // and apply worker use the same retry timing settings.
         let policy = build_error_handling_policy(&err);
         let mut retry_policy = match policy.retry_directive() {
-            RetryDirective::Timed => TableRetryPolicy::retry_in(ChronoDuration::milliseconds(
-                config.table_error_retry_delay_ms as i64,
-            )),
+            RetryDirective::Timed => timed_retry_policy(
+                Duration::from_millis(config.table_error_retry_delay_ms),
+                Utc::now(),
+            )?,
             RetryDirective::Manual => TableRetryPolicy::ManualRetry,
             RetryDirective::NoRetry => TableRetryPolicy::NoRetry,
         };
@@ -832,5 +844,45 @@ where
         replication_client.delete_slot_if_exists(&slot_name).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::{DateTime, Utc};
+
+    use crate::{
+        error::ErrorKind, replication::state::TableRetryPolicy,
+        runtime::table_sync::worker::timed_retry_policy,
+    };
+
+    /// Checked retry construction preserves the requested delay at both bounds.
+    #[test]
+    fn timed_retry_policy_preserves_delay() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for delay_ms in [1_000, 86_400_000] {
+            let policy = timed_retry_policy(Duration::from_millis(delay_ms), now).unwrap();
+            let TableRetryPolicy::TimedRetry { next_retry } = policy else {
+                panic!("Expected timed retry policy");
+            };
+            assert_eq!((next_retry - now).to_std().unwrap(), Duration::from_millis(delay_ms));
+        }
+    }
+
+    /// Oversized durations and overflowing deadlines are typed failures, not
+    /// panics.
+    #[test]
+    fn timed_retry_policy_rejects_overflow() {
+        let now = DateTime::from_timestamp(0, 0).unwrap();
+        for (delay, now) in [
+            (Duration::from_millis(u64::MAX), now),
+            (Duration::from_millis(u64::try_from(i64::MAX).unwrap()), now),
+            (Duration::from_secs(1), DateTime::<Utc>::MAX_UTC),
+        ] {
+            let err = timed_retry_policy(delay, now).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::ConfigError);
+        }
     }
 }

@@ -10,7 +10,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventType},
-    pipeline::PipelineId,
+    pipeline::{Pipeline, PipelineId},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::{SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
@@ -37,7 +37,9 @@ use etl::{
         },
     },
 };
-use etl_config::shared::{BatchConfig, InvalidatedSlotBehavior, TableSyncCopyConfig};
+use etl_config::shared::{
+    BatchConfig, InvalidatedSlotBehavior, PipelineConfig, TableSyncCopyConfig,
+};
 use etl_postgres::{
     below_version,
     slots::EtlReplicationSlot,
@@ -3157,4 +3159,28 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     assert_eq!(users_deletes, rows_to_delete);
     assert_eq!(orders_updates, rows_to_update);
     assert_eq!(orders_deletes, rows_to_delete);
+}
+
+/// Direct library callers receive a config error before any source startup
+/// work.
+#[tokio::test]
+async fn pipeline_retry_delay_is_validated_before_startup() {
+    for delay_ms in [0, 999, 86_400_001, u64::MAX] {
+        let config: PipelineConfig = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "publication_name": "publication",
+            "table_error_retry_delay_ms": delay_ms,
+            "pg_connection": {
+                "host": "127.0.0.1", "port": 0, "name": "postgres", "username": "postgres",
+                "tls": { "enabled": false, "trusted_root_certs": "" }
+            }
+        }))
+        .unwrap();
+        let store = NotifyingStore::new();
+        let destination = MemoryDestination::new(store.clone());
+        let mut pipeline = Pipeline::new(config, store, destination);
+
+        let err = pipeline.start().await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+    }
 }
