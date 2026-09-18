@@ -251,14 +251,14 @@ where
         // connection.
         let ShutdownResult::Ok(initialized) = with_shutdown!(
             async {
-                let replication_client = PgReplicationClient::connect_for_apply_worker(
+                let mut replication_client = PgReplicationClient::connect_for_apply_worker(
                     self.config.pg_connection.clone(),
                     self.pipeline_id,
                 )
                 .await?;
                 let start_lsn = get_start_lsn(
                     self.pipeline_id,
-                    &replication_client,
+                    &mut replication_client,
                     &self.store,
                     &self.config.invalidated_slot_behavior,
                     self.config.replication_slot.failover,
@@ -339,7 +339,7 @@ where
 /// the previous slot stopping and the new slot being created.
 async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
-    replication_client: &PgReplicationClient,
+    replication_client: &mut PgReplicationClient,
     store: &S,
     invalidated_slot_behavior: &InvalidatedSlotBehavior,
     failover: bool,
@@ -456,7 +456,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
 ///   slot, returning its consistent point LSN
 async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     pipeline_id: PipelineId,
-    replication_client: &PgReplicationClient,
+    replication_client: &mut PgReplicationClient,
     store: &S,
     slot_name: &str,
     behavior: &InvalidatedSlotBehavior,
