@@ -224,7 +224,7 @@ async fn start_replayable_stream(
     publication_name: &str,
     slot_suffix: &str,
 ) -> (PgReplicationClient, ReplicationMessageStream, String, PgLsn) {
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name(slot_suffix);
     let start_lsn = client.create_slot(&slot_name, false).await.unwrap().consistent_point;
     let (stream, feedback) = client

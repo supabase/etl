@@ -46,9 +46,11 @@ impl ErrorHandlingPolicy {
 pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     match error.kind() {
         // Automatically retriable errors. Keep this list narrow and limited to transient source or
-        // destination connectivity/capacity failures and loss of replication feedback. Retry
-        // attempts are bounded; persistent failures still require intervention.
+        // destination connectivity/capacity failures, source lock contention, and loss of
+        // replication feedback. Retry attempts are bounded; persistent failures still require
+        // intervention.
         ErrorKind::SourceConnectionFailed
+        | ErrorKind::SourceLockTimeout
         | ErrorKind::ReplicationFeedbackUnavailable
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
@@ -165,6 +167,7 @@ mod tests {
             (ErrorKind::InvalidState, RetryDirective::Manual),
             (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
             (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
+            (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
             (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
         ] {
             let error = EtlError::from((kind, "Test replication failure"));
