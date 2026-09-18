@@ -20,7 +20,7 @@ pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
 pub const STORE_REPLICATION_CHECKPOINT_FP: &str = "store_replication_checkpoint_fp";
 /// Fails the apply loop right after an event batch was handed to the
 /// destination. Configure with `return(<worker type>)` to target one worker
-/// type; the error is retried on a timer so the worker restarts and replays
+/// type. The error is retried on a timer, so the worker restarts and replays
 /// while the dispatched batch is still in flight.
 pub const APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP: &str =
     "apply_loop.after_event_batch_dispatch_fp";

@@ -472,13 +472,14 @@ async fn in_flight_write_keeps_streaming_and_shuts_down_cleanly_merge_tree() {
 /// The apply worker fails right after handing a CDC batch to the destination
 /// and retries while that batch is still in flight. The retried attempt
 /// replays the batch and then applies a source TRUNCATE. The replay must wait
-/// for the in-flight insert; otherwise the truncate runs first and the late
+/// for the in-flight insert. Otherwise the truncate runs first and the late
 /// insert restores the truncated row.
 ///
-/// Every step is driven by a signal: an armed pause parks the in-flight
-/// insert, a failpoint fails the apply loop once after dispatch, a fence
-/// observer reports that the replay is waiting, and the destination wrapper
-/// reports each applied batch.
+/// Every step is driven by a signal, never by a sleep:
+/// - an armed pause parks the in-flight insert,
+/// - a failpoint fails the apply loop once after dispatch,
+/// - a fence observer reports that the replay is waiting,
+/// - the destination wrapper reports each applied batch.
 #[tokio::test(flavor = "multi_thread")]
 async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree() {
     let _scenario = FailScenario::setup();
@@ -504,7 +505,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
             .await,
     );
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
-    // Short batches keep the pipeline moving; an immediate retry keeps the
+    // Short batches keep the pipeline moving. An immediate retry keeps the
     // failure path free of waiting.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
@@ -525,7 +526,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
 
     // Two INSERT pauses: the first parks the in-flight insert, the second
     // makes the replay's own INSERT observable. The fence observer reports
-    // the replay waiting. The failpoint fails the apply worker once, right
+    // when the replay waits. The failpoint fails the apply worker once, right
     // after the first CDC batch is dispatched.
     let (in_flight_reached, in_flight_release) = arm_pause_before_insert_statement_for_tests(0);
     let (mut replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
@@ -559,7 +560,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
     assert!(matches!(replay_reached.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
 
     // Releasing the in-flight insert lets it land, which lets the replay
-    // proceed to its INSERT; the wrapper records the replayed insert as well.
+    // proceed to its INSERT. The wrapper records the replayed insert as well.
     in_flight_release.send(()).unwrap();
     in_flight_applied.notified().await;
     replay_reached.await.unwrap();

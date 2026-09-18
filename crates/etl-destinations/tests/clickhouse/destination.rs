@@ -1787,9 +1787,9 @@ fn lifecycle_truncate(schema: &ReplicatedTableSchema) -> Event {
 /// A retried apply attempt replays the abandoned batch and a later truncate
 /// against the same destination while the abandoned insert is still in
 /// flight. The replay's dispatch must wait at the table's fence until the
-/// abandoned insert is acknowledged, so it cannot reach its own INSERT, let
-/// alone the TRUNCATE; otherwise the late insert restores rows the truncate
-/// removed.
+/// abandoned insert is acknowledged. Until then it cannot reach its own
+/// INSERT, let alone the TRUNCATE. Without the fence, the late insert would
+/// restore rows the truncate removed.
 #[tokio::test(flavor = "multi_thread")]
 async fn replayed_truncate_waits_for_abandoned_insert_on_same_table() {
     // GIVEN: a destination table, one pause for the abandoned insert, and
@@ -1805,7 +1805,7 @@ async fn replayed_truncate_waits_for_abandoned_insert_on_same_table() {
     let (abandoned_reached, abandoned_release) = arm_pause_before_insert_statement_for_tests(0);
     let (mut replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
 
-    // The first attempt's write is admitted and parks before its INSERT; the
+    // The first attempt's write is admitted and parks before its INSERT. The
     // apply loop that issued it has already given up on the result.
     let abandoned_handle = tokio::spawn({
         let destination = destination.clone();
@@ -1846,8 +1846,8 @@ async fn replayed_truncate_waits_for_abandoned_insert_on_same_table() {
     }
     assert!(!replay_handle.is_finished());
 
-    // Releasing the abandoned insert lets it land first; only then does the
-    // replay reach its INSERT, and its TRUNCATE removes both copies.
+    // Releasing the abandoned insert lets it land first. Only then does the
+    // replay reach its INSERT, and its TRUNCATE then removes both copies.
     abandoned_release.send(()).unwrap();
     assert_eq!(abandoned_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
     replay_reached.await.unwrap();

@@ -606,8 +606,8 @@ struct ClickHouseTableCacheEntry {
 /// This type contains the state needed to execute writes but deliberately
 /// omits [`TaskSet`], making that recursive registry access unavailable
 /// through the task's execution context. It omits [`EventBatchFences`] for the
-/// same reason: a task already holds the fences of every table it writes and
-/// must not wait on them again.
+/// same reason. A task already holds the fences of every table it writes, so
+/// it must never wait on them again.
 struct DestinationWriter<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
     client: ClickHouseClient,
@@ -683,20 +683,21 @@ fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
 /// Per-table fences that keep event batches for one table in dispatch order.
 ///
 /// The apply loop keeps at most one event batch in flight per worker. Any
-/// error that exits the apply loop breaks that guarantee: the loop abandons
-/// its pending batch, the batch task keeps running, and the retried attempt
-/// replays from the last flushed LSN through this same destination. Without a
-/// fence, the replay's `TRUNCATE` can overtake the abandoned `INSERT`, and the
-/// insert then restores rows the truncate removed.
+/// error that exits the apply loop breaks that guarantee. The loop abandons
+/// its pending batch, but the batch task keeps running. The retried attempt
+/// then replays from the last flushed LSN through this same destination.
+/// Without a fence, the replay's `TRUNCATE` can overtake the abandoned
+/// `INSERT`, and the insert then restores rows the truncate removed.
 ///
 /// [`Destination::write_events`] acquires the fence of every table the batch
 /// touches before it spawns the batch task. The task holds the fences until the
 /// batch is acknowledged. Acquiring in the caller is what guarantees the
-/// order: the apply loop's dispatch order follows the source stream, while a
-/// lock taken inside the task would be ordered by the scheduler.
+/// order. The apply loop dispatches batches in source stream order, so fences
+/// taken there follow that order too. A lock taken inside the task would
+/// follow the scheduler instead.
 ///
 /// A fence is not the same lock as a `create_locks` entry. A fence spans a
-/// whole batch; inside the batch, DDL takes the create lock one statement at a
+/// whole batch. Inside the batch, DDL takes the create lock one statement at a
 /// time. A tokio mutex cannot be locked again by the task that already holds
 /// it, so one lock cannot play both roles.
 struct EventBatchFences {
@@ -713,9 +714,10 @@ impl EventBatchFences {
     /// Acquires the fence of every table that `events` write and returns the
     /// guards. Dropping the guards releases the fences.
     ///
-    /// Fences are acquired in ascending table id order, so two batches that
-    /// share tables cannot each wait for a fence the other holds. Guards live
-    /// inside the batch task, so aborting the task releases them too.
+    /// Fences are acquired in ascending table id order. Two batches that
+    /// share tables therefore lock them in the same order, so neither can
+    /// hold one fence while waiting for the other's. Guards live inside the
+    /// batch task, so aborting the task releases them too.
     async fn acquire(&self, events: &[Event]) -> Vec<OwnedMutexGuard<()>> {
         let table_ids = batch_table_ids(events);
         let fences: Vec<Arc<tokio::sync::Mutex<()>>> = {
@@ -742,9 +744,8 @@ impl EventBatchFences {
 #[cfg(feature = "test-utils")]
 static FENCE_WAIT_OBSERVERS: Mutex<Vec<tokio::sync::oneshot::Sender<()>>> = Mutex::new(Vec::new());
 
-/// Returns a receiver that fires the next time a batch dispatch finds one of
-/// its fences held by an earlier batch and waits for it. Each receiver fires
-/// once.
+/// Returns a receiver that fires the next time a batch dispatch has to wait
+/// for a fence held by an earlier batch. Each receiver fires once.
 #[cfg(feature = "test-utils")]
 pub fn notify_on_fence_wait_for_tests() -> tokio::sync::oneshot::Receiver<()> {
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -2204,9 +2205,10 @@ where
         // admitting more work.
         self.tasks.try_reap().await?;
 
-        // Wait, in dispatch order, until every earlier batch that touches one
-        // of this batch's tables has finished. On the normal path no such batch
-        // is in flight and this returns at once. See `EventBatchFences`.
+        // Wait until every earlier batch that touches one of this batch's
+        // tables has finished. Batches take their fences in dispatch order.
+        // On the normal path no such batch is in flight and this returns at
+        // once. See `EventBatchFences`.
         let fence_guards = self.fences.acquire(&events).await;
 
         // Durability needs no branch: the task completes only after every
@@ -2379,14 +2381,27 @@ mod tests {
     /// Two dispatches that share tables acquire their fences in the same
     /// order, so neither can hold one fence while waiting for the other's.
     ///
-    /// The scenario is the classic two-lock deadlock: one batch names the
-    /// tables left then right, the other right then left, and each finds its
-    /// first fence free just after the other took its own. With acquisition
-    /// in event order the two would wait on each other forever.
+    /// This test is here to catch future deadlocks. The fences stay
+    /// deadlock-free only because every batch locks them in the same order.
+    /// The only thing enforcing that order is the `BTreeSet` in
+    /// [`batch_table_ids`]. Swapping it for an unsorted collection would
+    /// compile without complaint.
     ///
-    /// The paused clock makes that deadlock observable at once: when every
+    /// The scenario is the classic two-lock deadlock. One batch names the
+    /// tables left then right, the other right then left. Each takes its
+    /// first fence and then waits for its second, which the other holds. With
+    /// acquisition in event order the two would wait on each other forever.
+    ///
+    /// The paused clock makes that deadlock observable at once. When every
     /// task is blocked on a fence, the runtime has nothing to run and jumps
     /// straight to the timeout. On the success path the timeout never fires.
+    ///
+    /// We checked that this test can catch such a deadlock by introducing
+    /// one on purpose (locking fences in event order instead of sorted
+    /// order) and observing the test fail within a fraction of a second.
+    /// Reversing the sorted order still passes, because that is still one
+    /// shared order. The test cares that the order is shared, not which
+    /// direction it runs.
     #[tokio::test(start_paused = true)]
     async fn fences_of_overlapping_batches_do_not_deadlock() {
         let fences = Arc::new(EventBatchFences::new());
@@ -2394,7 +2409,7 @@ mod tests {
         let right = schema_for_table(2);
 
         // Two earlier batches hold one fence each, so both dispatches below
-        // have to wait, and the release order below controls how they wake.
+        // have to wait. The release order below controls how they wake.
         let left_held = fences.acquire(&[insert_for(&left)]).await;
         let right_held = fences.acquire(&[insert_for(&right)]).await;
 
@@ -2412,10 +2427,10 @@ mod tests {
         // released.
         tokio::task::yield_now().await;
 
-        // Release right first. Acquiring in event order would let the
-        // backward dispatch take right and then wait for left; releasing
-        // left would then hand it to the forward dispatch, which would wait
-        // for right, and neither could finish.
+        // Release right first. With event-ordered acquisition, the backward
+        // dispatch would take right and then wait for left. Releasing left
+        // would then hand it to the forward dispatch, which would wait for
+        // right. Neither could finish.
         drop(right_held);
         tokio::task::yield_now().await;
         drop(left_held);
