@@ -2295,7 +2295,8 @@ mod tests {
 
     /// Every event kind that writes a table contributes that table to the
     /// fence set, including each table of a multi-table truncate, while
-    /// transaction markers and unsupported events contribute nothing.
+    /// transaction markers and unsupported events contribute nothing. The
+    /// events name tables out of order; the result is ascending regardless.
     #[test]
     fn batch_table_ids_cover_every_written_table() {
         let lsn = PgLsn::from(100);
@@ -2304,7 +2305,7 @@ mod tests {
             Event::Insert(InsertEvent {
                 commit_lsn: lsn,
                 tx_ordinal: 1,
-                replicated_table_schema: schema_for_table(1),
+                replicated_table_schema: schema_for_table(4),
                 table_row: TableRow::new(vec![Cell::I32(1)]),
             }),
             Event::Update(UpdateEvent {
@@ -2317,18 +2318,18 @@ mod tests {
             Event::Delete(DeleteEvent {
                 commit_lsn: lsn,
                 tx_ordinal: 3,
-                replicated_table_schema: schema_for_table(3),
+                replicated_table_schema: schema_for_table(6),
                 old_table_row: None,
             }),
-            Event::Relation(RelationEvent { replicated_table_schema: schema_for_table(4) }),
+            Event::Relation(RelationEvent { replicated_table_schema: schema_for_table(1) }),
             Event::Truncate(TruncateEvent {
                 commit_lsn: lsn,
                 tx_ordinal: 4,
                 options: 0,
                 truncated_tables: vec![
                     schema_for_table(5),
-                    schema_for_table(6),
-                    schema_for_table(1),
+                    schema_for_table(3),
+                    schema_for_table(4),
                 ],
             }),
             Event::Commit(CommitEvent {
@@ -2363,6 +2364,70 @@ mod tests {
 
         assert!(batch_table_ids(&events).is_empty());
         assert!(batch_table_ids(&[]).is_empty());
+    }
+
+    /// Builds one insert event for `schema`; only the table matters.
+    fn insert_for(schema: &ReplicatedTableSchema) -> Event {
+        Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 0,
+            replicated_table_schema: schema.clone(),
+            table_row: TableRow::new(vec![Cell::I32(1)]),
+        })
+    }
+
+    /// Two dispatches that share tables acquire their fences in the same
+    /// order, so neither can hold one fence while waiting for the other's.
+    ///
+    /// The scenario is the classic two-lock deadlock: one batch names the
+    /// tables left then right, the other right then left, and each finds its
+    /// first fence free just after the other took its own. With acquisition
+    /// in event order the two would wait on each other forever.
+    ///
+    /// The paused clock makes that deadlock observable at once: when every
+    /// task is blocked on a fence, the runtime has nothing to run and jumps
+    /// straight to the timeout. On the success path the timeout never fires.
+    #[tokio::test(start_paused = true)]
+    async fn fences_of_overlapping_batches_do_not_deadlock() {
+        let fences = Arc::new(EventBatchFences::new());
+        let left = schema_for_table(1);
+        let right = schema_for_table(2);
+
+        // Two earlier batches hold one fence each, so both dispatches below
+        // have to wait, and the release order below controls how they wake.
+        let left_held = fences.acquire(&[insert_for(&left)]).await;
+        let right_held = fences.acquire(&[insert_for(&right)]).await;
+
+        let forward = tokio::spawn({
+            let fences = Arc::clone(&fences);
+            let events = vec![insert_for(&left), insert_for(&right)];
+            async move { fences.acquire(&events).await }
+        });
+        let backward = tokio::spawn({
+            let fences = Arc::clone(&fences);
+            let events = vec![insert_for(&right), insert_for(&left)];
+            async move { fences.acquire(&events).await }
+        });
+        // Let both dispatches reach their first wait before anything is
+        // released.
+        tokio::task::yield_now().await;
+
+        // Release right first. Acquiring in event order would let the
+        // backward dispatch take right and then wait for left; releasing
+        // left would then hand it to the forward dispatch, which would wait
+        // for right, and neither could finish.
+        drop(right_held);
+        tokio::task::yield_now().await;
+        drop(left_held);
+
+        let both = async {
+            forward.await.unwrap();
+            backward.await.unwrap();
+        };
+        // The timeout only bounds the failure path; see the test doc.
+        tokio::time::timeout(Duration::from_secs(1), both)
+            .await
+            .expect("fence acquisition deadlocked");
     }
 
     #[test]
