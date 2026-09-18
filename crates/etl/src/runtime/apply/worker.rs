@@ -3,8 +3,9 @@ use std::{sync::Arc, time::Duration};
 use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
 use etl_postgres::slots::EtlReplicationSlot;
 use metrics::counter;
-use tokio::{sync::Semaphore, task::JoinHandle};
+use tokio::sync::Semaphore;
 use tokio_postgres::types::PgLsn;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{Instrument, error, info, warn};
 
 use crate::{
@@ -23,7 +24,7 @@ use crate::{
     replication::{ApplyLoop, ApplyLoopResult, ApplyWorkerContext, WorkerContext, WorkerType},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
-        concurrency::ShutdownRx,
+        concurrency::{ShutdownResult, with_shutdown},
         error_policy::{RetryDirective, build_error_handling_policy},
     },
     store::{PipelineStore, StateStore, TableStateLifecycleStore},
@@ -36,7 +37,7 @@ use crate::{
 /// handle enables waiting for worker completion and checking final results.
 #[derive(Debug)]
 pub(crate) struct ApplyWorkerHandle {
-    handle: JoinHandle<EtlResult<()>>,
+    handle: AbortOnDropHandle<EtlResult<()>>,
 }
 
 impl ApplyWorkerHandle {
@@ -45,21 +46,14 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    pub(crate) async fn wait(mut self) -> EtlResult<()> {
-        (&mut self.handle).await.map_err(|err| {
+    pub(crate) async fn wait(self) -> EtlResult<()> {
+        self.handle.await.map_err(|err| {
             if err.is_cancelled() {
                 etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", source: err)
             } else {
                 etl_error!(ErrorKind::ApplyWorkerPanic, "Apply worker panicked", source: err)
             }
         })?
-    }
-}
-
-/// Aborts the apply worker when its owner disappears without waiting.
-impl Drop for ApplyWorkerHandle {
-    fn drop(&mut self) {
-        self.handle.abort();
     }
 }
 
@@ -81,7 +75,7 @@ pub(crate) struct ApplyWorker<S, D> {
     store: S,
     destination: D,
     out_of_band_source_pool: OutOfBandSourcePool,
-    shutdown_rx: ShutdownRx,
+    shutdown_token: CancellationToken,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -102,7 +96,7 @@ impl<S, D> ApplyWorker<S, D> {
         store: S,
         destination: D,
         out_of_band_source_pool: OutOfBandSourcePool,
-        shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
     ) -> Self {
@@ -120,7 +114,7 @@ impl<S, D> ApplyWorker<S, D> {
             store,
             destination,
             out_of_band_source_pool,
-            shutdown_rx,
+            shutdown_token,
             table_sync_worker_permits,
             memory_monitor,
             batch_memory_governor,
@@ -143,7 +137,7 @@ where
     /// immediately propagated.
     async fn handle_apply_worker_error(
         config: &PipelineConfig,
-        shutdown_rx: &mut ShutdownRx,
+        shutdown_token: &CancellationToken,
         retry_attempts: &mut u32,
         err: EtlError,
     ) -> EtlResult<bool> {
@@ -190,24 +184,20 @@ where
             "retrying apply worker after timed-retriable error",
         );
 
-        tokio::select! {
-            biased;
+        if with_shutdown!(tokio::time::sleep(sleep_duration), shutdown_token).should_shutdown() {
+            info!("shutting down apply worker while waiting to retry");
 
-            _ = shutdown_rx.changed() => {
-                info!("shutting down apply worker while waiting to retry");
-                Ok(true)
-            }
-
-            _ = tokio::time::sleep(sleep_duration) => Ok(false)
+            return Ok(true);
         }
+
+        Ok(false)
     }
 
     /// Spawns the apply worker and returns a handle for monitoring.
     ///
-    /// This method initializes the apply worker by determining the starting
-    /// LSN, creating coordination signals, and launching the main apply loop.
-    /// The worker runs asynchronously and can be monitored through the returned
-    /// handle.
+    /// Starts the worker's retry loop in a background task. Each attempt
+    /// determines its starting LSN and runs the apply loop with the shared
+    /// shutdown token. The returned handle tracks the task's completion.
     pub(crate) fn spawn(self) -> ApplyWorkerHandle {
         info!("starting apply worker");
 
@@ -219,7 +209,7 @@ where
         let apply_worker =
             self.guarded_run_apply_worker().instrument(apply_worker_span.or_current());
 
-        let handle = tokio::spawn(apply_worker);
+        let handle = AbortOnDropHandle::new(tokio::spawn(apply_worker));
 
         ApplyWorkerHandle { handle }
     }
@@ -231,7 +221,6 @@ where
     /// `table_error_retry_max_attempts`) so retry behavior is coherent across
     /// worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
-        let mut retry_shutdown_rx = self.shutdown_rx.clone();
         let mut retry_attempts: u32 = 0;
 
         loop {
@@ -241,7 +230,7 @@ where
                 Err(err) => {
                     let should_shutdown = Self::handle_apply_worker_error(
                         self.config.as_ref(),
-                        &mut retry_shutdown_rx,
+                        &self.shutdown_token,
                         &mut retry_attempts,
                         err,
                     )
@@ -257,22 +246,32 @@ where
 
     /// Runs a single apply worker attempt.
     async fn run_apply_worker(&self) -> EtlResult<()> {
-        let mut replication_client = PgReplicationClient::connect_for_apply_worker(
-            self.config.pg_connection.clone(),
-            self.pipeline_id,
-        )
-        .await?;
+        // Slot creation can wait indefinitely for source transactions. No apply
+        // work has been accepted yet, so cancellation can close this
+        // connection.
+        let ShutdownResult::Ok(initialized) = with_shutdown!(
+            async {
+                let mut replication_client = PgReplicationClient::connect_for_apply_worker(
+                    self.config.pg_connection.clone(),
+                    self.pipeline_id,
+                )
+                .await?;
+                let start_lsn = get_start_lsn(
+                    self.pipeline_id,
+                    &mut replication_client,
+                    &self.store,
+                    &self.config.invalidated_slot_behavior,
+                    self.config.replication_slot.failover,
+                )
+                .await?;
+                Ok::<_, EtlError>((replication_client, start_lsn))
+            },
+            self.shutdown_token,
+        ) else {
+            return Ok(());
+        };
+        let (replication_client, start_lsn) = initialized?;
 
-        let start_lsn = get_start_lsn(
-            self.pipeline_id,
-            &mut replication_client,
-            &self.store,
-            &self.config.invalidated_slot_behavior,
-            self.config.replication_slot.failover,
-        )
-        .await?;
-
-        let attempt_shutdown_rx = self.shutdown_rx.clone();
         let worker_context = WorkerContext::Apply(ApplyWorkerContext {
             pipeline_id: self.pipeline_id,
             config: Arc::clone(&self.config),
@@ -280,7 +279,7 @@ where
             store: self.store.clone(),
             destination: self.destination.clone(),
             out_of_band_source_pool: self.out_of_band_source_pool.clone(),
-            shutdown_rx: attempt_shutdown_rx.clone(),
+            shutdown_token: self.shutdown_token.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
             batch_memory_governor: self.batch_memory_governor.clone(),
@@ -295,7 +294,7 @@ where
             self.destination.clone(),
             self.out_of_band_source_pool.clone(),
             worker_context,
-            attempt_shutdown_rx,
+            self.shutdown_token.clone(),
             self.memory_monitor.clone(),
             self.batch_memory_governor.clone(),
             None,
@@ -543,44 +542,4 @@ async fn warn_if_tables_may_have_missed_changes<S: StateStore>(store: &S) -> Etl
     );
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        future::{Future, pending, poll_fn},
-        task::Poll,
-        time::Duration,
-    };
-
-    use tokio::sync::oneshot;
-
-    use crate::{error::EtlResult, runtime::apply::worker::ApplyWorkerHandle};
-
-    #[tokio::test]
-    async fn dropping_pending_wait_aborts_apply_worker() {
-        let (started_tx, started_rx) = oneshot::channel();
-        let (dropped_tx, dropped_rx) = oneshot::channel::<()>();
-        let worker = tokio::spawn(async move {
-            let _dropped_tx = dropped_tx;
-            started_tx.send(()).expect("worker start receiver should remain open");
-            pending::<EtlResult<()>>().await
-        });
-        started_rx.await.expect("worker should start");
-
-        let worker = ApplyWorkerHandle { handle: worker };
-        let mut wait = Box::pin(worker.wait());
-        poll_fn(|context| {
-            assert!(wait.as_mut().poll(context).is_pending());
-            Poll::Ready(())
-        })
-        .await;
-
-        drop(wait);
-
-        let dropped_result = tokio::time::timeout(Duration::from_secs(1), dropped_rx)
-            .await
-            .expect("apply worker should stop when its pending wait is dropped");
-        assert!(dropped_result.is_err(), "apply worker drop signal should close without a value");
-    }
 }

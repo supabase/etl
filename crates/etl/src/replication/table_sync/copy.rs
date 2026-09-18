@@ -15,16 +15,15 @@ use metrics::{counter, histogram};
 use tokio::{
     pin,
     sync::{Mutex, watch},
-    task::JoinSet,
 };
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, info};
+use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{START_TABLE_SYNC_DURING_DATA_SYNC_FP, etl_fail_point};
 use crate::{
     activity::ActivityHandle,
-    bail,
     destination::{
         Destination, DestinationWriteStatus, TableCopyAttemptId, TableCopyBatchId,
         WriteTableRowsResult,
@@ -50,11 +49,12 @@ use crate::{
     runtime::{
         BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
-            MemoryBatchStream, ShutdownResult, ShutdownRx, table_sync_worker_copy_stream_id,
+            MemoryBatchStream, ShutdownResult, table_sync_worker_copy_stream_id, with_shutdown,
         },
     },
     schema::{ReplicatedTableSchema, TableId},
     source_payload_metadata::TableCopyPayloadMetadata,
+    task::TaskGroup,
 };
 
 /// Target number of CTID ranges per worker when copy is parallel.
@@ -144,15 +144,6 @@ impl TableCopyBatchIdGenerator {
     }
 }
 
-/// Outcome of one worker connection.
-#[derive(Debug)]
-enum TableCopyWorkerOutcome {
-    /// The worker drained all available work and committed its transaction.
-    Completed(TableCopyProgress),
-    /// The worker observed shutdown before committing its transaction.
-    Shutdown,
-}
-
 /// Returns `numerator / denominator`, rounded up.
 fn div_ceil_u128(numerator: u128, denominator: u128) -> u128 {
     debug_assert!(denominator > 0);
@@ -220,12 +211,17 @@ fn partitions_for_table_weight(
     u16::try_from(partition_count).expect("clamped partition count should fit in u16")
 }
 
-/// Returns true when the table copy should stop for shutdown.
-fn is_shutdown_requested(shutdown_rx: &ShutdownRx) -> bool {
-    shutdown_rx.has_changed().unwrap_or(true)
+/// Stops copy tasks and the monitor, returning the first failure.
+async fn stop_table_copy_tasks(
+    tasks: &mut TaskGroup<TableCopyProgress>,
+    monitor: TableSyncMonitor,
+) -> EtlResult<()> {
+    tasks.shutdown().await?;
+    monitor.stop().await
 }
 
-/// Copies a table through ctid work items, using worker child connections.
+/// Copies a table by assigning physical ctid ranges to child-connection
+/// workers.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     activity_handle: &ActivityHandle,
@@ -239,15 +235,20 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     out_of_band_source_pool: OutOfBandSourcePool,
     table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
+    shutdown_token: CancellationToken,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyResult> {
     let max_copy_connections = max_copy_connections.max(1);
     let start_time = Instant::now();
-    let copy_partitions =
-        plan_table_copy_partitions(replication_transaction, table_id, max_copy_connections).await?;
+    let ShutdownResult::Ok(copy_partitions) = with_shutdown!(
+        plan_table_copy_partitions(replication_transaction, table_id, max_copy_connections),
+        shutdown_token,
+    ) else {
+        return Ok(TableCopyResult::Shutdown);
+    };
+    let copy_partitions = copy_partitions?;
     let worker_count = usize::from(max_copy_connections).min(copy_partitions.len());
 
     if copy_partitions.is_empty() {
@@ -273,35 +274,38 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 
     // Every child copy connection imports the same exported snapshot, so all
     // CTID ranges for this table copy see a consistent source view.
-    let snapshot_id = replication_transaction.export_snapshot().await?;
+    let ShutdownResult::Ok(snapshot_id) =
+        with_shutdown!(replication_transaction.export_snapshot(), shutdown_token)
+    else {
+        return Ok(TableCopyResult::Shutdown);
+    };
+    let snapshot_id = snapshot_id?;
     let batch_id_generator =
         Arc::new(TableCopyBatchIdGenerator::new(TableCopyAttemptId::generate()));
     let work_queue = Arc::new(Mutex::new(VecDeque::from(copy_partitions)));
     let publication_name = publication_name.map(str::to_owned);
-    let mut join_set = JoinSet::new();
+    let mut tasks = TaskGroup::new();
     let mut monitor = TableSyncMonitor::spawn(
         table_id,
         slot_name.clone(),
         consistent_point,
         out_of_band_source_pool,
         table_sync_monitor_interval,
-        shutdown_rx.clone(),
     );
 
-    for worker_index in 0..worker_count {
+    for _ in 0..worker_count {
         // We fork the connection for each worker since the main replication
         // transaction has to remain open for the whole duration of the copy.
         // This is needed since the snapshot exported by the replication
         // transaction is only valid while that transaction's connection is
         // active.
-        let child_replication_client = match replication_transaction.fork_child().await {
-            Ok(child_replication_client) => child_replication_client,
-            Err(error) => {
-                monitor.stop().await;
-
-                return Err(error);
-            }
+        let ShutdownResult::Ok(child_replication_client) =
+            with_shutdown!(replication_transaction.fork_child(), shutdown_token)
+        else {
+            stop_table_copy_tasks(&mut tasks, monitor).await?;
+            return Ok(TableCopyResult::Shutdown);
         };
+        let child_replication_client = child_replication_client?;
 
         // Keep these values owned by each worker. They are small, and cloning
         // them avoids extra shared ownership machinery in the hot path.
@@ -311,37 +315,39 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         let replicated_table_schema = replicated_table_schema.clone();
         let publication_name = publication_name.clone();
         let batch_config = batch_config.clone();
-        let shutdown_rx = shutdown_rx.clone();
         let destination = destination.clone();
         let memory_monitor = memory_monitor.clone();
         let batch_memory_governor = batch_memory_governor.clone();
 
         let activity_handle = activity_handle.clone();
-        join_set.spawn(async move {
-            table_copy_worker(
-                activity_handle,
-                worker_index,
-                child_replication_client,
-                snapshot_id,
-                work_queue,
-                batch_id_generator,
-                table_id,
-                replicated_table_schema,
-                publication_name,
-                batch_config,
-                shutdown_rx,
-                destination,
-                memory_monitor,
-                batch_memory_governor,
-            )
-            .await
-        });
+        tasks.spawn(table_copy_worker(
+            activity_handle,
+            child_replication_client,
+            snapshot_id,
+            work_queue,
+            batch_id_generator,
+            table_id,
+            replicated_table_schema,
+            publication_name,
+            batch_config,
+            destination,
+            memory_monitor,
+            batch_memory_governor,
+        ));
     }
 
     let mut progress = TableCopyProgress::default();
     loop {
         tokio::select! {
             biased;
+
+            // A cancelled copy restarts from a fresh snapshot. Stop the
+            // whole group here, including workers blocked inside destination calls,
+            // and join before releasing the parent snapshot transaction.
+            _ = shutdown_token.cancelled() => {
+                stop_table_copy_tasks(&mut tasks, monitor).await?;
+                return Ok(TableCopyResult::Shutdown);
+            }
 
             _ = monitor.wait_for_slot_invalidated() => {
                 info!(
@@ -350,12 +356,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
                     "aborting table copy after replication slot was invalidated"
                 );
 
-                join_set.abort_all();
-                while join_set.join_next().await.is_some() {}
-
-                monitor.stop().await;
-
-                bail!(
+                let error = etl_error!(
                     ErrorKind::ReplicationSlotInvalidated,
                     "Replication slot has been invalidated",
                     format!(
@@ -367,54 +368,20 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
                         slot_name, table_id.0
                     )
                 );
+                return Err(error);
             }
 
-            result = join_set.join_next() => {
+            result = tasks.join_next() => {
                 let Some(result) = result else {
                     break;
                 };
 
-                match result {
-                    Ok(Ok(TableCopyWorkerOutcome::Completed(worker_progress))) => {
-                        progress.merge(worker_progress);
-                    }
-                    Ok(Ok(TableCopyWorkerOutcome::Shutdown)) => {
-                        info!(
-                            table_id = table_id.0,
-                            "shutting down table copy after worker received shutdown"
-                        );
-
-                        monitor.stop().await;
-
-                        return Ok(TableCopyResult::Shutdown);
-                    }
-                    Ok(Err(error)) => {
-                        monitor.stop().await;
-
-                        return Err(error);
-                    }
-                    Err(join_error) if join_error.is_cancelled() => {
-                        debug!(error = %join_error, "table copy worker task was cancelled");
-
-                        monitor.stop().await;
-
-                        return Ok(TableCopyResult::Shutdown);
-                    }
-                    Err(join_error) => {
-                        monitor.stop().await;
-
-                        return Err(etl_error!(
-                            ErrorKind::TableCopyWorkerPanic,
-                            "Table copy worker panicked",
-                            source: join_error
-                        ));
-                    }
-                }
+                progress.merge(result?);
             }
         }
     }
 
-    monitor.stop().await;
+    monitor.stop().await?;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
     counter!(ETL_TABLE_COPY_ROWS_TOTAL).increment(progress.total_rows);
@@ -524,7 +491,6 @@ async fn plan_table_copy_partitions(
 #[expect(clippy::too_many_arguments)]
 async fn table_copy_worker<D>(
     activity_handle: ActivityHandle,
-    worker_index: usize,
     mut child_replication_client: ChildPgReplicationClient,
     snapshot_id: String,
     work_queue: Arc<Mutex<VecDeque<TableCopyPartition>>>,
@@ -533,11 +499,10 @@ async fn table_copy_worker<D>(
     replicated_table_schema: ReplicatedTableSchema,
     publication_name: Option<String>,
     batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
-) -> EtlResult<TableCopyWorkerOutcome>
+) -> EtlResult<TableCopyProgress>
 where
     D: Destination + Clone + Send + 'static,
 {
@@ -546,22 +511,16 @@ where
     let mut total_progress = TableCopyProgress::default();
 
     loop {
-        if is_shutdown_requested(&shutdown_rx) {
-            info!(table_id = table_id.0, worker_index, "table copy worker received shutdown");
-
-            return Ok(TableCopyWorkerOutcome::Shutdown);
-        }
-
         let copy_partition = work_queue.lock().await.pop_front();
         let Some(copy_partition) = copy_partition else {
             // The queue is fully populated before workers start; an empty queue
             // means all CTID work has been claimed.
             child_replication_transaction.commit().await?;
 
-            return Ok(TableCopyWorkerOutcome::Completed(total_progress));
+            return Ok(total_progress);
         };
 
-        match table_copy_partition_rows(
+        let partition_progress = table_copy_partition_rows(
             &activity_handle,
             &child_replication_transaction,
             &batch_id_generator,
@@ -570,16 +529,12 @@ where
             publication_name.clone(),
             copy_partition,
             batch_config.clone(),
-            shutdown_rx.clone(),
             destination.clone(),
             memory_monitor.clone(),
             batch_memory_governor.clone(),
         )
-        .await?
-        {
-            ShutdownResult::Ok(partition_progress) => total_progress.merge(partition_progress),
-            ShutdownResult::Shutdown(_) => return Ok(TableCopyWorkerOutcome::Shutdown),
-        }
+        .await?;
+        total_progress.merge(partition_progress);
     }
 }
 
@@ -594,18 +549,13 @@ async fn table_copy_partition_rows<D>(
     publication_name: Option<String>,
     partition: TableCopyPartition,
     batch_config: BatchConfig,
-    shutdown_rx: ShutdownRx,
     destination: D,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
-) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
+) -> EtlResult<TableCopyProgress>
 where
     D: Destination + Clone + Send + 'static,
 {
-    if is_shutdown_requested(&shutdown_rx) {
-        return Ok(ShutdownResult::Shutdown(TableCopyProgress::default()));
-    }
-
     let start_time = Instant::now();
     let replicated_column_schemas =
         replicated_table_schema.column_schemas().cloned().collect::<Vec<_>>();
@@ -641,22 +591,15 @@ where
     );
     pin!(table_copy_stream);
 
-    let progress = match table_copy_rows_from_stream(
+    let progress = table_copy_rows_from_stream(
         activity_handle,
         table_copy_stream.as_mut(),
-        shutdown_rx,
         connection_updates_rx,
         replicated_table_schema,
         batch_id_generator,
         destination,
     )
-    .await?
-    {
-        ShutdownResult::Ok(progress) => progress,
-        ShutdownResult::Shutdown(progress) => {
-            return Ok(ShutdownResult::Shutdown(progress));
-        }
-    };
+    .await?;
 
     let total_duration_secs = start_time.elapsed().as_secs_f64();
     counter!(ETL_TABLE_COPY_PARTITIONS_TOTAL).increment(1);
@@ -671,20 +614,21 @@ where
         "completed ctid partition copy"
     );
 
-    Ok(ShutdownResult::Ok(progress))
+    Ok(progress)
 }
 
-/// Copies rows from a batched table-copy stream into the destination with
-/// prioritized shutdown handling.
+/// Copies rows from a batched table-copy stream into the destination.
+///
+/// The owning task group cancels and joins workers on controlled shutdown;
+/// failures request cancellation without waiting.
 async fn table_copy_rows_from_stream<D, S>(
     activity_handle: &ActivityHandle,
     mut table_copy_stream: Pin<&mut S>,
-    mut shutdown_rx: ShutdownRx,
     mut connection_updates_rx: watch::Receiver<PostgresConnectionUpdate>,
     replicated_table_schema: ReplicatedTableSchema,
     batch_id_generator: &TableCopyBatchIdGenerator,
     destination: D,
-) -> EtlResult<ShutdownResult<TableCopyProgress, TableCopyProgress>>
+) -> EtlResult<TableCopyProgress>
 where
     D: Destination + Clone + Send + 'static,
     S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
@@ -694,10 +638,6 @@ where
     loop {
         tokio::select! {
             biased;
-
-            _ = shutdown_rx.changed() => {
-                return Ok(ShutdownResult::Shutdown(progress));
-            }
 
             changed = connection_updates_rx.changed() => {
                 if changed.is_err() {
@@ -728,7 +668,7 @@ where
 
             maybe_batch = table_copy_stream.next() => {
                 let Some(table_rows) = maybe_batch else {
-                    return Ok(ShutdownResult::Ok(progress));
+                    return Ok(progress);
                 };
 
                 let table_copy_rows = table_rows?;
@@ -756,6 +696,10 @@ where
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
                 let batch_id = batch_id_generator.next_batch_id()?;
 
+                // Inline writes are fine here: each partition has its own task
+                // and awaits both the method and its result before reading
+                // another batch. The copy owner can cancel this child during
+                // either await.
                 destination
                     .write_table_rows(
                         &replicated_table_schema,
@@ -764,13 +708,7 @@ where
                         flush_result,
                     )
                     .await?;
-
-                let ShutdownResult::Ok(completed_flush_result) = pending_flush_result
-                    .with_shutdown(&mut shutdown_rx)
-                    .await
-                else {
-                    return Ok(ShutdownResult::Shutdown(progress));
-                };
+                let completed_flush_result = pending_flush_result.await;
                 let (_, completed_at, result) =
                     completed_flush_result.into_parts_with_completion();
                 let write_status = result?;

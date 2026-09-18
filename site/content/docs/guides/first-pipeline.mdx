@@ -203,7 +203,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Starting pipeline...");
     let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
-    pipeline.wait().await?;
+
+    // Keep the same completion future alive while requesting shutdown.
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+    tokio::select! {
+        result = &mut pipeline_wait => result?,
+
+        signal = tokio::signal::ctrl_c() => {
+            pipeline.shutdown();
+            pipeline_wait.await?;
+            signal?;
+        }
+    }
 
     Ok(())
 }
@@ -226,6 +238,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 </Callout>
 
 ## Run the pipeline [#run-the-pipeline] [step]
+
+Ctrl+C requests shutdown and then awaits the original `Pipeline::wait()` future
+to finish draining and destination cleanup. Keep that future alive: cancelling
+it aborts the apply worker and skips the remaining asynchronous teardown. If you
+have not already called `wait()`, `shutdown_and_wait()` combines the shutdown
+request and completion wait. A worker or teardown error returns immediately
+and requests cancellation of remaining owned tasks without awaiting them;
+destination-owned resources may still require explicit cleanup.
 
 ```bash title="Terminal"
 PGPASSWORD=your_password RUST_LOG=info cargo run

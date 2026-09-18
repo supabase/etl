@@ -16,10 +16,10 @@ use etl::{
         TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
+    task::TaskGroup,
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::{Mutex, RwLock};
-use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -1664,7 +1664,7 @@ where
     }
 
     /// Encodes the accumulated `PendingRow` batches and inserts them into
-    /// ClickHouse, one `JoinSet` task per table. No-op if `pending` is empty.
+    /// ClickHouse, one task per table. No-op if `pending` is empty.
     ///
     /// All `prepare_table_for_writes` calls run sequentially before any insert
     /// is spawned, so a schema-resolution failure aborts the whole pass without
@@ -1685,13 +1685,13 @@ where
             prepared.push((clickhouse_table_name, nullable_flags, rows));
         }
 
-        let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
+        let mut tasks: TaskGroup<()> = TaskGroup::new();
         let engine = self.inserter_config.engine;
         for (clickhouse_table_name, nullable_flags, rows) in prepared {
             let client = self.client.clone();
             let max_bytes = self.inserter_config.max_bytes_per_insert;
 
-            join_set.spawn(async move {
+            tasks.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
                     .map(|PendingRow { operation, sequence_key, cells }| {
@@ -1714,11 +1714,7 @@ where
             });
         }
 
-        while let Some(result) = join_set.join_next().await {
-            result.map_err(
-                |err| etl_error!(ErrorKind::ApplyWorkerPanic, "Insert task failed", source: err),
-            )??;
-        }
+        tasks.wait().await?;
 
         Ok(())
     }

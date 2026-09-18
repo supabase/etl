@@ -2,18 +2,19 @@
 
 use std::{future::Future, time::Duration};
 
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 use tokio_postgres::types::PgLsn;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
-    error::EtlResult,
+    error::{EtlError, EtlResult},
     postgres::{FeedbackHandle, OutOfBandSourcePool},
     replication::{WorkerType, apply::tasks::schema_cleanup::SchemaCleanupRequest},
     schema::{SnapshotId, TableId},
     store::SchemaStore,
+    task::{abort_and_join, abort_and_join_result},
 };
 
-mod feedback;
 mod replication_lag;
 mod schema_cleanup;
 
@@ -25,13 +26,13 @@ pub(super) struct ApplyLoopTasks {
     /// Independent channel handle for submitting safe replication progress.
     feedback_handle: FeedbackHandle,
     /// Sender for serialized background schema cleanup requests.
-    schema_cleanup_tx: Option<mpsc::Sender<SchemaCleanupRequest>>,
+    schema_cleanup_tx: mpsc::Sender<SchemaCleanupRequest>,
     /// Background worker that serially processes schema cleanup requests.
-    schema_cleanup_worker_task: JoinHandle<()>,
+    schema_cleanup_worker_task: AbortOnDropHandle<()>,
     /// Background replication lag sampler task owned by this apply loop.
-    replication_lag_metrics_task: JoinHandle<()>,
+    replication_lag_metrics_task: AbortOnDropHandle<()>,
     /// Sole feedback writer owned for the entire apply-loop invocation.
-    feedback_sender_task: JoinHandle<()>,
+    feedback_sender_task: AbortOnDropHandle<EtlResult<()>>,
 }
 
 impl ApplyLoopTasks {
@@ -59,11 +60,11 @@ impl ApplyLoopTasks {
             table_sync_monitor_refresh_interval,
         );
 
-        let feedback_sender_task = feedback::spawn_feedback_task(feedback_sender_future);
+        let feedback_sender_task = AbortOnDropHandle::new(tokio::spawn(feedback_sender_future));
 
         Self {
             feedback_handle,
-            schema_cleanup_tx: Some(schema_cleanup_tx),
+            schema_cleanup_tx,
             schema_cleanup_worker_task,
             replication_lag_metrics_task,
             feedback_sender_task,
@@ -88,34 +89,25 @@ impl ApplyLoopTasks {
         table_id: TableId,
         retention_snapshot_id: SnapshotId,
     ) -> bool {
-        schema_cleanup::try_queue(self.schema_cleanup_tx.as_ref(), table_id, retention_snapshot_id)
+        schema_cleanup::try_queue(&self.schema_cleanup_tx, table_id, retention_snapshot_id)
     }
 
-    /// Stops and joins all owned background tasks, logging any failures.
+    /// Stops and joins owned background tasks until the first failure.
     ///
     /// Feedback and sampling can stop immediately. Closing the cleanup queue
-    /// lets the worker finish accepted requests before it exits. Task failures
-    /// never replace the apply loop's result, including during error recovery.
-    pub(super) async fn teardown(&mut self, worker_type: WorkerType) {
+    /// lets the worker finish accepted requests before it exits. A failure
+    /// returns immediately; remaining handles request cancellation on drop.
+    pub(super) async fn teardown(self) -> EtlResult<()> {
         // No final feedback is needed: persisted checkpoints govern replay.
         self.feedback_sender_task.abort();
         self.replication_lag_metrics_task.abort();
-        self.schema_cleanup_tx.take();
+        drop(self.schema_cleanup_tx);
 
-        feedback::join(&mut self.feedback_sender_task).await;
-        replication_lag::join(&mut self.replication_lag_metrics_task).await;
-        schema_cleanup::join(&mut self.schema_cleanup_worker_task, worker_type).await;
-    }
-}
+        abort_and_join_result(self.feedback_sender_task).await?;
+        abort_and_join(self.replication_lag_metrics_task).await?;
+        self.schema_cleanup_worker_task.await.map_err(EtlError::from)?;
 
-impl Drop for ApplyLoopTasks {
-    fn drop(&mut self) {
-        // Cancellation or panic can skip or interrupt async teardown. Abort
-        // every task; interrupted cleanup only prunes obsolete schemas and can
-        // be retried.
-        self.feedback_sender_task.abort();
-        self.replication_lag_metrics_task.abort();
-        self.schema_cleanup_worker_task.abort();
+        Ok(())
     }
 }
 
@@ -129,15 +121,13 @@ mod tests {
         sync::{mpsc, oneshot},
         task::JoinHandle,
     };
+    use tokio_util::task::AbortOnDropHandle;
 
     use crate::{
         error::{ErrorKind, EtlResult},
         etl_error,
         postgres::FeedbackHandle,
-        replication::{
-            WorkerType,
-            apply::tasks::{ApplyLoopTasks, feedback},
-        },
+        replication::apply::tasks::ApplyLoopTasks,
         schema::{SnapshotId, TableId},
     };
 
@@ -153,48 +143,31 @@ mod tests {
     /// Creates background tasks for testing apply-loop ownership and teardown.
     fn test_apply_loop_tasks(
         feedback_handle: FeedbackHandle,
-        feedback_sender_task: JoinHandle<()>,
+        feedback_sender_task: JoinHandle<EtlResult<()>>,
     ) -> ApplyLoopTasks {
         let (cleanup_tx, mut cleanup_rx) = mpsc::channel(1);
         ApplyLoopTasks {
             feedback_handle,
-            schema_cleanup_tx: Some(cleanup_tx),
-            schema_cleanup_worker_task: tokio::spawn(async move {
+            schema_cleanup_tx: cleanup_tx,
+            schema_cleanup_worker_task: AbortOnDropHandle::new(tokio::spawn(async move {
                 while cleanup_rx.recv().await.is_some() {}
-            }),
-            replication_lag_metrics_task: tokio::spawn(std::future::pending()),
-            feedback_sender_task,
+            })),
+            replication_lag_metrics_task: AbortOnDropHandle::new(tokio::spawn(
+                std::future::pending(),
+            )),
+            feedback_sender_task: AbortOnDropHandle::new(feedback_sender_task),
         }
     }
 
     /// Spawns a task whose cancellation is observable without timing
     /// assumptions.
-    fn pending_background_task() -> (JoinHandle<()>, oneshot::Receiver<()>) {
+    fn pending_background_task<T: Send + 'static>() -> (JoinHandle<T>, oneshot::Receiver<()>) {
         let (lifetime_tx, lifetime_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _lifetime = lifetime_tx;
-            std::future::pending::<()>().await;
+            std::future::pending::<T>().await
         });
         (task, lifetime_rx)
-    }
-
-    /// Cancellation must not detach any background task from its apply loop.
-    #[tokio::test]
-    async fn dropping_apply_loop_tasks_aborts_all_background_tasks() {
-        let (schema_cleanup_worker_task, cleanup_lifetime_rx) = pending_background_task();
-        let (replication_lag_metrics_task, sampler_lifetime_rx) = pending_background_task();
-        let (feedback_sender_task, feedback_lifetime_rx) = pending_background_task();
-        let tasks = ApplyLoopTasks {
-            feedback_handle: closed_feedback_handle(),
-            schema_cleanup_tx: None,
-            schema_cleanup_worker_task,
-            replication_lag_metrics_task,
-            feedback_sender_task,
-        };
-        drop(tasks);
-        assert!(feedback_lifetime_rx.await.is_err());
-        assert!(cleanup_lifetime_rx.await.is_err());
-        assert!(sampler_lifetime_rx.await.is_err());
     }
 
     /// Teardown joins cancelled feedback and sampler tasks and drains cleanup.
@@ -210,27 +183,30 @@ mod tests {
             release_rx.await.unwrap();
             assert!(cleanup_rx.recv().await.is_none());
         });
-        let mut tasks = ApplyLoopTasks {
+        let tasks = ApplyLoopTasks {
             feedback_handle: closed_feedback_handle(),
-            schema_cleanup_tx: Some(cleanup_tx),
-            schema_cleanup_worker_task,
-            replication_lag_metrics_task,
-            feedback_sender_task,
+            schema_cleanup_tx: cleanup_tx,
+            schema_cleanup_worker_task: AbortOnDropHandle::new(schema_cleanup_worker_task),
+            replication_lag_metrics_task: AbortOnDropHandle::new(replication_lag_metrics_task),
+            feedback_sender_task: AbortOnDropHandle::new(feedback_sender_task),
         };
         assert!(
             tasks
                 .try_queue_schema_cleanup(TableId::new(1), SnapshotId::new(100.into(), 90.into()),)
         );
-        let mut teardown = Box::pin(tasks.teardown(WorkerType::Apply));
+        let task_handles = [
+            tasks.feedback_sender_task.abort_handle(),
+            tasks.replication_lag_metrics_task.abort_handle(),
+            tasks.schema_cleanup_worker_task.abort_handle(),
+        ];
+        let mut teardown = Box::pin(tasks.teardown());
         assert!(teardown.as_mut().now_or_never().is_none());
         assert!(feedback_lifetime_rx.await.is_err());
         assert!(sampler_lifetime_rx.await.is_err());
         assert!(teardown.as_mut().now_or_never().is_none());
         release_tx.send(()).unwrap();
-        teardown.await;
-        assert!(tasks.feedback_sender_task.is_finished());
-        assert!(tasks.replication_lag_metrics_task.is_finished());
-        assert!(tasks.schema_cleanup_worker_task.is_finished());
+        teardown.await.unwrap();
+        assert!(task_handles.iter().all(tokio::task::AbortHandle::is_finished));
     }
 
     /// Cancellation during graceful teardown must still abort unfinished
@@ -240,60 +216,77 @@ mod tests {
         let (feedback_sender_task, feedback_lifetime_rx) = pending_background_task();
         let (replication_lag_metrics_task, sampler_lifetime_rx) = pending_background_task();
         let (schema_cleanup_worker_task, cleanup_lifetime_rx) = pending_background_task();
-        let mut tasks = ApplyLoopTasks {
+        let tasks = ApplyLoopTasks {
             feedback_handle: closed_feedback_handle(),
-            schema_cleanup_tx: None,
-            schema_cleanup_worker_task,
-            replication_lag_metrics_task,
-            feedback_sender_task,
+            schema_cleanup_tx: mpsc::channel(1).0,
+            schema_cleanup_worker_task: AbortOnDropHandle::new(schema_cleanup_worker_task),
+            replication_lag_metrics_task: AbortOnDropHandle::new(replication_lag_metrics_task),
+            feedback_sender_task: AbortOnDropHandle::new(feedback_sender_task),
         };
 
-        let mut teardown = Box::pin(tasks.teardown(WorkerType::Apply));
+        let mut teardown = Box::pin(tasks.teardown());
         assert!(teardown.as_mut().now_or_never().is_none());
         assert!(feedback_lifetime_rx.await.is_err());
         assert!(sampler_lifetime_rx.await.is_err());
         assert!(teardown.as_mut().now_or_never().is_none());
         drop(teardown);
-        drop(tasks);
         assert!(cleanup_lifetime_rx.await.is_err());
     }
 
-    /// Feedback failure makes subsequent submissions retryable without failing
-    /// teardown or preventing it from joining the other tasks.
+    /// Feedback failure propagates while remaining background tasks are
+    /// dropped.
     #[tokio::test]
-    async fn apply_loop_teardown_tolerates_feedback_failures() {
+    async fn apply_loop_teardown_propagates_feedback_failures() {
         let (closed_tx, closed_rx) = mpsc::channel::<()>(1);
         let sink = Box::pin(futures::sink::unfold(closed_rx, |receiver, _: Bytes| async move {
             let _receiver = receiver;
             Err(etl_error!(ErrorKind::SourceConnectionFailed, "Test feedback failure"))
         }));
         let (handle, sender) = FeedbackHandle::create(sink, Duration::from_secs(10));
-        let mut tasks = test_apply_loop_tasks(handle, feedback::spawn_feedback_task(sender));
+        let tasks = test_apply_loop_tasks(handle, tokio::spawn(sender));
         tasks.enqueue_status_update(100.into(), 80.into(), true).await.unwrap();
         closed_tx.closed().await;
         assert_eq!(
             tasks.enqueue_status_update(100.into(), 80.into(), true).await.unwrap_err().kind(),
             ErrorKind::ReplicationFeedbackUnavailable,
         );
-        tasks.teardown(WorkerType::Apply).await;
-        assert!(tasks.feedback_sender_task.is_finished());
-        assert!(tasks.replication_lag_metrics_task.is_finished());
-        assert!(tasks.schema_cleanup_worker_task.is_finished());
+        let task_handles = [
+            tasks.feedback_sender_task.abort_handle(),
+            tasks.replication_lag_metrics_task.abort_handle(),
+            tasks.schema_cleanup_worker_task.abort_handle(),
+        ];
+        assert!(tasks.teardown().await.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !task_handles.iter().all(tokio::task::AbortHandle::is_finished) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
-    /// A feedback task panic does not make teardown fail or skip other tasks.
+    /// A feedback task panic drops the remaining background tasks.
     #[tokio::test]
-    async fn apply_loop_teardown_tolerates_feedback_panic() {
+    async fn apply_loop_teardown_propagates_feedback_panic() {
         let (closed_tx, closed_rx) = mpsc::channel::<()>(1);
-        let task = feedback::spawn_feedback_task(async move {
+        let task = tokio::spawn(async move {
             let _receiver = closed_rx;
             panic!("Test feedback task panic");
         });
-        let mut tasks = test_apply_loop_tasks(closed_feedback_handle(), task);
+        let tasks = test_apply_loop_tasks(closed_feedback_handle(), task);
         closed_tx.closed().await;
-        tasks.teardown(WorkerType::Apply).await;
-        assert!(tasks.feedback_sender_task.is_finished());
-        assert!(tasks.replication_lag_metrics_task.is_finished());
-        assert!(tasks.schema_cleanup_worker_task.is_finished());
+        let task_handles = [
+            tasks.feedback_sender_task.abort_handle(),
+            tasks.replication_lag_metrics_task.abort_handle(),
+            tasks.schema_cleanup_worker_task.abort_handle(),
+        ];
+        assert!(tasks.teardown().await.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !task_handles.iter().all(tokio::task::AbortHandle::is_finished) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

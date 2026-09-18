@@ -363,6 +363,17 @@ the object to remove. See [Extension Points](/explanation/traits/#destination)
 for deferred `Accepted` writes, copy batch IDs, empty durability barriers, and
 startup/shutdown hooks.
 
+The example runs HTTP event writes in a `TaskRegistry` so `write_events()` can
+return promptly and the apply loop can keep progressing. Each task owns only
+its client, URL, payload, and result handle; it does not capture the registry.
+The destination drains those tasks in `shutdown()` after workers complete
+successfully. A worker failure skips this hook; dropping the destination's last
+registry owner requests cancellation without waiting. A panic during draining
+also returns immediately and drops remaining task handles. Copy writes remain
+inline because ETL already runs copy partitions in separate workers. They can be
+cancelled mid-request, so the remote `drop-for-copy` endpoint must ensure that
+requests from an earlier copy cannot modify the replacement table.
+
 ```rust title="src/http_destination.rs" lineNumbers
 use reqwest::Client;
 use serde_json::json;
@@ -374,6 +385,7 @@ use etl::destination::{
     TableCopyBatchId, WriteEventsResult, WriteTableRowsResult,
 };
 use etl::error::{ErrorKind, EtlResult};
+use etl::task::TaskRegistry;
 use etl::{data::TableRow, event::Event, schema::ReplicatedTableSchema};
 use etl::{bail, etl_error};
 
@@ -381,6 +393,7 @@ use etl::{bail, etl_error};
 pub struct HttpDestination {
     client: Client,
     base_url: String,
+    tasks: TaskRegistry,
 }
 
 impl HttpDestination {
@@ -389,14 +402,12 @@ impl HttpDestination {
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| etl_error!(ErrorKind::Unknown, "HTTP client error", source: e))?;
-        Ok(Self { client, base_url })
+        Ok(Self { client, base_url, tasks: TaskRegistry::new() })
     }
 
-    async fn post(&self, path: &str, body: serde_json::Value) -> EtlResult<()> {
-        let url = format!("{}/{}", self.base_url.trim_end_matches('/'), path);
-
+    async fn post(client: &Client, url: &str, body: serde_json::Value) -> EtlResult<()> {
         for attempt in 1..=3 {
-            match self.client.post(&url).json(&body).send().await {
+            match client.post(url).json(&body).send().await {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
                 Ok(resp) if resp.status().is_client_error() => {
                     bail!(ErrorKind::Unknown, "Client error", resp.status());
@@ -417,6 +428,11 @@ impl Destination for HttpDestination {
         "http"
     }
 
+    async fn shutdown(&self) -> EtlResult<()> {
+        let _guard = self.tasks.drain().await?;
+        Ok(())
+    }
+
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -424,9 +440,8 @@ impl Destination for HttpDestination {
     ) -> EtlResult<()> {
         let table_name = replicated_table_schema.name().to_string();
         info!("dropping table before copy {}", table_name);
-        let result = self
-            .post(&format!("tables/{table_name}/drop-for-copy"), json!({}))
-            .await;
+        let url = format!("{}/tables/{table_name}/drop-for-copy", self.base_url.trim_end_matches('/'));
+        let result = Self::post(&self.client, &url, json!({})).await;
         async_result.send(result);
         Ok(())
     }
@@ -456,8 +471,8 @@ impl Destination for HttpDestination {
             }).collect::<Vec<_>>()
         });
 
-        let result = self
-            .post("rows", payload)
+        let url = format!("{}/rows", self.base_url.trim_end_matches('/'));
+        let result = Self::post(&self.client, &url, payload)
             .await
             .map(|_| DestinationWriteStatus::Durable);
         async_result.send(result);
@@ -471,7 +486,7 @@ impl Destination for HttpDestination {
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
         if events.is_empty() {
-            // This immediate destination never returns Accepted, so it has no
+            // This destination never returns Accepted, so it has no
             // earlier ongoing-replication durability debt to settle.
             async_result.send(Ok(DestinationWriteStatus::Durable));
             return Ok(());
@@ -493,8 +508,13 @@ impl Destination for HttpDestination {
             }).collect::<Vec<_>>()
         });
 
-        let result = self.post("events", payload).await;
-        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+        let client = self.client.clone();
+        let url = format!("{}/events", self.base_url.trim_end_matches('/'));
+        self.tasks.try_reap().await?;
+        self.tasks.spawn(async move {
+            let result = Self::post(&client, &url, payload).await;
+            async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+        }).await;
         Ok(())
     }
 }
@@ -570,7 +590,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Starting pipeline...");
     let mut pipeline = Pipeline::new(config, store, destination);
     pipeline.start().await?;
-    pipeline.wait().await?;
+
+    // Keep the same completion future alive while requesting shutdown.
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+    tokio::select! {
+        result = &mut pipeline_wait => result?,
+
+        signal = tokio::signal::ctrl_c() => {
+            pipeline.shutdown();
+            pipeline_wait.await?;
+            signal?;
+        }
+    }
 
     Ok(())
 }
