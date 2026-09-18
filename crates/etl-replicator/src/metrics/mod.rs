@@ -21,20 +21,17 @@ pub(crate) struct MetricsTaskHandles {
 }
 
 impl MetricsTaskHandles {
-    /// Aborts all metrics tasks and waits for them to stop.
+    /// Aborts all metrics tasks and joins them until the first failure.
     pub(crate) async fn abort_and_wait(self) -> EtlResult<()> {
         for handle in &self.handles {
             handle.abort();
         }
 
-        let mut errors = Vec::new();
         for handle in self.handles {
-            if let Err(error) = abort_and_join(handle).await {
-                errors.push(error);
-            }
+            abort_and_join(handle).await?;
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
+        Ok(())
     }
 }
 
@@ -55,16 +52,16 @@ mod tests {
 
     use crate::metrics::MetricsTaskHandles;
 
-    /// A panic is returned after the other metrics tasks have stopped.
+    /// A panic drops the remaining metrics handles without awaiting them.
     #[tokio::test]
-    async fn metrics_shutdown_reports_panic_after_joining_siblings() {
+    async fn metrics_shutdown_failure_drops_siblings() {
         let (panic_tx, panic_rx) = oneshot::channel::<()>();
         let panicking = tokio::spawn(async move {
             let _lifetime = panic_tx;
             panic!("Test metrics task panic");
         });
         assert!(panic_rx.await.is_err());
-        let (lifetime_tx, mut lifetime_rx) = oneshot::channel::<()>();
+        let (lifetime_tx, lifetime_rx) = oneshot::channel::<()>();
         let pending = tokio::spawn(async move {
             let _lifetime = lifetime_tx;
             std::future::pending::<()>().await;
@@ -74,6 +71,6 @@ mod tests {
         };
 
         assert!(tasks.abort_and_wait().await.is_err());
-        assert_eq!(lifetime_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+        assert!(lifetime_rx.await.is_err());
     }
 }

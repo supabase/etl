@@ -432,22 +432,12 @@ where
                 let mut join_set = TaskGroup::new();
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
-                    let preparation_result = {
+                    let (namespace, iceberg_table_name) = {
                         // We hold the lock for the entire preparation to avoid
                         // race conditions since the consistency of this code
                         // path is critical.
                         let mut inner = self.inner.lock().await;
-                        self.prepare_table_for_writes(&mut inner, &replicated_table_schema).await
-                    };
-
-                    let (namespace, iceberg_table_name) = match preparation_result {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            return Err(match join_set.shutdown().await {
-                                Ok(()) => error,
-                                Err(cleanup_error) => vec![error, cleanup_error].into(),
-                            });
-                        }
+                        self.prepare_table_for_writes(&mut inner, &replicated_table_schema).await?
                     };
 
                     let client = self.client.clone();

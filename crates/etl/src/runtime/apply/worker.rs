@@ -184,17 +184,13 @@ where
             "retrying apply worker after timed-retriable error",
         );
 
-        tokio::select! {
-            biased;
+        if with_shutdown!(tokio::time::sleep(sleep_duration), shutdown_token).should_shutdown() {
+            info!("shutting down apply worker while waiting to retry");
 
-            _ = shutdown_token.cancelled() => {
-                info!("shutting down apply worker while waiting to retry");
-
-                Ok(true)
-            }
-
-            _ = tokio::time::sleep(sleep_duration) => Ok(false)
+            return Ok(true);
         }
+
+        Ok(false)
     }
 
     /// Spawns the apply worker and returns a handle for monitoring.

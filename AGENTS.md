@@ -240,56 +240,45 @@ mutability. Name long-running async work.
 
 ### Task ownership and shutdown
 
-Follow [Tokio's shutdown model](https://tokio.rs/tokio/topics/shutdown): stop
-work, then join it before returning or reusing its resources.
+Controlled teardown stops work and joins tasks. Silently accept requested
+cancellations; propagate panics, task errors, and unexpected cancellations
+immediately. On failure, drop remaining owned handles without awaiting secondary
+cleanup. Recovery correctness still applies: never checkpoint unfinished work.
 
-- **Ownership:** the spawner owns teardown unless it explicitly transfers
-  ownership. Use `AbortOnDropHandle` in production and `JoinSet` for groups;
-  ordinary `JoinHandle`s are fine in tests and benchmarks.
-- **Cooperative work:** use a token or existing channel closure when work needs
-  ordered cleanup. Stop producers, drain pending work, then join. Use
-  `with_shutdown!(future, token)` only for simple cancellation-safe waits: it
-  preserves the output or returns `ShutdownResult::Shutdown(())` by dropping
-  the future. Keep coordinated cleanup explicit.
-- **Signals:** only `Pipeline::shutdown()` cancels the shared token. Pass it to
-  coordinating owners, not every child. Components return failures to their
-  owners; destinations must not handle process signals independently.
-- **Apply:** an exit intent stops intake; normal exit waits for buffered batches
-  and pending write results. Preserve existing deadlines, durability and error
-  policies. Do not force early flushes or abort in-flight apply writes.
-- **Destination calls:** `write_events` should dispatch long-running writes to
-  owned tasks or queues and return promptly so the apply loop can keep running.
-  `write_table_rows` may write inline: copy partitions already have their own
-  tasks and each awaits its result before reading another batch.
-- **Copy and startup:** copy is replayable; its owner aborts and joins children
-  before releasing the snapshot. Keep replayable copy waits, including the final
-  empty write and its result, cancellable for prompt shutdown. Apply coordination
-  waits must also observe shutdown when a stopped worker may never publish the
-  awaited state; this does not make apply writes safe to cancel. Cancel pending
-  startup separately from apply draining, and shut down constructed destinations
-  even if startup never finished.
-- **Disposable tasks:** use `abort_and_join` for timers, samplers and monitors.
-  Keep memory sampling alive until workers and the destination have drained,
-  then abort and join it. Extra shutdown channels are unnecessary.
-- **Groups and errors:** use `TaskGroup` for fallible children; failure aborts
-  and joins siblings. Use `TaskRegistry` for shared destination tasks, and
-  `JoinSet::shutdown()` only when results may be discarded. Preserve errors and
-  sources; unexpected join failures are `TaskPanic` or `TaskCancelled`, with
-  worker-specific kinds at worker boundaries. Owner-requested aborts are normal
-  cleanup. A failure must not skip remaining joins. Reap destination tasks during
-  operation; retain table-sync results for the final wait.
-- **Drop and detach:** drop only requests abort; never block or spawn cleanup
-  from `Drop`. Separate handles from shared task data to avoid ownership cycles;
-  existing destination/registry cycles require explicit shutdown. Detach only
-  with a documented lifetime that ensures termination. Prove channel closure
-  ends the task, and document any eventual termination without a join.
-- **Native work:** started `spawn_blocking` work ignores abort. Keep resource
-  guards and native interruption/deadlines alive until it exits, even if its
-  async caller is cancelled. Joining an outer task does not prove native work
-  or remote writes finished.
-- **Style and tests:** leave a blank line after `biased;` and between `select!`
-  branches. Test lifecycle boundaries and error propagation using channels or
-  state barriers; avoid tests that merely repeat Tokio's handle behavior.
+- **Ownership:** the spawner owns teardown unless ownership is transferred.
+  Use `AbortOnDropHandle`, `TaskGroup` for fallible children, and `TaskRegistry`
+  for shared destination tasks. Transfer handles into completion futures so
+  early returns drop them even if the outer owner survives. Use
+  `JoinSet::shutdown()` only when task results may be discarded.
+- **Signals and waits:** the pipeline owns the shared cancellation token;
+  destinations do not handle process signals. Use `with_shutdown!` only for
+  cancellation-safe waits. Keep a running pipeline's pinned completion future
+  alive when requesting shutdown, then await it to finish cleanup.
+- **Apply:** stop intake and drain buffered batches and pending write results
+  under existing deadlines, durability, and error policies. Do not force early
+  flushes or cancel in-flight apply writes. Coordination waits must observe
+  shutdown when a stopping worker may never publish the awaited state.
+- **Copy and startup:** initial sync is replayable. Keep copy waits, including
+  the final empty write and its result, cancellable. On controlled shutdown,
+  abort and join copy children before releasing the snapshot. Cancel startup
+  separately from apply draining; clean up constructed destinations when a
+  signal cancels startup. Startup errors return immediately.
+- **Destination calls:** `write_events` should dispatch long-running writes and
+  return promptly. `write_table_rows` may write inline: each copy partition has
+  its own task and waits for the result before reading another batch.
+- **Background work:** use `abort_and_join` for disposable tasks and
+  `abort_and_join_result` for tasks returning `EtlResult<()>`. Keep memory
+  sampling alive until workers and destination cleanup finish. Reap destination
+  tasks during operation; retain table-sync results for the final wait.
+- **Drop and native work:** dropping handles requests abort; it does not undo
+  remote writes or stop started `spawn_blocking` work. Keep native guards and
+  interruption/deadlines alive until that work exits. Avoid ownership cycles;
+  existing destination/registry cycles still require explicit cleanup. Never
+  block or spawn cleanup from `Drop`. Detached tasks need a documented lifetime
+  and termination mechanism, such as client/observer channel closure.
+- **Tests:** use channels or state barriers to test lifecycle boundaries and
+  error propagation, rather than repeating Tokio's handle behavior. Leave a
+  blank line after `biased;` and between `select!` branches.
 
 ## Docs, metrics, logs
 

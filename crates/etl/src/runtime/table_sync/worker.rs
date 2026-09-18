@@ -459,15 +459,14 @@ where
 
                     // Stop retrying immediately on shutdown instead of sleeping
                     // through it.
-                    tokio::select! {
-                        biased;
-
-                        _ = shutdown_token.cancelled() => {
-                            info!(table_id = table_id.0, "shutting down table sync worker while waiting to retry");
-                            should_shutdown = true;
-                        }
-
-                        _ = tokio::time::sleep(sleep_duration) => {}
+                    should_shutdown =
+                        with_shutdown!(tokio::time::sleep(sleep_duration), shutdown_token)
+                            .should_shutdown();
+                    if should_shutdown {
+                        info!(
+                            table_id = table_id.0,
+                            "shutting down table sync worker while waiting to retry"
+                        );
                     }
 
                     // We lock the state again after sleeping.
@@ -655,22 +654,17 @@ where
         // the number of table sync workers running in parallel which in turn
         // helps limit the max number of concurrent connections to the source
         // database.
-        let _permit = tokio::select! {
-            biased;
+        let ShutdownResult::Ok(permit) =
+            with_shutdown!(Arc::clone(&self.run_permit).acquire_owned(), self.shutdown_token)
+        else {
+            info!(
+                table_id = self.table_id.0,
+                "shutting down table sync worker while waiting for a run permit"
+            );
 
-            _ = self.shutdown_token.cancelled() => {
-                info!(table_id = self.table_id.0, "shutting down table sync worker while waiting for a run permit");
-
-                return Ok(TableSyncWorkerResult::Shutdown);
-            }
-
-            // We use `acquired_owned` for better semantics over `acquire` since
-            // we want to own the permit in this future.
-            permit = Arc::clone(&self.run_permit).acquire_owned() => {
-                permit
-            }
-        }
-        .map_err(|err| {
+            return Ok(TableSyncWorkerResult::Shutdown);
+        };
+        let _permit = permit.map_err(|err| {
             etl_error!(
                 ErrorKind::InvalidState,
                 "Table sync worker semaphore closed while acquiring run permit",

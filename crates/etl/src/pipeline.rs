@@ -33,6 +33,18 @@ use crate::{
 /// components.
 pub type PipelineId = u64;
 
+/// Task ownership transferred together so a failed or cancelled wait drops
+/// every remaining pipeline-owned handle.
+#[derive(Debug)]
+struct PipelineTasks {
+    /// Handle for the running apply worker.
+    apply_worker: ApplyWorkerHandle,
+    /// Pool that owns all table sync worker tasks.
+    pool: Arc<TableSyncWorkerPool>,
+    /// Sampler owned independently of the readings shared with workers.
+    memory_monitor_task: AbortOnDropHandle<()>,
+}
+
 /// Internal state tracking for pipeline lifecycle.
 ///
 /// Tracks whether the pipeline has been started and maintains handles to
@@ -41,14 +53,10 @@ pub type PipelineId = u64;
 enum PipelineState {
     /// Pipeline has been created but not yet started.
     NotStarted,
-    /// Pipeline is running with active workers.
+    /// Pipeline has started; its tasks may have moved to the completion waiter.
     Started {
-        /// Handle for the running apply worker.
-        apply_worker: Mutex<Option<ApplyWorkerHandle>>,
-        /// Pool that owns all table sync worker tasks.
-        pool: Arc<TableSyncWorkerPool>,
-        /// Sampler owned independently of the readings shared with workers.
-        memory_monitor_task: Mutex<Option<AbortOnDropHandle<()>>>,
+        /// Resources transferred to the first completion waiter.
+        tasks: Mutex<Option<PipelineTasks>>,
     },
 }
 
@@ -206,9 +214,7 @@ where
         .spawn();
 
         self.state = PipelineState::Started {
-            apply_worker: Mutex::new(Some(apply_worker)),
-            pool,
-            memory_monitor_task: Mutex::new(Some(memory_monitor_task)),
+            tasks: Mutex::new(Some(PipelineTasks { apply_worker, pool, memory_monitor_task })),
         };
 
         Ok(())
@@ -216,77 +222,44 @@ where
 
     /// Waits for the pipeline to complete all processing and terminate.
     ///
-    /// This method blocks until both the apply worker and all table sync
-    /// workers have finished their work. If the pipeline was never started,
-    /// this returns immediately. If any workers encounter errors, those errors
-    /// are collected and returned.
+    /// If the pipeline was never started, this returns immediately. After
+    /// startup, only one waiter can take ownership of its tasks. This method
+    /// borrows the pipeline so its owner can request shutdown while waiting.
     ///
-    /// This method may be called once after startup. It borrows the pipeline
-    /// so the owner can call [`Pipeline::shutdown`] while waiting.
-    /// Await it to completion for graceful cleanup: cancelling this future
-    /// aborts the apply worker and skips the remaining asynchronous teardown.
-    /// Other workers remain owned by the pipeline until it is dropped.
-    ///
-    /// The wait process ensures proper shutdown ordering:
-    /// 1. Apply worker completes first (may spawn additional table sync
-    ///    workers)
-    /// 2. All table sync workers complete
-    /// 3. Any errors from workers are aggregated and returned
-    /// 4. Background pipeline tasks complete after shutdown
+    /// Joins apply and table sync workers, shuts down the destination, then
+    /// stops memory sampling. Requested aborts are silently accepted; panics,
+    /// task errors, and unexpected cancellations return immediately. On failure
+    /// or cancellation of this future, remaining owned handles request abort
+    /// on drop without awaiting further cleanup. Destination-owned resources,
+    /// including ownership cycles, may still require explicit teardown.
     pub async fn wait(&self) -> EtlResult<()> {
-        let PipelineState::Started { apply_worker, pool, memory_monitor_task } = &self.state else {
+        let PipelineState::Started { tasks } = &self.state else {
             warn!("pipeline was not started, skipping wait");
             return Ok(());
         };
-        let Some(apply_worker) = apply_worker.lock().await.take() else {
+        let Some(PipelineTasks { apply_worker, pool, memory_monitor_task }) =
+            tasks.lock().await.take()
+        else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
         };
+        // Cancellation must reach workers even when an error or a dropped
+        // waiter skips the successful teardown sequence.
+        let _shutdown_guard = self.shutdown_token.clone().drop_guard();
 
-        let mut errors = vec![];
-
-        // We first wait for the apply worker to finish, since that must be done
-        // before waiting for the table sync workers to finish, otherwise if we
-        // wait for sync workers first, we might be having the apply worker that
-        // spawns new sync workers after we waited for the current ones to
-        // finish.
+        // The apply worker may spawn table sync workers until it exits.
         debug!("waiting for apply worker to complete");
-        let apply_worker_result = apply_worker.wait().await;
-        if let Err(err) = apply_worker_result {
-            errors.push(err);
-        }
-
-        // No worker should outlive the apply worker, including when it exits
-        // without an explicit shutdown request.
+        apply_worker.wait().await?;
         self.shutdown();
 
-        // We wait for all table sync workers to finish.
         debug!("waiting for table sync workers to complete");
-        let table_sync_workers_result = pool.wait_all().await;
-        if let Err(err) = table_sync_workers_result {
-            errors.push(err);
-        }
+        pool.wait_all().await?;
 
-        // Once all workers completed, we notify the destination of shutting
-        // down.
         debug!("waiting for destination shutdown to complete");
-        if let Err(err) = self.destination.shutdown().await {
-            warn!("destination shutdown failed, collecting errors");
+        self.destination.shutdown().await?;
 
-            errors.push(err);
-        }
-
-        // Consumers need fresh readings while draining. Join the sampler last,
-        // including when earlier cleanup failed.
+        // Consumers need fresh readings until workers and destination drain.
         debug!("waiting for memory monitor to complete");
-        if let Some(task) = memory_monitor_task.lock().await.take()
-            && let Err(error) = abort_and_join(task).await
-        {
-            errors.push(error);
-        }
-
-        if !errors.is_empty() {
-            return Err(errors.into());
-        }
+        abort_and_join(memory_monitor_task).await?;
 
         Ok(())
     }

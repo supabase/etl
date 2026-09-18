@@ -29,13 +29,13 @@ pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
 
-    /// Propagates the shutdown signal to the destination.
+    /// Finishes destination-owned work and releases resources during shutdown.
     ///
-    /// Override this method if the destination needs cleanup or bookkeeping
-    /// during shutdown. Background streaming destinations should use it to stop
-    /// writer loops and drain or drop outstanding work. ETL calls this method
-    /// at most once for a destination instance, after it has stopped submitting
-    /// new work. The default implementation is a no-op.
+    /// Called after workers complete successfully; stop writer loops and finish
+    /// owned work here. Worker failures skip this hook, so resources also need
+    /// drop-based cancellation or explicit owner cleanup. Accept requested task
+    /// cancellations; propagate panics and task errors without awaiting
+    /// remaining tasks. The default implementation is a no-op.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -92,14 +92,11 @@ pub trait Destination {
     /// The method return value is reserved for immediate dispatch/setup
     /// failures before the work has been accepted.
     ///
-    /// Copy partitions already run in separate worker tasks, so implementations
-    /// may perform the write inline or dispatch it to owned background work.
-    /// Unless shutdown is requested, each worker awaits both this method and
-    /// its `async_result` before reading the next batch for that partition.
-    /// Offloading alone does not allow another batch while that result is
-    /// pending. Other copy workers can still write concurrently, up to the
-    /// configured copy parallelism. A resolved result may report `Accepted`
-    /// rather than durability, as described below.
+    /// Copy partitions run in separate tasks, so writes may run inline or be
+    /// offloaded. Each partition awaits this method and its `async_result`
+    /// before reading another batch, unless cancelled. Parallelism comes from
+    /// other copy workers; `Accepted` permits progress without proving
+    /// durability.
     ///
     /// [`crate::destination::DestinationWriteStatus::Durable`] means the batch
     /// and all earlier accepted writes it covers are durable.

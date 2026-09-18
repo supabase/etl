@@ -609,6 +609,50 @@ async fn pipeline_shutdown_while_waiting_propagates_destination_error() {
     assert_eq!(pipeline.wait().await.unwrap_err().kind(), ErrorKind::InvalidState);
 }
 
+/// Apply failure skips a stalled destination shutdown even if the caller
+/// retains the pipeline after waiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_failure_returns_without_destination_teardown() {
+    let mut database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+    let copied = store.notify_on_table_sync_complete(schema.users_schema().id).await;
+    let ready =
+        store.notify_on_table_state_type(schema.users_schema().id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+    insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+    ready.notified().await;
+
+    let held_shutdown = destination.hold_next(FaultyOp::Shutdown).await;
+    destination
+        .inject_fault(
+            FaultyOp::WriteEvents,
+            FaultAction::reject(ErrorKind::WithNoRetry, "Test apply failure"),
+        )
+        .await;
+    insert_users_data(&mut database, &schema.users_schema().name, 2..=2).await;
+
+    let error =
+        tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, pipeline.wait()).await.unwrap().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::WithNoRetry);
+    assert!(!destination.shutdown_called().await);
+    assert_eq!(pipeline.wait().await.unwrap_err().kind(), ErrorKind::InvalidState);
+    assert_eq!(pipeline.start().await.unwrap_err().kind(), ErrorKind::InvalidState);
+
+    // Destination-owned resources retain their explicit teardown contract.
+    held_shutdown.release_ok();
+    destination.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_errors_when_async_result_is_dropped() {
     init_test_tracing();

@@ -12,7 +12,7 @@ use crate::{
     replication::{WorkerType, apply::tasks::schema_cleanup::SchemaCleanupRequest},
     schema::{SnapshotId, TableId},
     store::SchemaStore,
-    task::abort_and_join,
+    task::{abort_and_join, abort_and_join_result},
 };
 
 mod replication_lag;
@@ -92,27 +92,22 @@ impl ApplyLoopTasks {
         schema_cleanup::try_queue(&self.schema_cleanup_tx, table_id, retention_snapshot_id)
     }
 
-    /// Stops and joins all owned background tasks, collecting failures.
+    /// Stops and joins owned background tasks until the first failure.
     ///
     /// Feedback and sampling can stop immediately. Closing the cleanup queue
-    /// lets the worker finish accepted requests before it exits. All tasks are
-    /// joined before failures are returned to the apply loop.
+    /// lets the worker finish accepted requests before it exits. A failure
+    /// returns immediately; remaining handles request cancellation on drop.
     pub(super) async fn teardown(self) -> EtlResult<()> {
         // No final feedback is needed: persisted checkpoints govern replay.
         self.feedback_sender_task.abort();
         self.replication_lag_metrics_task.abort();
         drop(self.schema_cleanup_tx);
 
-        let feedback_result = abort_and_join(self.feedback_sender_task)
-            .await
-            .and_then(|result| result.unwrap_or(Ok(())));
-        let sampler_result = abort_and_join(self.replication_lag_metrics_task).await.map(|_| ());
-        let cleanup_result = self.schema_cleanup_worker_task.await.map_err(EtlError::from);
-        let errors: Vec<_> = [feedback_result, sampler_result, cleanup_result]
-            .into_iter()
-            .filter_map(Result::err)
-            .collect();
-        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
+        abort_and_join_result(self.feedback_sender_task).await?;
+        abort_and_join(self.replication_lag_metrics_task).await?;
+        self.schema_cleanup_worker_task.await.map_err(EtlError::from)?;
+
+        Ok(())
     }
 }
 
@@ -238,7 +233,8 @@ mod tests {
         assert!(cleanup_lifetime_rx.await.is_err());
     }
 
-    /// Feedback failure propagates after all background tasks are joined.
+    /// Feedback failure propagates while remaining background tasks are
+    /// dropped.
     #[tokio::test]
     async fn apply_loop_teardown_propagates_feedback_failures() {
         let (closed_tx, closed_rx) = mpsc::channel::<()>(1);
@@ -260,10 +256,16 @@ mod tests {
             tasks.schema_cleanup_worker_task.abort_handle(),
         ];
         assert!(tasks.teardown().await.is_err());
-        assert!(task_handles.iter().all(tokio::task::AbortHandle::is_finished));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !task_handles.iter().all(tokio::task::AbortHandle::is_finished) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
-    /// A feedback task panic propagates without skipping other task joins.
+    /// A feedback task panic drops the remaining background tasks.
     #[tokio::test]
     async fn apply_loop_teardown_propagates_feedback_panic() {
         let (closed_tx, closed_rx) = mpsc::channel::<()>(1);
@@ -279,6 +281,12 @@ mod tests {
             tasks.schema_cleanup_worker_task.abort_handle(),
         ];
         assert!(tasks.teardown().await.is_err());
-        assert!(task_handles.iter().all(tokio::task::AbortHandle::is_finished));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !task_handles.iter().all(tokio::task::AbortHandle::is_finished) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

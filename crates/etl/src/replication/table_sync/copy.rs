@@ -211,16 +211,13 @@ fn partitions_for_table_weight(
     u16::try_from(partition_count).expect("clamped partition count should fit in u16")
 }
 
-/// Stops copy tasks and the monitor without discarding completed failures.
+/// Stops copy tasks and the monitor, returning the first failure.
 async fn stop_table_copy_tasks(
     tasks: &mut TaskGroup<TableCopyProgress>,
     monitor: TableSyncMonitor,
 ) -> EtlResult<()> {
-    let tasks_result = tasks.shutdown().await;
-    let monitor_result = monitor.stop().await;
-    let errors: Vec<_> =
-        [tasks_result, monitor_result].into_iter().filter_map(Result::err).collect();
-    if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
+    tasks.shutdown().await?;
+    monitor.stop().await
 }
 
 /// Copies a table by assigning physical ctid ranges to child-connection
@@ -302,26 +299,13 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         // This is needed since the snapshot exported by the replication
         // transaction is only valid while that transaction's connection is
         // active.
-        let child_result = tokio::select! {
-            biased;
-
-            _ = shutdown_token.cancelled() => {
-                stop_table_copy_tasks(&mut tasks, monitor).await?;
-                return Ok(TableCopyResult::Shutdown);
-            }
-
-            result = replication_transaction.fork_child() => result,
+        let ShutdownResult::Ok(child_replication_client) =
+            with_shutdown!(replication_transaction.fork_child(), shutdown_token)
+        else {
+            stop_table_copy_tasks(&mut tasks, monitor).await?;
+            return Ok(TableCopyResult::Shutdown);
         };
-        let child_replication_client = match child_result {
-            Ok(child_replication_client) => child_replication_client,
-            Err(error) => {
-                if let Err(stop_error) = stop_table_copy_tasks(&mut tasks, monitor).await {
-                    return Err(vec![error, stop_error].into());
-                }
-
-                return Err(error);
-            }
-        };
+        let child_replication_client = child_replication_client?;
 
         // Keep these values owned by each worker. They are small, and cloning
         // them avoids extra shared ownership machinery in the hot path.
@@ -336,23 +320,20 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
         let batch_memory_governor = batch_memory_governor.clone();
 
         let activity_handle = activity_handle.clone();
-        tasks.spawn(async move {
-            table_copy_worker(
-                activity_handle,
-                child_replication_client,
-                snapshot_id,
-                work_queue,
-                batch_id_generator,
-                table_id,
-                replicated_table_schema,
-                publication_name,
-                batch_config,
-                destination,
-                memory_monitor,
-                batch_memory_governor,
-            )
-            .await
-        });
+        tasks.spawn(table_copy_worker(
+            activity_handle,
+            child_replication_client,
+            snapshot_id,
+            work_queue,
+            batch_id_generator,
+            table_id,
+            replicated_table_schema,
+            publication_name,
+            batch_config,
+            destination,
+            memory_monitor,
+            batch_memory_governor,
+        ));
     }
 
     let mut progress = TableCopyProgress::default();
@@ -387,10 +368,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
                         slot_name, table_id.0
                     )
                 );
-                return Err(match stop_table_copy_tasks(&mut tasks, monitor).await {
-                    Ok(()) => error,
-                    Err(stop_error) => vec![error, stop_error].into(),
-                });
+                return Err(error);
             }
 
             result = tasks.join_next() => {
@@ -398,19 +376,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
                     break;
                 };
 
-                match result {
-                    Ok(worker_progress) => {
-                        progress.merge(worker_progress);
-                    }
-                    Err(error) => {
-                        if let Err(stop_error) = stop_table_copy_tasks(&mut tasks, monitor).await {
-                            return Err(vec![error, stop_error].into());
-                        }
-
-                        return Err(error);
-                    }
-
-                }
+                progress.merge(result?);
             }
         }
     }
@@ -652,7 +618,9 @@ where
 }
 
 /// Copies rows from a batched table-copy stream into the destination.
-/// The owning copy task group handles cancellation and joins this worker.
+///
+/// The owning task group cancels and joins workers on controlled shutdown;
+/// failures request cancellation without waiting.
 async fn table_copy_rows_from_stream<D, S>(
     activity_handle: &ActivityHandle,
     mut table_copy_stream: Pin<&mut S>,

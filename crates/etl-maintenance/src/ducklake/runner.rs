@@ -1426,21 +1426,13 @@ impl DuckDbMaintenanceExecutor {
             ),
         }
 
-        // Join both monitors before reporting completion, retaining operation
-        // and cleanup failures. The guards also cover cancellation
-        // during these joins.
-        let watchdog_result = watchdog_task.await.map_err(EtlError::from);
-        let abort_result = abort_task.await.map_err(EtlError::from);
-        match (blocking_result, watchdog_result, abort_result) {
-            (Ok(result), Ok(()), Ok(())) => Ok(result),
-            (result, watchdog_result, abort_result) => {
-                Err([result.map(|_| ()), watchdog_result, abort_result]
-                    .into_iter()
-                    .filter_map(Result::err)
-                    .collect::<Vec<_>>()
-                    .into())
-            }
-        }
+        // Native work has returned, so failed operations can drop their
+        // monitors.
+        let result = blocking_result?;
+        watchdog_task.await.map_err(EtlError::from)?;
+        abort_task.await.map_err(EtlError::from)?;
+
+        Ok(result)
     }
 }
 

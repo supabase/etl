@@ -34,44 +34,36 @@ See [DEVELOPMENT.md](../../DEVELOPMENT.md). Do not commit
 
 ## Shutdown
 
-SIGINT (Ctrl-C) and SIGTERM cancel pending asynchronous store, destination,
-and pipeline initialization. A constructed pipeline also shuts down its
-destination if initialization fails or is cancelled.
+SIGINT (Ctrl-C) and SIGTERM cancel pending asynchronous initialization. If a
+signal interrupts startup of a constructed pipeline, its destination is shut
+down. Initialization errors return immediately.
 
-After startup, signals request pipeline shutdown and await its existing
-completion future. WAL apply stops intake and drains pending writes. Initial
-copy aborts and joins its child tasks; an interrupted copy is redone on restart.
-Its final empty write and result wait are also interruptible until the copy is
-marked complete. Apply coordination waits observe shutdown so they do not wait
-for a state transition from a worker that is stopping; in-flight apply writes
-still drain.
-Background samplers are aborted and joined, and errors returned by workers or
-cleanup propagate to the process exit status. Existing error policies still
-apply: table errors can be recorded in the store, and shutdown during a timed
-retry wait ends that retry successfully. Memory sampling stays active while
-workers and the destination drain, then the pipeline aborts and joins its sampler.
-DuckLake does not handle process signals independently: native connections are
-interrupted by destination teardown after apply draining, or by query deadlines.
+After startup, signals request shutdown and await the existing pipeline
+completion future. WAL apply drains pending writes under its existing retry
+and durability rules; interrupted initial copies restart from a fresh snapshot.
+Workers finish before destination cleanup, then background samplers and the
+health server are stopped and joined. Memory sampling remains active during
+draining; enabled probes report unready while liveness stays healthy.
 
-When enabled, activity probes stay live and report unready during draining.
-The probe server is stopped and joined after pipeline teardown, including on
-initialization failure or cancellation.
+Requested task cancellations are silently accepted. The first worker or
+teardown failure returns immediately and drops remaining owned handles to
+request abort without awaiting further cleanup. Panics and unexpected
+cancellations remain failures. Existing table-error and retry policies still
+apply; uncheckpointed work is replayed after restart. A process restart does not
+clear persisted table errors, including a timed retry interrupted by shutdown.
 
-There is no internal grace-period timer or second-signal force-exit policy.
-An in-flight apply handler, inline initial-sync setup, or destination drain can
-delay shutdown. Kubernetes enforces its termination grace period with SIGKILL,
-which cannot run cleanup; restart recovery uses persisted progress and
-destination replay semantics.
-Aborting an async task also cannot undo a remote write or stop native work
-already running through `spawn_blocking`. DuckDB query interruption and deadline
-watchdogs survive cancellation of the async caller while the runtime is running.
-Runtime teardown stops polling async watchdogs and still waits for native work,
-including setup, to return; SIGKILL remains the external limit for a stuck process.
+There is no internal shutdown grace timer or second-signal force-exit policy.
+Destination or store operations can delay exit; Kubernetes supplies the external
+SIGKILL limit. Aborting tasks cannot undo remote writes or stop native work.
+DuckLake interruption belongs to destination teardown and query deadlines,
+not an independent signal handler. Its watchdogs survive caller cancellation
+but require a running async runtime; runtime teardown still waits for native
+work to return.
 
-Postgres connection drivers terminate through client/observer channel closure;
-these drivers are not explicitly joined. Process-wide exporters and third-party
-SDK workers retain their library/runtime lifecycles rather than being stopped
-by an individual pipeline.
+Postgres drivers stop through client/observer channel closure without explicit
+joins. Process-wide exporters and SDK workers retain their library lifecycles.
+Failed pipelines skip destination teardown; embedded owners must explicitly
+clean up destinations with ownership cycles.
 
 ## Configuration
 

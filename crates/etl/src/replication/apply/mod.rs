@@ -950,15 +950,12 @@ where
             state,
         };
 
-        let result = apply_loop.run(replication_client, replication_message_stream).await;
+        let result = apply_loop.run(replication_client, replication_message_stream).await?;
 
-        let teardown_result = apply_loop.tasks.teardown().await;
+        // We tear down all the tasks of the apply loop.
+        apply_loop.tasks.teardown().await?;
 
-        match (result, teardown_result) {
-            (Ok(result), Ok(())) => Ok(result),
-            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
-            (Err(error), Err(teardown_error)) => Err(vec![error, teardown_error].into()),
-        }
+        Ok(result)
     }
 
     /// Runs the main event processing loop with its feedback sender already

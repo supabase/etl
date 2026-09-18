@@ -790,12 +790,15 @@ where
         self.copy_buffers.lock().clear();
         self.failed_copy_buffers.lock().clear();
         self.copy_direct_to_parquet_tables.lock().clear();
-        // A failed destination task must not skip stopping the sampler.
-        let tasks_result = self.tasks.shutdown().await;
-        let sampler_result = self.shutdown_metrics_sampler().await;
-        let errors: Vec<_> =
-            [tasks_result, sampler_result].into_iter().filter_map(Result::err).collect();
-        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
+        // Own the sampler during teardown so an earlier failure aborts it.
+        let sampler =
+            self.metrics_sampler.as_ref().as_ref().and_then(|sampler| sampler.handle.lock().take());
+        self.tasks.shutdown().await?;
+        if let Some(sampler) = sampler {
+            abort_and_join(sampler).await?;
+        }
+
+        Ok(())
     }
 
     async fn startup(&self) -> EtlResult<()> {
@@ -4049,17 +4052,6 @@ where
             .await
     }
 
-    /// Stops the background DuckLake metrics sampler.
-    async fn shutdown_metrics_sampler(&self) -> EtlResult<()> {
-        if let Some(metrics_sampler) = &*self.metrics_sampler {
-            let handle = metrics_sampler.handle.lock().take();
-            if let Some(handle) = handle {
-                abort_and_join(handle).await?;
-            }
-        }
-
-        Ok(())
-    }
     /// Returns how many COPY-pool DuckDB connections have been initialized for
     /// tests.
     #[cfg(feature = "test-utils")]

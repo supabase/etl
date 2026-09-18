@@ -14,13 +14,14 @@ const TASK_REAP_THRESHOLD: usize = 32;
 
 /// Shared handle used to manage spawned background tasks.
 ///
-/// [`TaskRegistry`] is a small lifecycle primitive, not a scheduler.
+/// Dropping the last owner requests abort of registered tasks. Tasks capturing
+/// the registry, including through destination clones, create ownership cycles
+/// that require explicit shutdown. Some built-in destinations retain such
+/// cycles.
 ///
-/// Dropping the last owner aborts registered tasks. A task that captures this
-/// set, directly or through a destination clone, keeps the registry alive.
-/// Such owners require explicit shutdown; dropping external handles alone
-/// does not cancel their tasks. Some built-in destinations currently retain
-/// this ownership cycle as a known limitation.
+/// A failed operation discards the tracked group and requests cancellation.
+/// Reusing the registry does not wait for previously discarded tasks to stop;
+/// resource reuse must account for cancellation and any native or remote work.
 #[derive(Debug, Clone)]
 pub struct TaskRegistry {
     inner: Arc<Mutex<TaskGroup<()>>>,
@@ -101,30 +102,20 @@ impl TaskRegistry {
             return Ok(());
         }
 
-        inner.try_reap().await
+        inner.try_reap()
     }
 
-    /// Drains the task set and retains exclusive access to its task registry.
+    /// Waits for tracked tasks and retains exclusive access to the registry.
     ///
-    /// Use this when resources used by registered tasks must be changed after
-    /// all previously registered work has finished and before later work can
-    /// start. The returned guard blocks [`TaskRegistry::spawn`],
-    /// [`TaskRegistry::spawn_with`], and other registry operations until
-    /// dropped.
+    /// The returned guard blocks registration and other registry operations
+    /// while the caller changes resources used by tasks. Both the tasks being
+    /// drained and the guard holder must avoid awaiting registry access, which
+    /// would deadlock.
     ///
-    /// Tasks finish normally unless a tracked task panics or is cancelled; no
-    /// timeout is imposed. Cancelling this method releases the registry and
-    /// leaves unfinished tasks tracked, including any cancellation already
-    /// requested.
-    ///
-    /// The registry remains locked while registered tasks are awaited. Such
-    /// tasks must not directly or indirectly wait for an operation that
-    /// accesses this [`TaskRegistry`]. The caller must likewise not await any
-    /// operation that accesses this task registry while holding the returned
-    /// guard.
-    ///
-    /// If a tracked task fails, this method returns an error without a guard.
-    /// Remaining tasks are aborted and joined before returning the error.
+    /// A panic or unexpected cancellation returns an error without a guard and
+    /// drops remaining tasks to request abort without waiting. No timeout is
+    /// imposed. Cancelling this method releases the lock but leaves unfinished
+    /// tasks tracked, including any cancellation already requested.
     pub async fn drain(&self) -> EtlResult<TaskRegistryDrainGuard> {
         let mut inner = Arc::clone(&self.inner).lock_owned().await;
 
@@ -136,8 +127,9 @@ impl TaskRegistry {
     /// Aborts and reaps all remaining tasks during shutdown.
     ///
     /// The caller must stop producers first. The registry stays locked until
-    /// every task is reaped, then admits submissions again. Task failures are
-    /// returned only after all remaining tasks have been joined.
+    /// every task is reaped or a failure is observed, then admits submissions
+    /// again. Requested cancellations are silently accepted. A panic returns
+    /// immediately and drops the remaining tasks without awaiting them.
     pub async fn shutdown(&self) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
 
@@ -213,7 +205,9 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::TaskPanic);
         assert!(tasks.inner.lock().await.is_empty());
-        assert!(release_senders.iter().all(oneshot::Sender::is_closed));
+        for sender in &mut release_senders {
+            sender.closed().await;
+        }
     }
 
     /// A below-threshold panic is reported by drain once without poisoning the
@@ -291,14 +285,15 @@ mod tests {
         assert!(tasks.inner.lock().await.is_empty());
     }
 
-    /// An earlier panic must not skip joining the remaining cancelled tasks.
+    /// An earlier panic drops remaining tasks even while the registry is
+    /// retained.
     #[tokio::test]
-    async fn teardown_reaps_all_tasks_after_panic() {
+    async fn teardown_failure_drops_remaining_tasks() {
         for drain in [false, true] {
             let tasks = TaskRegistry::new();
             spawn_panicked_task(&tasks).await;
 
-            let (lifetime_tx, mut lifetime_rx) = oneshot::channel::<()>();
+            let (lifetime_tx, lifetime_rx) = oneshot::channel::<()>();
             tasks
                 .spawn(async move {
                     let _lifetime = lifetime_tx;
@@ -313,7 +308,7 @@ mod tests {
             };
             assert_eq!(error.kind(), ErrorKind::TaskPanic);
             assert!(tasks.inner.lock().await.is_empty());
-            assert_eq!(lifetime_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+            assert!(lifetime_rx.await.is_err());
         }
     }
 }

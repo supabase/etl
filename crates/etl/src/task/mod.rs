@@ -2,7 +2,10 @@
 //!
 //! [`TaskGroup`] owns the fallible children of one operation. [`TaskRegistry`]
 //! is a shared registry for background tasks whose outputs travel through other
-//! channels. Both join aborted siblings before returning a task failure.
+//! channels. Both return the first failure and drop remaining tasks to request
+//! cancellation without waiting. Controlled teardown joins owned tasks until
+//! the first failure. Owner-requested cancellation is accepted silently;
+//! panics and task-returned errors remain failures during shutdown.
 
 mod group;
 mod registry;
@@ -15,14 +18,12 @@ use crate::error::EtlResult;
 
 /// Aborts an owned disposable task and waits for it to release its resources.
 ///
-/// Deliberate cancellation returns `None`; a task that already completed
-/// returns its output. Panics remain errors, and task-returned errors remain in
-/// the output for the caller to propagate. The handle remains guarded while
-/// joining; cancelling this future drops the guard without waiting for
-/// completion.
+/// Requested cancellation silently returns `None`; completed tasks return their
+/// output, including any task error. Panics propagate as errors. Cancelling
+/// this future drops the guarded handle without waiting.
 ///
-/// Use this only when the owner intends to abort the task. Graceful joins must
-/// still report unexpected cancellation as a task failure.
+/// Use only for intentional aborts; graceful joins must report unexpected
+/// cancellation as a failure.
 pub async fn abort_and_join<T>(task: AbortOnDropHandle<T>) -> EtlResult<Option<T>> {
     task.abort();
 
@@ -31,4 +32,12 @@ pub async fn abort_and_join<T>(task: AbortOnDropHandle<T>) -> EtlResult<Option<T
         Err(error) if error.is_cancelled() => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Aborts and joins an owned disposable task returning [`EtlResult`].
+///
+/// Composes [`abort_and_join`], treating requested cancellation as success and
+/// propagating both panics and task-returned errors.
+pub async fn abort_and_join_result(task: AbortOnDropHandle<EtlResult<()>>) -> EtlResult<()> {
+    abort_and_join(task).await?.unwrap_or(Ok(()))
 }

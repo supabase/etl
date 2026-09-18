@@ -117,7 +117,7 @@ before ETL saves the corresponding checkpoint. Destinations can use idempotent
 writes or deduplication to keep replay from changing the final result.
 ETL also limits replay through:
 
-- **Controlled shutdown**: The pipeline attempts to finish in-flight work before its shutdown deadline; interrupted work can be replayed after restart
+- **Controlled shutdown**: The pipeline stops intake, drains apply work, and joins tasks. Interrupted initial copies restart from a fresh snapshot. Failures return immediately and request abort of remaining owned tasks; persisted checkpoints still govern recovery
 - **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
 
 ### Handling Duplicates

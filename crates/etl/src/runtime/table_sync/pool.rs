@@ -149,20 +149,22 @@ impl TableSyncWorkerPool {
     /// acquires a write lock on the workers map to remove the entry only if the
     /// worker_id matches.
     ///
-    /// If any workers encounter supervision errors, those errors are collected
-    /// and returned.
+    /// The first supervision error returns immediately and drops remaining
+    /// task handles to request cancellation without waiting.
     pub(crate) async fn wait_all(&self) -> EtlResult<()> {
-        let mut errors = Vec::new();
         let mut workers_join_set = self.workers_join_set.lock().await;
 
         while let Some(result) = workers_join_set.join_next().await {
             let mut workers = self.workers.write().await;
-            if let Err(error) = Self::handle_worker_result(&mut workers, result) {
-                errors.push(error);
+            if let Err(err) = Self::handle_worker_result(&mut workers, result) {
+                *workers_join_set = JoinSet::new();
+                workers.clear();
+
+                return Err(err);
             }
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors.into()) }
+        Ok(())
     }
 
     /// Releases completed worker state and reports supervision failures.

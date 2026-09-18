@@ -3,11 +3,11 @@
 use std::net::Ipv4Addr;
 
 use etl::{
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
     store::PostgresStore,
-    task::abort_and_join,
+    task::abort_and_join_result,
 };
 use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, ReplicatorHealthConfig};
 use tokio::net::TcpListener;
@@ -15,6 +15,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error};
 
 use crate::{
+    core::shutdown::with_shutdown,
     error::ReplicatorResult,
     error_notification::ErrorNotificationClient,
     error_reporting::ErrorReportingStateStore,
@@ -120,13 +121,13 @@ pub(crate) async fn start_replicator_with_config(
         // We initialize the store, using the optional store connection when the
         // replication connection points at a read replica.
         let store_pg_connection_config = replicator_config.pipeline.store_pg_connection().clone();
-        let replicator_store = tokio::select! {
-            biased;
-
-            _ = shutdown_signal.wait() => return Ok(()),
-
-            result = init_replicator_store(pipeline_id, store_pg_connection_config, notification_client) => result?,
+        let Some(result) = with_shutdown!(
+            init_replicator_store(pipeline_id, store_pg_connection_config, notification_client),
+            shutdown_signal.wait(),
+        ) else {
+            return Ok(());
         };
+        let replicator_store = result?;
 
         destinations::start(
             replicator_config,
@@ -140,22 +141,13 @@ pub(crate) async fn start_replicator_with_config(
 
     replicator_health.set_replicator_state(ReplicatorState::Stopping);
 
-    // Probes are disposable, but joining still reports server failures and
-    // panics.
-    let health_result = if let Some(health_server_task) = health_server_task {
-        abort_and_join(health_server_task).await.and_then(|result| result.unwrap_or(Ok(())))
-    } else {
-        Ok(())
-    };
+    replicator_result?;
 
-    match (replicator_result, health_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error.into()),
-        (Err(error), Err(health_error)) => Err(EtlError::from(vec![
-            etl_error!(ErrorKind::InvalidState, "Replicator failed", source: error),
-            health_error,
-        ])
-        .into()),
+    // On failure the handle drops; successful teardown also observes the
+    // server result.
+    if let Some(health_server_task) = health_server_task {
+        abort_and_join_result(health_server_task).await?;
     }
+
+    Ok(())
 }
