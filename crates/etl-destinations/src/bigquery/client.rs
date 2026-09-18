@@ -1038,7 +1038,6 @@ impl BigQueryClient {
     ///
     /// Executes a TRUNCATE TABLE statement to remove all rows while preserving
     /// the table structure.
-    #[allow(dead_code)]
     pub async fn truncate_table(
         &self,
         dataset_id: &BigQueryDatasetId,

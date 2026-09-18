@@ -13,8 +13,8 @@ Two table-engine layouts are supported, selected via `--clickhouse-engine`:
   `_etl_deleted` (tombstone) columns. A companion `<table>__current` view
   reads current state via `FINAL` and filters tombstones. Requires
   ClickHouse >= 23.5 and a primary key on the source.
-- `merge_tree`: append-only event-log layout with `cdc_operation` and
-  `cdc_lsn` columns appended to every row. Works for PK-less source tables.
+- `merge_tree`: append-only event-log layout with `cdc_operation`, `cdc_lsn`,
+  and `cdc_tx_ordinal` columns appended to every row. Works for PK-less source tables.
 
 Table names are derived from the Postgres schema and table name using
 double-underscore escaping (e.g. `public.orders` -> `public_orders`).

@@ -596,8 +596,8 @@ fn replication_slot_failures(
     used_replication_slots: i64,
     max_table_sync_workers: u16,
 ) -> Vec<ValidationFailure> {
-    let free_slots = max_replication_slots as i64 - used_replication_slots;
-    let required_slots = max_table_sync_workers as i64 + 1;
+    let free_slots = i64::from(max_replication_slots) - used_replication_slots;
+    let required_slots = i64::from(max_table_sync_workers) + 1;
 
     if required_slots <= free_slots {
         Vec::new()
@@ -626,8 +626,8 @@ fn wal_sender_failures(
     active_wal_senders: i64,
     max_table_sync_workers: u16,
 ) -> Vec<ValidationFailure> {
-    let free_wal_senders = max_wal_senders as i64 - active_wal_senders;
-    let required_wal_senders = max_table_sync_workers as i64 + 1;
+    let free_wal_senders = i64::from(max_wal_senders) - active_wal_senders;
+    let required_wal_senders = i64::from(max_table_sync_workers) + 1;
     let mut failures = Vec::new();
 
     if required_wal_senders > free_wal_senders {

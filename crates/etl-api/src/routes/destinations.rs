@@ -312,7 +312,7 @@ pub(crate) async fn read_destination(
     ),
     tag = "Destinations"
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn update_destination(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,

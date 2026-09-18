@@ -117,7 +117,7 @@ pub enum Secrets {
 /// intentionally forces pod recreation so the replicator observes the latest
 /// runtime configuration. `wait` controls completion of any prerequisite
 /// deletions, not readiness of the newly created runtime.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub async fn create_or_update_pipeline_runtime_in_k8s(
     k8s_client: &dyn K8sClient,
     tenant_id: &str,

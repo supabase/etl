@@ -108,8 +108,6 @@ pub struct IcebergDestination<S> {
     client: IcebergClient,
     store: S,
     inner: Arc<Mutex<Inner>>,
-    /// Known limitation: tasks retain destination clones and this registry.
-    /// Call [`Destination::shutdown`] to break the ownership cycle.
     tasks: TaskRegistry,
 }
 

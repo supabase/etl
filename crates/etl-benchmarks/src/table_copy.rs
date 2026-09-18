@@ -413,6 +413,13 @@ async fn wait_for_table_copies(
 }
 
 /// Counts snapshots in the PostgreSQL-backed DuckLake metadata catalog.
+#[cfg_attr(
+    not(feature = "ducklake"),
+    expect(
+        clippy::unused_async,
+        reason = "DuckLake operations are async when the feature is enabled"
+    )
+)]
 async fn collect_ducklake_snapshot_count(destination: &DestinationArgs) -> Result<Option<u64>> {
     if destination.destination != DestinationType::DuckLake {
         return Ok(None);
@@ -461,6 +468,13 @@ async fn collect_ducklake_snapshot_count(destination: &DestinationArgs) -> Resul
 }
 
 /// Optionally measures one adjacent-file compaction after the copy completes.
+#[cfg_attr(
+    not(feature = "ducklake"),
+    expect(
+        clippy::unused_async,
+        reason = "DuckLake operations are async when the feature is enabled"
+    )
+)]
 async fn run_ducklake_compaction(args: &RunArgs) -> Result<Option<DuckLakeCompactionReport>> {
     if !args.ducklake_compact_after_copy {
         return Ok(None);

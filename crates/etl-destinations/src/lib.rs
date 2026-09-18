@@ -29,7 +29,6 @@ mod sql;
 #[cfg(any(
     feature = "bigquery",
     feature = "clickhouse",
-    feature = "ducklake",
     feature = "iceberg",
     feature = "snowflake"
 ))]

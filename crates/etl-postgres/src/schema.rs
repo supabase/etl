@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn numeric_modifiers_negative_scale() {
         // NUMERIC(2, -3): typmod = ((2 << 16) | (-3i16 as u16 as i32)) + 4
-        let typmod = ((2i32 << 16) | ((-3i16 as u16) as i32)) + VARHDRSZ;
+        let typmod = ((2i32 << 16) | i32::from(-3i16 as u16)) + VARHDRSZ;
         let m = numeric_modifiers(typmod).unwrap();
         assert_eq!(m.p, 2);
         assert_eq!(m.s, -3);
@@ -658,7 +658,7 @@ mod tests {
     #[test]
     fn numeric_modifiers_min_negative_scale() {
         // NUMERIC(1000, -1000)
-        let typmod = ((1000i32 << 16) | ((-1000i16 as u16) as i32)) + VARHDRSZ;
+        let typmod = ((1000i32 << 16) | i32::from(-1000i16 as u16)) + VARHDRSZ;
         let m = numeric_modifiers(typmod).unwrap();
         assert_eq!(m.p, 1000);
         assert_eq!(m.s, -1000);
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn numeric_modifiers_minimal() {
         // NUMERIC(1, 0)
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((1i32 << 16) | 0) + VARHDRSZ;
         let m = numeric_modifiers(typmod).unwrap();
         assert_eq!(m.p, 1);

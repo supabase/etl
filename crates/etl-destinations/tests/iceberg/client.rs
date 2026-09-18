@@ -696,7 +696,7 @@ async fn insert_nullable_array() {
 
     // int2_array_col (index 7): Convert I16 to I32
     if let Cell::Array(ArrayCell::I16(vec)) = &values[7] {
-        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(|v| v as i32)).collect();
+        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(i32::from)).collect();
         values[7] = Cell::Array(ArrayCell::I32(converted));
     }
 
@@ -722,7 +722,7 @@ async fn insert_nullable_array() {
 
     // oid_array_col (index 20): Convert U32 to I64
     if let Cell::Array(ArrayCell::U32(vec)) = &values[20] {
-        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(|v| v as i64)).collect();
+        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(i64::from)).collect();
         values[20] = Cell::Array(ArrayCell::I64(converted));
     }
 
@@ -877,7 +877,7 @@ async fn insert_non_nullable_array() {
 
     // int2_array_col (index 7): Convert I16 to I32
     if let Cell::Array(ArrayCell::I16(vec)) = &values[7] {
-        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(|v| v as i32)).collect();
+        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(i32::from)).collect();
         values[7] = Cell::Array(ArrayCell::I32(converted));
     }
 
@@ -903,7 +903,7 @@ async fn insert_non_nullable_array() {
 
     // oid_array_col (index 20): Convert U32 to I64
     if let Cell::Array(ArrayCell::U32(vec)) = &values[20] {
-        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(|v| v as i64)).collect();
+        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(i64::from)).collect();
         values[20] = Cell::Array(ArrayCell::I64(converted));
     }
 

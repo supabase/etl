@@ -345,7 +345,7 @@ pub(crate) async fn read_source(
     ),
     tag = "Sources"
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(crate) async fn update_source(
     headers: HeaderMap,
     Extension(pool): Extension<PgPool>,

@@ -26,7 +26,7 @@ pub(crate) enum ClickHouseValue {
     /// tombstone.
     UInt8(u8),
     UInt32(u32),
-    /// Unsigned 64-bit integer, used for the MergeTree `cdc_lsn` column.
+    /// Unsigned 64-bit integer, used for MergeTree ordering metadata.
     UInt64(u64),
     /// Unsigned 128-bit integer, used for the ReplacingMergeTree `_etl_version`
     /// column (the packed `EventSequenceKey`).
@@ -176,7 +176,7 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
                 "NULL value for non-nullable ClickHouse column"
             ));
         }
-        ClickHouseValue::Bool(b) => buf.push(b as u8),
+        ClickHouseValue::Bool(b) => buf.push(u8::from(b)),
         ClickHouseValue::Int16(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Int32(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Int64(v) => buf.extend_from_slice(&v.to_le_bytes()),

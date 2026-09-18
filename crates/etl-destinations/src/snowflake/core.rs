@@ -511,7 +511,7 @@ where
         table_id: TableId,
         table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        #[allow(clippy::map_entry)]
+        #[expect(clippy::map_entry)]
         if !column_cache.contains_key(&table_id) {
             self.prepare_table_for_writes(table_schema).await?;
             let cols: Vec<_> =

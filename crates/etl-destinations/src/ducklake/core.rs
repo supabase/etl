@@ -519,8 +519,6 @@ pub struct DuckLakeDestination<S> {
     /// Gate held by connection-pinned copy sessions and acquired exclusively by
     /// maintenance before it queues on [`Self::checkpoint_gate`].
     copy_session_gate: Arc<RwLock<()>>,
-    /// Known limitation: tasks retain destination clones and this registry.
-    /// Call [`Destination::shutdown`] to break the ownership cycle.
     tasks: TaskRegistry,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     metadata_schema: Arc<str>,
@@ -1664,7 +1662,7 @@ where
     /// Pool initialization is blocking because DuckDB extensions are loaded and
     /// the lake catalog is attached synchronously. This constructor offloads
     /// that warm-up work to Tokio's blocking pool.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new(
         catalog_url: Url,
         data_path: Url,
@@ -1685,7 +1683,7 @@ where
     }
 
     /// Creates a new DuckLake destination with explicit writer configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_writer_config(
         catalog_url: Url,
         data_path: Url,
@@ -1714,7 +1712,7 @@ where
 
     /// Creates a new DuckLake destination with explicit external maintenance
     /// runtime configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_external_maintenance(
         catalog_url: Url,
         data_path: Url,
@@ -1738,7 +1736,7 @@ where
 
     /// Creates a new DuckLake destination with table sorting and external
     /// maintenance configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_table_sorting_and_external_maintenance(
         catalog_url: Url,
         data_path: Url,
@@ -1763,7 +1761,7 @@ where
     }
 
     /// Creates a new DuckLake destination from fully resolved runtime policies.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn new_inner(
         catalog_url: Url,
         data_path: Url,
@@ -1996,7 +1994,7 @@ where
             applied_batches_table_created,
             streaming_progress_table_created,
         };
-        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
+        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(f64::from(pool_size));
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 metadata_schema.to_string(),

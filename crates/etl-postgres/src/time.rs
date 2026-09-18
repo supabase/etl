@@ -203,7 +203,7 @@ fn parse_two_digit_bytes(bytes: &[u8]) -> Option<i32> {
         return None;
     }
 
-    Some(((bytes[0] - b'0') as i32 * 10) + (bytes[1] - b'0') as i32)
+    Some((i32::from(bytes[0] - b'0') * 10) + i32::from(bytes[1] - b'0'))
 }
 
 /// Writes a fixed offset the same way Postgres ISO output does.
