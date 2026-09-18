@@ -26,7 +26,7 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
-            create_pipeline_with_table_sync_copy_config,
+            create_pipeline_with_table_sync_copy_config, wait_for_pipeline_error,
         },
         schema::assert_table_schema_columns,
         test_destination_wrapper::TestDestinationWrapper,
@@ -643,8 +643,7 @@ async fn pipeline_failure_returns_without_destination_teardown() {
         .await;
     insert_users_data(&mut database, &schema.users_schema().name, 2..=2).await;
 
-    let error =
-        tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, pipeline.wait()).await.unwrap().unwrap_err();
+    let error = wait_for_pipeline_error(&pipeline).await;
     assert_eq!(error.kind(), ErrorKind::WithNoRetry);
     assert!(!destination.shutdown_called().await);
     assert_eq!(pipeline.wait().await.unwrap_err().kind(), ErrorKind::InvalidState);
@@ -1249,10 +1248,9 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
 
     pipeline.start().await.unwrap();
 
-    // The error surfaces when we wait for the pipeline to complete
-    let wait_result = pipeline.shutdown_and_wait().await;
-    assert!(wait_result.is_err());
-    let err = wait_result.unwrap_err();
+    // Requesting shutdown here could cancel worker initialization before it
+    // checks the invalidated apply slot. Wait for the failure itself instead.
+    let err = wait_for_pipeline_error(&pipeline).await;
     assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
 }
 
