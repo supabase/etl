@@ -251,16 +251,78 @@ Each replicated table is created as `MergeTree() ORDER BY tuple()` with:
 
 - `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
 - `cdc_lsn`: the Postgres commit LSN
+- `cdc_tx_ordinal`: the zero-based event position within the Postgres transaction
 
-Current state per primary key:
+Current state per primary key: take the latest event by `cdc_lsn` and
+`cdc_tx_ordinal` with `LIMIT 1 BY`, then filter out tombstones:
 
 ```sql
-SELECT <user columns> FROM (
-    SELECT * FROM "public_orders"
-    ORDER BY cdc_lsn DESC LIMIT 1 BY (id)
+select <user columns> from (
+    select * from "public_orders"
+    order by cdc_lsn desc, cdc_tx_ordinal desc
+    limit 1 by (id)
 )
-WHERE cdc_operation != 'DELETE'
+where cdc_operation != 'DELETE'
 ```
+
+### Update Requirements
+
+An update that changes a primary key writes a delete marker (tombstone) for the
+old key, followed by the row under the new key. For example, changing `id` from
+`1` to `2` must remove `1` from current-state queries rather than leave both rows
+visible.
+
+Postgres's replica identity controls which old values it sends. Use one of:
+
+- `REPLICA IDENTITY DEFAULT` with a primary key: sends the old primary-key values
+  when the key changes.
+- `REPLICA IDENTITY FULL`: sends the old row, including its primary key.
+
+An alternative identity, such as an index on `email`, may not provide the old
+primary key. ETL rejects updates it cannot apply safely.
+
+The new row must contain a value for every replicated column, not just the
+changed columns. Postgres can omit unchanged large (TOASTed) values from updates.
+If ETL cannot reconstruct those values, it rejects the update rather than
+replacing them with `NULL`.
+
+### Upgrading Existing ClickHouse Tables
+
+Adding `cdc_tx_ordinal` is a breaking layout change for existing `MergeTree`
+tables (only those created during the closed beta). ETL does not add the column
+automatically: the next write from a restarted destination fails before
+inserting rows. `ReplacingMergeTree` keeps
+its `_etl_version UInt128` / `_etl_deleted UInt8` layout and does not require
+this ALTER.
+
+For a non-destructive MergeTree upgrade:
+
+1. Stop all writers to every affected destination table.
+2. Verify the physical table has the expected user columns followed by
+   `cdc_operation String` and `cdc_lsn UInt64`, with no source column named
+   `cdc_tx_ordinal`. Resolve other schema drift separately.
+3. Append the new column to each physical table, using its actual ClickHouse
+   database and escaped table name. For example:
+
+   ```sql
+   alter table default.public_orders
+       add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn;
+   ```
+
+4. Keep the existing ETL metadata, schema snapshots, and replication
+   checkpoints. Start only the upgraded writer, and update current-state
+   queries to order by both `cdc_lsn` and `cdc_tx_ordinal`.
+
+Existing events receive ordinal `0`. This cannot reconstruct their ordering
+within an old transaction. Neither this ALTER nor the new writer removes stale
+old-key rows left by earlier primary-key-changing updates, including stale rows
+in `ReplacingMergeTree`.
+
+If an accurate current-state baseline is required, use ETL's table reset/re-copy
+path instead. It drops and recreates the destination table and copies the current
+source contents; **the previous append-only event history is lost**. Preserve
+that history separately if needed. `TRUNCATE` alone is not a layout migration
+and does not reset ETL checkpoints.
 
 ---
 

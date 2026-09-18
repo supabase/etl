@@ -1700,7 +1700,7 @@ where
     /// Pool initialization is blocking because DuckDB extensions are loaded and
     /// the lake catalog is attached synchronously. This constructor offloads
     /// that warm-up work to Tokio's blocking pool.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new(
         catalog_url: Url,
         data_path: Url,
@@ -1721,7 +1721,7 @@ where
     }
 
     /// Creates a new DuckLake destination with explicit writer configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_writer_config(
         catalog_url: Url,
         data_path: Url,
@@ -1750,7 +1750,7 @@ where
 
     /// Creates a new DuckLake destination with explicit external maintenance
     /// runtime configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_external_maintenance(
         catalog_url: Url,
         data_path: Url,
@@ -1774,7 +1774,7 @@ where
 
     /// Creates a new DuckLake destination with table sorting and external
     /// maintenance configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_table_sorting_and_external_maintenance(
         catalog_url: Url,
         data_path: Url,
@@ -1799,7 +1799,7 @@ where
     }
 
     /// Creates a new DuckLake destination from fully resolved runtime policies.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn new_inner(
         catalog_url: Url,
         data_path: Url,
@@ -2032,7 +2032,7 @@ where
             applied_batches_table_created,
             streaming_progress_table_created,
         };
-        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
+        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(f64::from(pool_size));
         let shutdown_signal_manager = Arc::clone(&manager);
         destination
             .tasks

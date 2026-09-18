@@ -515,9 +515,9 @@ impl BenchDestination {
         not(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake")),
         expect(clippy::unused_async)
     )]
-    #[allow(
-        unused_variables,
-        reason = "pipeline_id and store are consumed only by feature-gated arms"
+    #[cfg_attr(
+        not(any(feature = "bigquery", feature = "snowflake")),
+        expect(unused_variables, reason = "pipeline_id is only used by BigQuery and Snowflake")
     )]
     pub async fn new(
         destination_args: &DestinationArgs,

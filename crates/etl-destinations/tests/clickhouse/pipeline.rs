@@ -315,7 +315,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: Postgres source with one row ---
+    // GIVEN: a Postgres source with two rows.
     let database = spawn_source_database().await;
     let table_name = test_table_name("update_flow");
 
@@ -329,13 +329,13 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('before')",
+            "INSERT INTO {} (value) VALUES ('before'), ('mover')",
             table_name.as_quoted_identifier(),
         ))
         .await
         .unwrap();
 
-    // --- WHEN: pipeline copies data and an UPDATE is streamed ---
+    // WHEN: the pipeline copies data and updates are streamed.
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -357,9 +357,10 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
         .await;
 
+    // A plain non-key update and a primary-key change cover both update paths.
     database
         .run_sql(&format!(
             "UPDATE {} SET value = 'after' WHERE id = 1",
@@ -367,18 +368,317 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         ))
         .await
         .unwrap();
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET id = 3, value = 'moved' WHERE id = 2",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
 
     events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     let query = current_state_query(engine, UPDATE_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // --- THEN: current state shows the updated value ---
-    assert_eq!(rows.len(), 1, "expected one current-state row after UPDATE");
+    // THEN: current state shows the updated value and the moved key.
+    assert_eq!(rows.len(), 2, "expected two current-state rows after UPDATEs");
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "after");
+    assert_eq!(rows[1].id, 3);
+    assert_eq!(rows[1].value, "moved");
+}
+
+/// Composite key changes use physical tuple positions even when the primary
+/// key definition has reversed order and a non-key column separates the keys.
+async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bool) {
+    // GIVEN: copied rows share key components in reversed tuple order.
+    init_test_tracing();
+    install_crypto_provider();
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("composite_changes");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[
+                ("id", "bigint not null"),
+                ("value", "text not null"),
+                ("tenant_id", "bigint not null"),
+            ],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} add primary key (tenant_id, id)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    if full_identity {
+        database
+            .run_sql(&format!(
+                "alter table {} replica identity full",
+                table_name.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+    }
+    let publication_name = "test_pub_composite_changes";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value, tenant_id) values (1, 'original', 10), (1, \
+             'other_tenant', 20), (2, 'other_id', 10)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+    let copied = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+
+    // WHEN: one transaction changes and reuses composite keys.
+    let updated = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 4)])
+        .await;
+    let tx = database.begin_transaction().await;
+    for change in [
+        "set id = 3, tenant_id = 30, value = 'moved' where id = 1 and tenant_id = 10",
+        "set id = 1, tenant_id = 10, value = 'reused' where id = 3 and tenant_id = 30",
+        "set tenant_id = 21, value = 'tenant_changed' where id = 1 and tenant_id = 20",
+        "set id = 4, value = 'id_changed' where id = 2 and tenant_id = 10",
+    ] {
+        tx.run_sql(&format!("update {} {change}", table_name.as_quoted_identifier()))
+            .await
+            .unwrap();
+    }
+    tx.commit_transaction().await;
+    updated.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // THEN: all rows retain their final keys without stale keys.
+    let query = current_state_query(
+        engine,
+        "test_composite__changes",
+        "tenant_id, id, value",
+        &["tenant_id", "id"],
+        "tenant_id, id",
+    );
+    assert_eq!(
+        clickhouse_db.query::<(i64, i64, String)>(&query).await,
+        vec![
+            (10, 1, "reused".to_owned()),
+            (10, 4, "id_changed".to_owned()),
+            (21, 1, "tenant_changed".to_owned()),
+        ]
+    );
+}
+
+/// DEFAULT identity supplies compact keys in source tuple order.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_default_identity_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::MergeTree, false).await;
+}
+
+/// DEFAULT identity key changes converge under ReplacingMergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_default_identity_replacing_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::ReplacingMergeTree, false).await;
+}
+
+/// FULL identity supplies complete old tuples rather than compact keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_full_identity_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::MergeTree, true).await;
+}
+
+/// FULL identity key changes converge under ReplacingMergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_full_identity_replacing_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::ReplacingMergeTree, true).await;
+}
+
+/// FULL identity forces comparison of NaN-bearing old keys even when only a
+/// non-key value changes. Other rows change each float key independently or
+/// move away and back within one transaction.
+async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
+    // GIVEN: copied rows have NaN float keys and FULL replica identity.
+    init_test_tracing();
+    install_crypto_provider();
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("nan_changes");
+    let (real_type, double_type, nan_key, finite_key, projection) = if array_keys {
+        (
+            "real[] not null",
+            "double precision[] not null",
+            "'{NaN,NULL,2}'",
+            "'{5.5,NULL,2}'",
+            "bucket, assumeNotNull(real_key[1]), assumeNotNull(double_key[1]), value",
+        )
+    } else {
+        (
+            "real not null",
+            "double precision not null",
+            "'NaN'",
+            "'5.5'",
+            "bucket, real_key, double_key, value",
+        )
+    };
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[
+                ("bucket", "bigint not null"),
+                ("real_key", real_type),
+                ("double_key", double_type),
+                ("value", "text not null"),
+            ],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} add primary key (bucket, real_key, double_key)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    let publication_name = "test_pub_nan_changes";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (bucket, real_key, double_key, value) values (1, {nan_key}, \
+             {nan_key}, 'original'), (2, {nan_key}, {nan_key}, 'original'), (3, {nan_key}, \
+             {nan_key}, 'original'), (4, {nan_key}, {nan_key}, 'original')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+    let copied = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+
+    // WHEN: one transaction preserves, changes, and reuses NaN-bearing keys.
+    let updated = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 5)])
+        .await;
+    let tx = database.begin_transaction().await;
+    for change in [
+        "set value = 'same_key' where bucket = 1".to_owned(),
+        format!("set real_key = {finite_key}, value = 'real_moved' where bucket = 2"),
+        format!("set double_key = {finite_key}, value = 'double_moved' where bucket = 3"),
+        format!(
+            "set real_key = {finite_key}, double_key = {finite_key}, value = 'moved' where bucket \
+             = 4",
+        ),
+        format!(
+            "set real_key = {nan_key}, double_key = {nan_key}, value = 'reused' where bucket = 4",
+        ),
+    ] {
+        tx.run_sql(&format!("update {} {change}", table_name.as_quoted_identifier()))
+            .await
+            .unwrap();
+    }
+    tx.commit_transaction().await;
+    updated.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // THEN: unchanged NaNs and final changed or reused keys survive.
+    let query = current_state_query(
+        engine,
+        "test_nan__changes",
+        projection,
+        &["bucket", "real_key", "double_key"],
+        "bucket",
+    );
+    let rows = clickhouse_db.query::<(i64, f32, f64, String)>(&query).await;
+    let states: Vec<_> = rows
+        .iter()
+        .map(|(bucket, real, double, value)| {
+            (*bucket, real.is_nan(), double.is_nan(), value.as_str())
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            (1, true, true, "same_key"),
+            (2, false, true, "real_moved"),
+            (3, true, false, "double_moved"),
+            (4, true, true, "reused"),
+        ]
+    );
+    assert_eq!(rows[1].1, 5.5);
+    assert_eq!(rows[2].2, 5.5);
+
+    // THEN: MergeTree tombstones reflect only actual key changes.
+    if engine == ClickHouseEngine::MergeTree {
+        assert_eq!(
+            clickhouse_db
+                .query::<(i64, u64)>(
+                    "select bucket, count() from test_nan__changes where cdc_operation = 'DELETE' \
+                     group by bucket order by bucket",
+                )
+                .await,
+            vec![(2, 1), (3, 1), (4, 2)]
+        );
+    }
+}
+
+/// Scalar Float32 and Float64 NaN keys retain Postgres equality in MergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn nan_key_changes_merge_tree() {
+    nan_key_changes_inner(ClickHouseEngine::MergeTree, false).await;
+}
+
+/// Scalar NaN key updates converge under ReplacingMergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn nan_key_changes_replacing_merge_tree() {
+    nan_key_changes_inner(ClickHouseEngine::ReplacingMergeTree, false).await;
+}
+
+/// NaN arrays also preserve equality and key changes. ReplacingMergeTree
+/// rejects their nullable-element sort keys with default ClickHouse settings.
+#[tokio::test(flavor = "multi_thread")]
+async fn nan_array_key_changes_merge_tree() {
+    nan_key_changes_inner(ClickHouseEngine::MergeTree, true).await;
 }
 
 /// An in-flight destination write must not stall the pipeline: dispatch

@@ -29,7 +29,7 @@ pub(super) struct DucklakeValidator {
 }
 
 impl DucklakeValidator {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn new(
         catalog_url: String,
         data_path: String,
