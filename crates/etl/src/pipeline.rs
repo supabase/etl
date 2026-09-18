@@ -17,6 +17,7 @@ use crate::{
     config::PipelineConfig,
     destination::PipelineDestination,
     error::{ErrorKind, EtlResult},
+    etl_error,
     observability::register_metrics,
     postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
     replication::state::TableState,
