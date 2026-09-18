@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
@@ -19,7 +23,7 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::{Mutex, RwLock};
-use tokio::task::JoinSet;
+use tokio::{sync::OwnedMutexGuard, task::JoinSet};
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -565,12 +569,18 @@ pub struct ClickHouseDestination<S> {
     /// [`Destination::write_events`] admits its work here and returns;
     /// destructive table resets drain the registry to fence admitted work.
     tasks: TaskSet,
+    /// Per-table ordering of event batches; see [`EventBatchFences`].
+    fences: Arc<EventBatchFences>,
 }
 
 // Manual impl: `S` sits behind `Arc`, so cloning must not require `S: Clone`.
 impl<S> Clone for ClickHouseDestination<S> {
     fn clone(&self) -> Self {
-        Self { writer: self.writer.clone(), tasks: self.tasks.clone() }
+        Self {
+            writer: self.writer.clone(),
+            tasks: self.tasks.clone(),
+            fences: Arc::clone(&self.fences),
+        }
     }
 }
 
@@ -595,7 +605,9 @@ struct ClickHouseTableCacheEntry {
 ///
 /// This type contains the state needed to execute writes but deliberately
 /// omits [`TaskSet`], making that recursive registry access unavailable
-/// through the task's execution context.
+/// through the task's execution context. It omits [`EventBatchFences`] for the
+/// same reason: a task already holds the fences of every table it writes and
+/// must not wait on them again.
 struct DestinationWriter<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
     client: ClickHouseClient,
@@ -637,6 +649,88 @@ impl<S> Clone for DestinationWriter<S> {
             table_cache: Arc::clone(&self.table_cache),
             create_locks: Arc::clone(&self.create_locks),
         }
+    }
+}
+
+/// Returns the id of every table that `events` write, in ascending order.
+///
+/// Transaction markers and unsupported events touch no table.
+fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
+    let mut table_ids = BTreeSet::new();
+    for event in events {
+        match event {
+            Event::Insert(insert) => {
+                table_ids.insert(insert.replicated_table_schema.id());
+            }
+            Event::Update(update) => {
+                table_ids.insert(update.replicated_table_schema.id());
+            }
+            Event::Delete(delete) => {
+                table_ids.insert(delete.replicated_table_schema.id());
+            }
+            Event::Relation(relation) => {
+                table_ids.insert(relation.replicated_table_schema.id());
+            }
+            Event::Truncate(truncate) => {
+                table_ids.extend(truncate.truncated_tables.iter().map(ReplicatedTableSchema::id));
+            }
+            Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
+        }
+    }
+    table_ids
+}
+
+/// Per-table fences that keep event batches for one table in dispatch order.
+///
+/// The apply loop keeps at most one event batch in flight per worker. Any
+/// error that exits the apply loop breaks that guarantee: the loop abandons
+/// its pending batch, the batch task keeps running, and the retried attempt
+/// replays from the last flushed LSN through this same destination. Without a
+/// fence, the replay's `TRUNCATE` can overtake the abandoned `INSERT`, and the
+/// insert then restores rows the truncate removed.
+///
+/// [`Destination::write_events`] acquires the fence of every table the batch
+/// touches before it spawns the batch task. The task holds the fences until the
+/// batch is acknowledged. Acquiring in the caller is what guarantees the
+/// order: the apply loop's dispatch order follows the source stream, while a
+/// lock taken inside the task would be ordered by the scheduler.
+///
+/// A fence is not the same lock as a `create_locks` entry. A fence spans a
+/// whole batch; inside the batch, DDL takes the create lock one statement at a
+/// time. A tokio mutex cannot be locked again by the task that already holds
+/// it, so one lock cannot play both roles.
+struct EventBatchFences {
+    /// One fence per table, created on first use. The map lock is a brief,
+    /// await-free `parking_lot::Mutex`.
+    fences: Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl EventBatchFences {
+    fn new() -> Self {
+        Self { fences: Mutex::new(HashMap::new()) }
+    }
+
+    /// Acquires the fence of every table that `events` write and returns the
+    /// guards. Dropping the guards releases the fences.
+    ///
+    /// Fences are acquired in ascending table id order, so two batches that
+    /// share tables cannot each wait for a fence the other holds. Guards live
+    /// inside the batch task, so aborting the task releases them too.
+    async fn acquire(&self, events: &[Event]) -> Vec<OwnedMutexGuard<()>> {
+        let table_ids = batch_table_ids(events);
+        let fences: Vec<Arc<tokio::sync::Mutex<()>>> = {
+            let mut map = self.fences.lock();
+            table_ids
+                .into_iter()
+                .map(|table_id| Arc::clone(map.entry(table_id).or_default()))
+                .collect()
+        };
+
+        let mut guards = Vec::with_capacity(fences.len());
+        for fence in fences {
+            guards.push(fence.lock_owned().await);
+        }
+        guards
     }
 }
 
@@ -695,6 +789,7 @@ where
                 create_locks: Arc::new(Mutex::new(HashMap::new())),
             },
             tasks: TaskSet::new(),
+            fences: Arc::new(EventBatchFences::new()),
         }
     }
 
@@ -2083,6 +2178,11 @@ where
         // admitting more work.
         self.tasks.try_reap().await?;
 
+        // Wait, in dispatch order, until every earlier batch that touches one
+        // of this batch's tables has finished. On the normal path no such batch
+        // is in flight and this returns at once. See `EventBatchFences`.
+        let fence_guards = self.fences.acquire(&events).await;
+
         // Durability needs no branch: the task completes only after every
         // INSERT in the batch is acknowledged under `wait_for_async_insert=1`,
         // so each result is already `Durable` and `RequireDurable` calls are
@@ -2091,6 +2191,9 @@ where
         self.tasks
             .spawn_with(move || async move {
                 let result = writer.write_events_inner(events).await;
+                // Release the fences first so the next batch for these tables
+                // can start as soon as this one has finished.
+                drop(fence_guards);
                 async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })
             .await;

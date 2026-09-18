@@ -38,7 +38,7 @@ use etl::{
         TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
-    event::{Event, InsertEvent, RelationEvent},
+    event::{Event, InsertEvent, RelationEvent, TruncateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
@@ -69,6 +69,7 @@ use etl_destinations::clickhouse::{
 use etl_telemetry::tracing::init_test_tracing;
 use parking_lot::Mutex;
 use proptest::{option, prelude::*};
+use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
 
@@ -1770,6 +1771,92 @@ async fn concurrent_writes_complete_independently_and_reset_drains_both() {
             )
             .await,
         Vec::<String>::new()
+    );
+}
+
+/// Builds one streaming truncate event for the lifecycle schema.
+fn lifecycle_truncate(schema: &ReplicatedTableSchema) -> Event {
+    Event::Truncate(TruncateEvent {
+        commit_lsn: PgLsn::from(2000),
+        tx_ordinal: 0,
+        options: 0,
+        truncated_tables: vec![schema.clone()],
+    })
+}
+
+/// A retried apply attempt replays the abandoned batch and a later truncate
+/// against the same destination while the abandoned insert is still in
+/// flight. The replay's dispatch must wait at the table's fence until the
+/// abandoned insert is acknowledged, so it cannot reach its own INSERT, let
+/// alone the TRUNCATE; otherwise the late insert restores rows the truncate
+/// removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn replayed_truncate_waits_for_abandoned_insert_on_same_table() {
+    // GIVEN: a destination table, one pause for the abandoned insert, and
+    // one pause for the replay's insert so its progress is observable.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("replay");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (abandoned_reached, abandoned_release) = arm_pause_before_insert_statement_for_tests(0);
+    let (mut replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
+
+    // The first attempt's write is admitted and parks before its INSERT; the
+    // apply loop that issued it has already given up on the result.
+    let abandoned_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "restored")],
+            )
+            .await
+        }
+    });
+    abandoned_reached.await.unwrap();
+
+    // WHEN: the retried attempt replays the same insert followed by a
+    // truncate of the table through the same destination.
+    let replay_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "restored"), lifecycle_truncate(&schema)],
+            )
+            .await
+        }
+    });
+
+    // THEN: the replay waits at the fence behind the abandoned insert, so it
+    // does not reach its own INSERT statement. An unfenced replay reaches it
+    // within a few polls, so holding across the whole yield budget makes a
+    // regression fail rather than race.
+    for _ in 0..10_000 {
+        assert!(matches!(replay_reached.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        tokio::task::yield_now().await;
+    }
+    assert!(!replay_handle.is_finished());
+
+    // Releasing the abandoned insert lets it land first; only then does the
+    // replay reach its INSERT, and its TRUNCATE removes both copies.
+    abandoned_release.send(()).unwrap();
+    assert_eq!(abandoned_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    replay_reached.await.unwrap();
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_replay\"").await, vec![1]);
+    replay_release.send(()).unwrap();
+    assert_eq!(replay_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"public_replay\"").await,
+        Vec::<i64>::new()
     );
 }
 

@@ -765,7 +765,7 @@ static INSERT_STATEMENT_PAUSES: parking_lot::Mutex<Vec<ArmedInsertStatementPause
     parking_lot::Mutex::new(Vec::new());
 
 /// Arms a one-shot pause before the zero-based `statement_index` INSERT
-/// statement of a [`ClickHouseClient::insert_rows`] call.
+/// statement of a `ClickHouseClient::insert_rows` call.
 ///
 /// Several pauses may be armed at once; each call crossing an armed
 /// statement boundary consumes the earliest matching pause, so two
