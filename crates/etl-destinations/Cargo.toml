@@ -101,7 +101,7 @@ snowflake = [
 ]
 # We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
 # put here the extra dependencies needed.
-test-utils = ["dep:async-trait", "dep:uuid"]
+test-utils = ["dep:async-trait", "dep:uuid", "etl/test-utils"]
 
 [dependencies]
 
@@ -154,9 +154,10 @@ zstd = { workspace = true, optional = true }
 base64 = { workspace = true }
 
 chrono = { workspace = true }
-etl = { workspace = true, features = ["test-utils"] }
+etl = { workspace = true, features = ["test-utils", "failpoints"] }
 etl-postgres = { workspace = true, features = ["test-utils", "tokio"] }
 etl-telemetry = { workspace = true }
+fail = { workspace = true }
 futures = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 proptest = { workspace = true }
@@ -166,7 +167,7 @@ rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [[test]]
