@@ -1,7 +1,5 @@
 //! Replicator service orchestration.
 
-use std::net::Ipv4Addr;
-
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -10,7 +8,7 @@ use etl::{
     task::abort_and_join_result,
 };
 use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, ReplicatorHealthConfig};
-use tokio::net::TcpListener;
+use etl_telemetry::listener::bind_listener;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error};
 
@@ -60,19 +58,21 @@ pub(crate) enum ReplicatorState {
 /// pipeline initialization, so waiting for a replication slot does not consume
 /// a fixed startup deadline. `/readyz` remains unavailable until work is
 /// observed.
-async fn spawn_health_server(
+fn spawn_health_server(
     health_config: Option<ReplicatorHealthConfig>,
     replicator_health: ReplicatorHealth,
 ) -> ReplicatorResult<Option<AbortOnDropHandle<EtlResult<()>>>> {
     let Some(health_config) = health_config else {
         return Ok(None);
     };
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, health_config.port)).await?;
+    let listener = bind_listener(health_config.port)?;
+
     debug!(
         configured_port = health_config.port,
         stall_timeout_ms = health_config.stall_timeout_ms,
         "health server listener bound"
     );
+
     let router = health::router(replicator_health);
 
     Ok(Some(AbortOnDropHandle::new(tokio::spawn(async move {
@@ -113,7 +113,7 @@ pub(crate) async fn start_replicator_with_config(
     let mut shutdown_signal = shutdown::ShutdownSignal::new()?;
     let replicator_health = ReplicatorHealth::new(replicator_config.health.unwrap_or_default());
     let health_server_task =
-        spawn_health_server(replicator_config.health, replicator_health.clone()).await?;
+        spawn_health_server(replicator_config.health, replicator_health.clone())?;
 
     let replicator_result = async {
         let pipeline_id = replicator_config.pipeline.id;

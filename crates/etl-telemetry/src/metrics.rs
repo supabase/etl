@@ -1,11 +1,39 @@
 use std::{
+    io,
     sync::{Mutex, PoisonError},
     time::Duration,
 };
 
+use axum::{
+    Router,
+    extract::State,
+    http::{StatusCode, header},
+    response::IntoResponse,
+    routing::any,
+};
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
+use thiserror::Error;
 use tokio_util::task::AbortOnDropHandle;
-use tracing::trace;
+use tracing::{error, trace};
+
+use crate::listener::bind_listener;
+
+/// HTTP port for the standalone metrics endpoint.
+const METRICS_PORT: u16 = 9000;
+
+/// Interval for maintaining the recorder's metric storage.
+const UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Errors while initializing the standalone metrics endpoint.
+#[derive(Debug, Error)]
+pub enum MetricsError {
+    /// The HTTP listener could not be bound.
+    #[error("Failed to bind metrics listener")]
+    Listener(#[source] io::Error),
+    /// The recorder or exporter could not be installed.
+    #[error(transparent)]
+    Build(#[from] BuildError),
+}
 
 // Global cache for the Prometheus handle used by [`init_metrics_handle`].
 //
@@ -66,10 +94,7 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
     // due to metrics collection.
     let upkeep_task = AbortOnDropHandle::new(tokio::spawn(async move {
         loop {
-            // upkeep_timeout hardcoded for now. Will make it configurable later
-            // if it creates a problem
-            let upkeep_timeout = Duration::from_secs(5);
-            tokio::time::sleep(upkeep_timeout).await;
+            tokio::time::sleep(UPKEEP_INTERVAL).await;
             trace!("running metrics upkeep");
             handle_clone.run_upkeep();
         }
@@ -79,31 +104,32 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
     Ok(handle)
 }
 
-/// Initializes metrics with an automatic HTTP server on port 9000.
-///
-/// This function is designed for standalone services where metrics should be
-/// exposed automatically without manual endpoint management. It installs a
-/// global metrics recorder and starts an HTTP server that listens on
-/// `[::]:9000/metrics`, making metrics available for Prometheus scraping.
+/// Renders metrics without blocking the async runtime's worker threads.
+async fn render_metrics(
+    State(handle): State<PrometheusHandle>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let body = tokio::task::spawn_blocking(move || handle.render()).await.map_err(|error| {
+        error!(error = %error, "metrics rendering failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(([(header::CONTENT_TYPE, "text/plain")], body))
+}
+
+/// Installs the recorder and serves metrics on port 9000 over IPv4 and IPv6.
 ///
 /// When provided, `project_ref`, `pipeline_id`, and `destination` are attached
 /// as global labels to all exported metrics for the current process.
 ///
-/// # Use Case
-///
-/// Use this when you want to:
-/// - Expose metrics from a standalone service (e.g., etl-replicator).
-/// - Automatically start a dedicated metrics endpoint without custom routing.
-/// - Let Prometheus scrape metrics directly from a fixed port.
+/// Must be called inside a Tokio runtime. The caller owns the returned server
+/// task, which also performs recorder upkeep, and must stop it on shutdown.
 pub fn init_metrics(
     project_ref: Option<&str>,
     pipeline_id: Option<u64>,
     destination: Option<&str>,
-) -> Result<(), BuildError> {
-    let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
-        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-        9000,
-    ));
+) -> Result<AbortOnDropHandle<io::Result<()>>, MetricsError> {
+    let listener = bind_listener(METRICS_PORT).map_err(MetricsError::Listener)?;
+    let mut builder = PrometheusBuilder::new();
 
     if let Some(project_ref) = project_ref {
         builder = builder.add_global_label("project", project_ref);
@@ -117,7 +143,29 @@ pub fn init_metrics(
         builder = builder.add_global_label("destination", destination);
     }
 
-    builder.install()?;
+    let handle = builder.install_recorder()?;
+    // Preserve the exporter's health route and metrics on every other path.
+    let router = Router::new()
+        .route("/health", any(|| async { ([(header::CONTENT_TYPE, "text/plain")], "OK") }))
+        .fallback(render_metrics)
+        .with_state(handle.clone());
 
-    Ok(())
+    let metrics_http_listener = AbortOnDropHandle::new(tokio::spawn(async move {
+        let server = axum::serve(listener, router).into_future();
+        tokio::pin!(server);
+
+        loop {
+            tokio::select! {
+                result = &mut server => return result,
+
+                _ = tokio::time::sleep(UPKEEP_INTERVAL) => {
+                    trace!("running metrics upkeep");
+
+                    handle.run_upkeep();
+                }
+            }
+        }
+    }));
+
+    Ok(metrics_http_listener)
 }

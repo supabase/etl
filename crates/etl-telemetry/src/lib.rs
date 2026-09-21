@@ -4,5 +4,6 @@
 //! structured logging, project identification, panic handling, and both
 //! development and production logging modes.
 
+pub mod listener;
 pub mod metrics;
 pub mod tracing;

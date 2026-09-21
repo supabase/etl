@@ -21,7 +21,8 @@ const DEFAULT_STALL_TIMEOUT_MILLISECONDS: u64 = 5 * 60 * 1000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplicatorHealthConfig {
-    /// HTTP port for `/livez` and `/readyz` on all IPv4 interfaces.
+    /// HTTP port for `/livez` and `/readyz` on all IPv4 and IPv6 interfaces.
+    /// Falls back to IPv4 when IPv6 sockets are unsupported.
     pub port: u16,
     /// Minimum inactivity allowance in milliseconds, defaulting to five
     /// minutes.

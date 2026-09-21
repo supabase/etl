@@ -203,8 +203,11 @@ health:
 ```
 
 Omitting `health` disables it; `health: {}` uses these defaults. The listener
-binds to `0.0.0.0`. Use another port, such as `19001`, when running alongside
-the local Docker stack, which reserves port 9001 for ClickHouse.
+accepts IPv4 and IPv6 connections on all interfaces, falling back to IPv4 when
+IPv6 sockets are unsupported.
+
+Use another port, such as `19001`, when running alongside the local Docker
+stack, which reserves port 9001 for ClickHouse.
 
 - `/livez`: returns 503 when monitored work stalls; otherwise 200, including
   initialization, intentional waits, and graceful shutdown.
