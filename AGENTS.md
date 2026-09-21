@@ -112,6 +112,23 @@ implementation details private.
   filenames). Add a new file. Do not edit a migration that is not yet on `main`
   unless the user asks, including comments.
 
+### Dependency versions
+
+- Specify registry dependencies as full `x.y.z` versions without an operator
+  (Cargo's default caret requirement). Use a minimum that provides the APIs and
+  fixes we need; adding `.0` to an abbreviated version does not tighten its range.
+- Allow SemVer-compatible updates. Use exact pins (`=x.y.z`), tilde requirements,
+  or tighter upper bounds only for a concrete compatibility need, and document
+  the reason next to the dependency.
+- Keep shared dependencies in `[workspace.dependencies]` and inherit them with
+  `workspace = true`. Pin Git dependencies to a commit with `rev`.
+- Keep the workspace `Cargo.lock` tracked and include relevant lockfile changes
+  with intentional dependency updates. Use `--locked` in CI build, lint, and test
+  commands for workspaces with a committed lockfile; do not rely on exact
+  manifest pins for reproducible builds. For task aliases, use `cargo --locked x`
+  or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
+  own `--locked` flag.
+
 ### Destination compatibility
 
 | Situation | Do |

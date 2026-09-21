@@ -145,7 +145,7 @@ jobs:
         run: |
           POSTGRES_IMAGE=postgres:18 \
           POSTGRES_VERSION=18 \
-            cargo xtask postgres start --shards 1 --base-port "$POSTGRES_PORT" --source-only
+            cargo --locked xtask postgres start --shards 1 --base-port "$POSTGRES_PORT" --source-only
 
       - name: Prepare BigQuery key
         if: inputs.destination == 'bigquery'
@@ -291,7 +291,7 @@ jobs:
             args+=(--bq-sa-key-file "$BQ_SA_KEY_FILE")
           fi
 
-          cargo xtask "${args[@]}"
+          cargo --locked xtask "${args[@]}"
 
       - name: Summarize benchmark results
         run: |
@@ -423,7 +423,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          cargo xtask benchmark-compare \
+          cargo --locked xtask benchmark-compare \
             --current-dir target/bench-results \
             --output target/bench-results/benchmark-comparison.md
           status=$?

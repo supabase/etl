@@ -139,7 +139,7 @@ jobs:
         run: |
           POSTGRES_IMAGE=postgres:18 \
           POSTGRES_VERSION=18 \
-            cargo xtask postgres start --shards 1 --source-only
+            cargo --locked xtask postgres start --shards 1 --source-only
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
@@ -147,7 +147,7 @@ jobs:
           tool: cargo-nextest
 
       - name: Run Snowflake Tests Without Credentials
-        run: cargo x test-snowflake --credentials skip
+        run: cargo --locked x test-snowflake --credentials skip
 
   snowflake_gate:
     name: Snowflake Gate

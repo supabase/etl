@@ -85,10 +85,10 @@ jobs:
           tool: cargo-msrv
 
       - name: Check MSRV Sync
-        run: cargo x msrv
+        run: cargo --locked x msrv
 
       - name: Verify MSRV
-        run: cargo x msrv --verify
+        run: cargo --locked x msrv --verify
 
   check:
     name: Lint
@@ -113,7 +113,7 @@ jobs:
 
       - name: Install cargo-sort
         if: matrix.check == 'sort'
-        run: cargo install cargo-sort
+        run: cargo install cargo-sort --locked
 
       - name: Install pinned nightly rustfmt
         if: matrix.check == 'fmt'
@@ -121,14 +121,15 @@ jobs:
 
       - name: Run Cargo Fmt
         if: matrix.check == 'fmt'
-        run: cargo x fmt --check
+        run: cargo --locked x fmt --check
 
       - name: Run Cargo Clippy
         if: matrix.check == 'clippy'
-        run: cargo clippy --all-targets --all-features --no-deps -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features --no-deps -- -D warnings
 
       - name: Check Fuzz Crate
         if: matrix.check == 'clippy'
+        # Fuzz is a separate workspace without a committed Cargo.lock.
         run: cargo check --manifest-path fuzz/Cargo.toml
 
       - name: Run Cargo Sort
@@ -160,7 +161,7 @@ jobs:
 
           # ducklake makes sqlx a dependency of etl-destinations and etl-maintenance;
           # resolving the feature graph does not compile DuckDB.
-          sqlx_features="$(cargo tree \
+          sqlx_features="$(cargo tree --locked \
             -p etl -p etl-postgres -p etl-maintenance -p etl-destinations \
             --no-default-features \
             --features "${TLS_FEATURES},etl-destinations/ducklake" \
@@ -179,7 +180,7 @@ jobs:
 
       - name: Check AWS-LC Build
         run: |
-          cargo check \
+          cargo check --locked \
             -p etl -p etl-postgres -p etl-maintenance -p etl-destinations \
             --no-default-features \
             --features "${TLS_FEATURES}"
@@ -266,7 +267,7 @@ jobs:
         run: |
           POSTGRES_IMAGE=${{ matrix.postgres_image }} \
           POSTGRES_VERSION=${{ matrix.postgres_version }} \
-            cargo xtask postgres start
+            cargo --locked xtask postgres start
 
       - name: Vendor DuckDB Extensions
         run: |
@@ -289,7 +290,7 @@ jobs:
       - name: Migrate Database
         run: |
           sudo apt-get install libpq-dev -y
-          cargo x migrate etl-api
+          cargo --locked x migrate etl-api
 
       - name: Set up BigQuery Credentials
         # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.
@@ -314,7 +315,7 @@ jobs:
       - name: Run Unit and Integration Tests
         if: matrix.coverage == false
         run: |
-          cargo xtask nextest run
+          cargo --locked xtask nextest run
 
       - name: Install cargo-llvm-cov
         if: matrix.coverage == true
@@ -324,17 +325,17 @@ jobs:
 
       - name: Run Doctests
         run: |
-          cargo test --doc --workspace --all-features --no-fail-fast
+          cargo test --locked --doc --workspace --all-features --no-fail-fast
 
       - name: Run Unit and Integration Tests with Coverage
         if: matrix.coverage == true
         run: |
-          cargo xtask nextest llvm-cov
+          cargo --locked xtask nextest llvm-cov
 
       - name: Merge Coverage Data
         if: matrix.coverage == true
         run: |
-          cargo llvm-cov report --lcov --output-path lcov.info
+          cargo llvm-cov report --locked --lcov --output-path lcov.info
 
       - name: Upload Coverage to Coveralls
         if: matrix.coverage == true
@@ -367,4 +368,4 @@ jobs:
           tool: cargo-nextest
 
       - name: Run Multigres Tests
-        run: cargo xtask multigres test
+        run: cargo --locked xtask multigres test

@@ -15,14 +15,14 @@ kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"]
 pg_escape = { workspace = true }
 rand = { workspace = true, features = ["std", "thread_rng"] }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
-schemars = "0.8"
+schemars = "0.8.0"
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "json"] }
 tokio = { workspace = true, features = ["full"] }
-toml = "1.1"
-xshell = "0.2"
+toml = "1.1.0"
+xshell = "0.2.0"
 
 [lints]
 workspace = true
