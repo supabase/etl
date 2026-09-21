@@ -1904,6 +1904,69 @@ async fn shutdown_aborts_admitted_write_without_silent_success() {
     );
 }
 
+/// An aborted write releases its table fence. The fence guards travel inside
+/// the spawned future, so abort must drop them even though the task never
+/// reaches its explicit release; otherwise every later batch for that table
+/// would wait forever on the same destination.
+async fn aborted_write_releases_fence_for_later_writes_inner(engine: ClickHouseEngine) {
+    // GIVEN: a destination table and a write parked at its first INSERT
+    // statement while holding the table's fence.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("refenced");
+    let destination = clickhouse_db.build_destination_with_engine(MemoryStore::new(), engine).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (reached, _release) = arm_pause_before_insert_statement_for_tests(0);
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "aborted")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+
+    // WHEN: shutdown aborts the parked write and the same table is written
+    // again through the same destination.
+    Destination::shutdown(&destination).await.unwrap();
+    write_handle.await.unwrap().unwrap_err();
+    // A leaked fence would park this call forever; the timeout turns that
+    // into a failure instead of a hung test.
+    let status = tokio::time::timeout(
+        Duration::from_secs(30),
+        write_events_via_trait(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![lifecycle_insert(&schema, 2, "admitted")],
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // THEN: the later write was admitted past the fence and landed alone.
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_refenced\"").await, vec![2]);
+}
+
+/// MergeTree releases an aborted write's fence for later writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_releases_fence_for_later_writes_merge_tree() {
+    aborted_write_releases_fence_for_later_writes_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree releases an aborted write's fence for later writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_releases_fence_for_later_writes_replacing_merge_tree() {
+    aborted_write_releases_fence_for_later_writes_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
 /// An insert rejected by the server reaches the caller through the async
 /// result channel, and the destination keeps admitting later work.
 #[tokio::test(flavor = "multi_thread")]
