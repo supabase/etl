@@ -33,6 +33,8 @@ pub(crate) const ETL_STATUS_UPDATES_SKIPPED_TOTAL: &str = "etl_status_updates_sk
 pub(crate) const ETL_SCHEMA_CLEANUPS_TOTAL: &str = "etl_schema_cleanups_total";
 pub(crate) const ETL_SCHEMA_CLEANUP_ERRORS_TOTAL: &str = "etl_schema_cleanup_errors_total";
 pub(crate) const ETL_SCHEMA_CLEANUP_TABLES_TOTAL: &str = "etl_schema_cleanup_tables_total";
+pub(crate) const ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL: &str =
+    "etl_schema_cleanup_skipped_tables_total";
 pub(crate) const ETL_SCHEMA_CLEANUP_PRUNED_VERSIONS_TOTAL: &str =
     "etl_schema_cleanup_pruned_versions_total";
 pub(crate) const ETL_DDL_SCHEMA_CHANGES_TOTAL: &str = "etl_ddl_schema_changes_total";
@@ -267,6 +269,14 @@ pub(crate) fn register_metrics() {
             Unit::Count,
             "Total number of tables included in successfully completed schema cleanup operations, \
              labeled by worker_type."
+        );
+
+        describe_counter!(
+            ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL,
+            Unit::Count,
+            "Total number of PostgreSQL schema cleanup table requests skipped because an equal or \
+             newer retention boundary was already successfully pruned in the current store \
+             lifecycle."
         );
 
         describe_counter!(

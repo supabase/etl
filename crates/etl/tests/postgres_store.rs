@@ -9,7 +9,7 @@ use etl::{
     schema::{ColumnSchema, ReplicationMask, SnapshotId, TableId, TableName, TableSchema},
     store::{
         PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableState,
-        TableStateLifecycleStore, WorkerType,
+        TableStateLifecycleStore, TableStateOperation, WorkerType,
     },
     test_utils::database::spawn_source_database,
 };
@@ -57,6 +57,50 @@ fn create_another_table_schema() -> TableSchema {
     ];
 
     TableSchema::new(table_id, table_name, columns)
+}
+
+/// Stores synthetic versions of one table schema.
+async fn store_schema_versions(store: &PostgresStore, schema: &TableSchema, versions: &[u64]) {
+    for &version in versions {
+        let mut schema = schema.clone();
+        schema.snapshot_id = test_snapshot_id(version, version);
+        store.store_table_schema(schema).await.unwrap();
+    }
+}
+
+/// Counts actual DELETE statements, including successful zero-delete queries,
+/// and allows tests to reject a prune without changing the store.
+async fn track_schema_prune_queries(pool: &sqlx::PgPool) {
+    sqlx::raw_sql(
+        r#"
+        create table test.schema_prune_queries (
+            calls bigint not null,
+            reject_prune boolean not null
+        );
+        insert into test.schema_prune_queries values (0, false);
+        create function test.record_schema_prune_query() returns trigger
+        language plpgsql as $$
+        begin
+            if (select reject_prune from test.schema_prune_queries) then
+                raise exception 'injected schema prune failure';
+            end if;
+            update test.schema_prune_queries set calls = calls + 1;
+            return null;
+        end;
+        $$;
+        create trigger record_schema_prune_query
+        before delete on etl.table_schemas
+        for each statement execute function test.record_schema_prune_query();
+        "#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Returns the number of successful schema-prune SQL statements.
+async fn schema_prune_query_count(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("select calls from test.schema_prune_queries").fetch_one(pool).await.unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -751,6 +795,200 @@ async fn schema_store_prunes_obsolete_versions_from_database_and_cache() {
     let latest_schema =
         store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
     assert_eq!(latest_schema.snapshot_id, test_snapshot_id(300u64, 300u64));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_skips_successful_prune_boundaries_across_clones() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+    track_schema_prune_queries(&pool).await;
+    let first = create_sample_table_schema();
+    let second = create_another_table_schema();
+    store_schema_versions(&store, &first, &[0, 100, 200]).await;
+    store_schema_versions(&store, &second, &[0, 100, 200]).await;
+    let boundaries = BTreeMap::from([
+        (first.id, test_snapshot_id(100, 100)),
+        (second.id, test_snapshot_id(50, 50)),
+    ]);
+
+    assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 1);
+    assert_eq!(schema_prune_query_count(&pool).await, 1);
+
+    // The second table's zero-delete result is remembered too, including by
+    // other handles sharing the same store lifecycle.
+    assert_eq!(store.clone().prune_table_schemas(boundaries).await.unwrap(), 0);
+    assert_eq!(
+        store
+            .prune_table_schemas(BTreeMap::from([
+                (first.id, test_snapshot_id(50, 50)),
+                (second.id, SnapshotId::initial()),
+            ]))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(schema_prune_query_count(&pool).await, 1);
+
+    // A mixed request still prunes the table whose boundary advances.
+    assert_eq!(
+        store
+            .prune_table_schemas(BTreeMap::from([
+                (first.id, test_snapshot_id(200, 200)),
+                (second.id, test_snapshot_id(50, 50)),
+            ]))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(schema_prune_query_count(&pool).await, 2);
+    assert_eq!(
+        store
+            .prune_table_schemas(BTreeMap::from([
+                (first.id, test_snapshot_id(150, 150)),
+                (second.id, test_snapshot_id(100, 100)),
+            ]))
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(schema_prune_query_count(&pool).await, 3);
+    assert!(store.get_table_schema(&first.id, test_snapshot_id(100, 100)).await.unwrap().is_none());
+    assert_eq!(
+        store
+            .get_table_schema(&second.id, test_snapshot_id(150, 150))
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot_id,
+        test_snapshot_id(100, 100)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_retries_failed_prune_boundaries() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+    track_schema_prune_queries(&pool).await;
+    let schema = create_sample_table_schema();
+    store_schema_versions(&store, &schema, &[0, 100]).await;
+    let boundaries = BTreeMap::from([(schema.id, test_snapshot_id(100, 100))]);
+
+    sqlx::query("update test.schema_prune_queries set reject_prune = true")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(store.prune_table_schemas(boundaries.clone()).await.is_err());
+    assert!(store.get_table_schema(&schema.id, SnapshotId::initial()).await.unwrap().is_some());
+
+    sqlx::query("update test.schema_prune_queries set reject_prune = false")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 1);
+    assert_eq!(store.prune_table_schemas(boundaries).await.unwrap(), 0);
+    assert_eq!(schema_prune_query_count(&pool).await, 1);
+    assert!(store.get_table_schema(&schema.id, SnapshotId::initial()).await.unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_invalidates_prune_boundaries_for_older_schema_writes() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+    track_schema_prune_queries(&pool).await;
+    let schema = create_sample_table_schema();
+    store_schema_versions(&store, &schema, &[0, 100]).await;
+    let boundaries = BTreeMap::from([(schema.id, test_snapshot_id(200, 200))]);
+    assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 1);
+
+    // Newer insertion and an older cleanup are safe in either lock order.
+    let (pruned, ()) = tokio::join!(
+        store.prune_table_schemas(boundaries.clone()),
+        store_schema_versions(&store, &schema, &[300]),
+    );
+    assert_eq!(pruned.unwrap(), 0);
+    assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 0);
+    assert_eq!(schema_prune_query_count(&pool).await, 1);
+
+    // Insertion below the boundary changes the retained snapshot, so the
+    // previous successful query no longer makes another query redundant.
+    store_schema_versions(&store, &schema, &[150]).await;
+    assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 1);
+    assert_eq!(schema_prune_query_count(&pool).await, 2);
+    assert_eq!(
+        store
+            .get_table_schema(&schema.id, test_snapshot_id(200, 200))
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot_id,
+        test_snapshot_id(150, 150)
+    );
+
+    // An insertion exactly at the boundary must invalidate it as well.
+    store_schema_versions(&store, &schema, &[200]).await;
+    assert_eq!(store.prune_table_schemas(boundaries).await.unwrap(), 1);
+    assert_eq!(schema_prune_query_count(&pool).await, 3);
+    assert_eq!(
+        store.get_table_schema(&schema.id, SnapshotId::max()).await.unwrap().unwrap().snapshot_id,
+        test_snapshot_id(300, 300)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_reloads_and_restarts_retry_pruning() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+    track_schema_prune_queries(&pool).await;
+    let schema = create_sample_table_schema();
+    store_schema_versions(&store, &schema, &[0, 100]).await;
+    let boundaries = BTreeMap::from([(schema.id, test_snapshot_id(100, 100))]);
+    assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 1);
+
+    store.load_table_schemas().await.unwrap();
+    assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 0);
+    assert_eq!(schema_prune_query_count(&pool).await, 2);
+
+    let restarted = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    assert_eq!(restarted.prune_table_schemas(boundaries).await.unwrap(), 0);
+    assert_eq!(schema_prune_query_count(&pool).await, 3);
+    assert_eq!(
+        restarted
+            .get_table_schema(&schema.id, SnapshotId::max())
+            .await
+            .unwrap()
+            .unwrap()
+            .snapshot_id,
+        test_snapshot_id(100, 100)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_lifecycle_changes_invalidate_prune_boundaries() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+    track_schema_prune_queries(&pool).await;
+    let schema = create_sample_table_schema();
+    let boundaries = BTreeMap::from([(schema.id, test_snapshot_id(100, 100))]);
+
+    for operation in [
+        TableStateOperation::PrepareForCopy { table_id: schema.id },
+        TableStateOperation::ResetForResync,
+        TableStateOperation::Delete { table_id: schema.id },
+    ] {
+        store.update_table_state(schema.id, TableState::Ready).await.unwrap();
+        store_schema_versions(&store, &schema, &[0, 100]).await;
+        assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 1);
+
+        store.apply_table_state_operation(operation).await.unwrap();
+        let queries_before_retry = schema_prune_query_count(&pool).await;
+        assert_eq!(store.prune_table_schemas(boundaries.clone()).await.unwrap(), 0);
+        assert_eq!(schema_prune_query_count(&pool).await, queries_before_retry + 1);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

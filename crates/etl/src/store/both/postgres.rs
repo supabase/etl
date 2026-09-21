@@ -9,7 +9,7 @@ use etl_postgres::store::{
     checkpoint, destination_table_metadata as pg_destination_table_metadata, schema,
     table_state as pg_table_state,
 };
-use metrics::gauge;
+use metrics::{counter, gauge};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tokio::sync::Mutex;
 use tokio_postgres::types::PgLsn;
@@ -20,7 +20,7 @@ use crate::{
     destination::{DestinationTableMetadata, DestinationTableSchema},
     error::{ErrorKind, EtlResult},
     etl_error,
-    observability::{ETL_TABLES_TOTAL, STATE_LABEL},
+    observability::{ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL, ETL_TABLES_TOTAL, STATE_LABEL},
     pipeline::PipelineId,
     postgres::migrations,
     replication::{
@@ -104,6 +104,12 @@ struct Inner {
     /// typically contains only the latest schema version for each table, since
     /// that's what the replication pipeline actively uses.
     table_schemas: Arc<TableSchemaSnapshots>,
+    /// Last successfully pruned retention boundary per table.
+    ///
+    /// Lifecycle changes and schema writes at or below a remembered boundary
+    /// invalidate it before database work starts, since cancellation can leave
+    /// a write committed without updating the cache.
+    schema_prune_boundaries: BTreeMap<TableId, SnapshotId>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
 }
@@ -193,6 +199,7 @@ impl PostgresStore {
             state_counts: HashMap::new(),
             table_states: Arc::new(BTreeMap::new()),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
+            schema_prune_boundaries: BTreeMap::new(),
             destination_tables_metadata: Arc::new(BTreeMap::new()),
         };
 
@@ -610,6 +617,7 @@ impl SchemaStore for PostgresStore {
         debug!("loading table schemas from postgres state store");
 
         let mut inner = self.inner.lock().await;
+        inner.schema_prune_boundaries.clear();
         let table_schemas = schema::load_table_schemas(&self.pool, self.pipeline_id as i64)
             .await
             .map_err(|err| {
@@ -637,6 +645,13 @@ impl SchemaStore for PostgresStore {
         debug!(table_name = %table_schema.name, snapshot_id = %table_schema.snapshot_id, "storing table schema");
 
         let mut inner = self.inner.lock().await;
+        if inner
+            .schema_prune_boundaries
+            .get(&table_schema.id)
+            .is_some_and(|boundary| table_schema.snapshot_id <= *boundary)
+        {
+            inner.schema_prune_boundaries.remove(&table_schema.id);
+        }
         schema::store_table_schema(&self.pool, self.pipeline_id as i64, &table_schema)
             .await
             .map_err(|err| {
@@ -653,9 +668,21 @@ impl SchemaStore for PostgresStore {
 
     async fn prune_table_schemas(
         &self,
-        retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
+        mut retention_snapshot_ids: BTreeMap<TableId, SnapshotId>,
     ) -> EtlResult<u64> {
         let mut inner = self.inner.lock().await;
+        let requested_table_count = retention_snapshot_ids.len();
+        retention_snapshot_ids.retain(|table_id, boundary| {
+            inner.schema_prune_boundaries.get(table_id).is_none_or(|pruned| *pruned < *boundary)
+        });
+        let skipped_table_count = requested_table_count - retention_snapshot_ids.len();
+        if skipped_table_count > 0 {
+            counter!(ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL).increment(skipped_table_count as u64);
+        }
+        if retention_snapshot_ids.is_empty() {
+            return Ok(0);
+        }
+
         let deleted_count = schema::delete_obsolete_table_schema_versions(
             &self.pool,
             self.pipeline_id as i64,
@@ -681,6 +708,10 @@ impl SchemaStore for PostgresStore {
             );
         }
 
+        // Successful zero-delete queries also establish a completed boundary.
+        // Errors and cancellation must leave the request eligible for retry.
+        inner.schema_prune_boundaries.extend(retention_snapshot_ids);
+
         Ok(deleted_count)
     }
 }
@@ -693,6 +724,7 @@ impl TableStateLifecycleStore for PostgresStore {
         match operation {
             TableStateOperation::PrepareForCopy { table_id } => {
                 let mut inner = self.inner.lock().await;
+                inner.schema_prune_boundaries.remove(&table_id);
                 let mut tx = self.pool.begin().await?;
 
                 pg_destination_table_metadata::delete_destination_table_metadata(
@@ -743,6 +775,7 @@ impl TableStateLifecycleStore for PostgresStore {
             TableStateOperation::ResetForResync => {
                 let (state_type, metadata) = TableState::Init.to_storage_format()?;
                 let mut inner = self.inner.lock().await;
+                inner.schema_prune_boundaries.clear();
                 let table_ids = inner.table_states.keys().copied().collect::<Vec<_>>();
                 let reset_count = table_ids.len();
 
@@ -784,6 +817,7 @@ impl TableStateLifecycleStore for PostgresStore {
             }
             TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.lock().await;
+                inner.schema_prune_boundaries.remove(&table_id);
                 let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
                 let mut tx = self.pool.begin().await?;
 

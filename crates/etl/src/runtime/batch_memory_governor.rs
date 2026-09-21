@@ -39,7 +39,7 @@ fn calculate_batch_memory_target(total_memory_bytes: u64, memory_budget_ratio: f
     ratio_of_bytes(total_memory_bytes, memory_budget_ratio)
 }
 
-/// Divides one snapshot-scoped target across the registered batch slots.
+/// Divides one capacity-derived target across the registered batch slots.
 ///
 /// Each slot represents one position that may own an accumulating or in-flight
 /// decoded batch. Every slot receives an equal target, then the configured
@@ -57,22 +57,22 @@ fn calculate_per_slot_batch_size_target(
     per_slot_batch_size_bytes.min(max_batch_bytes.max(1))
 }
 
-/// Snapshot-derived values changed under one short update lock.
+/// Capacity-derived values changed under one short update lock.
 #[derive(Debug)]
 struct BatchMemoryUpdateState {
     /// Batch-producing positions currently registered with the governor.
     registered_batch_slots: usize,
-    /// Global advisory target frozen for the current memory snapshot.
+    /// Global advisory target frozen for the current memory capacity.
     snapshot_batch_target_bytes: u64,
 }
 
 /// Mutable batch-governor state shared by batch producers.
 #[derive(Debug)]
 struct BatchMemoryState {
-    /// Snapshot target and slot count protected by one update lock.
+    /// Capacity-derived target and slot count protected by one update lock.
     update_state: Mutex<BatchMemoryUpdateState>,
-    /// Memory snapshot revision used by the frozen global target.
-    memory_snapshot_revision: AtomicU64,
+    /// Memory capacity revision used by the frozen global target.
+    memory_capacity_revision: AtomicU64,
     /// Current advisory target for one registered batch slot.
     batch_size_target_bytes: AtomicUsize,
     /// Preferred ceiling for one batch.
@@ -82,7 +82,7 @@ struct BatchMemoryState {
 impl BatchMemoryState {
     /// Creates shared state from the initial memory snapshot target.
     fn new(
-        memory_snapshot_revision: u64,
+        memory_capacity_revision: u64,
         snapshot_batch_target_bytes: u64,
         max_batch_bytes: usize,
     ) -> Self {
@@ -95,7 +95,7 @@ impl BatchMemoryState {
                 registered_batch_slots: 0,
                 snapshot_batch_target_bytes,
             }),
-            memory_snapshot_revision: AtomicU64::new(memory_snapshot_revision),
+            memory_capacity_revision: AtomicU64::new(memory_capacity_revision),
             batch_size_target_bytes: AtomicUsize::new(batch_size_target_bytes),
             max_batch_bytes,
         }
@@ -188,14 +188,15 @@ impl BatchMemoryGovernor {
     /// Returns the current advisory batch-size target in bytes.
     ///
     /// The common path compares two atomic revisions and loads the atomic
-    /// target. The first caller to observe a new memory-snapshot revision
+    /// target. The first caller to observe a new memory-capacity revision
     /// refreshes the shared target while holding the same lock used for slot
     /// changes. This keeps one frozen global target per revision and one
     /// consistent per-slot target for all callers.
     pub(crate) fn batch_size_target_bytes(&self) -> usize {
-        // Avoid locking when the governor already reflects the latest snapshot.
-        let memory_snapshot_revision = self.memory_monitor.snapshot_revision();
-        if memory_snapshot_revision != self.state.memory_snapshot_revision.load(Ordering::Acquire) {
+        // Usage-only samples leave the capacity revision unchanged, so they
+        // do not require locking or recalculating the target.
+        let memory_capacity_revision = self.memory_monitor.capacity_revision();
+        if memory_capacity_revision != self.state.memory_capacity_revision.load(Ordering::Acquire) {
             self.try_refresh_batch_size_target();
         }
 
@@ -205,7 +206,7 @@ impl BatchMemoryGovernor {
         self.state.batch_size_target_bytes.load(Ordering::Acquire)
     }
 
-    /// Refreshes the shared target from the newest complete memory snapshot.
+    /// Refreshes the shared target from the newest sampled memory capacity.
     fn try_refresh_batch_size_target(&self) {
         let mut update = match self.state.update_state.try_lock() {
             Ok(guard) => guard,
@@ -219,7 +220,7 @@ impl BatchMemoryGovernor {
         let memory = self.memory_monitor.capacity_snapshot();
 
         // Recheck under the lock shared by target refreshes and slot changes.
-        if self.state.memory_snapshot_revision.load(Ordering::Relaxed) == memory.revision {
+        if self.state.memory_capacity_revision.load(Ordering::Relaxed) == memory.revision {
             return;
         }
 
@@ -232,11 +233,11 @@ impl BatchMemoryGovernor {
         self.state.recalculate_batch_size_target(&update);
 
         // Publish the refreshed target before readers accept this revision.
-        self.state.memory_snapshot_revision.store(memory.revision, Ordering::Release);
+        self.state.memory_capacity_revision.store(memory.revision, Ordering::Release);
 
         debug!(
             pipeline_id = self.pipeline_id,
-            memory_snapshot_revision = memory.revision,
+            memory_capacity_revision = memory.revision,
             total_memory_bytes = memory.total_memory_bytes,
             memory_budget_ratio = self.memory_budget_ratio,
             snapshot_batch_target_bytes,
@@ -282,10 +283,12 @@ mod tests {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(2_000, 10_000);
         let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 0.2, 10_000);
+        let revision = memory_monitor.capacity_revision();
 
         assert_eq!(governor.batch_size_target_bytes(), 2_000);
 
         memory_monitor.set_memory_snapshot_for_test(9_000, 10_000);
+        assert_eq!(memory_monitor.capacity_revision(), revision);
         assert_eq!(governor.batch_size_target_bytes(), 2_000);
     }
 
@@ -324,17 +327,17 @@ mod tests {
     }
 
     #[test]
-    fn shared_target_refreshes_when_snapshot_revision_wraps() {
+    fn shared_target_refreshes_when_capacity_revision_wraps() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(0, 10_000);
-        memory_monitor.set_snapshot_revision_for_test(u64::MAX);
+        memory_monitor.set_capacity_revision_for_test(u64::MAX);
         let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 0.2, 10_000);
 
         assert_eq!(governor.batch_size_target_bytes(), 2_000);
 
         memory_monitor.set_memory_snapshot_for_test(4_000, 5_000);
 
-        assert_eq!(memory_monitor.snapshot_revision(), 0);
+        assert_eq!(memory_monitor.capacity_revision(), 0);
         assert_eq!(governor.batch_size_target_bytes(), 1_000);
     }
 
