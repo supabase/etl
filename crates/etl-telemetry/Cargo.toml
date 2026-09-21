@@ -29,8 +29,5 @@ tracing-appender = { workspace = true }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-subscriber = { workspace = true, default-features = true, features = ["json", "env-filter", "ansi"] }
 
-[dev-dependencies]
-reqwest = { workspace = true }
-
 [lints]
 workspace = true
