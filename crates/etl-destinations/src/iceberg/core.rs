@@ -8,16 +8,17 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type},
     store::SharedStateStore,
+    task::{TaskGroup, TaskRegistry},
 };
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::{
@@ -107,7 +108,7 @@ pub struct IcebergDestination<S> {
     client: IcebergClient,
     store: S,
     inner: Arc<Mutex<Inner>>,
-    tasks: TaskSet,
+    tasks: TaskRegistry,
 }
 
 /// Namespace in the destination where the tables will be copied
@@ -172,7 +173,7 @@ where
             client,
             store,
             inner: Arc::new(Mutex::new(Inner { created_namespaces: HashSet::new(), namespace })),
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
         }
     }
 
@@ -426,7 +427,7 @@ where
 
             // Process accumulated events for each table.
             if !table_id_to_data.is_empty() {
-                let mut join_set = JoinSet::new();
+                let mut join_set = TaskGroup::new();
 
                 for (_, (replicated_table_schema, table_rows)) in table_id_to_data {
                     let (namespace, iceberg_table_name) = {
@@ -444,10 +445,7 @@ where
                     });
                 }
 
-                while let Some(insert_result) = join_set.join_next().await {
-                    insert_result
-                        .map_err(|_| etl_error!(ErrorKind::Unknown, "Failed to join future"))??;
-                }
+                join_set.wait().await?;
             }
 
             // Collect and deduplicate schemas from all truncate events.

@@ -1418,6 +1418,7 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
                 orders_sync_done_notify,
                 orders_ready_notify,
             ),
+
             () = orders_errored_notify.notified() => (
                 orders_table_id,
                 users_table_id,
@@ -2782,4 +2783,34 @@ async fn idle_durability_shutdown_drains_the_existing_barrier() {
         Some(commit_lsn)
     );
     assert!(test.writes_rx.try_recv().is_err());
+}
+
+/// Failed draining barriers preserve replay progress and the worker's error
+/// policy: cancellation ends a retry wait, while non-retriable errors
+/// propagate.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_durability_shutdown_preserves_error_policy_and_checkpoint() {
+    for kind in [ErrorKind::WithTimedRetry, ErrorKind::WithNoRetry] {
+        let mut test = IdleDurabilityTest::start().await;
+        test.insert(1).await;
+        let (_, result) = test.next_batch().await;
+        let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+        result.send(Ok(DestinationWriteStatus::Accepted));
+        let barrier = test.next_barrier().await;
+
+        test.pipeline.shutdown();
+        barrier.send(Err(etl::etl_error!(kind, "Test shutdown write failure")));
+        let result = test.pipeline.wait().await;
+
+        if kind == ErrorKind::WithTimedRetry {
+            result.unwrap();
+        } else {
+            assert!(result.unwrap_err().kinds().contains(&kind));
+        }
+        assert_eq!(
+            test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+            checkpoint
+        );
+        assert!(test.writes_rx.try_recv().is_err());
+    }
 }

@@ -867,7 +867,7 @@ async fn spawn_test_app_with_services(
         api_client: reqwest::Client::new(),
         api_key,
         config,
-        server_handle: server,
+        server_handle: server.detach(),
         k8s_state,
     }
 }

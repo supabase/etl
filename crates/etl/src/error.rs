@@ -166,14 +166,16 @@ pub enum ErrorKind {
     // State & Workflow Errors
     /// Pipeline state violated an expected invariant.
     InvalidState,
+    /// A spawned task panicked.
+    TaskPanic,
+    /// A spawned task was unexpectedly canceled.
+    TaskCancelled,
     /// The apply worker task panicked.
     ApplyWorkerPanic,
     /// The apply worker task was canceled.
     ApplyWorkerCancelled,
     /// A table sync worker task panicked.
     TableSyncWorkerPanic,
-    /// A table copy worker task panicked.
-    TableCopyWorkerPanic,
     /// A table sync worker task was canceled.
     TableSyncWorkerCancelled,
     /// Table state rollback failed.
@@ -559,6 +561,20 @@ where
         }
 
         EtlError { repr: ErrorRepr::Many { errors } }
+    }
+}
+
+/// Preserves task termination as a source and distinguishes cancellation from
+/// panic.
+impl From<tokio::task::JoinError> for EtlError {
+    fn from(error: tokio::task::JoinError) -> Self {
+        let (kind, description) = if error.is_cancelled() {
+            (ErrorKind::TaskCancelled, "Task was cancelled")
+        } else {
+            (ErrorKind::TaskPanic, "Task panicked")
+        };
+
+        Self::from((kind, description)).with_source(error)
     }
 }
 

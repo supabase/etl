@@ -8,14 +8,15 @@ use etl::{
     data::{OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::DestinationStore,
+    task::TaskRegistry,
 };
 use tokio::time::timeout;
 use tracing::{info, warn};
@@ -208,14 +209,14 @@ where
 /// Execution context captured by Snowflake background event tasks.
 ///
 /// Before resetting a table, [`Destination`] retains exclusive access to its
-/// [`TaskSet`] while waiting for every admitted event task to finish. A task
-/// that captured the complete destination could later access that same task
-/// registry, causing the reset to wait for the task while the task waits for
-/// the reset-held registry.
+/// [`TaskRegistry`] while waiting for every admitted event task to finish. A
+/// task that captured the complete destination could later access that same
+/// task registry, causing the reset to wait for the task while the task waits
+/// for the reset-held registry.
 ///
 /// This type contains the state needed to execute writes but deliberately omits
-/// [`TaskSet`], making that recursive registry access unavailable through the
-/// task's execution context.
+/// [`TaskRegistry`], making that recursive registry access unavailable through
+/// the task's execution context.
 struct DestinationWriter<S, T, C> {
     /// Snowflake API client shared by foreground and event writes.
     client: Client<T, C>,
@@ -236,7 +237,7 @@ impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for DestinationWriter<S,
 /// the state store bookkeeping.
 pub struct Destination<S, T = AuthManager<HttpExchanger>, C = RestStreamClient<T>> {
     writer: DestinationWriter<S, T, C>,
-    tasks: TaskSet,
+    tasks: TaskRegistry,
 }
 
 impl<S: Clone, T: TokenProvider, C: StreamClient> Clone for Destination<S, T, C> {
@@ -254,7 +255,7 @@ where
     /// Create a new destination.
     pub fn new(client: Client<T, C>, store: S) -> Self {
         register_metrics();
-        Self { writer: DestinationWriter { client, store }, tasks: TaskSet::new() }
+        Self { writer: DestinationWriter { client, store }, tasks: TaskRegistry::new() }
     }
 
     /// Fetches the latest committed offset for this table's channel.
@@ -315,7 +316,8 @@ where
         Ok(())
     }
 
-    /// Processes an event batch after its task was admitted into [`TaskSet`].
+    /// Processes an event batch after its task was admitted into
+    /// [`TaskRegistry`].
     ///
     /// This execution context intentionally cannot access the task registry. A
     /// table reset may retain that registry while waiting for this method to

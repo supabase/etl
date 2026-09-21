@@ -2,12 +2,20 @@
 
 use std::net::Ipv4Addr;
 
-use etl::{pipeline::PipelineId, store::PostgresStore};
+use etl::{
+    error::{ErrorKind, EtlResult},
+    etl_error,
+    pipeline::PipelineId,
+    store::PostgresStore,
+    task::abort_and_join_result,
+};
 use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, ReplicatorHealthConfig};
-use tokio::{net::TcpListener, task::JoinHandle};
+use tokio::net::TcpListener;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error};
 
 use crate::{
+    core::shutdown::with_shutdown,
     error::ReplicatorResult,
     error_notification::ErrorNotificationClient,
     error_reporting::ErrorReportingStateStore,
@@ -17,6 +25,7 @@ use crate::{
 mod destinations;
 #[cfg(feature = "any-destination")]
 mod pipeline;
+mod shutdown;
 
 #[cfg(all(
     feature = "any-destination",
@@ -54,7 +63,7 @@ pub(crate) enum ReplicatorState {
 async fn spawn_health_server(
     health_config: Option<ReplicatorHealthConfig>,
     replicator_health: ReplicatorHealth,
-) -> ReplicatorResult<Option<JoinHandle<()>>> {
+) -> ReplicatorResult<Option<AbortOnDropHandle<EtlResult<()>>>> {
     let Some(health_config) = health_config else {
         return Ok(None);
     };
@@ -66,11 +75,12 @@ async fn spawn_health_server(
     );
     let router = health::router(replicator_health);
 
-    Ok(Some(tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, router).await {
+    Ok(Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, router).await.map_err(|error| {
             error!(error = %error, "health server failed");
-        }
-    })))
+            etl_error!(ErrorKind::InvalidState, "Health server failed", source: error)
+        })
+    }))))
 }
 
 /// Initializes the store.
@@ -98,6 +108,9 @@ pub(crate) async fn start_replicator_with_config(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
+    // Register before any asynchronous initialization so startup remains
+    // cancellable.
+    let mut shutdown_signal = shutdown::ShutdownSignal::new()?;
     let replicator_health = ReplicatorHealth::new(replicator_config.health.unwrap_or_default());
     let health_server_task =
         spawn_health_server(replicator_config.health, replicator_health.clone()).await?;
@@ -108,18 +121,33 @@ pub(crate) async fn start_replicator_with_config(
         // We initialize the store, using the optional store connection when the
         // replication connection points at a read replica.
         let store_pg_connection_config = replicator_config.pipeline.store_pg_connection().clone();
-        let replicator_store =
-            init_replicator_store(pipeline_id, store_pg_connection_config, notification_client)
-                .await?;
+        let Some(result) = with_shutdown!(
+            init_replicator_store(pipeline_id, store_pg_connection_config, notification_client),
+            shutdown_signal.wait(),
+        ) else {
+            return Ok(());
+        };
+        let replicator_store = result?;
 
-        destinations::start(replicator_config, replicator_store, replicator_health).await
+        destinations::start(
+            replicator_config,
+            replicator_store,
+            &mut shutdown_signal,
+            &replicator_health,
+        )
+        .await
     }
     .await;
 
-    // Stop probes on both completion and initialization failure.
+    replicator_health.set_replicator_state(ReplicatorState::Stopping);
+
+    replicator_result?;
+
+    // On failure the handle drops; successful teardown also observes the
+    // server result.
     if let Some(health_server_task) = health_server_task {
-        health_server_task.abort();
+        abort_and_join_result(health_server_task).await?;
     }
 
-    replicator_result
+    Ok(())
 }

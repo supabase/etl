@@ -14,7 +14,6 @@ use tracing::debug;
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    runtime::concurrency::{ShutdownResult, ShutdownRx},
     schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
@@ -224,22 +223,6 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
     }
 }
 
-impl<T, M> PendingAsyncResult<T, M> {
-    /// Waits for completion or returns when shutdown is requested.
-    pub(crate) async fn with_shutdown(
-        self,
-        shutdown_rx: &mut ShutdownRx,
-    ) -> ShutdownResult<CompletedAsyncResult<T, M>, ()> {
-        tokio::select! {
-            biased;
-
-            _ = shutdown_rx.changed() => ShutdownResult::Shutdown(()),
-
-            completed = self => ShutdownResult::Ok(completed),
-        }
-    }
-}
-
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
@@ -266,7 +249,6 @@ impl<T, M> CompletedAsyncResult<T, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::concurrency::create_shutdown_channel;
 
     #[tokio::test]
     async fn async_result_round_trips_success() {
@@ -315,42 +297,5 @@ mod tests {
 
         assert!(metadata.is_none());
         assert_eq!(result.unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_completes_before_shutdown() {
-        let (_shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
-        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        result_tx.send(Ok(7));
-
-        let ShutdownResult::Ok(completed) = pending_result.with_shutdown(&mut shutdown_rx).await
-        else {
-            panic!("async result should complete before shutdown");
-        };
-
-        assert_eq!(completed.into_result().unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_stops_waiting_on_shutdown() {
-        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
-        let (_result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        shutdown_tx.shutdown().unwrap();
-
-        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
-
-        assert!(matches!(result, ShutdownResult::Shutdown(())));
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_prioritizes_shutdown_over_completion() {
-        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
-        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        result_tx.send(Ok(7));
-        shutdown_tx.shutdown().unwrap();
-
-        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
-
-        assert!(matches!(result, ShutdownResult::Shutdown(())));
     }
 }

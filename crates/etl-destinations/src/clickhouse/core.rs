@@ -8,8 +8,8 @@ use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -20,10 +20,11 @@ use etl::{
         TableId, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
+    task::{TaskGroup, TaskRegistry},
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::{Mutex, RwLock};
-use tokio::{sync::OwnedMutexGuard, task::JoinSet};
+use tokio::sync::OwnedMutexGuard;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -634,7 +635,7 @@ pub struct ClickHouseDestination<S> {
     ///
     /// [`Destination::write_events`] admits its work here and returns;
     /// destructive table resets drain the registry to fence admitted work.
-    tasks: TaskSet,
+    tasks: TaskRegistry,
     /// Per-table ordering of event batches; see [`EventBatchFences`].
     fences: Arc<EventBatchFences>,
 }
@@ -664,13 +665,13 @@ struct ClickHouseTableCacheEntry {
 /// Execution context captured by ClickHouse background event tasks.
 ///
 /// Before resetting a table, [`ClickHouseDestination`] retains exclusive
-/// access to its [`TaskSet`] while waiting for every admitted event task to
-/// finish. A task that captured the complete destination could later access
+/// access to its [`TaskRegistry`] while waiting for every admitted event task
+/// to finish. A task that captured the complete destination could later access
 /// that same task registry, causing the reset to wait for the task while the
 /// task waits for the reset-held registry.
 ///
 /// This type contains the state needed to execute writes but deliberately
-/// omits [`TaskSet`], making that recursive registry access unavailable
+/// omits [`TaskRegistry`], making that recursive registry access unavailable
 /// through the task's execution context. It omits [`EventBatchFences`] for the
 /// same reason. A task already holds the fences of every table it writes, so
 /// it must never wait on them again.
@@ -881,7 +882,7 @@ where
                 table_cache: Arc::new(RwLock::new(HashMap::new())),
                 create_locks: Arc::new(Mutex::new(HashMap::new())),
             },
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
             fences: Arc::new(EventBatchFences::new()),
         }
     }
@@ -1848,7 +1849,7 @@ where
     }
 
     /// Encodes the accumulated `PendingRow` batches and inserts them into
-    /// ClickHouse, one `JoinSet` task per table. No-op if `pending` is empty.
+    /// ClickHouse, one task per table. No-op if `pending` is empty.
     ///
     /// All `prepare_table_for_writes` calls run sequentially before any insert
     /// is spawned, so a schema-resolution failure aborts the whole pass without
@@ -1869,13 +1870,13 @@ where
             prepared.push((clickhouse_table_name, nullable_flags, rows));
         }
 
-        let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
+        let mut tasks: TaskGroup<()> = TaskGroup::new();
         let engine = self.inserter_config.engine;
         for (clickhouse_table_name, nullable_flags, rows) in prepared {
             let client = self.client.clone();
             let max_bytes = self.inserter_config.max_bytes_per_insert;
 
-            join_set.spawn(async move {
+            tasks.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
                     .map(|PendingRow { operation, sequence_key, cells }| {
@@ -1898,11 +1899,7 @@ where
             });
         }
 
-        while let Some(result) = join_set.join_next().await {
-            result.map_err(
-                |err| etl_error!(ErrorKind::ApplyWorkerPanic, "Insert task failed", source: err),
-            )??;
-        }
+        tasks.wait().await?;
 
         Ok(())
     }

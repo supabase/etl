@@ -28,6 +28,12 @@
 //! coordinates initial sync and ongoing replication, and handles failures
 //! gracefully.
 //!
+//! [`pipeline::Pipeline::shutdown`] requests shutdown; keep the original
+//! [`pipeline::Pipeline::wait`] future alive to finish cleanup. Failures return
+//! immediately and drop remaining owned tasks to request cancellation.
+//! [`pipeline::Pipeline::shutdown_and_wait`] combines both steps when no wait
+//! is in progress. See [`pipeline::Pipeline::wait`] for teardown guarantees.
+//!
 //! ## Destinations
 //! [`destination::Destination`] trait implementations define where replicated
 //! data should be sent. Destinations are pluggable and can integrate with
@@ -218,6 +224,7 @@ mod runtime;
 pub mod schema;
 mod source_payload_metadata;
 pub mod store;
+pub mod task;
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
