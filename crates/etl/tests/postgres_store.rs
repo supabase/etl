@@ -833,6 +833,13 @@ async fn multiple_pipelines_isolation() {
             .map(|m| m.table_id().to_owned()),
         Some("pipeline1_table".to_owned())
     );
+
+    // Deleting one pipeline's state must preserve the other pipeline's state.
+    store1.delete_table_state(table_id).await.unwrap();
+
+    let new_store2 = PostgresStore::new(pipeline_id2, database.config.clone()).await.unwrap();
+    new_store2.load_table_states().await.unwrap();
+    assert_eq!(new_store2.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
 }
 
 #[tokio::test(flavor = "multi_thread")]
