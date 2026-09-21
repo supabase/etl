@@ -1,11 +1,29 @@
 use std::{
+    io,
     sync::{Mutex, PoisonError},
     time::Duration,
 };
 
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
+use thiserror::Error;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::trace;
+
+use crate::listener::listen_address;
+
+/// HTTP port for the standalone metrics endpoint.
+const METRICS_PORT: u16 = 9000;
+
+/// Errors while initializing the standalone metrics endpoint.
+#[derive(Debug, Error)]
+pub enum MetricsError {
+    /// The host's socket support could not be determined.
+    #[error("Failed to select metrics listener address")]
+    Listener(#[source] io::Error),
+    /// The recorder or exporter could not be installed.
+    #[error(transparent)]
+    Build(#[from] BuildError),
+}
 
 // Global cache for the Prometheus handle used by [`init_metrics_handle`].
 //
@@ -84,7 +102,7 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 /// This function is designed for standalone services where metrics should be
 /// exposed automatically without manual endpoint management. It installs a
 /// global metrics recorder and starts an HTTP server that listens on
-/// `[::]:9000/metrics`, making metrics available for Prometheus scraping.
+/// `[::]:9000/metrics`, falling back to IPv4 when IPv6 sockets are unsupported.
 ///
 /// When provided, `project_ref`, `pipeline_id`, and `destination` are attached
 /// as global labels to all exported metrics for the current process.
@@ -99,11 +117,9 @@ pub fn init_metrics(
     project_ref: Option<&str>,
     pipeline_id: Option<u64>,
     destination: Option<&str>,
-) -> Result<(), BuildError> {
-    let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
-        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-        9000,
-    ));
+) -> Result<(), MetricsError> {
+    let address = listen_address(METRICS_PORT).map_err(MetricsError::Listener)?;
+    let mut builder = PrometheusBuilder::new().with_http_listener(address);
 
     if let Some(project_ref) = project_ref {
         builder = builder.add_global_label("project", project_ref);

@@ -2229,6 +2229,7 @@ name = "etl-telemetry"
 version = "0.1.0"
 dependencies = [
  "etl-config",
+ "libc",
  "metrics-exporter-prometheus",
  "serde",
  "serde_json",
@@ -2239,6 +2240,7 @@ dependencies = [
  "tracing-appender",
  "tracing-log",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

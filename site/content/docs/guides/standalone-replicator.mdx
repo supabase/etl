@@ -203,8 +203,9 @@ health:
 ```
 
 Omitting `health` disables it; `health: {}` uses these defaults. The listener
-binds to `[::]` (all IPv6 interfaces). IPv4 support depends on the host's
-dual-stack settings.
+binds to `[::]` (all IPv6 interfaces), falling back to `0.0.0.0` when IPv6
+sockets are unsupported. Otherwise, IPv4 support follows the host's dual-stack
+settings.
 
 Use another port, such as `19001`, when running alongside the local Docker
 stack, which reserves port 9001 for ClickHouse.

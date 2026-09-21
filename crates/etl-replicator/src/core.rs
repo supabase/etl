@@ -1,7 +1,5 @@
 //! Replicator service orchestration.
 
-use std::net::Ipv6Addr;
-
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -10,6 +8,7 @@ use etl::{
     task::abort_and_join_result,
 };
 use etl_config::shared::{PgConnectionConfig, ReplicatorConfig, ReplicatorHealthConfig};
+use etl_telemetry::listener::listen_address;
 use tokio::net::TcpListener;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error};
@@ -67,7 +66,7 @@ async fn spawn_health_server(
     let Some(health_config) = health_config else {
         return Ok(None);
     };
-    let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, health_config.port)).await?;
+    let listener = TcpListener::bind(listen_address(health_config.port)?).await?;
     debug!(
         configured_port = health_config.port,
         stall_timeout_ms = health_config.stall_timeout_ms,
