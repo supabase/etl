@@ -15,22 +15,22 @@ doctest = false
 [dependencies]
 etl-config = { workspace = true }
 
-metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
+axum = { workspace = true, features = ["http1", "tokio"] }
+libc = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+socket2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["net"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true, default-features = true }
 tracing-appender = { workspace = true }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-subscriber = { workspace = true, default-features = true, features = ["json", "env-filter", "ansi"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = ["Win32_Networking_WinSock"] }
+[dev-dependencies]
+reqwest = { workspace = true }
 
 [lints]
 workspace = true

@@ -128,6 +128,7 @@ serde = { version = "1.0.219", default-features = false }
 serde_json = { version = "1.0.141", default-features = false }
 sha2 = { version = "0.11", default-features = false }
 simdutf8 = { version = "0.1.5" }
+socket2 = { version = "0.6", default-features = false }
 sqlx = { version = "0.9.0", default-features = false }
 sysinfo = { version = "0.39.6", default-features = false }
 tempfile = { version = "3.23.0", default-features = false }
@@ -151,7 +152,6 @@ url = { version = "2.5.8", features = ["serde"] }
 utoipa = { version = "5.4.0", default-features = false }
 utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["vendored"] }
 uuid = { version = "1.17.0", default-features = false }
-windows-sys = { version = "0.61", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
 zstd = { version = "0.13", default-features = false }
 

@@ -1,31 +1,41 @@
-//! Listen addresses for health and telemetry endpoints.
+//! IPv4 and IPv6 listeners for health and telemetry endpoints.
 
 use std::{
     io,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
 };
 
-#[cfg(unix)]
 use libc::{EAFNOSUPPORT, EPROTONOSUPPORT};
-use tokio::net::TcpSocket;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::{
-    WSAEAFNOSUPPORT as EAFNOSUPPORT, WSAEPROTONOSUPPORT as EPROTONOSUPPORT,
-};
+use socket2::{Domain, Protocol, Socket, Type};
+use tokio::net::TcpListener;
 
-/// Selects `[::]:port`, or `0.0.0.0:port` when IPv6 sockets are unsupported.
+/// Maximum number of pending connections, subject to the host's limit.
+const LISTEN_BACKLOG: i32 = 1024;
+
+/// Binds a dual-stack TCP listener, falling back to IPv4 if IPv6 is
+/// unsupported.
 ///
-/// Checks socket support without binding a port. Permission and resource errors
-/// propagate, and callers remain responsible for reporting bind failures.
-/// IPv4 connections to an IPv6 listener follow the host's dual-stack settings.
-pub fn listen_address(port: u16) -> io::Result<SocketAddr> {
-    let ip = match TcpSocket::new_v6() {
-        Ok(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-        Err(error) if matches!(error.raw_os_error(), Some(EAFNOSUPPORT | EPROTONOSUPPORT)) => {
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+/// Enables IPv4 on the IPv6 socket explicitly rather than relying on host
+/// defaults. Permission, resource, and bind errors propagate unchanged.
+/// Must be called from a Tokio runtime with I/O enabled.
+pub fn bind_listener(port: u16) -> io::Result<TcpListener> {
+    let (socket, address) = match Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
+        Ok(socket) => {
+            socket.set_only_v6(false)?;
+
+            (socket, SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)))
         }
+        Err(error) if matches!(error.raw_os_error(), Some(EAFNOSUPPORT | EPROTONOSUPPORT)) => (
+            Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?,
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        ),
         Err(error) => return Err(error),
     };
 
-    Ok(SocketAddr::new(ip, port))
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&address.into())?;
+    socket.listen(LISTEN_BACKLOG)?;
+
+    TcpListener::from_std(socket.into())
 }

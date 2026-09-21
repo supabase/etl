@@ -7,6 +7,7 @@
 use std::process::ExitCode;
 
 use ::tracing::{debug, error, info};
+use etl::task::abort_and_join;
 use etl_config::shared::ReplicatorConfig;
 
 use crate::{
@@ -75,6 +76,8 @@ async fn async_main(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
+    let metrics_http_listener = init::init_metrics(&replicator_config)?;
+
     // Keep the feature flags client alive for the full async runtime lifetime.
     let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
 
@@ -83,6 +86,10 @@ async fn async_main(
     let Err(error) =
         start_replicator_with_config(replicator_config, notification_client.clone()).await
     else {
+        if let Some(result) = abort_and_join(metrics_http_listener).await? {
+            result?;
+        }
+
         return Ok(());
     };
 
@@ -139,9 +146,6 @@ fn try_main() -> ReplicatorResult<()> {
 
     // We prepare the notification client used to send errors.
     let notification_client = init::init_error_notification(&replicator_config);
-
-    // We initialize the Prometheus recorder.
-    init::init_metrics(&replicator_config)?;
 
     debug!("starting tokio runtime");
 

@@ -2229,11 +2229,14 @@ dependencies = [
 name = "etl-telemetry"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "etl-config",
  "libc",
  "metrics-exporter-prometheus",
+ "reqwest",
  "serde",
  "serde_json",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -2241,7 +2244,6 @@ dependencies = [
  "tracing-appender",
  "tracing-log",
  "tracing-subscriber",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
