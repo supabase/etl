@@ -18,5 +18,7 @@ use etl::schema::ColumnNameMapping;
 const CLICKHOUSE_COLUMN_NAME_MAPPING: ColumnNameMapping = ColumnNameMapping::Identity;
 
 pub use core::{ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig};
+#[cfg(feature = "test-utils")]
+pub use core::{arm_fail_drop_table_for_copy_once_for_tests, notify_on_fence_wait_for_tests};
 
 pub use client::ClickHouseClient;

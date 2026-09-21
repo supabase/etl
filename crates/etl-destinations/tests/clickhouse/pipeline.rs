@@ -1,6 +1,8 @@
 use etl::{
+    config::BatchConfig,
     error::ErrorKind,
     event::{Event, EventType, RelationEvent},
+    failpoints::APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
     pipeline::PipelineId,
     schema::ReplicatedTableSchema,
     store::{SchemaStore, StateStore},
@@ -8,17 +10,20 @@ use etl::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{PipelineBuilder, create_pipeline},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
-use etl_config::shared::ClickHouseEngine;
+use etl_config::shared::{ClickHouseEngine, PipelineConfig};
 use etl_destinations::clickhouse::{
-    ClickHouseInserterConfig, test_utils::setup_clickhouse_database,
+    ClickHouseInserterConfig, client::arm_pause_before_insert_statement_for_tests,
+    notify_on_fence_wait_for_tests, test_utils::setup_clickhouse_database,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
+use fail::FailScenario;
 use rand::random;
+use tokio::sync::oneshot;
 
 use crate::support::{
     clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query},
@@ -674,6 +679,212 @@ async fn nan_key_changes_replacing_merge_tree() {
 #[tokio::test(flavor = "multi_thread")]
 async fn nan_array_key_changes_merge_tree() {
     nan_key_changes_inner(ClickHouseEngine::MergeTree, true).await;
+}
+
+/// An in-flight destination write must not stall the pipeline: dispatch
+/// returns after admission so streaming continues while the write is
+/// parked, and shutdown drains the pending write to durability.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_flight_write_keeps_streaming_and_shuts_down_cleanly_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: a copied table with a pause armed for its next CDC insert.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("slowsink");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .unwrap();
+    let publication_name = "test_pub_clickhouse_slowsink";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('first')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+
+    // WHEN: two transactions stream while the first CDC batch is parked at
+    // its INSERT statement, then the batch is released.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+        ])
+        .await;
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('second')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET value = 'third' WHERE id = 1",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    reached.await.unwrap();
+    release.send(()).unwrap();
+    events_notify.notified().await;
+
+    // THEN: shutdown drains the pending write and both transactions are
+    // durably visible.
+    pipeline.shutdown_and_wait().await.unwrap();
+    let query = current_state_query(
+        ClickHouseEngine::MergeTree,
+        "test_slowsink",
+        ID_VALUE_PROJECTION,
+        &["id"],
+        "id",
+    );
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].value, "third");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].value, "second");
+}
+
+/// The apply worker fails right after handing a CDC batch to the destination
+/// and retries while that batch is still in flight. The retried attempt
+/// replays the batch and then applies a source TRUNCATE. The replay must wait
+/// for the in-flight insert. Otherwise the truncate runs first and the late
+/// insert restores the truncated row.
+///
+/// Every step is driven by a signal, never by a sleep:
+/// - an armed pause parks the in-flight insert,
+/// - a failpoint fails the apply loop once after dispatch,
+/// - a fence observer reports that the replay is waiting,
+/// - the destination wrapper reports each applied batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree() {
+    let _scenario = FailScenario::setup();
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: an empty table whose initial copy has completed, so the apply
+    // worker owns its CDC events from here on.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("retryfence");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .unwrap();
+    let publication_name = "test_pub_clickhouse_retryfence";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    // Short batches keep the pipeline moving. The retry waits the smallest
+    // delay the pipeline accepts; every later step is event-driven, so the
+    // delay only adds wall time.
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 10,
+        memory_budget_ratio: 0.2,
+        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+    })
+    .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1)
+    .build();
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    // Two INSERT pauses: the first parks the in-flight insert, the second
+    // makes the replay's own INSERT observable. The fence observer reports
+    // when the replay waits. The failpoint fails the apply worker once, right
+    // after the first CDC batch is dispatched.
+    let (in_flight_reached, in_flight_release) = arm_pause_before_insert_statement_for_tests(0);
+    let (mut replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
+    let fence_wait = notify_on_fence_wait_for_tests();
+    fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(apply)").unwrap();
+
+    // WHEN: one row is inserted, its batch parks at the INSERT, and the apply
+    // worker fails and retries with the batch still in flight.
+    let in_flight_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('restored')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    in_flight_reached.await.unwrap();
+
+    // THEN: the retried attempt's replay waits at the table fence. It must not
+    // reach its own INSERT while the in-flight insert is parked.
+    tokio::select! {
+        biased;
+        result = &mut replay_reached => {
+            result.unwrap();
+            panic!("replayed batch reached its INSERT before the in-flight insert finished");
+        }
+        result = fence_wait => result.unwrap(),
+    }
+    assert!(matches!(replay_reached.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+
+    // Releasing the in-flight insert lets it land, which lets the replay
+    // proceed to its INSERT. The wrapper records the replayed insert as well.
+    in_flight_release.send(()).unwrap();
+    in_flight_applied.notified().await;
+    replay_reached.await.unwrap();
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"test_retryfence\"").await, vec![1]);
+    let replay_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+    replay_release.send(()).unwrap();
+    replay_applied.notified().await;
+
+    // A source TRUNCATE now streams through the retried attempt and lands
+    // after both inserts.
+    let truncate_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
+        .await;
+    database.run_sql(&format!("TRUNCATE {}", table_name.as_quoted_identifier())).await.unwrap();
+    truncate_applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"test_retryfence\"").await,
+        Vec::<i64>::new()
+    );
 }
 
 /// Tests that edge-case values survive the Postgres -> ClickHouse pipeline
