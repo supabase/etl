@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use etl::{
     activity::{self, ActivityKind},
-    data::{Cell, TableRow},
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
         TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
@@ -1636,6 +1636,98 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     assert_eq!(orders_inserts.len(), 1);
 }
 
+/// Changing a row filter affects CDC without reconciling previously copied
+/// rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_row_filter_changes_apply_without_restart() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    if below_version!(database.server_version(), POSTGRES_15) {
+        return;
+    }
+
+    let table_name = test_table_name("filtered_rows");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let table = table_name.as_quoted_identifier();
+    client
+        .batch_execute(&format!(
+            "alter table {table} replica identity full;
+             insert into {table} (id, value) values (1, 10), (2, 20), (3, 30), (4, 40);
+             create publication filtered_pub for table {table} where (value >= 20)"
+        ))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        "filtered_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let sync_complete = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    sync_complete.notified().await;
+
+    // The new predicate includes an uncopied row and excludes two copied rows.
+    let changes_complete = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
+        ])
+        .await;
+
+    client
+        .batch_execute(&format!(
+            "alter publication filtered_pub set table {table} where (value < 30);
+             begin;
+             update {table} set value = 11 where id = 1;
+             update {table} set value = 30 where id = 2;
+             update {table} set value = 50 where id = 4;
+             update {table} set value = 20 where id = 3;
+             commit"
+        ))
+        .await
+        .unwrap();
+
+    changes_complete.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let row = |id, value| TableRow::new(vec![Cell::I64(id), Cell::I32(value)]);
+    let mut copied_rows = destination.get_table_rows().await.remove(&table_id).unwrap();
+    copied_rows.sort_by_key(|row| match row.values()[0] {
+        Cell::I64(id) => id,
+        _ => unreachable!(),
+    });
+    assert_eq!(copied_rows, vec![row(2, 20), row(3, 30), row(4, 40)]);
+
+    let events = destination.get_events().await;
+    let changes: Vec<_> = events
+        .iter()
+        .filter(|event| event.has_table_id(&table_id))
+        .filter(|event| matches!(event, Event::Insert(_) | Event::Update(_) | Event::Delete(_)))
+        .collect();
+    let [Event::Update(update), Event::Delete(exit), Event::Insert(entry)] = changes.as_slice()
+    else {
+        panic!("Expected the filtered update, delete, insert sequence");
+    };
+    assert_eq!(update.updated_table_row, UpdatedTableRow::Full(row(1, 11)));
+    assert_eq!(exit.old_table_row, Some(OldTableRow::Full(row(2, 20))));
+    assert_eq!(entry.table_row, row(3, 20));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn publication_changes_are_correctly_handled() {
     init_test_tracing();
@@ -1657,6 +1749,8 @@ async fn publication_changes_are_correctly_handled() {
 
     let publication_name = "test_pub_cleanup";
     database.create_publication_for_all(publication_name, Some(&table_1.schema)).await.unwrap();
+
+    database.insert_values(table_2.clone(), &["value"], &[&0]).await.unwrap();
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -1756,6 +1850,10 @@ async fn publication_changes_are_correctly_handled() {
     assert!(states.contains_key(&table_1_id));
     assert!(!states.contains_key(&table_2_id));
     assert!(states.contains_key(&table_3_id));
+    assert_eq!(
+        destination.get_table_rows().await[&table_2_id],
+        vec![TableRow::new(vec![Cell::I64(1), Cell::I32(0)])]
+    );
 
     // Assert that the table sync slot for table_2 is also deleted.
     let table_2_slot_name: String =
