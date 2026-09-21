@@ -1,6 +1,6 @@
 //! Replicator service orchestration.
 
-use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 
 use etl::{
     error::{ErrorKind, EtlResult},
@@ -67,7 +67,7 @@ async fn spawn_health_server(
     let Some(health_config) = health_config else {
         return Ok(None);
     };
-    let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, health_config.port)).await?;
+    let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, health_config.port)).await?;
     debug!(
         configured_port = health_config.port,
         stall_timeout_ms = health_config.stall_timeout_ms,
