@@ -56,6 +56,7 @@ sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "macr
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-rustls = { workspace = true, features = ["aws-lc-rs", "logging", "tls12"] }
+tokio-util = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true, features = ["trace"] }
 tracing = { workspace = true, default-features = false }

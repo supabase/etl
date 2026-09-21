@@ -29,13 +29,13 @@ pub trait Destination {
     /// Returns the name of the destination.
     fn name() -> &'static str;
 
-    /// Propagates the shutdown signal to the destination.
+    /// Finishes destination-owned work and releases resources during shutdown.
     ///
-    /// Override this method if the destination needs cleanup or bookkeeping
-    /// during shutdown. Background streaming destinations should use it to stop
-    /// writer loops and drain or drop outstanding work. ETL calls this method
-    /// at most once for a destination instance, after it has stopped submitting
-    /// new work. The default implementation is a no-op.
+    /// Called after workers complete successfully; stop writer loops and finish
+    /// owned work here. Worker failures skip this hook, so resources also need
+    /// drop-based cancellation or explicit owner cleanup. Accept requested task
+    /// cancellations; propagate panics and task errors without awaiting
+    /// remaining tasks. The default implementation is a no-op.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -92,10 +92,11 @@ pub trait Destination {
     /// The method return value is reserved for immediate dispatch/setup
     /// failures before the work has been accepted.
     ///
-    /// Unless shutdown is requested, ETL waits for each table-copy batch to
-    /// finish before reading the next batch for the same copy partition. When
-    /// multiple copy workers are configured, this method can still run
-    /// concurrently across different partitions.
+    /// Copy partitions run in separate tasks, so writes may run inline or be
+    /// offloaded. Each partition awaits this method and its `async_result`
+    /// before reading another batch, unless cancelled. Parallelism comes from
+    /// other copy workers; `Accepted` permits progress without proving
+    /// durability.
     ///
     /// [`crate::destination::DestinationWriteStatus::Durable`] means the batch
     /// and all earlier accepted writes it covers are durable.
@@ -114,6 +115,13 @@ pub trait Destination {
     /// barrier fails the copy without advancing its durable state. Empty and
     /// skipped tables also receive a finish write so the destination can
     /// prepare their initial state.
+    ///
+    /// Initial copy may be interrupted at any await point in this method,
+    /// including the final empty call. The incomplete copy restarts from
+    /// scratch, so cancellation need not finish the current batch. Dropping
+    /// the method future does not stop offloaded or native work; the
+    /// destination remains responsible for that work and the reset
+    /// guarantees of [`Destination::drop_table_for_copy`].
     ///
     /// Awaiting each result before requesting the next batch bounds ETL-owned
     /// row batches per copy partition. A deferred destination must separately
@@ -144,6 +152,14 @@ pub trait Destination {
     ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
+    ///
+    /// The apply loop awaits this method directly, so implementations should
+    /// dispatch long-running writes to owned tasks or queues and return
+    /// promptly. The loop can then continue processing WAL and observing
+    /// shutdown while it polls `async_result` separately. Performing the write
+    /// inline stalls that loop until the method returns, even if the write
+    /// yields to the async runtime. Shutdown does not cancel the method call;
+    /// it waits for dispatch and pending write results to finish.
     ///
     /// Implementations report asynchronous write status through `async_result`.
     /// The method return value is reserved for immediate dispatch/setup

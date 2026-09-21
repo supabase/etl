@@ -223,7 +223,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
 
     /// Returns this transaction as a query target.
     fn target(&self) -> PgReplicationQueryTarget<'_, 'a> {
-        PgReplicationQueryTarget::Transaction(&self.transaction)
+        PgReplicationQueryTarget::new(&self.transaction)
     }
 
     /// Retrieves the schema information for the supplied table.

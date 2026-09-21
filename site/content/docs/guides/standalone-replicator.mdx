@@ -167,6 +167,31 @@ The process runs until it receives a shutdown signal or encounters a terminal
 pipeline error. Run it under a service manager that restarts failed processes,
 preserves logs, and provides resource limits.
 
+## Shutdown
+
+SIGINT (Ctrl+C) and SIGTERM request shutdown. Listeners are installed before
+asynchronous initialization, so pending startup can be cancelled. If a signal
+interrupts startup of a constructed pipeline, its destination is cleaned up.
+Initialization errors return immediately.
+
+Once running, the pipeline stops intake and drains pending apply work under
+existing retry and durability rules. Interrupted initial copies restart from a
+fresh snapshot. Workers finish before destination cleanup and background tasks
+are joined. Enabled probes report stopping while liveness remains healthy.
+
+Requested task cancellations are silently accepted. Panics, task errors, and
+unexpected cancellations return immediately, requesting abort of remaining
+owned tasks without awaiting further cleanup. This does not roll back writes
+or guarantee that native work has stopped. Recovery uses persisted checkpoints;
+uncheckpointed work may be replayed even after a successful exit.
+Persisted table errors remain stopped across process restarts, including when
+shutdown interrupted a timed retry; restarting the process does not clear them.
+
+There is no internal shutdown grace timer or second-signal force-exit behavior.
+Destination or store operations can delay exit. Configure an external termination
+limit, such as Kubernetes' grace period followed by SIGKILL, which cannot run
+cleanup.
+
 ## Activity probes
 
 Enable the optional HTTP listener with a top-level configuration block:
