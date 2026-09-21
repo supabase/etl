@@ -2090,6 +2090,7 @@ dependencies = [
  "etl-maintenance",
  "etl-postgres",
  "etl-telemetry",
+ "fail",
  "futures",
  "gcp-bigquery-client",
  "humantime",

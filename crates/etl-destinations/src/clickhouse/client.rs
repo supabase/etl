@@ -670,6 +670,9 @@ impl ClickHouseClient {
         let mut statements = 0u64;
 
         while rows.peek().is_some() {
+            #[cfg(feature = "test-utils")]
+            pause_before_insert_statement_for_tests(statements).await;
+
             let mut insert = self
                 .inner
                 .insert_formatted_with(sql.clone())
@@ -741,6 +744,71 @@ impl ClickHouseClient {
 
         Ok(())
     }
+}
+
+/// One-shot pause armed before an INSERT statement inside
+/// [`ClickHouseClient::insert_rows`].
+#[cfg(feature = "test-utils")]
+struct ArmedInsertStatementPause {
+    /// Zero-based index of the statement to pause before.
+    statement_index: u64,
+    /// Signals that the paused call reached the armed statement boundary.
+    reached: tokio::sync::oneshot::Sender<()>,
+    /// Resumes the paused call when signalled or dropped.
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Currently armed insert-statement pauses; each is consumed once.
+#[cfg(feature = "test-utils")]
+static INSERT_STATEMENT_PAUSES: parking_lot::Mutex<Vec<ArmedInsertStatementPause>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// Arms a one-shot pause before the zero-based `statement_index` INSERT
+/// statement of a `ClickHouseClient::insert_rows` call.
+///
+/// Several pauses may be armed at once; each call crossing an armed
+/// statement boundary consumes the earliest matching pause, so two
+/// concurrent single-statement writes can both be parked by arming the same
+/// index twice.
+///
+/// Returns the `reached` receiver, signalled at the armed statement boundary
+/// after every earlier statement in the call was acknowledged, and the
+/// `release` sender that resumes the paused call. Dropping the sender also
+/// resumes it, so tests must hold the sender while the pause must stay in
+/// force.
+#[cfg(feature = "test-utils")]
+pub fn arm_pause_before_insert_statement_for_tests(
+    statement_index: u64,
+) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    INSERT_STATEMENT_PAUSES.lock().push(ArmedInsertStatementPause {
+        statement_index,
+        reached: reached_tx,
+        release: release_rx,
+    });
+
+    (reached_rx, release_tx)
+}
+
+/// Pauses at an armed statement boundary; no-op when no armed pause matches
+/// the statement index.
+#[cfg(feature = "test-utils")]
+async fn pause_before_insert_statement_for_tests(statement_index: u64) {
+    let armed = {
+        let mut armed_pauses = INSERT_STATEMENT_PAUSES.lock();
+        armed_pauses
+            .iter()
+            .position(|armed| armed.statement_index == statement_index)
+            .map(|index| armed_pauses.remove(index))
+    };
+    let Some(armed) = armed else {
+        return;
+    };
+    let _ = armed.reached.send(());
+    // A test that aborts the paused task never sends; a dropped sender
+    // resumes normally.
+    let _ = armed.release.await;
 }
 
 #[cfg(test)]
