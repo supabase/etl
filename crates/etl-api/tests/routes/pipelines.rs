@@ -8,8 +8,10 @@ use etl_api::{
     k8s::PodStatus,
     routes::{
         ErrorMessage,
-        destinations::UpdateDestinationRequest,
-        destinations_pipelines::UpdateDestinationPipelineRequest,
+        destinations::{ReadDestinationResponse, UpdateDestinationRequest},
+        destinations_pipelines::{
+            CreateDestinationPipelineRequest, UpdateDestinationPipelineRequest,
+        },
         pipelines::{
             CreatePipelineRequest, CreatePipelineResponse, GetPipelineReplicationStatusResponse,
             GetPipelineVersionResponse, ReadPipelineResponse, ReadPipelinesResponse,
@@ -3618,4 +3620,124 @@ async fn rollback_tables_deletion_timeout_preserves_state() {
     .unwrap();
     assert_eq!(states, vec!["ready"]);
     drop_pg_database(&source_db_config).await;
+}
+
+/// Both endpoint families reject invalid delays before changing pipeline or
+/// destination state.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_retry_delay_is_rejected_by_create_and_update_routes() {
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+
+    for delay_ms in [0, 999, 86_400_001, u64::MAX] {
+        let mut config = new_pipeline_config();
+        config.table_error_retry_delay_ms = Some(delay_ms);
+        let create = CreatePipelineRequest { source_id, destination_id, config: config.clone() };
+        let response = app.create_pipeline(&tenant_id, &create).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let error: ErrorMessage = response.json().await.unwrap();
+        assert!(error.message.contains("table_error_retry_delay_ms"));
+
+        let create_combined = CreateDestinationPipelineRequest {
+            destination_name: "retry delay test".to_owned(),
+            destination_config: new_bigquery_destination_config(),
+            source_id,
+            pipeline_config: config.clone(),
+        };
+        let response = app.create_destination_pipeline(&tenant_id, &create_combined).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let update_config = UpdateApiPipelineConfig::from_api_config(config);
+        let update =
+            UpdatePipelineRequest { source_id, destination_id, config: update_config.clone() };
+        let response = app.update_pipeline(&tenant_id, pipeline_id, &update).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let update_combined = UpdateDestinationPipelineRequest {
+            destination_name: "retry delay test".to_owned(),
+            destination_config: UpdateApiDestinationConfig::from_api_config(
+                new_bigquery_destination_config(),
+            ),
+            source_id,
+            pipeline_config: update_config,
+        };
+        let response = app
+            .update_destination_pipeline(&tenant_id, destination_id, pipeline_id, &update_combined)
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    let pipeline: ReadPipelineResponse =
+        app.read_pipeline(&tenant_id, pipeline_id).await.json().await.unwrap();
+    assert_eq!(pipeline.config.table_error_retry_delay_ms, Some(10_000));
+}
+
+/// Invalid stored delays stay readable and can be reset or replaced through
+/// either update route.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_retry_delay_legacy_values_can_be_repaired() {
+    let (app, tenant_id, source_id, destination_id, pipeline_id) = setup_basic_pipeline().await;
+    // Repair a stopped pipeline without triggering unrelated source and restart
+    // checks.
+    app.k8s_state.set_stateful_set_active(false);
+    app.k8s_state.set_pod_status(PodStatus::Stopped).await;
+    let pool = get_connection_pool(app.database_config());
+    sqlx::query(
+        "update app.pipelines set config = jsonb_set(config, '{table_error_retry_delay_ms}', '0') \
+         where id = $1",
+    )
+    .bind(pipeline_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let pipeline: ReadPipelineResponse =
+        app.read_pipeline(&tenant_id, pipeline_id).await.json().await.unwrap();
+    assert_eq!(pipeline.config.table_error_retry_delay_ms, Some(0));
+    let destination: ReadDestinationResponse =
+        app.read_destination(&tenant_id, destination_id).await.json().await.unwrap();
+
+    let mut update = UpdatePipelineRequest {
+        source_id,
+        destination_id,
+        config: UpdateApiPipelineConfig::default(),
+    };
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &update).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let mut combined = UpdateDestinationPipelineRequest {
+        destination_name: "retry delay repair".to_owned(),
+        destination_config: UpdateApiDestinationConfig::from_api_config(
+            new_bigquery_destination_config(),
+        ),
+        source_id,
+        pipeline_config: UpdateApiPipelineConfig::default(),
+    };
+    let response =
+        app.update_destination_pipeline(&tenant_id, destination_id, pipeline_id, &combined).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let unchanged: ReadDestinationResponse =
+        app.read_destination(&tenant_id, destination_id).await.json().await.unwrap();
+    assert_eq!(unchanged.name, destination.name);
+
+    update.config.table_error_retry_delay_ms = UpdateField::Clear;
+    let response = app.update_pipeline(&tenant_id, pipeline_id, &update).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let pipeline: ReadPipelineResponse =
+        app.read_pipeline(&tenant_id, pipeline_id).await.json().await.unwrap();
+    assert_eq!(pipeline.config.table_error_retry_delay_ms, Some(10_000));
+
+    sqlx::query(
+        "update app.pipelines set config = jsonb_set(config, '{table_error_retry_delay_ms}', '0') \
+         where id = $1",
+    )
+    .bind(pipeline_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    combined.pipeline_config.table_error_retry_delay_ms = UpdateField::Set(1_000);
+    let response =
+        app.update_destination_pipeline(&tenant_id, destination_id, pipeline_id, &combined).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let pipeline: ReadPipelineResponse =
+        app.read_pipeline(&tenant_id, pipeline_id).await.json().await.unwrap();
+    assert_eq!(pipeline.config.table_error_retry_delay_ms, Some(1_000));
 }

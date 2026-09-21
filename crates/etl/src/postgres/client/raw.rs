@@ -51,13 +51,13 @@ const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replicati
 
 /// Builds connection options for logical replication connections.
 ///
-/// Disables statement, lock, and idle-in-transaction timeouts because
-/// replication streams, slot creation, and initial table synchronization can
-/// legitimately run for a long time.
+/// Leaves statement and idle-in-transaction timeouts disabled for long-running
+/// replication and copy work. Lock waits are bounded except during slot
+/// creation, which temporarily disables the lock timeout in its transaction.
 fn replication_options(application_name: String) -> PgConnectionOptions {
     PgConnectionOptions::builder(application_name)
         .statement_timeout(0)
-        .lock_timeout(0)
+        .lock_timeout(30_000)
         .idle_in_transaction_session_timeout(0)
         .build()
 }
@@ -432,10 +432,14 @@ impl PgReplicationClient {
         let server_version = self.server_version;
         let connection_updates_rx = self.connection_updates_rx();
 
-        let transaction = self.begin_tx().await?;
-        let slot = PgReplicationQueryTarget::Transaction(&transaction)
+        let transaction = self.begin_slot_creation_transaction().await?;
+        let slot = PgReplicationQueryTarget::new(&transaction)
             .create_slot(slot_name, SnapshotAction::Use, failover)
             .await?;
+
+        // Only slot creation needs unlimited lock waits; schema and copy
+        // queries do not.
+        transaction.simple_query("set local lock_timeout = default").await?;
 
         Ok((
             PgReplicationTransaction::new(
@@ -455,11 +459,19 @@ impl PgReplicationClient {
     /// slot. The option applies only to this creation operation and is not
     /// retained by the client.
     pub async fn create_slot(
-        &self,
+        &mut self,
         slot_name: &str,
         failover: bool,
     ) -> EtlResult<CreateSlotResult> {
-        self.create_slot_internal(slot_name, SnapshotAction::NoExport, failover).await
+        self.validate_replication_slot_failover_support(failover)?;
+
+        let transaction = self.begin_slot_creation_transaction().await?;
+        let slot = PgReplicationQueryTarget::new(&transaction)
+            .create_slot(slot_name, SnapshotAction::NoExport, failover)
+            .await?;
+        transaction.commit().await?;
+
+        Ok(slot)
     }
 
     /// Gets the state of a replication slot by name.
@@ -692,8 +704,8 @@ impl PgReplicationClient {
     )> {
         info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 
-        // Do not convert the query or the options to lowercase, see comment in
-        // `create_slot_internal`.
+        // PostgreSQL requires uppercase keywords in replication protocol
+        // commands.
         let options = format!(
             r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
             quote_literal(quote_identifier(publication_name).as_ref()),
@@ -727,24 +739,16 @@ impl PgReplicationClient {
         Ok(transaction)
     }
 
-    /// Returns this client as a query target.
-    fn target(&self) -> PgReplicationQueryTarget<'_, '_> {
-        PgReplicationQueryTarget::Client(&self.client)
-    }
-
-    /// Internal helper method to create a replication slot.
+    /// Begins a transaction that lets slot creation wait for old writers.
     ///
-    /// The `snapshot_action` controls how the slot's snapshot is handled during
-    /// creation.
-    async fn create_slot_internal(
-        &self,
-        slot_name: &str,
-        snapshot_action: SnapshotAction,
-        failover: bool,
-    ) -> EtlResult<CreateSlotResult> {
-        self.validate_replication_slot_failover_support(failover)?;
-
-        self.target().create_slot(slot_name, snapshot_action, failover).await
+    /// The local override is reset when the transaction ends, including when an
+    /// error drops the transaction and queues a rollback. Setting a GUC does
+    /// not acquire a snapshot, so `USE_SNAPSHOT` can still establish it
+    /// afterwards.
+    async fn begin_slot_creation_transaction(&mut self) -> EtlResult<Transaction<'_>> {
+        let transaction = self.begin_tx().await?;
+        transaction.simple_query("set local lock_timeout = 0").await?;
+        Ok(transaction)
     }
 
     /// Rejects a failover-slot request when the server explicitly reports a
@@ -766,8 +770,8 @@ impl PgReplicationClient {
     async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
         debug!(slot_name, "deleting replication slot");
 
-        // Do not convert the query or the options to lowercase, see comment in
-        // `create_slot_internal`.
+        // PostgreSQL requires uppercase keywords in replication protocol
+        // commands.
         let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
 
         let Ok(delete_result) =
@@ -817,6 +821,16 @@ impl PgReplicationClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replication bounds lock waits without limiting copy duration or idle
+    /// snapshots.
+    #[test]
+    fn replication_timeout_defaults() {
+        let options = replication_options(APP_NAME_REPLICATOR_REPLICATION.to_owned());
+        assert_eq!(options.lock_timeout, 30_000);
+        assert_eq!(options.statement_timeout, 0);
+        assert_eq!(options.idle_in_transaction_session_timeout, 0);
+    }
 
     #[test]
     fn replication_base_name_fits_worker_suffix_without_clamping() {

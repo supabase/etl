@@ -210,7 +210,7 @@ async fn pipeline_enables_failover_on_an_existing_apply_slot() {
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 
     // Model a pipeline whose apply slot predates the failover setting.
-    let replication_client =
+    let mut replication_client =
         etl::postgres::client::PgReplicationClient::connect(database.config.clone()).await.unwrap();
     replication_client.create_slot(&apply_slot_name, false).await.unwrap();
     assert_eq!(replication_slot_failover(&database, &apply_slot_name).await, Some(false));
