@@ -1327,6 +1327,69 @@ async fn existing_column_default_changes_drop_before_setting_supported_replaceme
     }
 }
 
+/// A source default containing backslashes reaches ClickHouse with the same
+/// characters PostgreSQL stores.
+///
+/// PostgreSQL renders `default 'C:\temp'` as the literal `'C:\temp'::text`,
+/// where the backslash is an ordinary character. ClickHouse reads `\t` inside a
+/// string literal as a tab, so forwarding the PostgreSQL literal verbatim
+/// silently changes the default. The test makes ClickHouse materialise the
+/// stored default by inserting a row without the column, then compares the
+/// value with what PostgreSQL holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn column_default_with_backslashes_keeps_source_value() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: text and json defaults with backslashes, one trailing.
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let table_id = TableId::new(4246);
+    let table_name = TableName::new("public".to_owned(), "escaped".to_owned());
+    let schema = store
+        .store_table_schema(TableSchema::new(
+            table_id,
+            table_name,
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("path".to_owned(), Type::TEXT, -1, 2, false)
+                    .with_default_expression(r"'C:\temp'::text".to_owned()),
+                ColumnSchema::new("trailing".to_owned(), Type::TEXT, -1, 3, false)
+                    .with_default_expression(r"'abc\'::text".to_owned()),
+                ColumnSchema::new("payload".to_owned(), Type::JSONB, -1, 4, false)
+                    .with_default_expression(r#"'{"p":"C:\\dir"}'::jsonb"#.to_owned()),
+            ],
+        ))
+        .await
+        .unwrap();
+    let schema = ReplicatedTableSchema::all(schema);
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+
+    // WHEN: the table is created and ClickHouse fills omitted columns.
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    clickhouse_db
+        .db_client()
+        .query(
+            "insert into \"public_escaped\" (id, cdc_operation, cdc_lsn, cdc_tx_ordinal) values \
+             (1, 'INSERT', 0, 0)",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    // THEN: every default holds exactly the characters PostgreSQL stores.
+    assert_eq!(
+        clickhouse_db
+            .query::<(String, String, String)>(
+                "select path, trailing, payload from \"public_escaped\""
+            )
+            .await,
+        vec![(r"C:\temp".to_owned(), r"abc\".to_owned(), r#"{"p":"C:\\dir"}"#.to_owned())]
+    );
+}
+
 /// Retained row shape for interrupted publication-mask recovery.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct RecoveryMaskRow {

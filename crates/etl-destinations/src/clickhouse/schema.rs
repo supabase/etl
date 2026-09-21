@@ -539,6 +539,40 @@ mod tests {
         }
     }
 
+    /// PostgreSQL string literals treat backslashes as plain characters, while
+    /// ClickHouse treats them as escapes. The renderer must re-quote the
+    /// decoded value in ClickHouse's dialect so the destination default holds
+    /// the same characters as the source default.
+    #[test]
+    fn clickhouse_default_clause_escapes_backslashes_for_clickhouse() {
+        // GIVEN: PostgreSQL literals with plain backslashes, one trailing.
+        let cases = [
+            (Type::TEXT, r"'C:\temp'::text", r" DEFAULT 'C:\\temp'"),
+            (Type::TEXT, r"'abc\'::text", r" DEFAULT 'abc\\'"),
+            (Type::TEXT, "'it''s'::text", r" DEFAULT 'it\'s'"),
+            (Type::VARCHAR, r"'\'", r" DEFAULT '\\'"),
+            (Type::JSONB, r#"'{"p":"C:\\dir"}'::jsonb"#, r#" DEFAULT '{"p":"C:\\\\dir"}'"#),
+            (Type::INTERVAL, r"'1 day\'::interval", r" DEFAULT '1 day\\'"),
+            (Type::DATE, r"'2026-01-01\'::date", r" DEFAULT toDate32('2026-01-01\\')"),
+            (
+                Type::TIMESTAMP,
+                r"'2026-01-01 00:00:00\'::timestamp",
+                r" DEFAULT toDateTime64('2026-01-01 00:00:00\\', 6, 'UTC')",
+            ),
+        ];
+
+        for (typ, expression, expected) in cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
+
+            // WHEN: the default clause is rendered for ClickHouse.
+            let clause = clickhouse_default_clause(&column);
+
+            // THEN: backslashes are escaped so ClickHouse keeps the characters.
+            assert_eq!(clause.as_deref(), Some(expected));
+        }
+    }
+
     #[test]
     fn create_merge_tree_sql_cdc_columns() {
         let schemas = vec![ColumnSchema {
