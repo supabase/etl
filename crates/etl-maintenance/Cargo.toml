@@ -46,6 +46,7 @@ sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "migrate", "
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-postgres = { workspace = true, optional = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true, default-features = true }
 url = { workspace = true, optional = true }
 

@@ -81,8 +81,7 @@ async fn async_main(
     info!("replicator bootstrap completed");
 
     let Err(error) =
-        Box::pin(start_replicator_with_config(replicator_config, notification_client.clone()))
-            .await
+        start_replicator_with_config(replicator_config, notification_client.clone()).await
     else {
         return Ok(());
     };

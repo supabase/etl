@@ -14,7 +14,7 @@ use std::{fmt::Display, time::Duration};
 
 use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 
 use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
@@ -212,11 +212,11 @@ fn register_metrics() {
 /// This function should be called after
 /// [`etl_telemetry::metrics::init_metrics`] to ensure the metrics recorder is
 /// installed.
-pub(super) fn spawn_jemalloc_metrics_task() -> JoinHandle<()> {
+pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
     register_metrics();
     log_jemalloc_config();
 
-    tokio::spawn(async move {
+    AbortOnDropHandle::new(tokio::spawn(async move {
         // Initialize MIBs once for efficient repeated lookups. MIBs translate
         // string keys to numeric indices, avoiding string parsing on each read.
         let epoch_mib = match epoch::mib() {
@@ -310,5 +310,5 @@ pub(super) fn spawn_jemalloc_metrics_task() -> JoinHandle<()> {
 
             tokio::time::sleep(POLL_INTERVAL).await;
         }
-    })
+    }))
 }

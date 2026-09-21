@@ -65,7 +65,7 @@ pub(super) struct TableLifecycleGuard {
 /// through both phases, preventing setup from publishing a stale channel.
 ///
 /// This value does not block event admission. The caller must retain its
-/// [`etl::destination::TaskSetDrainGuard`] until the remote drop returns.
+/// [`etl::task::TaskRegistryDrainGuard`] until the remote drop returns.
 pub(super) struct DetachedTableForCopy<C> {
     /// Prevents setup from publishing a replacement before remote drop
     /// finishes.

@@ -118,9 +118,9 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
             RetryDirective::Manual,
             Some("Inspect the table sync worker panic logs and manually retry the table."),
         ),
-        ErrorKind::TableCopyWorkerPanic => ErrorHandlingPolicy::new(
+        ErrorKind::TaskPanic | ErrorKind::TaskCancelled => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
-            Some("Inspect the table copy worker panic logs and manually retry the table."),
+            Some("Inspect the task failure and resolve its cause before manually retrying."),
         ),
 
         // Special handling for fault injection tests.
@@ -165,6 +165,8 @@ mod tests {
         for (kind, retry) in [
             (ErrorKind::DeserializationError, RetryDirective::Manual),
             (ErrorKind::InvalidState, RetryDirective::Manual),
+            (ErrorKind::TaskPanic, RetryDirective::Manual),
+            (ErrorKind::TaskCancelled, RetryDirective::Manual),
             (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
             (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
             (ErrorKind::SourceLockTimeout, RetryDirective::Timed),

@@ -178,7 +178,15 @@ where
 
     let span = tracing::Span::current();
     let task = async move {
-        let result = connection.await;
+        let result = tokio::select! {
+            biased;
+
+            // The request channel alone waits for outstanding server replies.
+            // No client or observer remains to use them once this channel closes.
+            _ = updates_tx.closed() => return,
+
+            result = connection => result,
+        };
 
         match result {
             Err(err) => {
@@ -194,10 +202,9 @@ where
     }
     .instrument(span);
 
-    // There is no need to track the connection task via the `JoinHandle` since
-    // the `Client`, which returned the connection, will automatically terminate
-    // the connection when dropped.
-    tokio::spawn(task);
+    // The client and its active observers own the receiver side. Closing it
+    // stops the driver even if PostgreSQL never answers an outstanding query.
+    drop(tokio::spawn(task));
 
     updates_rx
 }
@@ -820,7 +827,60 @@ impl PgReplicationClient {
 
 #[cfg(test)]
 mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+    };
+
     use super::*;
+
+    /// Closing the owner channel must release a socket even when the server
+    /// never responds to an already-dispatched query.
+    #[tokio::test]
+    async fn dropping_client_and_observers_stops_stalled_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (query_tx, query_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let startup_len = socket.read_u32().await.unwrap();
+            let mut startup = vec![0; usize::try_from(startup_len - 4).unwrap()];
+            socket.read_exact(&mut startup).await.unwrap();
+            // AuthenticationOk followed by ReadyForQuery completes startup.
+            socket.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I").await.unwrap();
+            assert_eq!(socket.read_u8().await.unwrap(), b'Q');
+            let query_len = socket.read_u32().await.unwrap();
+            let mut query = vec![0; usize::try_from(query_len - 4).unwrap()];
+            socket.read_exact(&mut query).await.unwrap();
+            query_tx.send(()).unwrap();
+            // Deliberately omit a response. Only owner cancellation can close
+            // this connection while its query remains outstanding.
+            let mut remainder = Vec::new();
+            socket.read_to_end(&mut remainder).await.unwrap();
+        });
+        let (client, connection) = Config::new()
+            .host("127.0.0.1")
+            .port(port)
+            .user("unused")
+            .dbname("unused")
+            .ssl_mode(tokio_postgres::config::SslMode::Disable)
+            .connect(NoTls)
+            .await
+            .unwrap();
+        let observer = spawn_postgres_connection::<NoTls>(connection);
+        let mut query = Box::pin(client.simple_query("select 1"));
+        tokio::select! {
+            result = &mut query => panic!("Query completed without a server response: {result:?}"),
+
+            _ = query_rx => {}
+        }
+        drop(query);
+        drop(client);
+        drop(observer);
+
+        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    }
 
     /// Replication bounds lock waits without limiting copy duration or idle
     /// snapshots.

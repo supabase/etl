@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
     PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
@@ -9,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     destination::PipelineDestination,
+    error::EtlError,
     pipeline::{Pipeline, PipelineId},
     schema::{TableId, TableName},
     store::PipelineStore,
@@ -19,6 +22,29 @@ use crate::{
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
+
+/// Maximum time for an expected terminal failure to finish the pipeline.
+const PIPELINE_FAILURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Waits for a pipeline to fail without requesting shutdown.
+///
+/// Use after arranging a terminal worker failure. Requesting shutdown instead
+/// can cancel initialization before the worker observes the failure. Table
+/// errors that leave the pipeline running must be observed through the store.
+///
+/// # Panics
+///
+/// Panics if the pipeline succeeds or does not finish within 30 seconds.
+pub async fn wait_for_pipeline_error<S, D>(pipeline: &Pipeline<S, D>) -> EtlError
+where
+    S: PipelineStore,
+    D: PipelineDestination,
+{
+    tokio::time::timeout(PIPELINE_FAILURE_TIMEOUT, pipeline.wait())
+        .await
+        .expect("Pipeline did not finish within the terminal failure timeout")
+        .unwrap_err()
+}
 
 /// Generates a test-specific replication slot name with a random component.
 ///

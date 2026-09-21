@@ -80,6 +80,7 @@ where
     loop {
         select! {
             () = &mut future => return,
+
             _ = snapshot_interval.tick() => {
                 // Logical slot creation on a standby may wait for a
                 // running-xacts snapshot from the primary when the primary is
