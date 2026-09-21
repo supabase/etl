@@ -14,7 +14,7 @@ use etl::{
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
-use etl_config::shared::ClickHouseEngine;
+use etl_config::shared::{ClickHouseEngine, PipelineConfig};
 use etl_destinations::clickhouse::{
     ClickHouseInserterConfig, client::arm_pause_before_insert_statement_for_tests,
     notify_on_fence_wait_for_tests, test_utils::setup_clickhouse_database,
@@ -805,8 +805,9 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
             .await,
     );
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
-    // Short batches keep the pipeline moving. An immediate retry keeps the
-    // failure path free of waiting.
+    // Short batches keep the pipeline moving. The retry waits the smallest
+    // delay the pipeline accepts; every later step is event-driven, so the
+    // delay only adds wall time.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         random::<PipelineId>(),
@@ -819,7 +820,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
         memory_budget_ratio: 0.2,
         max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
     })
-    .with_retry_config(0, 1)
+    .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1)
     .build();
     pipeline.start().await.unwrap();
     table_sync_complete_notify.notified().await;
