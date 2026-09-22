@@ -1390,6 +1390,49 @@ async fn column_default_with_backslashes_keeps_source_value() {
     );
 }
 
+/// Builds a replicated `public.<table>` schema with one integer primary key.
+fn id_only_schema(table_id: u32, table: &str) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+        TableId::new(table_id),
+        TableName::new("public".to_owned(), table.to_owned()),
+        vec![ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1)],
+    )))
+}
+
+/// A source table whose destination name equals another table's current view
+/// is rejected under ReplacingMergeTree.
+///
+/// Destination names double underscores, so `public.foo_current` encodes to
+/// `public_foo__current`, the name of the current view over `public.foo`. If
+/// that table exists first, ClickHouse's `CREATE VIEW IF NOT EXISTS` for
+/// `public.foo` silently keeps the table, so `public.foo` never gets its view.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_named_like_current_view_is_rejected_under_replacing_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: a ReplacingMergeTree destination.
+    let clickhouse_db = setup_clickhouse_database().await;
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+
+    // WHEN: `public.foo_current` is created, then `public.foo`.
+    let error =
+        destination.write_table_rows(&id_only_schema(1, "foo_current"), vec![]).await.unwrap_err();
+    destination.write_table_rows(&id_only_schema(2, "foo"), vec![]).await.unwrap();
+
+    // THEN: the colliding table is rejected and `public.foo` owns the view
+    // name.
+    assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    assert_eq!(
+        clickhouse_db
+            .query::<String>("select engine from system.tables where name = 'public_foo__current'")
+            .await,
+        vec!["View".to_owned()]
+    );
+}
+
 /// Retained row shape for interrupted publication-mask recovery.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct RecoveryMaskRow {

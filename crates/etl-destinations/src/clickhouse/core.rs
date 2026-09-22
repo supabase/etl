@@ -17,7 +17,7 @@ use etl::{
     schema::{
         ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
         IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
-        TableId, Type, is_array_type,
+        TableId, TableName, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
     task::{TaskGroup, TaskRegistry},
@@ -36,7 +36,7 @@ use crate::{
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
             CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
-            create_current_view_sql, create_table_sql, drop_current_view_sql,
+            CURRENT_VIEW_SUFFIX, create_current_view_sql, create_table_sql, drop_current_view_sql,
             supports_column_default, trailing_cdc_column_names,
         },
     },
@@ -1101,6 +1101,11 @@ where
         match metadata {
             None => {
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
+                validate_clickhouse_table_name(
+                    &clickhouse_table_name,
+                    schema.name(),
+                    self.inserter_config.engine,
+                )?;
                 // Detect an unmanaged pre-existing table with an incompatible
                 // engine before recording ownership or issuing creation DDL.
                 self.ensure_engine_matches(&clickhouse_table_name).await?;
@@ -1115,6 +1120,11 @@ where
             }
             Some(metadata) if metadata.is_pending() => {
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
+                validate_clickhouse_table_name(
+                    &clickhouse_table_name,
+                    schema.name(),
+                    self.inserter_config.engine,
+                )?;
                 self.ensure_engine_matches(&clickhouse_table_name).await?;
                 self.recover_pending_metadata(table_id, &clickhouse_table_name, schema, metadata)
                     .await?;
@@ -2020,6 +2030,35 @@ fn validate_clickhouse_table_shape(
 ) -> EtlResult<()> {
     replicated_table_schema.validate_destination_column_names(CLICKHOUSE_COLUMN_NAME_MAPPING)?;
     validate_clickhouse_schema_capabilities(replicated_table_schema, engine)
+}
+
+/// Rejects destination table names that ReplacingMergeTree reserves for
+/// current views.
+///
+/// The encoder doubles underscores, so a source table ending in `_current`
+/// encodes to `<other>__current`, the current view name of the table whose
+/// encoding is `<other>`. ClickHouse's `IF NOT EXISTS` keeps whichever object
+/// exists first, so the collision would otherwise pass silently.
+fn validate_clickhouse_table_name(
+    clickhouse_table_name: &str,
+    source_table_name: &TableName,
+    engine: ClickHouseEngine,
+) -> EtlResult<()> {
+    if matches!(engine, ClickHouseEngine::ReplacingMergeTree)
+        && clickhouse_table_name.ends_with(CURRENT_VIEW_SUFFIX)
+    {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse table name collides with a current view name",
+            format!(
+                "Table '{source_table_name}' maps to '{clickhouse_table_name}', which \
+                 ReplacingMergeTree reserves for the current view of another table; rename the \
+                 source table or set `engine: merge_tree`."
+            )
+        ));
+    }
+
+    Ok(())
 }
 
 /// Validates ClickHouse-specific schema capabilities.
@@ -3410,6 +3449,30 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_clickhouse_table_name_rejects_current_view_suffix_under_replacing_merge_tree() {
+        // GIVEN: an encoded name that equals another table's current view.
+        let source_name = TableName::new("public".to_owned(), "foo_current".to_owned());
+        let clickhouse_table_name = "public_foo__current";
+
+        // WHEN: validated for both engines.
+        let error = validate_clickhouse_table_name(
+            clickhouse_table_name,
+            &source_name,
+            ClickHouseEngine::ReplacingMergeTree,
+        )
+        .unwrap_err();
+        let merge_tree = validate_clickhouse_table_name(
+            clickhouse_table_name,
+            &source_name,
+            ClickHouseEngine::MergeTree,
+        );
+
+        // THEN: only the engine with current views rejects it.
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        merge_tree.unwrap();
     }
 
     #[test]
