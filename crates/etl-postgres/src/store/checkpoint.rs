@@ -20,54 +20,42 @@ fn parse_lsn(lsn: &str) -> sqlx::Result<PgLsn> {
     })
 }
 
-/// Fetches the persisted replication checkpoint for a pipeline worker.
-pub async fn get_replication_checkpoint<'c, E>(
+/// Loads all persisted checkpoints for a pipeline in one query.
+///
+/// The worker/table constraint identifies workers by table ID. Separate
+/// branches match the partial indexes for null and non-null table IDs.
+pub async fn load_replication_checkpoints<'c, E>(
     executor: E,
     pipeline_id: i64,
-    worker_type: &'static str,
-    table_id: Option<TableId>,
-) -> sqlx::Result<Option<PgLsn>>
+) -> sqlx::Result<Vec<(Option<TableId>, PgLsn)>>
 where
     E: PgExecutor<'c>,
 {
-    let checkpoint_lsn: Option<String> = if let Some(table_id) = table_id {
-        sqlx::query_scalar(
-            r#"
-            select flush_lsn::text
-            from etl.replication_progress
-            where pipeline_id = $1
-              and worker_type = $2::etl.replication_worker_type
-              and table_id = $3
-            "#,
-        )
-        .bind(pipeline_id)
-        .bind(worker_type)
-        .bind(SqlxTableId(table_id.into_inner()))
-        .fetch_optional(executor)
-        .await?
-    } else {
-        sqlx::query_scalar(
-            r#"
-            select flush_lsn::text
-            from etl.replication_progress
-            where pipeline_id = $1
-              and worker_type = $2::etl.replication_worker_type
-              and table_id is null
-            "#,
-        )
-        .bind(pipeline_id)
-        .bind(worker_type)
-        .fetch_optional(executor)
-        .await?
-    };
+    let rows: Vec<(Option<SqlxTableId>, String)> = sqlx::query_as(
+        r#"
+        select table_id, flush_lsn::text
+        from etl.replication_progress
+        where pipeline_id = $1 and table_id is null
+        union all
+        select table_id, flush_lsn::text
+        from etl.replication_progress
+        where pipeline_id = $1 and table_id is not null
+        "#,
+    )
+    .bind(pipeline_id)
+    .fetch_all(executor)
+    .await?;
 
-    checkpoint_lsn.as_deref().map(parse_lsn).transpose()
+    rows.into_iter()
+        .map(|(table_id, lsn)| Ok((table_id.map(|id| TableId::new(id.0)), parse_lsn(&lsn)?)))
+        .collect()
 }
 
 /// Monotonically persists a replication checkpoint for a pipeline worker.
 ///
 /// A stale or duplicated checkpoint cannot move the stored replay frontier
-/// backward.
+/// backward. PostgreSQL applies the maximum and returns the stored LSN in one
+/// atomic statement, so callers can cache the returned value after success.
 pub async fn upsert_replication_checkpoint<'c, E>(
     executor: E,
     pipeline_id: i64,
@@ -86,11 +74,7 @@ where
             values ($1, $2::etl.replication_worker_type, $3, $4::pg_lsn)
             on conflict (pipeline_id, worker_type, table_id) where table_id is not null
             do update set
-                flush_lsn = case
-                    when excluded.flush_lsn > etl.replication_progress.flush_lsn
-                        then excluded.flush_lsn
-                    else etl.replication_progress.flush_lsn
-                end,
+                flush_lsn = greatest(excluded.flush_lsn, etl.replication_progress.flush_lsn),
                 updated_at = case
                     when excluded.flush_lsn > etl.replication_progress.flush_lsn
                         then now()
@@ -112,11 +96,7 @@ where
             values ($1, $2::etl.replication_worker_type, $3::pg_lsn)
             on conflict (pipeline_id, worker_type) where table_id is null
             do update set
-                flush_lsn = case
-                    when excluded.flush_lsn > etl.replication_progress.flush_lsn
-                        then excluded.flush_lsn
-                    else etl.replication_progress.flush_lsn
-                end,
+                flush_lsn = greatest(excluded.flush_lsn, etl.replication_progress.flush_lsn),
                 updated_at = case
                     when excluded.flush_lsn > etl.replication_progress.flush_lsn
                         then now()

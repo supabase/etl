@@ -1293,10 +1293,9 @@ where
     /// Tries to queue best-effort cleanup for relation tables covered by
     /// durable progress.
     ///
-    /// The persisted checkpoint row is deliberately reloaded here instead of
-    /// using the apply loop's in-memory flush position. Cleanup removes replay
-    /// state, so its boundary must survive a crash independently of this
-    /// process.
+    /// The store supplies its cached checkpoint confirmed by persistence.
+    /// Cleanup removes replay state, so the apply loop's in-memory flush
+    /// position alone cannot establish a boundary that survives a crash.
     ///
     /// Pending candidates remain in [`ApplyLoopState`] when a transient failure
     /// prevents evaluation or queueing, so the next durable result retries

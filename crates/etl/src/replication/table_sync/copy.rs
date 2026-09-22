@@ -406,19 +406,10 @@ async fn plan_table_copy_partitions(
         vec![table_id]
     };
 
-    let mut table_estimates = Vec::with_capacity(source_tables.len());
-
-    for source_table_id in source_tables {
-        let estimate =
-            replication_transaction.get_table_copy_planning_estimate(source_table_id).await?;
-
-        // If a table has no blocks, we don't want to consider it for the copy.
-        if estimate.is_empty() {
-            continue;
-        }
-
-        table_estimates.push((source_table_id, estimate));
-    }
+    let mut table_estimates =
+        replication_transaction.get_table_copy_planning_estimates(&source_tables).await?;
+    // Empty physical tables need no COPY work.
+    table_estimates.retain(|_, estimate| !estimate.is_empty());
 
     // If there are no estimates, we don't need to copy any partitions.
     if table_estimates.is_empty() {
@@ -431,14 +422,10 @@ async fn plan_table_copy_partitions(
     // Row estimates are useful for allocating work across leaf tables, but only
     // if every physical table has one. Otherwise, fall back to heap blocks so a
     // non-empty table with stale stats is not weighted as zero.
-    let use_estimated_rows =
-        table_estimates.iter().all(|(_, estimate)| estimate.estimated_rows() > 0);
+    let use_estimated_rows = table_estimates.values().all(|estimate| estimate.estimated_rows() > 0);
 
     let total_estimated_rows = use_estimated_rows.then(|| {
-        table_estimates
-            .iter()
-            .map(|(_, estimate)| u128::from(estimate.partition_weight(true)))
-            .sum()
+        table_estimates.values().map(|estimate| u128::from(estimate.partition_weight(true))).sum()
     });
 
     let target_partitions = target_ctid_partition_count(max_copy_connections, total_estimated_rows);
@@ -446,8 +433,8 @@ async fn plan_table_copy_partitions(
     // Estimate values fit in u64, but totals and weighted multiplication use
     // u128 so large physical-table groups cannot overflow during planning.
     let total_weight: u128 = table_estimates
-        .iter()
-        .map(|(_, estimate)| u128::from(estimate.partition_weight(use_estimated_rows)))
+        .values()
+        .map(|estimate| u128::from(estimate.partition_weight(use_estimated_rows)))
         .sum();
 
     let mut copy_partitions = Vec::with_capacity(usize::from(target_partitions));

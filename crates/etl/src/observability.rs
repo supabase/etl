@@ -5,6 +5,10 @@ use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 static REGISTER_METRICS: Once = Once::new();
 
 pub(crate) const ETL_TABLES_TOTAL: &str = "etl_tables_total";
+
+/// Elapsed client time per PostgreSQL request; its count measures query volume.
+pub(crate) const ETL_POSTGRES_QUERY_DURATION_SECONDS: &str = "etl_postgres_query_duration_seconds";
+
 pub(crate) const ETL_DESTINATION_BATCH_WRITE_DURATION_SECONDS: &str =
     "etl_destination_batch_write_duration_seconds";
 pub(crate) const ETL_DESTINATION_DURABILITY_DURATION_SECONDS: &str =
@@ -59,6 +63,12 @@ pub(crate) const ETL_APPLY_LOOP_END_TO_END_LAG_BYTES: &str = "etl_apply_loop_end
 
 /// Label key for table state (used by table state metrics).
 pub(crate) const STATE_LABEL: &str = "state";
+/// Label key for the fixed logical PostgreSQL pool name.
+pub(crate) const POOL_LABEL: &str = "pool";
+/// Pool name for persisted ETL state and schema queries.
+pub(crate) const POSTGRES_STORE_POOL: &str = "postgres_store";
+/// Pool name for source queries outside replication connections.
+pub(crate) const OUT_OF_BAND_POOL: &str = "out_of_band";
 /// Label key for the ETL worker type ("table_sync" or "apply").
 pub(crate) const WORKER_TYPE_LABEL: &str = "worker_type";
 /// Label key for the replication data path ("copy" or "cdc").
@@ -106,6 +116,13 @@ pub(crate) fn ddl_command_tag_label(command_tag: &str) -> &'static str {
 /// register the metrics only once.
 pub(crate) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
+        describe_histogram!(
+            ETL_POSTGRES_QUERY_DURATION_SECONDS,
+            Unit::Seconds,
+            "SQLx request duration by pool, including pool wait, result consumption, errors, and \
+             cancellations."
+        );
+
         describe_gauge!(
             ETL_TABLES_TOTAL,
             Unit::Count,
@@ -274,9 +291,7 @@ pub(crate) fn register_metrics() {
         describe_counter!(
             ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL,
             Unit::Count,
-            "Total number of PostgreSQL schema cleanup table requests skipped because an equal or \
-             newer retention boundary was already successfully pruned in the current store \
-             lifecycle."
+            "Table cleanup requests skipped because their retention boundary was already pruned."
         );
 
         describe_counter!(

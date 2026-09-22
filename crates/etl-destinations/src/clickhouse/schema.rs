@@ -122,9 +122,7 @@ pub(super) fn clickhouse_default_expression(
 
 /// Renders a parsed default expression as ClickHouse SQL.
 ///
-/// Literal variants carry the PostgreSQL SQL literal. They are decoded and
-/// re-quoted with ClickHouse escapes because the dialects disagree on
-/// backslashes: PostgreSQL stores them, ClickHouse interprets them.
+/// Re-quotes PostgreSQL string literals to preserve backslashes in ClickHouse.
 fn render_clickhouse_default_expression(
     expression: &DefaultExpression,
     typ: &Type,
@@ -553,13 +551,9 @@ mod tests {
         }
     }
 
-    /// PostgreSQL string literals treat backslashes as plain characters, while
-    /// ClickHouse treats them as escapes. The renderer must re-quote the
-    /// decoded value in ClickHouse's dialect so the destination default holds
-    /// the same characters as the source default.
+    /// Defaults preserve literal backslashes and quotes in ClickHouse.
     #[test]
     fn clickhouse_default_clause_escapes_backslashes_for_clickhouse() {
-        // GIVEN: PostgreSQL literals with plain backslashes, one trailing.
         let cases = [
             (Type::TEXT, r"'C:\temp'::text", r" DEFAULT 'C:\\temp'"),
             (Type::TEXT, r"'abc\'::text", r" DEFAULT 'abc\\'"),
@@ -579,10 +573,8 @@ mod tests {
             let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
                 .with_default_expression(expression.to_owned());
 
-            // WHEN: the default clause is rendered for ClickHouse.
             let clause = clickhouse_default_clause(&column);
 
-            // THEN: backslashes are escaped so ClickHouse keeps the characters.
             assert_eq!(clause.as_deref(), Some(expected));
         }
     }

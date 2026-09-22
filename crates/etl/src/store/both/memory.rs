@@ -138,6 +138,12 @@ impl StateStore for MemoryStore {
         Ok(previous_state)
     }
 
+    async fn load_replication_checkpoints(&self) -> EtlResult<usize> {
+        let inner = self.inner.lock().await;
+
+        Ok(inner.replication_checkpoints.len())
+    }
+
     async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,

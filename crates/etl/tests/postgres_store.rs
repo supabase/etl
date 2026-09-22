@@ -18,6 +18,9 @@ use etl_telemetry::tracing::init_test_tracing;
 use sqlx::postgres::types::Oid as SqlxTableId;
 use tokio_postgres::types::{PgLsn, Type as PgType};
 
+/// PostgreSQL's maximum number of columns in a physical table.
+const MAX_POSTGRES_TABLE_COLUMNS: i32 = 1600;
+
 /// Creates a synthetic composite snapshot ID for tests.
 fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
     SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
@@ -119,6 +122,8 @@ async fn state_store_operations() {
 
     let all_states = store.get_table_states().await.unwrap();
     assert!(all_states.is_empty());
+
+    store.update_table_states(vec![]).await.unwrap();
 
     // Test updating state
     let init_state = TableState::Init;
@@ -255,52 +260,173 @@ async fn state_store_load_states() {
     assert_eq!(states.get(&table_id2), Some(&data_sync_state));
 }
 
+/// Checkpoints remain monotonic, cached across clones, and isolated by worker.
+/// A fresh store reloads persisted values after a restart.
 #[tokio::test(flavor = "multi_thread")]
-async fn state_store_replication_checkpoint_is_monotonic() {
-    init_test_tracing();
-
+async fn state_store_replication_checkpoint_is_monotonic_and_cached() {
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
-    let table_id = TableId::new(12345);
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    assert_eq!(store.load_replication_checkpoints().await.unwrap(), 0);
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    let apply_worker = WorkerType::Apply;
-    let table_sync_worker = WorkerType::TableSync { table_id };
+    let other_pipeline = PostgresStore::new(2, database.config.clone()).await.unwrap();
+    other_pipeline
+        .upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(999))
+        .await
+        .unwrap();
 
-    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), None);
+    let cloned_store = store.clone();
+    let table_sync_worker = WorkerType::TableSync { table_id: TableId::new(12345) };
+    let checkpoints = [(WorkerType::Apply, 100u64, 120u64), (table_sync_worker, 75, 200)];
 
-    let first_lsn = PgLsn::from(100u64);
-    let stale_lsn = PgLsn::from(90u64);
-    let later_lsn = PgLsn::from(120u64);
+    for (worker, first, latest) in checkpoints {
+        for reader in [&store, &cloned_store] {
+            assert_eq!(reader.get_replication_checkpoint(worker).await.unwrap(), None);
+        }
 
-    assert_eq!(
-        store.upsert_replication_checkpoint(apply_worker, first_lsn).await.unwrap(),
-        first_lsn
-    );
-    assert_eq!(
-        store.upsert_replication_checkpoint(apply_worker, stale_lsn).await.unwrap(),
-        first_lsn
-    );
-    assert_eq!(
-        store.upsert_replication_checkpoint(apply_worker, later_lsn).await.unwrap(),
-        later_lsn
-    );
-    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), Some(later_lsn));
+        let first = PgLsn::from(first);
+        let latest = PgLsn::from(latest);
 
-    let table_sync_lsn = PgLsn::from(75u64);
-    assert_eq!(
-        store.upsert_replication_checkpoint(table_sync_worker, table_sync_lsn).await.unwrap(),
-        table_sync_lsn
-    );
-    assert_eq!(
-        store.get_replication_checkpoint(table_sync_worker).await.unwrap(),
-        Some(table_sync_lsn)
-    );
-    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), Some(later_lsn));
+        assert_eq!(store.upsert_replication_checkpoint(worker, first).await.unwrap(), first);
+        assert_eq!(
+            cloned_store.upsert_replication_checkpoint(worker, PgLsn::from(1)).await.unwrap(),
+            first
+        );
+        assert_eq!(store.get_replication_checkpoint(worker).await.unwrap(), Some(first));
+
+        assert_eq!(
+            cloned_store.upsert_replication_checkpoint(worker, latest).await.unwrap(),
+            latest
+        );
+
+        for reader in [&store, &cloned_store] {
+            assert_eq!(reader.get_replication_checkpoint(worker).await.unwrap(), Some(latest));
+        }
+    }
+
+    drop(cloned_store);
+    drop(store);
+
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), None);
+    assert_eq!(store.load_replication_checkpoints().await.unwrap(), 2);
+
+    for (worker, _, latest) in checkpoints {
+        assert_eq!(
+            store.get_replication_checkpoint(worker).await.unwrap(),
+            Some(PgLsn::from(latest))
+        );
+    }
 
     store.delete_replication_checkpoint(table_sync_worker).await.unwrap();
+
     assert_eq!(store.get_replication_checkpoint(table_sync_worker).await.unwrap(), None);
-    assert_eq!(store.get_replication_checkpoint(apply_worker).await.unwrap(), Some(later_lsn));
+    assert_eq!(
+        store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+        Some(PgLsn::from(120))
+    );
+}
+
+/// Failed writes cannot advance a checkpoint. A failed reset discards its old
+/// cached boundary; an explicit startup load restores the confirmed database
+/// value.
+#[tokio::test(flavor = "multi_thread")]
+async fn checkpoint_cache_recovers_after_rejected_mutations() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let saved = PgLsn::from(100u64);
+    store.upsert_replication_checkpoint(WorkerType::Apply, saved).await.unwrap();
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create function test.reject_checkpoint() returns trigger language plpgsql as $$
+                 begin raise exception 'injected checkpoint failure'; end;
+             $$;
+             create trigger reject_checkpoint before insert or delete on etl.replication_progress
+             for each statement execute function test.reject_checkpoint();",
+        )
+        .await
+        .unwrap();
+    store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(200u64)).await.unwrap_err();
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), Some(saved));
+
+    store.delete_replication_checkpoint(WorkerType::Apply).await.unwrap_err();
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), None);
+    assert_eq!(store.load_replication_checkpoints().await.unwrap(), 1);
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), Some(saved));
+
+    client
+        .batch_execute("drop trigger reject_checkpoint on etl.replication_progress")
+        .await
+        .unwrap();
+    let latest = PgLsn::from(300u64);
+    assert_eq!(
+        store.upsert_replication_checkpoint(WorkerType::Apply, latest).await.unwrap(),
+        latest
+    );
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), Some(latest));
+
+    store.delete_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), None);
+}
+
+/// Schema replacement commits every column batch together and preserves the
+/// previously committed database and cache contents if a later batch fails.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_upsert_replaces_columns_atomically_in_batches() {
+    let database = spawn_source_database().await;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+    let original = create_sample_table_schema();
+    store.store_table_schema(original.clone()).await.unwrap();
+
+    let mut wide = original.clone();
+    wide.name = TableName::new("schema'\"; --\\".to_owned(), "table'\"; --\\".to_owned());
+    wide.column_schemas = (1..=MAX_POSTGRES_TABLE_COLUMNS)
+        .map(|ordinal| {
+            let mut column = test_column(
+                &format!("column {ordinal}'\"; --\\"),
+                PgType::TEXT,
+                -1,
+                ordinal,
+                ordinal % 2 == 0,
+                ordinal == 1,
+            );
+            column.default_expression = Some(r"'synthetic''; select 1; --\'::text".to_owned());
+
+            column
+        })
+        .collect();
+
+    // The duplicate is in the last batch, after earlier inserts succeeded.
+    let mut invalid = wide.clone();
+    *invalid.column_schemas.last_mut().unwrap() = wide.column_schemas[0].clone();
+    store.store_table_schema(invalid).await.unwrap_err();
+
+    assert_eq!(
+        *store.get_table_schema(&original.id, SnapshotId::max()).await.unwrap().unwrap(),
+        original
+    );
+    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, 1).await.unwrap();
+    assert_eq!(loaded, [original]);
+
+    store.store_table_schema(wide.clone()).await.unwrap();
+
+    assert_eq!(*store.get_table_schema(&wide.id, SnapshotId::max()).await.unwrap().unwrap(), wide);
+    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, 1).await.unwrap();
+    assert_eq!(loaded.as_slice(), std::slice::from_ref(&wide));
+
+    wide.column_schemas.clear();
+    store.store_table_schema(wide.clone()).await.unwrap();
+
+    let loaded = etl_postgres::store::schema::load_table_schemas(&pool, 1).await.unwrap();
+    assert_eq!(loaded, [wide]);
+    let counts: (i64, i64) = sqlx::query_as(
+        "select (select count(*) from etl.table_schemas), (select count(*) from etl.table_columns)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(counts, (1, 0));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -340,49 +466,6 @@ async fn schema_store_operations() {
 
     let all_schemas = store.get_table_schemas().await.unwrap();
     assert_eq!(all_schemas.len(), 2);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_store_load_schemas() {
-    init_test_tracing();
-
-    let database = spawn_source_database().await;
-    let pipeline_id = 1;
-
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    let table_schema1 = create_sample_table_schema();
-    let table_schema2 = create_another_table_schema();
-
-    // Store schemas
-    store.store_table_schema(table_schema1.clone()).await.unwrap();
-    store.store_table_schema(table_schema2.clone()).await.unwrap();
-
-    // Create a new store instance (simulating restart)
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-
-    // Initially empty (not loaded yet)
-    let schemas = new_store.get_table_schemas().await.unwrap();
-    assert!(schemas.is_empty());
-
-    // Load schemas from database
-    let loaded_count = new_store.load_table_schemas().await.unwrap();
-    assert_eq!(loaded_count, 2);
-
-    // Verify loaded schemas
-    let schemas = new_store.get_table_schemas().await.unwrap();
-    assert_eq!(schemas.len(), 2);
-
-    let schema1 = new_store.get_table_schema(&table_schema1.id, SnapshotId::max()).await.unwrap();
-    assert!(schema1.is_some());
-    let schema1 = schema1.unwrap();
-    assert_eq!(schema1.id, table_schema1.id);
-    assert_eq!(schema1.name, table_schema1.name);
-
-    let schema2 = new_store.get_table_schema(&table_schema2.id, SnapshotId::max()).await.unwrap();
-    assert!(schema2.is_some());
-    let schema2 = schema2.unwrap();
-    assert_eq!(schema2.id, table_schema2.id);
-    assert_eq!(schema2.name, table_schema2.name);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -466,6 +549,7 @@ async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
     store.store_table_schema(table_schema).await.unwrap();
 
     let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_table_schemas().await.unwrap();
     let checkpoint_lsn = PgLsn::from(5);
 
     let at_maximum =
@@ -483,8 +567,7 @@ async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
     assert!(migrated_snapshot_id <= SnapshotId::at_lsn(checkpoint_lsn));
     assert!(second_commit_first_snapshot > SnapshotId::at_lsn(checkpoint_lsn));
 
-    // Query from newest to oldest so each narrower bound misses newer cached
-    // entries and exercises numeric ordering of the persisted text.
+    // Narrower bounds must select the correct version from the loaded index.
     let at_second_commit = reloaded_store
         .get_table_schema(&table_id, SnapshotId::at_lsn(PgLsn::from(10)))
         .await
@@ -507,121 +590,43 @@ async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
     assert_eq!(at_checkpoint_before_second_commit.snapshot_id, first_commit_snapshot);
 }
 
+/// Retained versions are loaded together, so older lookups cannot leave gaps
+/// that cause subsequent at-or-before reads to select the wrong schema.
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_store_upsert_replaces_columns() {
-    init_test_tracing();
-
+async fn schema_store_loads_retained_schemas_once() {
     let database = spawn_source_database().await;
-    let pipeline_id = 1;
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let schemas = [create_sample_table_schema(), create_another_table_schema()];
 
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    for schema in &schemas {
+        store_schema_versions(&store, schema, &[0, 100, 200]).await;
+    }
+    drop(store);
 
-    // Create the initial schema with three columns.
-    let table_id = TableId::new(12345);
-    let table_name = TableName::new("public".to_owned(), "test_table".to_owned());
-    let initial_columns = vec![
-        test_column("id", PgType::INT4, -1, 1, false, true),
-        test_column("name", PgType::TEXT, -1, 2, true, false),
-        test_column("old_column", PgType::TEXT, -1, 3, true, false),
-    ];
-    let table_schema = TableSchema::new(table_id, table_name.clone(), initial_columns);
+    let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    assert!(store.get_table_schema(&schemas[0].id, SnapshotId::max()).await.unwrap().is_none());
+    assert!(store.get_table_schemas().await.unwrap().is_empty());
 
-    // Store the initial schema.
-    store.store_table_schema(table_schema.clone()).await.unwrap();
+    assert_eq!(store.load_table_schemas().await.unwrap(), 6);
 
-    // Verify the initial columns.
-    let schema = store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
-    assert_eq!(schema.column_schemas.len(), 3);
-    assert!(schema.column_schemas.iter().any(|c| c.name == "old_column"));
+    let cloned_store = store.clone();
 
-    // Create an updated schema with the same snapshot ID but different columns,
-    // simulating a retry or reprocessing scenario.
-    let updated_columns = vec![
-        test_column("id", PgType::INT4, -1, 1, false, true),
-        test_column("name", PgType::TEXT, -1, 2, true, false),
-        test_column("new_column", PgType::TEXT, -1, 3, true, false), // replaced old_column
-        test_column("extra_column", PgType::INT8, -1, 4, true, false), // added column
-    ];
-    let updated_schema = TableSchema::new(table_id, table_name, updated_columns);
+    for schema in &schemas {
+        for (requested, expected) in [(0, 0), (150, 100), (200, 200), (100, 100)] {
+            let loaded = cloned_store
+                .get_table_schema(&schema.id, test_snapshot_id(requested, requested))
+                .await
+                .unwrap()
+                .unwrap();
+            let mut expected_schema = schema.clone();
+            expected_schema.snapshot_id = test_snapshot_id(expected, expected);
 
-    // Upsert the updated schema at the same snapshot ID.
-    store.store_table_schema(updated_schema.clone()).await.unwrap();
-
-    // Reload from the database to verify that columns were replaced rather than
-    // accumulated.
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    let schema = new_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
-
-    assert_eq!(schema.column_schemas.len(), 4); // Should be 4, not 3+4=7
-    assert!(
-        !schema.column_schemas.iter().any(|c| c.name == "old_column"),
-        "old_column should have been deleted"
-    );
-    assert!(
-        schema.column_schemas.iter().any(|c| c.name == "new_column"),
-        "new_column should exist"
-    );
-    assert!(
-        schema.column_schemas.iter().any(|c| c.name == "extra_column"),
-        "extra_column should exist"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_cache_eviction() {
-    init_test_tracing();
-
-    let database = spawn_source_database().await;
-    let pipeline_id = 1;
-
-    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-
-    // Store three schema versions for table 1.
-    let table_id_1 = TableId::new(12345);
-    let table_name_1 = TableName::new("public".to_owned(), "test_table".to_owned());
-    for snapshot_id in [0u64, 100, 200] {
-        let columns = vec![
-            test_column("id", PgType::INT4, -1, 1, false, true),
-            test_column(&format!("col_at_{snapshot_id}"), PgType::TEXT, -1, 2, true, false),
-        ];
-        let mut table_schema = TableSchema::new(table_id_1, table_name_1.clone(), columns);
-        table_schema.snapshot_id = test_snapshot_id(snapshot_id, snapshot_id);
-        store.store_table_schema(table_schema.clone()).await.unwrap();
+            assert_eq!(*loaded, expected_schema);
+        }
     }
 
-    // Store three schemas for table 2 to verify that eviction is per-table.
-    let table_id_2 = TableId::new(67890);
-    let table_name_2 = TableName::new("public".to_owned(), "table_2".to_owned());
-    for snapshot_id in [0u64, 100, 200] {
-        let columns = vec![test_column("id", PgType::INT4, -1, 1, false, true)];
-        let mut schema = TableSchema::new(table_id_2, table_name_2.clone(), columns);
-        schema.snapshot_id = test_snapshot_id(snapshot_id, snapshot_id);
-        store.store_table_schema(schema).await.unwrap();
-    }
-
-    // The cache retains two schemas per table, for four schemas total.
-    let cached_schemas = store.get_table_schemas().await.unwrap();
-    assert_eq!(cached_schemas.len(), 4, "Should have 2 schemas per table");
-
-    // Eviction keeps the two newest snapshots and removes the initial snapshot.
-    let table_1_snapshots: Vec<SnapshotId> =
-        cached_schemas.iter().filter(|s| s.id == table_id_1).map(|s| s.snapshot_id).collect();
-    assert!(
-        table_1_snapshots.contains(&test_snapshot_id(100u64, 100u64))
-            && table_1_snapshots.contains(&test_snapshot_id(200u64, 200u64))
-    );
-    assert!(!table_1_snapshots.contains(&SnapshotId::initial()));
-
-    let table_2_snapshots: Vec<SnapshotId> =
-        cached_schemas.iter().filter(|s| s.id == table_id_2).map(|s| s.snapshot_id).collect();
-    assert!(!table_2_snapshots.contains(&SnapshotId::initial()));
-
-    // Evicted schemas remain loadable from the database.
-    let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    let schema_0 =
-        new_store.get_table_schema(&table_id_1, SnapshotId::initial()).await.unwrap().unwrap();
-    assert_eq!(schema_0.snapshot_id, SnapshotId::initial());
-    assert!(schema_0.column_schemas.iter().any(|c| c.name == "col_at_0"));
+    assert_eq!(store.get_table_schemas().await.unwrap().len(), 6);
+    assert!(store.get_table_schema(&TableId::new(0), SnapshotId::max()).await.unwrap().is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -953,6 +958,7 @@ async fn schema_store_reloads_and_restarts_retry_pruning() {
     assert_eq!(schema_prune_query_count(&pool).await, 2);
 
     let restarted = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    restarted.load_table_schemas().await.unwrap();
     assert_eq!(restarted.prune_table_schemas(boundaries).await.unwrap(), 0);
     assert_eq!(schema_prune_query_count(&pool).await, 3);
     assert_eq!(
@@ -1261,6 +1267,7 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     // Create a new store instance and load from DB to ensure persistence.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     new_store.load_table_states().await.unwrap();
+    new_store.load_replication_checkpoints().await.unwrap();
     new_store.load_table_schemas().await.unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
 
@@ -1352,6 +1359,7 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
 
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     new_store.load_table_states().await.unwrap();
+    new_store.load_replication_checkpoints().await.unwrap();
     new_store.load_table_schemas().await.unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
 
@@ -1445,6 +1453,7 @@ async fn reset_table_states_for_resync_resets_states_and_apply_checkpoint_only()
 
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     new_store.load_table_states().await.unwrap();
+    new_store.load_replication_checkpoints().await.unwrap();
     new_store.load_table_schemas().await.unwrap();
     new_store.load_destination_tables_metadata().await.unwrap();
 

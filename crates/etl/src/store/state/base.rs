@@ -13,15 +13,9 @@ pub type TableStates = Arc<BTreeMap<TableId, TableState>>;
 /// Arc-wrapped dictionary of destination table metadata.
 pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTableMetadata>>;
 
-/// Trait for storing table states, replication checkpoints, and destination
-/// metadata.
+/// Stores table states, replication checkpoints, and destination metadata.
 ///
-/// [`StateStore`] implementations are responsible for defining how table
-/// states, replication checkpoints, and destination table metadata are stored
-/// and retrieved.
-///
-/// Implementations should ensure thread-safety and handle concurrent access to
-/// the data.
+/// Implementations follow the shared-cache contract in [`crate::store`].
 pub trait StateStore {
     /// Returns table state for table with id `table_id` from the cache.
     ///
@@ -38,18 +32,10 @@ pub trait StateStore {
 
     /// Loads the table states from the persistent store into the cache.
     ///
-    /// This should be called once at program start to load the state into the
-    /// cache and then use only the `get_X` methods to access the states.
-    /// Updating the state by calling the `update_table_state` updates in both
-    /// the cache and the persistent store, so no need to ever load the states
-    /// again.
+    /// Call once at startup; subsequent writes maintain the cache.
     fn load_table_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
-    /// Updates multiple table states atomically in both the cache and the
-    /// persistent store.
-    ///
-    /// All state updates are applied as a single atomic operation. If any
-    /// update fails, the entire operation is rolled back.
+    /// Persists state updates atomically, then updates the cache.
     fn update_table_states(
         &self,
         updates: Vec<(TableId, TableState)>,
@@ -71,11 +57,17 @@ pub trait StateStore {
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<TableState>> + Send;
 
-    /// Returns the persisted checkpoint LSN for a replication worker, if any.
+    /// Loads all worker checkpoints from persistent storage into the cache.
     ///
-    /// This checkpoint is the durable replay frontier used during worker
-    /// startup. It is distinct from the apply loop's received and flush LSNs
-    /// and may have been selected from either one at a safe persistence point.
+    /// Call once at startup before workers run. Later writes and resets keep
+    /// the cache current. Returns the number of checkpoints loaded.
+    fn load_replication_checkpoints(&self) -> impl Future<Output = EtlResult<usize>> + Send;
+
+    /// Returns the worker's cached durable replay checkpoint, or `None`.
+    ///
+    /// Call [`Self::load_replication_checkpoints`] at startup. Reads never
+    /// query storage; in-memory apply progress alone does not establish a
+    /// checkpoint.
     fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
@@ -83,8 +75,8 @@ pub trait StateStore {
 
     /// Monotonically persists a checkpoint LSN for a replication worker.
     ///
-    /// Implementations must never move the stored checkpoint backward. The
-    /// returned value is the checkpoint stored after the monotonic update.
+    /// Cache and return the confirmed stored value, which may exceed the
+    /// supplied LSN. Failed writes must not advance the cache.
     fn upsert_replication_checkpoint(
         &self,
         worker_type: WorkerType,
@@ -93,7 +85,8 @@ pub trait StateStore {
 
     /// Deletes the persisted checkpoint for a replication worker.
     ///
-    /// This is used when the worker's slot lineage is intentionally reset.
+    /// Used when resetting slot lineage. Invalidate the cached checkpoint
+    /// before database work so cancellation cannot leave a stale boundary.
     fn delete_replication_checkpoint(
         &self,
         worker_type: WorkerType,

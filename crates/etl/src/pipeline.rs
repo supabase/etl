@@ -166,17 +166,15 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // We load the destination table metadata and schemas from the store to
-        // have them cached for quick access.
-        //
-        // It's really important to load the metadata and schemas before
-        // starting the apply worker since downstream code relies on the
-        // assumption that they are loaded in the cache.
+        // Warm every store cache before initialization reads, destinations, or
+        // workers.
+        self.store.load_table_states().await?;
         self.store.load_destination_tables_metadata().await?;
         self.store.load_table_schemas().await?;
+        self.store.load_replication_checkpoints().await?;
 
-        // We load the table states by checking the table ids of a publication
-        // and loading/creating the table states based on the current state.
+        // Reconcile the cached table states with current publication
+        // membership.
         self.initialize_table_states(&replication_client).await?;
 
         // We then let destinations perform their startup sequence if any.
@@ -342,8 +340,6 @@ where
             "publication tables loaded"
         );
 
-        // We load the current table states.
-        self.store.load_table_states().await?;
         let table_states = self.store.get_table_states().await?;
 
         // Initialize states for newly added tables in the publication.

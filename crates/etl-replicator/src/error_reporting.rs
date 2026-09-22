@@ -112,6 +112,10 @@ where
         self.inner.rollback_table_state(table_id).await
     }
 
+    async fn load_replication_checkpoints(&self) -> EtlResult<usize> {
+        self.inner.load_replication_checkpoints().await
+    }
+
     async fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,

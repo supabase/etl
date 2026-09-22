@@ -80,11 +80,14 @@ pub trait SchemaStore {
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_schema()` | Returns the schema version with the largest `snapshot_id <= requested_snapshot_id`. If it misses cache, it may load from persistent storage |
+| `get_table_schema()` | Returns the newest cached schema at or before the requested snapshot, or `None` |
 | `get_table_schemas()` | Returns all cached schemas without reading persistent storage |
-| `load_table_schemas()` | Loads schemas from persistent storage into cache. Call once at startup. Returns the number of schemas loaded |
+| `load_table_schemas()` | Loads all retained versions into cache at startup and returns their count |
 | `store_table_schema()` | Saves a schema version to both cache and persistent storage and returns the cached `Arc` |
-| `prune_table_schemas()` | For the supplied per-table snapshot boundaries, preserves the newest schema version at or before each boundary, preserves newer versions, and removes older versions. The `BTreeMap` provides deterministic table-ID iteration. Implementations with both cache and persistent storage must prune both |
+| `prune_table_schemas()` | Keeps the newest schema at or before each table's boundary and all newer versions; removes older versions from storage and cache |
+
+Stores can skip completed cleanup boundaries until schema writes or lifecycle
+changes require another pass.
 
 ## StateStore
 
@@ -102,6 +105,7 @@ pub trait StateStore {
     fn rollback_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<TableState>> + Send;
 
     // Persisted replication checkpoints
+    fn load_replication_checkpoints(&self) -> impl Future<Output = EtlResult<usize>> + Send;
     fn get_replication_checkpoint(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<Option<PgLsn>>> + Send;
     fn upsert_replication_checkpoint(&self, worker_type: WorkerType, checkpoint_lsn: PgLsn) -> impl Future<Output = EtlResult<PgLsn>> + Send;
     fn delete_replication_checkpoint(&self, worker_type: WorkerType) -> impl Future<Output = EtlResult<()>> + Send;
@@ -120,7 +124,7 @@ pub trait StateStore {
 | `get_table_state()` | Returns current state for a table from cache |
 | `get_table_states()` | Returns states for all tables from cache as [`TableStates`] |
 | `load_table_states()` | Loads states from persistent storage into cache. Call once at startup. Returns the number of states loaded |
-| `update_table_states()` | Atomically updates multiple table states in both cache and persistent storage |
+| `update_table_states()` | Persists table-state updates atomically, then updates the cache |
 | `update_table_state()` | Updates state in both cache and persistent storage |
 | `rollback_table_state()` | Reverts table to previous state. Returns the state after rollback |
 
@@ -135,13 +139,17 @@ in selecting a safe restart position.
 
 | Method | Purpose |
 |--------|---------|
-| `get_replication_checkpoint()` | Returns the persisted checkpoint for a worker, if present |
-| `upsert_replication_checkpoint()` | Monotonically stores a checkpoint and returns the stored LSN. Implementations must not move it backward |
-| `delete_replication_checkpoint()` | Deletes the checkpoint when a worker slot lineage is intentionally reset |
+| `load_replication_checkpoints()` | Loads all worker checkpoints together at startup and returns their count |
+| `get_replication_checkpoint()` | Returns the cached checkpoint for a worker, or `None`, without querying storage |
+| `upsert_replication_checkpoint()` | Monotonically persists a checkpoint, then caches and returns the actual stored LSN. It can be higher than the requested LSN; failed writes must not advance the cache |
+| `delete_replication_checkpoint()` | Deletes the persisted and cached checkpoint when a worker slot lineage is intentionally reset |
+
+Resets invalidate cached checkpoints before database work so cancellation
+cannot leave an old replay boundary available.
 
 ### Destination Metadata Methods
 
-Destination table metadata connects source table IDs to destination state. Its schema is explicitly `Creating`, `Applying`, or `Applied`; each variant contains the snapshots and replication masks required for that state. Destinations match the schema variant and decide whether to recover or reject an incomplete operation. `Applied` is authoritative: an empty process cache may be repopulated from it, but must not cause the data-bearing table to be created, inspected for repair, or structurally reconciled. External changes to ETL-owned tables are unsupported and should fail through ordinary destination operations.
+Destination table metadata connects source table IDs to destination state. Its schema is explicitly `Creating`, `Applying`, or `Applied`; each variant contains the snapshots and replication masks required for that state. Destinations match the schema variant and decide whether to recover or reject an incomplete operation. `Applied` is authoritative: an empty process cache may be repopulated from it, but must not cause the data-bearing table to be created, inspected for repair, or structurally reconciled. External changes to ETL-owned tables are unsupported.
 
 | Method | Purpose |
 |--------|---------|

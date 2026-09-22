@@ -79,6 +79,10 @@ Create `src/custom_store.rs`. A store must implement **three traits** (see [Exte
 blanket-implemented facades over these traits plus the required
 clone/thread-safety bounds, so custom stores do not implement those directly.
 
+Startup loads all retained schemas, table states, destination metadata, and
+worker checkpoints before destinations or workers run. Getters read the shared
+cache; writes and lifecycle operations maintain it after persistence succeeds.
+
 <Callout className="etl-callout" type="warn" title="Instructional store">
   This example keeps state in memory so the trait contract is visible in one
   file, including rollback during an in-process retry. It does not survive a
@@ -249,6 +253,11 @@ impl StateStore for CustomStore {
         })?;
         entry.state = Some(previous_state.clone());
         Ok(previous_state)
+    }
+
+    async fn load_replication_checkpoints(&self) -> EtlResult<usize> {
+        let checkpoints = self.checkpoints.lock().await;
+        Ok(checkpoints.len())
     }
 
     async fn get_replication_checkpoint(

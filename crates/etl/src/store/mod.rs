@@ -16,6 +16,13 @@
 //!
 //! [`MemoryStore`] and [`PostgresStore`] provide combined implementations that
 //! handle both state and schema storage in unified systems.
+//!
+//! Use one store and its clones per pipeline so workers share coherent caches.
+//! External changes to ETL state or destination data are unsupported. Stores
+//! own caching and query batching: startup loads state, metadata, checkpoints,
+//! and all retained schemas; getters read memory. Writes update caches after
+//! persistence succeeds, and durable-checkpoint pruning removes obsolete
+//! schemas from both storage and cache.
 
 mod both;
 mod capabilities;
