@@ -7,9 +7,6 @@ The open-source project is the replication engine: the `etl` library, the
 `etl-replicator` binary, and the built-in destinations. Product docs live at
 [supabase.github.io/etl](https://supabase.github.io/etl/).
 
-`etl-api` is an optional Kubernetes control-plane for deploying replicators.
-You do not need it to run ETL.
-
 ## Start here
 
 ```bash
@@ -20,27 +17,20 @@ That starts local Postgres, ClickHouse, and the Iceberg REST catalog, and runs
 migrations. It does not write service configuration or apply Kubernetes
 resources.
 
-Then set up the service you want:
+Then configure the replicator:
 
 ```bash
-cargo x setup api
-cargo x run api
-
-# or, ClickHouse by default:
 cargo x setup replicator
 cargo x seed
 cargo x run replicator
 ```
 
-Generated files in `crates/etl-api/configuration/` and
-`crates/etl-replicator/configuration/` are gitignored. Re-run replicator setup
-with `--force` to replace its files. API `--force` rewrites the config while
-preserving old encryption keys and appending a new key id. Do not commit those
-files.
+Generated files in `crates/etl-replicator/configuration/` are gitignored.
+Re-run setup with `--force` to replace them. Do not commit generated configuration.
 
 Need: Rust from `rust-toolchain.toml`, `psql`, SQLx CLI, and Docker Compose.
-`kubectl` plus [OrbStack](https://orbstack.dev) with Kubernetes if you run the
-API.
+The standalone replicator does not require Kubernetes. `cargo x deploy-local`
+uses `kubectl` and an OrbStack Kubernetes cluster for optional local deployment.
 
 Install SQLx CLI:
 
@@ -81,18 +71,6 @@ curl -sS 'http://localhost:8123/?user=etl&password=etl' \
 
 Stop the replicator with Ctrl+C.
 
-## API
-
-```bash
-cargo x setup api
-cargo x run api
-```
-
-`cargo x setup api` writes API configuration and applies Kubernetes resources.
-If you skipped `cargo x init`, it also starts the local stack. Health is at
-http://127.0.0.1:8010/health_check, Swagger at `/swagger-ui`. See
-`crates/etl-api/README.md` for configuration.
-
 ## Everyday commands
 
 `cargo x` is the task runner. `cargo x --help` lists every command.
@@ -103,7 +81,7 @@ cargo x fmt --check
 cargo x check            # fmt, sort, clippy
 cargo x fix
 cargo x msrv             # verify MSRV consistency
-cargo x migrate          # API and ETL migrations
+cargo x migrate          # source and state-store migrations
 cargo x deploy-local \
   --cpu-request 125m \
   --memory-request 250Mi # deploy replicator to local OrbStack k8s
@@ -133,16 +111,31 @@ Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
 `cargo xtask postgres start` starts only the test Postgres clusters.
 `cargo xtask multigres --help` covers the optional Multigres cluster.
 
+## Migrations
+
+SQL is grouped by its owning subsystem:
+
+| Directory | Purpose |
+| --- | --- |
+| `crates/etl/migrations/source/` | Helpers required in replication source databases. |
+| `crates/etl/migrations/postgres_store/` | Durable state for `PostgresStore`. |
+| `crates/etl-maintenance/migrations/postgres/` | External-maintenance coordination state. |
+
+`cargo x migrate` creates the local database if needed and applies the first two
+sets; `cargo x init` also runs it. Maintenance initialization belongs to its store.
+See [replication migrations](crates/etl/migrations/README.md) and
+[maintenance migrations](crates/etl-maintenance/migrations/README.md) for runtime
+entrypoints, shared migration history, compatibility, and focused tests.
+
 ## Configuration
 
-Both binaries load `configuration/base.yaml`, then
+The replicator loads `configuration/base.yaml`, then
 `configuration/{environment}.yaml`, then `APP_` environment variables (nested
 keys use `__`). `APP_ENVIRONMENT` defaults to `prod`. `cargo x run` sets `dev`
 and points `APP_CONFIG_DIR` at the generated directory.
 
-Generated files include only required fields. Encryption keys and API keys are
-random. Local Docker passwords are the published Compose defaults. Cloud
-destination secrets are fake placeholders.
+Generated files include only required fields. Local Docker passwords are the
+published Compose defaults. Cloud destination secrets are fake placeholders.
 
 ## Tests
 
@@ -200,7 +193,6 @@ printed by the server.
 - Nothing listens on 5430: run `cargo x init` (or `SKIP_DOCKER=1` with
   `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and
   `POSTGRES_DB`).
-- API exits on Kubernetes: enable OrbStack Kubernetes, then `cargo x setup api`.
 - Replicator config missing: `cargo x setup replicator` (ClickHouse) or
   `--destination <name>`.
 - `cargo x seed` keeps `etl_testdata` if it already exists. Recreate with

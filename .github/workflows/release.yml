@@ -108,16 +108,13 @@ jobs:
           git push origin "$TAG"
 
   build-and-push:
-    name: Build and Push Docker Images
+    name: Build and Push Docker Image
     needs: [version, create-tag]
-    strategy:
-      matrix:
-        image: [etl-api, etl-replicator]
     uses: ./.github/workflows/docker-build.yml
     with:
-      image: public.ecr.aws/supabase/${{ matrix.image }}
+      image: public.ecr.aws/supabase/etl-replicator
       context: .
-      file: ./crates/${{ matrix.image }}/Dockerfile
+      file: ./crates/etl-replicator/Dockerfile
       push: true
       tag_with_version: true
       version: ${{ needs.version.outputs.version }}
@@ -143,14 +140,11 @@ jobs:
             echo "body<<MARKER"
             echo "Release ${TAG}"
             echo
-            echo "Docker images published:"
-            echo "- public.ecr.aws/supabase/etl-api:latest"
-            echo "- public.ecr.aws/supabase/etl-api:${TAG}"
+            echo "Docker image published:"
             echo "- public.ecr.aws/supabase/etl-replicator:latest"
             echo "- public.ecr.aws/supabase/etl-replicator:${TAG}"
             echo
             echo "View on ECR Public Gallery:"
-            echo "- https://gallery.ecr.aws/supabase/etl-api"
             echo "- https://gallery.ecr.aws/supabase/etl-replicator"
             echo "MARKER"
           } >> "$GITHUB_OUTPUT"

@@ -150,11 +150,10 @@ for the complete setup and production guidance.
 
 ```bash
 cargo x init              # Docker, databases, migrations
-cargo x setup api && cargo x run api
 cargo x setup replicator && cargo x seed && cargo x run replicator
 ```
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) to start the replicator or API, pick a
+See [DEVELOPMENT.md](DEVELOPMENT.md) to start the replicator, pick a
 destination, and run tests. The workspace uses Rust 1.95.0 from
 `rust-toolchain.toml`.
 

@@ -224,11 +224,9 @@ allow the greater of `stall_timeout_ms` and PostgreSQL's `wal_sender_timeout`
 expected copy batch and finalization durations.
 
 For Kubernetes, use `/livez` for startup and liveness, and `/readyz` for readiness
-on the configured port. The optional ETL API configures these independently under
-`k8s.replicator_health.startup`, `.liveness`, and `.readiness`. Each supplied block
-requires `period_seconds`, `timeout_seconds`, and `failure_threshold_count`;
-omitted blocks generate no probe. With no probes, the API also omits the listener.
-Enable probes only with a replicator image that supports these endpoints.
+on the configured port. Configure probe timing and failure thresholds in the Pod
+specification. Enable probes only with a replicator image that supports these
+endpoints and has its health listener enabled.
 
 ## Recovery and operations
 
