@@ -1363,8 +1363,8 @@ where
             .await
     }
 
-    /// Handles a schema change event (Relation) by computing the diff and
-    /// applying ALTER TABLE statements.
+    /// Handles relation metadata, applying the schema diff for a new snapshot
+    /// or recovering an interrupted transition.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
         validate_clickhouse_schema_capabilities(new_schema, self.inserter_config.engine)?;
 

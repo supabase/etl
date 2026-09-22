@@ -1502,9 +1502,10 @@ where
             // not changed. Accumulate their table IDs across accepted writes
             // until a durable result carries a commit boundary we can persist.
             // That boundary may precede relations in the batch, so retention
-            // must preserve schemas needed to replay the unfinished transaction.
-            // The first relation after restart also triggers a new check if an
-            // earlier cleanup was missed.
+            // must preserve schemas needed to replay the unfinished
+            // transaction. The first relation after restart also
+            // triggers a new check if an earlier cleanup was
+            // missed.
             self.state
                 .pending_schema_cleanup_table_ids
                 .extend(metadata.relation_table_ids.iter().copied());
@@ -2039,26 +2040,21 @@ where
     /// logical message is decoded and record the exact snapshot that any
     /// following relation must materialize.
     ///
-    /// This ordering matches how `pgoutput` produces the stream:
-    /// - `pgoutput_message()` writes logical `Message` records directly and
-    ///   does not inject `Relation` metadata.
-    /// - `Relation` records are synthesized lazily by `maybe_send_schema()`
-    ///   only when `pgoutput_change()` is about to emit a DML change.
-    /// - relcache invalidation from the DDL resets `schema_sent`, so the first
-    ///   post-DDL DML for the relation gets a fresh `Relation` message just
-    ///   before the row event.
+    /// Supported publication DDL also advances this cursor: a column-list
+    /// change needs an ordered snapshot for its new replication mask even
+    /// though the stored full-table columns can remain identical.
     ///
-    /// In other words, the protocol variant this code relies on is: `... -> ddl
-    /// Message -> Relation(new schema) -> Insert/Update/Delete ...`. Because
-    /// the DDL message itself is not a DML event, we must record the new schema
-    /// cursor here so the next `Relation` rebuilds the masks against that exact
-    /// snapshot. PostgreSQL omits the relation when the DDL did not invalidate
-    /// pgoutput's cached relation state. In that case the first row combines
-    /// the stored new table schema with the previous relation masks and
-    /// materializes `WithSchema`. The retained masks are only a fallback: a new
-    /// relation replaces them before any row is decoded. Without previous
-    /// masks, a table-sync worker cannot hand over this incomplete state until
-    /// a relation provides both masks.
+    /// `pgoutput_message()` emits the logical message directly. A protocol
+    /// relation follows lazily before a row or truncate when PostgreSQL's
+    /// relation cache needs refreshing. This is independent of ETL's snapshot
+    /// lineage: maintenance can resend a relation without a DDL message, and
+    /// no-op DDL can emit a message without invalidating the relation cache.
+    ///
+    /// When no relation follows DDL, the first row combines the pending schema
+    /// with the previous masks and emits a destination-facing relation event.
+    /// A received relation replaces those fallback masks before row decoding.
+    /// Without previous masks, a table-sync worker must wait for a relation
+    /// before handing over its decoding state.
     async fn handle_message(
         &mut self,
         message: &protocol::MessageBody,
@@ -2398,6 +2394,8 @@ where
                 RelationSchemaSelection::Exact(snapshot_id)
             }
             Some(TableDecodingState::WithSchema(schema)) => {
+                // A cache invalidation can resend the same schema. Preserve
+                // its lineage instead of selecting a newer preloaded snapshot.
                 RelationSchemaSelection::Exact(schema.inner().snapshot_id)
             }
             None => {

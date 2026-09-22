@@ -1591,6 +1591,8 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
     .await;
 }
 
+/// Checks truncate relation ordering with warm caches, table DDL, publication
+/// column-list changes, and replay.
 #[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_emits_relation_before_truncate() {
     init_test_tracing();
@@ -1639,6 +1641,9 @@ async fn logical_replication_emits_relation_before_truncate() {
         .await
         .unwrap();
 
+    // Plain truncate refreshes relation metadata even with a warm cache.
+    database.run_sql(&format!("truncate table {first_quoted}, {second_quoted}")).await.unwrap();
+
     // No-op DDL stores a new schema snapshot without invalidating pgoutput's
     // relation cache. Truncate still emits a protocol relation per table before
     // the truncate message, unlike a later insert.
@@ -1649,12 +1654,12 @@ async fn logical_replication_emits_relation_before_truncate() {
     // A schema change that adds a column invalidates the relation cache.
     // Truncate still emits a protocol relation, now including the new column.
     database.run_sql(&format!("alter table {first_quoted} add column email text")).await.unwrap();
-    database.truncate_table(first_table_name).await.unwrap();
+    database.truncate_table(first_table_name.clone()).await.unwrap();
 
     let columns = vec!["id".to_owned(), "name".to_owned(), "age".to_owned()];
     let columns_with_email =
         vec!["id".to_owned(), "name".to_owned(), "age".to_owned(), "email".to_owned()];
-    let expected = vec![
+    let mut expected = vec![
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns.clone()),
         ExpectedStreamMarker::Insert(first_table_id.into_inner()),
@@ -1662,6 +1667,14 @@ async fn logical_replication_emits_relation_before_truncate() {
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(second_table_id.into_inner(), columns.clone()),
         ExpectedStreamMarker::Insert(second_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Relation(second_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Truncate(vec![
+            first_table_id.into_inner(),
+            second_table_id.into_inner(),
+        ]),
         ExpectedStreamMarker::Commit,
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::DdlMessage(first_table_id.into_inner(), None, columns.clone()),
@@ -1685,10 +1698,38 @@ async fn logical_replication_emits_relation_before_truncate() {
         ),
         ExpectedStreamMarker::Commit,
         ExpectedStreamMarker::Begin,
-        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns_with_email),
+        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns_with_email.clone()),
         ExpectedStreamMarker::Truncate(vec![first_table_id.into_inner()]),
         ExpectedStreamMarker::Commit,
     ];
+
+    if !below_version!(database.server_version(), POSTGRES_15) {
+        // The DDL snapshot still has all columns; the following relation
+        // supplies the new publication mask before truncate, without any row.
+        database
+            .run_sql(&format!(
+                "alter publication {publication_name} set table {first_quoted} (id, name)"
+            ))
+            .await
+            .unwrap();
+        database.truncate_table(first_table_name).await.unwrap();
+        expected.extend([
+            ExpectedStreamMarker::Begin,
+            ExpectedStreamMarker::DdlMessage(
+                first_table_id.into_inner(),
+                Some(publication_name.to_owned()),
+                columns_with_email,
+            ),
+            ExpectedStreamMarker::Commit,
+            ExpectedStreamMarker::Begin,
+            ExpectedStreamMarker::Relation(
+                first_table_id.into_inner(),
+                vec!["id".to_owned(), "name".to_owned()],
+            ),
+            ExpectedStreamMarker::Truncate(vec![first_table_id.into_inner()]),
+            ExpectedStreamMarker::Commit,
+        ]);
+    }
 
     assert_stream_markers_and_replay(
         client,

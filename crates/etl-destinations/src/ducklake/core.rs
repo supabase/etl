@@ -2594,8 +2594,8 @@ where
         )
     }
 
-    /// Handles a schema-change relation event by applying the destination DDL
-    /// diff and advancing destination table metadata.
+    /// Handles relation metadata, applying the schema diff and advancing
+    /// destination metadata when the snapshot advances.
     async fn handle_relation_event(
         &self,
         new_replicated_table_schema: &ReplicatedTableSchema,
@@ -2643,11 +2643,11 @@ where
             return Ok(());
         }
 
-        // A relation carries no durable DML sequence key. Reject both schema
-        // advancement and an equal-snapshot mask conflict before either can
-        // drive DuckLake DDL. Older relations are harmless replay markers;
-        // later row and truncate handling validates retained events after the
-        // durable streaming watermark has removed an already-applied prefix.
+        // A relation carries no durable DML sequence key. Require a newer
+        // snapshot before a changed replication mask can drive DuckLake DDL.
+        // Older relations are harmless replay markers. Row and truncate
+        // handling validates retained events after the durable streaming
+        // watermark has removed an already-applied prefix.
         ensure_relation_schema_transition(
             "DuckLake",
             table_id,
