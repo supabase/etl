@@ -78,13 +78,35 @@ select * from public_orders__current;
 The replicator never runs `OPTIMIZE ... FINAL CLEANUP`. Background merges
 collapse older versions but retain tombstones.
 
-Cleanup removes tombstones. Replaying an older row afterward can make a
-deleted row visible again, so:
+Cleanup removes tombstones. A row with an older version inserted afterward
+becomes visible again. Restart replay can cause this: ETL replays every event
+written after the persisted checkpoint, and insert deduplication can drop a
+replayed tombstone whose block hash is still in the deduplication log while
+accepting the live row in a differently batched block.
 
-1. Stop the pipeline and wait for it to exit. A clean shutdown records the
-   checkpoint past every acknowledged write, so a restart replays nothing
-   older than the tombstones.
-2. Run the statements below, then restart the pipeline.
+Run cleanup only when nothing can replay:
+
+1. Stop the pipeline and wait for it to exit.
+2. Confirm the checkpoint covers every write. In Postgres:
+
+   ```sql
+   select flush_lsn - '0/0'::pg_lsn
+   from etl.replication_progress
+   where pipeline_id = <pipeline id> and worker_type = 'apply'
+     and table_id is null;
+   ```
+
+   In ClickHouse:
+
+   ```sql
+   select max(bitShiftRight(_etl_version, 64)) from "public_orders";
+   ```
+
+   The ClickHouse value must be lower. If it is not, start the pipeline, let
+   it pass a commit boundary, and stop it again.
+3. On replicated or ClickHouse Cloud tables, run
+   `system sync replica "public_orders"`.
+4. Run the statements below, then restart the pipeline.
 
 See [ClickHouse's cleanup requirements](https://clickhouse.com/docs/concepts/features/operations/update/replacing-merge-tree#automatic-upserts-of-inserted-rows).
 
