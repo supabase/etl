@@ -1,19 +1,22 @@
 # ClickHouse Destination
 
-> **Status: Private alpha.** Access is limited, and behavior may change before
-> general availability.
+> **Private alpha.** The managed service admits a limited set of users; the
+> open-source destination is unrestricted. Expect operational requirements to
+> change.
 
 ## Requirements
 
 - `ReplacingMergeTree` (the default) needs ClickHouse **23.5 or newer** and a
   source primary key. `MergeTree` has neither requirement.
-- Replica identity must be `DEFAULT` with a primary key, or `FULL`. See
-  [Update requirements](#update-requirements).
+- In either engine, publish every primary-key column if the source has a key.
+- For tables with a primary key, updates and deletes need a matching replica
+  identity or `FULL`. See [Update requirements](#update-requirements).
 
 ## Running the example
 
-Copy `.env.example` to `.env`, then start and seed the local Postgres and
-ClickHouse:
+Complete the [development setup](../../../../DEVELOPMENT.md), then run these
+commands from the repository root. Copy `.env.example` to `.env` if you have
+not already done so:
 
 ```bash
 source .env
@@ -27,8 +30,9 @@ Run the example:
 cargo x example clickhouse
 ```
 
-`cargo x` supplies the local database, the `seed_pub` publication, and the
-`TESTS_*` variables. The equivalent direct invocation:
+The wrapper reads the exported Postgres connection variables and defaults to
+database `etl_testdata` and publication `seed_pub`. The example reads
+`TESTS_CLICKHOUSE_*` directly. The equivalent direct command is:
 
 ```bash
 cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
@@ -41,51 +45,54 @@ cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
 
 ## Table engines
 
-The destination supports two layouts. Select one per pipeline with
-`--clickhouse-engine`:
+Select a layout with the example's `--clickhouse-engine` flag or the standalone
+replicator's `destination.engine` setting:
 
-| Flag value                       | Engine               | Use it for                                       |
+| Engine value                     | Engine               | Use it for                                       |
 | -------------------------------- | -------------------- | ------------------------------------------------ |
 | `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replica. Requires a primary key.   |
 | `merge_tree`                     | `MergeTree`          | Append-only event log. No primary key required.  |
 
 Table names are `<schema>_<table>` with underscores in either part doubled:
 `public.orders` → `public_orders`, `my_schema.t` → `my__schema_t`.
+Schema and table names cannot start or end with `_`, or contain `"` or `;`.
 
 ### ReplacingMergeTree (default)
 
-Each replicated table uses
-`ReplacingMergeTree(_etl_version, _etl_deleted)`, keyed on the source primary
-key. Two trailing columns drive the merge:
+`ReplacingMergeTree(_etl_version, _etl_deleted)` keeps the latest version for
+each source primary key:
 
-- `_etl_version UInt128` -- the packed event sequence key
-  `(commit_lsn << 64) | tx_ordinal`. It totally orders every event, including
-  rows that share a WAL record, so the latest event per primary key wins under
-  `FINAL`.
-- `_etl_deleted UInt8` -- tombstone flag. `1` for `DELETE` events and `0` for
-  other events.
+- `_etl_version UInt128`: `(commit_lsn << 64) | tx_ordinal`. Higher versions
+  win for the same key.
+- `_etl_deleted UInt8`: `1` marks a tombstone; `0` marks a live row.
 
-Each table gets a `<table>__current` view that hides the `ReplacingMergeTree`
-columns:
+Initial-copy rows use version `0`.
+
+Query the `<table>__current` view for current state. It applies `final`,
+filters tombstones, and returns only source columns:
 
 ```sql
-CREATE VIEW IF NOT EXISTS "public_orders__current" AS
-SELECT <user columns>
-FROM "public_orders" FINAL
-WHERE _etl_deleted = 0
+select * from public_orders__current;
 ```
 
-Query the `__current` view for current state, or read the base table directly:
+The replicator never runs `OPTIMIZE ... FINAL CLEANUP`. Background merges
+collapse older versions but retain tombstones.
+
+Cleanup removes tombstones. Replaying an older row afterward can make a
+deleted row visible again, so:
+
+1. Stop the pipeline and wait for it to exit. A clean shutdown records the
+   checkpoint past every acknowledged write, so a restart replays nothing
+   older than the tombstones.
+2. Run the statements below, then restart the pipeline.
+
+See [ClickHouse's cleanup requirements](https://clickhouse.com/docs/concepts/features/operations/update/replacing-merge-tree#automatic-upserts-of-inserted-rows).
 
 ```sql
-select <user columns>
-from "public_orders" final
-where _etl_deleted = 0
+alter table "public_orders"
+    modify setting allow_experimental_replacing_merge_with_cleanup = 1;
+optimize table "public_orders" final cleanup;
 ```
-
-The replicator never runs `OPTIMIZE ... FINAL CLEANUP`; background merges
-collapse duplicates, but deleted rows stay on disk until you run
-`optimize table "<table>" final cleanup`.
 
 ### MergeTree
 
@@ -97,32 +104,43 @@ columns follow each row:
 - `cdc_tx_ordinal`: the zero-based event position within the Postgres
   transaction.
 
+Initial-copy rows use `INSERT` with `cdc_lsn = 0` and `cdc_tx_ordinal = 0`.
+A replicated source `TRUNCATE` clears the table and its event history; it is
+not stored as a log entry.
+
 The table is the event log. For current state per primary key, take the latest
 event and drop tombstones:
 
 ```sql
-select <user columns> from (
+select id, user_id, total, status, created_at from (
     select * from "public_orders"
     order by cdc_lsn desc, cdc_tx_ordinal desc
     limit 1 by (id)
 )
-where cdc_operation != 'DELETE'
+where cdc_operation != 'DELETE';
 ```
 
 ## Update requirements
 
 An update that changes a primary key writes a tombstone for the old key and
 then the row under the new key, so current-state queries see only the new key.
+Both rows share the source event's sequence.
 
 Postgres's replica identity controls which old values it sends. Use one of:
 
 - `REPLICA IDENTITY DEFAULT` with a primary key: sends the old primary-key values
   when the key changes.
-- `REPLICA IDENTITY FULL`: sends the old row, including its primary key.
+- `REPLICA IDENTITY USING INDEX` with the same identity columns as the primary
+  key: ETL treats it as a primary-key identity.
+- `REPLICA IDENTITY FULL`: sends the entire old row.
 
-Any other identity (`USING INDEX`, `NOTHING`) omits the old primary key, so ETL
-rejects the update or delete with `SourceReplicaIdentityError` instead of
-writing a stale row.
+For tables with a primary key, ETL rejects other index identities with
+`SourceReplicaIdentityError` rather than risk leaving a stale row.
+
+With `NOTHING`, or `DEFAULT` without a primary key, Postgres rejects updates
+and deletes when the publication includes those operations. They fail at
+the source, before ETL receives an event. Inserts do not require replica
+identity.
 
 Postgres omits unchanged TOASTed (large) values from update rows. ETL fills
 them from the old row image, which only `REPLICA IDENTITY FULL` guarantees;
@@ -131,9 +149,8 @@ tables with large columns.
 
 ## Upgrading existing tables
 
-`MergeTree` tables created during the private alpha lack `cdc_tx_ordinal`. ETL
-refuses to write to them until the column exists; `ReplacingMergeTree` tables
-are unaffected.
+Older `MergeTree` tables without `cdc_tx_ordinal` must be upgraded before ETL
+can write to them. `ReplacingMergeTree` does not need this schema change.
 
 For a non-destructive `MergeTree` upgrade:
 
@@ -150,13 +167,13 @@ For a non-destructive `MergeTree` upgrade:
 4. Restart the pipeline. Do not reset ETL state. Update current-state queries
    to order by `cdc_lsn desc, cdc_tx_ordinal desc`.
 
-Pre-existing events get ordinal `0`, so their order within a transaction is
-lost. The `ALTER` also leaves any stale old-key rows from earlier primary-key
-changes in place, in both engines.
+Existing events receive ordinal `0`; their order within a transaction cannot
+be recovered. Upgrading does not remove stale old-key rows left by earlier
+primary-key changes in either engine.
 
 For an exact current-state baseline, reset the table instead: ETL drops and
-recreates it and re-copies the source. **This discards the append-only event
-history**, so export it first if you need it. `TRUNCATE` on its own neither
+recreates it and re-copies the source. **This discards the event history**,
+so export it first if you need it. `TRUNCATE` on its own neither
 migrates the layout nor resets ETL checkpoints.
 
 ## Connection notes
@@ -164,21 +181,20 @@ migrates the layout nor resets ETL checkpoints.
 For HTTPS connections, provide an `https://` URL. TLS uses `webpki` root
 certificates automatically.
 
-The standalone replicator can enforce a public-network policy
-(`ClickHouseDestination::new_public`), which requires an `https://` URL and a
-host that resolves only to publicly routable addresses. It rejects loopback,
-private, link-local, and other IANA special-purpose ranges. The example binary
-skips this policy, so `http://localhost:8123` works locally.
+For HTTPS, the standalone replicator requires every resolved address to be
+publicly routable. It rejects loopback, private, link-local, and other IANA
+special-purpose ranges. Managed configurations also require HTTPS.
+Standalone HTTP and the example binary allow local connections.
 
-The example reads `TESTS_CLICKHOUSE_PASSWORD` from the environment so the
-secret stays out of process arguments; `--clickhouse-password` also works.
+Set `TESTS_DATABASE_PASSWORD` and `TESTS_CLICKHOUSE_PASSWORD` rather than
+passing password flags to keep secrets out of process arguments.
 
-## CLI flags
+## Example CLI flags
 
 | Flag                           | Default                | Description                                                   |
 | ------------------------------ | ---------------------- | ------------------------------------------------------------- |
 | `--db-host`                    | _(required)_           | Postgres host                                                 |
-| `--db-port`                    | _(required)_           | Postgres port (`u16`)                                         |
+| `--db-port`                    | _(required)_           | Postgres port                                                 |
 | `--db-name`                    | _(required)_           | Postgres database name                                        |
 | `--db-username`                | _(required)_           | Postgres user (must have `REPLICATION`)                       |
 | `--db-password`                | _(optional)_           | Password; env: `TESTS_DATABASE_PASSWORD`                      |
@@ -193,5 +209,4 @@ secret stays out of process arguments; `--clickhouse-password` also works.
 
 ## Metrics
 
-See [`./METRICS.md`](./METRICS.md) for the metrics that the ClickHouse
-destination emits.
+See [Metrics](./METRICS.md).

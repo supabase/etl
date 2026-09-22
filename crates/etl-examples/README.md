@@ -33,9 +33,9 @@ cargo x example ducklake
 cargo x example snowflake
 ```
 
-This handles the `-p etl-examples --features <name>` boilerplate, injects
-`TESTS_DATABASE_*` as `--db-*` flags, and defaults `--db-name` to `etl_testdata`
-and `--publication` to `seed_pub` (matching `cargo x seed`).
+This selects the package and feature, reads the exported `TESTS_DATABASE_*`
+variables, and defaults to database `etl_testdata` and publication `seed_pub`
+(matching `cargo x seed`).
 
 Override any flag by passing it explicitly:
 
@@ -116,9 +116,9 @@ After `cargo x seed`:
 cargo x example clickhouse
 ```
 
-No cloud account is required. Full flags and table-engine notes are in
-[ClickHouse](#clickhouse) below. Use BigQuery, DuckLake, or Snowflake only when
-you already have those services.
+No cloud account is required. See the [ClickHouse destination guide][clickhouse-guide]
+for flags, requirements, and table engines. Use BigQuery, DuckLake, or Snowflake
+only when you already have those services.
 
 ## BigQuery
 
@@ -168,63 +168,25 @@ cargo run --bin bigquery -p etl-examples --features bigquery -- \
 
 ## ClickHouse
 
-**Status: Private alpha.** Access is limited, and behavior may change before
-general availability.
+**Private alpha.** The managed service admits a limited set of users; the
+open-source destination is unrestricted. Expect operational requirements to
+change.
 
-Replicates a Postgres publication to ClickHouse over HTTP(S). The default
-`ReplacingMergeTree` engine needs ClickHouse **23.5 or newer**. See the
-[ClickHouse destination guide][clickhouse-guide] for table layouts, read
-patterns, and operator guidance.
-
-[clickhouse-guide]: ../etl-destinations/src/clickhouse/README.md
-
-### Run
-
-The example reads `TESTS_DATABASE_PASSWORD` and the `TESTS_CLICKHOUSE_*`
-variables from the environment, so neither password appears in process
-arguments. Load `.env` first:
+Replicates a Postgres publication to ClickHouse over HTTP(S). After
+[local setup](#quick-database-setup):
 
 ```bash
 source .env
-cargo run --bin clickhouse -p etl-examples --features clickhouse -- \
-    --db-host "$TESTS_DATABASE_HOST" \
-    --db-port "$TESTS_DATABASE_PORT" \
-    --db-name etl_testdata \
-    --db-username "$TESTS_DATABASE_USERNAME" \
-    --publication seed_pub
+cargo x example clickhouse
 ```
 
-For HTTPS, pass an `https://` URL. TLS uses `webpki` root certificates.
+The example reads both passwords from `TESTS_DATABASE_PASSWORD` and
+`TESTS_CLICKHOUSE_PASSWORD`, keeping them out of process arguments.
 
-### All Flags
+See the [ClickHouse destination guide][clickhouse-guide] for engine selection,
+requirements, CLI flags, queries, and upgrades.
 
-| Flag                           | Default                | Description                                          |
-| ------------------------------ | ---------------------- | ---------------------------------------------------- |
-| `--db-host`                    | _(required)_           | Postgres host                                        |
-| `--db-port`                    | _(required)_           | Postgres port                                        |
-| `--db-name`                    | _(required)_           | Postgres database name                               |
-| `--db-username`                | _(required)_           | Postgres user                                        |
-| `--db-password`                | —                      | Postgres password; env: `TESTS_DATABASE_PASSWORD`    |
-| `--clickhouse-url`             | _(required)_           | ClickHouse HTTP(S) URL; env: `TESTS_CLICKHOUSE_URL`  |
-| `--clickhouse-user`            | _(required)_           | ClickHouse user; env: `TESTS_CLICKHOUSE_USER`        |
-| `--clickhouse-password`        | —                      | ClickHouse password; env: `TESTS_CLICKHOUSE_PASSWORD` |
-| `--clickhouse-database`        | `default`              | ClickHouse database; env: `TESTS_CLICKHOUSE_DATABASE` |
-| `--clickhouse-engine`          | `replacing_merge_tree` | `replacing_merge_tree` or `merge_tree`               |
-| `--max-batch-fill-duration-ms` | `5000`                 | Max time to wait before flushing a batch             |
-| `--max-table-sync-workers`     | `4`                    | Concurrent workers during initial copy               |
-| `--publication`                | _(required)_           | Postgres publication name                            |
-
-### Table Engines
-
-Choose the layout per pipeline with `--clickhouse-engine`:
-
-| Flag value                       | Engine               | Use it for                                       |
-| -------------------------------- | -------------------- | ------------------------------------------------ |
-| `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replica. Requires a primary key.   |
-| `merge_tree`                     | `MergeTree`          | Append-only event log. No primary key required.  |
-
-See the [ClickHouse destination guide][clickhouse-guide] for column layouts,
-read patterns, replica identity requirements, and upgrades.
+[clickhouse-guide]: ../etl-destinations/src/clickhouse/README.md
 
 ---
 

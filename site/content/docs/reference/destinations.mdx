@@ -23,9 +23,8 @@ mature cloud destination.**
 
 - **Stable:** The most mature built-in destination. Review its limitations and
   validate it against your production workload.
-- **Private alpha:** Works end to end but is available to a limited set of
-  users. Expect behavior and operational requirements to change before general
-  availability.
+- **Private alpha:** Managed-service access is limited. This does not restrict
+  local or self-hosted use of the open-source destination.
 - **In progress:** Functional, but behavior, configuration, schema support, and
   operational requirements may still change. Test recovery and schema changes
   before production use.
@@ -184,15 +183,18 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 
 <DestinationStatus status="private-alpha" />
 
+This status applies to the managed service, not local or self-hosted use.
+
 ClickHouse is the local default destination. `cargo x init` starts ClickHouse
 on `http://localhost:8123` (`etl` / `etl`), and `cargo x setup replicator`
 writes config for that service. It needs no cloud account.
 
-The [Standalone Replicator](/guides/standalone-replicator/) guide uses
-ClickHouse as its default example.
+See the [Standalone Replicator](/guides/standalone-replicator/) guide for setup
+and the [ClickHouse destination guide](https://github.com/supabase/etl/blob/main/crates/etl-destinations/src/clickhouse/README.md)
+for queries, example flags, and upgrades.
 
 ClickHouse supports a current-state layout with `ReplacingMergeTree` and an
-append-only event-log layout with `MergeTree`.
+append-only event log with `MergeTree`.
 
 `engine` applies only when ETL creates or recreates a table. ClickHouse cannot
 change a table's engine, so if the configured `engine` differs from an existing
@@ -201,16 +203,19 @@ and resynchronize the table, or revert `engine`.
 
 ### Limitations
 
-- The default `ReplacingMergeTree` layout requires a source primary key with
-  every primary-key column included in the publication, and requires
+- The default `ReplacingMergeTree` layout requires a source primary key and
   ClickHouse 23.5 or newer.
-- Tables with a primary key need `REPLICA IDENTITY DEFAULT` or
-  `REPLICA IDENTITY FULL` for updates and deletes. With `USING INDEX` or
-  `NOTHING`, ETL rejects the affected updates and deletes instead of leaving
-  stale primary-key rows. A primary-key-changing update writes a tombstone for
-  the old key followed by the new row.
-- `MergeTree` keeps an append-only event log; current state needs a
-  `limit 1 by` query over `cdc_lsn` and `cdc_tx_ordinal`.
+- In either engine, publish every primary-key column if the source has a key.
+- For updates and deletes on tables with a primary key, replica identity must
+  be `DEFAULT`, `FULL`, or `USING INDEX` with the same identity columns as the
+  primary key. ETL rejects other index identities. With `NOTHING`, Postgres
+  rejects published updates and deletes before they reach ETL. A
+  primary-key-changing update writes a tombstone for the old key followed by
+  the new row.
+- `MergeTree` keeps an append-only event log; current state needs a `limit 1 by`
+  query over `cdc_lsn` and `cdc_tx_ordinal`.
+- A replicated `TRUNCATE` clears the destination table in either engine,
+  including `MergeTree` event history.
 - ETL warns on source type changes but does not alter or validate the
   ClickHouse column type. Later RowBinary writes may fail; resynchronize the
   table after a type change.
@@ -222,6 +227,8 @@ and resynchronize the table, or revert `engine`.
 - Dotted nested subcolumns can be renamed only within the same parent, matching
   ClickHouse's documented `RENAME COLUMN` limitation.
 - Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.
+  Follow [ClickHouse's cleanup requirements](https://clickhouse.com/docs/concepts/features/operations/update/replacing-merge-tree#automatic-upserts-of-inserted-rows)
+  to avoid resurrecting deleted rows.
 
 ## DuckLake
 
