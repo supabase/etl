@@ -6,7 +6,7 @@ building `etl-replicator`.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `clickhouse` | ClickHouse | In progress |
+| `clickhouse` | ClickHouse | Private alpha |
 | `bigquery` | Google BigQuery | Stable |
 | `ducklake` | DuckLake | In progress |
 | `snowflake` | Snowflake | In progress |

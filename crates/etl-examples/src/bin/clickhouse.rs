@@ -20,25 +20,21 @@ Table names are derived from the Postgres schema and table name using
 double-underscore escaping (e.g. `public.orders` -> `public_orders`).
 
 Prerequisites:
-1. Postgres server with logical replication enabled (wal_level = logical)
-2. A publication created in Postgres (CREATE PUBLICATION my_pub FOR ALL TABLES;)
-3. A running ClickHouse instance accessible over HTTP(S). ReplacingMergeTree additionally
-   requires CH >= 23.5.
+1. Postgres server with logical replication enabled (wal_level = logical).
+2. The `seed_pub` publication created by `cargo x seed`.
+3. A running ClickHouse instance accessible over HTTP(S).
+   `ReplacingMergeTree` also requires ClickHouse 23.5 or newer.
 
-Usage:
-    cargo run -p etl-examples --bin clickhouse -- \
-        --db-host localhost \
-        --db-port 5432 \
-        --db-name postgres \
-        --db-username postgres \
-        --db-password password \
-        --clickhouse-url http://localhost:8123 \
-        --clickhouse-user default \
-        --clickhouse-database default \
-        --publication my_pub
+Usage after `source .env`, `cargo x init`, and `cargo x seed`:
+    cargo run -p etl-examples --bin clickhouse --features clickhouse -- \
+        --db-host "$TESTS_DATABASE_HOST" \
+        --db-port "$TESTS_DATABASE_PORT" \
+        --db-name etl_testdata \
+        --db-username "$TESTS_DATABASE_USERNAME" \
+        --publication seed_pub
 
-For HTTPS connections, provide an `https://` URL -- TLS is handled automatically
-using webpki root certificates. Use `--clickhouse-password` if your ClickHouse instance
+For HTTPS connections, provide an `https://` URL. TLS uses webpki root
+certificates automatically. Set `TESTS_CLICKHOUSE_PASSWORD` when ClickHouse
 requires authentication.
 
 */
@@ -106,25 +102,25 @@ struct DbArgs {
     /// Postgres database user name (must have REPLICATION privileges)
     #[arg(long)]
     db_username: String,
-    /// Postgres database user password (optional if using trust authentication)
-    #[arg(long)]
+    /// Postgres database user password (optional with trust authentication).
+    #[arg(long, env = "TESTS_DATABASE_PASSWORD", hide_env_values = true)]
     db_password: Option<String>,
 }
 
 /// ClickHouse destination configuration.
 #[derive(Debug, Args)]
 struct ClickHouseArgs {
-    /// ClickHouse HTTP(S) endpoint (e.g. http://localhost:8123 or https://host:8443)
-    #[arg(long)]
+    /// ClickHouse HTTP(S) endpoint.
+    #[arg(long, env = "TESTS_CLICKHOUSE_URL")]
     clickhouse_url: String,
-    /// ClickHouse user name
-    #[arg(long)]
+    /// ClickHouse user name.
+    #[arg(long, env = "TESTS_CLICKHOUSE_USER")]
     clickhouse_user: String,
-    /// ClickHouse user password (optional)
-    #[arg(long)]
+    /// ClickHouse user password (optional).
+    #[arg(long, env = "TESTS_CLICKHOUSE_PASSWORD", hide_env_values = true)]
     clickhouse_password: Option<String>,
-    /// ClickHouse target database
-    #[arg(long)]
+    /// ClickHouse target database.
+    #[arg(long, env = "TESTS_CLICKHOUSE_DATABASE", default_value = "default")]
     clickhouse_database: String,
     /// Table engine used for replicated tables. `replacing_merge_tree` is the
     /// default and requires a source primary key and CH >= 23.5; `merge_tree`

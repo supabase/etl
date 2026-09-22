@@ -25,7 +25,6 @@ impl ExampleArgs {
         let db_host = env_or("TESTS_DATABASE_HOST", None);
         let db_port = env_or("TESTS_DATABASE_PORT", None);
         let db_username = env_or("TESTS_DATABASE_USERNAME", None);
-        let db_password = env_or("TESTS_DATABASE_PASSWORD", None);
 
         let missing: Vec<&str> = [
             db_host.is_none().then_some("TESTS_DATABASE_HOST"),
@@ -49,32 +48,12 @@ impl ExampleArgs {
         inject(&mut extra, "--db-host", &db_host, &self.args);
         inject(&mut extra, "--db-port", &db_port, &self.args);
         inject(&mut extra, "--db-username", &db_username, &self.args);
-        inject(&mut extra, "--db-password", &db_password, &self.args);
         inject(&mut extra, "--db-name", &Some("etl_testdata".to_owned()), &self.args);
         inject(&mut extra, "--publication", &Some("seed_pub".to_owned()), &self.args);
 
-        match name.as_str() {
-            "bigquery" => {
-                inject_env(&mut extra, "--bq-project-id", "TESTS_BIGQUERY_PROJECT_ID", &self.args);
-                inject_env(
-                    &mut extra,
-                    "--bq-sa-key-file",
-                    "TESTS_BIGQUERY_SA_KEY_PATH",
-                    &self.args,
-                );
-            }
-            "clickhouse" => {
-                inject_env(&mut extra, "--clickhouse-url", "TESTS_CLICKHOUSE_URL", &self.args);
-                inject_env(&mut extra, "--clickhouse-user", "TESTS_CLICKHOUSE_USER", &self.args);
-                inject_env(
-                    &mut extra,
-                    "--clickhouse-password",
-                    "TESTS_CLICKHOUSE_PASSWORD",
-                    &self.args,
-                );
-            }
-            "snowflake" => {}
-            _ => {}
+        if name == "bigquery" {
+            inject_env(&mut extra, "--bq-project-id", "TESTS_BIGQUERY_PROJECT_ID", &self.args);
+            inject_env(&mut extra, "--bq-sa-key-file", "TESTS_BIGQUERY_SA_KEY_PATH", &self.args);
         }
 
         extra.extend(self.args.iter().cloned());
