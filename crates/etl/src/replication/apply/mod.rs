@@ -472,13 +472,16 @@ struct ApplyLoopState {
     /// durability interval without emitting one sample for every intermediate
     /// accepted result.
     pending_durability_interval: Option<PendingDurabilityInterval>,
-    /// Relation tables not yet covered by persisted commit-boundary progress.
+    /// Tables with relation events awaiting schema-cleanup evaluation.
     ///
-    /// This includes relations from `Accepted` writes and from durable
-    /// mid-transaction writes that carry no commit end LSN. A later durable
-    /// commit-bearing result covers them cumulatively and makes their tables
-    /// candidates for obsolete schema cleanup.
-    pending_relation_table_ids: HashSet<TableId>,
+    /// Accumulates table IDs from successfully completed batches, including
+    /// accepted writes. A later durable result also confirms earlier accepted
+    /// writes in the same apply-loop stream. Once its commit boundary is
+    /// persisted, these tables are evaluated for cleanup at that boundary.
+    /// Relations beyond that boundary remain protected by schema retention.
+    ///
+    /// Entries remain pending if evaluation fails or the cleanup queue is full.
+    pending_schema_cleanup_table_ids: HashSet<TableId>,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -536,7 +539,7 @@ impl ApplyLoopState {
             activity_handle,
             last_commit_end_lsn: None,
             pending_durability_interval: None,
-            pending_relation_table_ids: HashSet::new(),
+            pending_schema_cleanup_table_ids: HashSet::new(),
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
@@ -1290,8 +1293,7 @@ where
         }
     }
 
-    /// Tries to queue best-effort cleanup for relation tables covered by
-    /// durable progress.
+    /// Tries to queue schema cleanup for pending tables at persisted progress.
     ///
     /// The store supplies its cached checkpoint confirmed by persistence.
     /// Cleanup removes replay state, so the apply loop's in-memory flush
@@ -1302,7 +1304,7 @@ where
     /// them. They are cleared only after successful evaluation and, when
     /// needed, successful queueing.
     async fn try_queue_schema_cleanup(&mut self) {
-        if self.state.pending_relation_table_ids.is_empty() {
+        if self.state.pending_schema_cleanup_table_ids.is_empty() {
             return;
         }
 
@@ -1352,7 +1354,7 @@ where
 
         // If there are no tables to try to prune, we don't want to attempt it.
         if retention_snapshot_ids.is_empty() {
-            self.state.pending_relation_table_ids.clear();
+            self.state.pending_schema_cleanup_table_ids.clear();
 
             return;
         }
@@ -1373,8 +1375,14 @@ where
             }
         }
 
+        // A queued boundary can precede a relation in a durable batch that ends
+        // mid-transaction. We still remove that table here, so later checkpoint
+        // progress alone will not retry cleanup. This deliberately keeps
+        // best-effort cleanup tracking to table IDs: extra schema versions may
+        // remain until another relation, including the first after restart,
+        // triggers a new check with a sufficiently advanced checkpoint.
         self.state
-            .pending_relation_table_ids
+            .pending_schema_cleanup_table_ids
             .retain(|table_id| deferred_table_ids.contains(table_id));
     }
 
@@ -1402,7 +1410,7 @@ where
     ) -> EtlResult<BTreeMap<TableId, SnapshotId>> {
         let mut retention_snapshot_ids = BTreeMap::new();
 
-        for &table_id in &self.state.pending_relation_table_ids {
+        for &table_id in &self.state.pending_schema_cleanup_table_ids {
             // Only prune snapshots for tables this worker would apply at this
             // checkpoint. This keeps table sync workers limited to their
             // assigned table while preserving apply worker ownership rules.
@@ -1490,16 +1498,15 @@ where
         let status = result?;
 
         if let Some(metadata) = metadata.as_ref() {
-            // Relation events are optimistic cleanup signals: the first
-            // relation after startup need not represent a schema change, while
-            // a real DDL is communicated downstream through one. Accumulate
-            // them until a durable result also carries a commit end LSN,
-            // because only then can persisted progress cover every preceding
-            // relation in this ordered apply-loop stream. This also makes
-            // cleanup self-healing across restarts: the first later relation
-            // rebuilds the candidate even though this in-memory set was lost.
+            // Relation events trigger cleanup checks even when the schema has
+            // not changed. Accumulate their table IDs across accepted writes
+            // until a durable result carries a commit boundary we can persist.
+            // That boundary may precede relations in the batch, so retention
+            // must preserve schemas needed to replay the unfinished transaction.
+            // The first relation after restart also triggers a new check if an
+            // earlier cleanup was missed.
             self.state
-                .pending_relation_table_ids
+                .pending_schema_cleanup_table_ids
                 .extend(metadata.relation_table_ids.iter().copied());
 
             if metadata.durability == WriteEventsDurability::RequireDurable
@@ -1609,9 +1616,8 @@ where
                         self.process_syncing_tables_after_flush(commit_end_lsn).await?;
 
                         // Progress and table-sync state are now durable. Freeze
-                        // cleanup boundaries for all cumulatively covered
-                        // relations before allowing their database deletion to
-                        // run asynchronously.
+                        // cleanup boundaries for pending tables using persisted
+                        // progress, which may precede relations in this batch.
                         self.try_queue_schema_cleanup().await;
                     }
                 }
