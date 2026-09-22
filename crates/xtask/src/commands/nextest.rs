@@ -188,7 +188,7 @@ impl PgEnv {
 }
 
 /// Builds a nextest `Command` with mode-specific args and the common flags
-/// shared by all lanes (`--workspace --all-features --no-fail-fast`).
+/// shared by all lanes (`--locked --workspace --all-features --no-fail-fast`).
 fn nextest_command(mode: Mode) -> Command {
     let mut cmd = Command::new("cargo");
 
@@ -197,7 +197,7 @@ fn nextest_command(mode: Mode) -> Command {
         Mode::LlvmCov => cmd.args(["llvm-cov", "nextest"]),
     };
 
-    cmd.args(["--workspace", "--all-features", "--no-fail-fast"]);
+    cmd.args(["--locked", "--workspace", "--all-features", "--no-fail-fast"]);
 
     if matches!(mode, Mode::LlvmCov) {
         cmd.arg("--no-report");
@@ -262,7 +262,7 @@ fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result
 fn prebuild_test_binaries() -> Result<()> {
     eprintln!("prebuilding test binaries.");
     let status = Command::new("cargo")
-        .args(["nextest", "run", "--workspace", "--all-features", "--no-run"])
+        .args(["nextest", "run", "--locked", "--workspace", "--all-features", "--no-run"])
         .status()
         .context("failed to prebuild test binaries")?;
 

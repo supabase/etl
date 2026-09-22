@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
@@ -13,13 +17,14 @@ use etl::{
     schema::{
         ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
         IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
-        TableId, Type, is_array_type,
+        TableId, TableName, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
+    task::{TaskGroup, TaskRegistry},
 };
 use etl_config::shared::ClickHouseEngine;
 use parking_lot::{Mutex, RwLock};
-use tokio::task::JoinSet;
+use tokio::sync::OwnedMutexGuard;
 use tracing::{debug, info, warn};
 use url::Url;
 
@@ -31,7 +36,7 @@ use crate::{
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
             CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
-            create_current_view_sql, create_table_sql, drop_current_view_sql,
+            CURRENT_VIEW_SUFFIX, create_current_view_sql, create_table_sql, drop_current_view_sql,
             supports_column_default, trailing_cdc_column_names,
         },
     },
@@ -623,8 +628,54 @@ impl std::fmt::Display for ClickHouseOperationKind {
 ///
 /// The table engine is configured via [`ClickHouseInserterConfig::engine`];
 /// see [`ClickHouseEngine`] for the engine-specific layouts.
-#[derive(Clone)]
 pub struct ClickHouseDestination<S> {
+    /// Write-path state and operations shared by all destination entrypoints.
+    writer: DestinationWriter<S>,
+    /// Lifecycle registry for background event-write tasks.
+    ///
+    /// [`Destination::write_events`] admits its work here and returns;
+    /// destructive table resets drain the registry to fence admitted work.
+    tasks: TaskRegistry,
+    /// Per-table ordering of event batches; see [`EventBatchFences`].
+    fences: Arc<EventBatchFences>,
+}
+
+// Manual impl: `S` sits behind `Arc`, so cloning must not require `S: Clone`.
+impl<S> Clone for ClickHouseDestination<S> {
+    fn clone(&self) -> Self {
+        Self {
+            writer: self.writer.clone(),
+            tasks: self.tasks.clone(),
+            fences: Arc::clone(&self.fences),
+        }
+    }
+}
+
+/// Applied ClickHouse table state cached for the insert hot path.
+#[derive(Clone)]
+struct ClickHouseTableCacheEntry {
+    /// Destination table name selected by durable metadata.
+    table_name: String,
+    /// Exact applied schema endpoint validated before this entry was inserted.
+    metadata: DestinationTableMetadata,
+    /// Per-column nullable flags, including the trailing CDC columns.
+    nullable_flags: Arc<[bool]>,
+}
+
+/// Execution context captured by ClickHouse background event tasks.
+///
+/// Before resetting a table, [`ClickHouseDestination`] retains exclusive
+/// access to its [`TaskRegistry`] while waiting for every admitted event task
+/// to finish. A task that captured the complete destination could later access
+/// that same task registry, causing the reset to wait for the task while the
+/// task waits for the reset-held registry.
+///
+/// This type contains the state needed to execute writes but deliberately
+/// omits [`TaskRegistry`], making that recursive registry access unavailable
+/// through the task's execution context. It omits [`EventBatchFences`] for the
+/// same reason. A task already holds the fences of every table it writes, so
+/// it must never wait on them again.
+struct DestinationWriter<S> {
     /// HTTP client used for all DDL and RowBinary INSERT traffic.
     client: ClickHouseClient,
     /// Per-INSERT byte budget; gates intermediate flushes within a single
@@ -655,15 +706,126 @@ pub struct ClickHouseDestination<S> {
     create_locks: Arc<Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
-/// Applied ClickHouse table state cached for the insert hot path.
-#[derive(Clone)]
-struct ClickHouseTableCacheEntry {
-    /// Destination table name selected by durable metadata.
-    table_name: String,
-    /// Exact applied schema endpoint validated before this entry was inserted.
-    metadata: DestinationTableMetadata,
-    /// Per-column nullable flags, including the trailing CDC columns.
-    nullable_flags: Arc<[bool]>,
+// Manual impl: `S` sits behind `Arc`, so cloning must not require `S: Clone`.
+impl<S> Clone for DestinationWriter<S> {
+    fn clone(&self) -> Self {
+        Self {
+            client: self.client.clone(),
+            inserter_config: self.inserter_config,
+            store: Arc::clone(&self.store),
+            table_cache: Arc::clone(&self.table_cache),
+            create_locks: Arc::clone(&self.create_locks),
+        }
+    }
+}
+
+/// Returns the id of every table that `events` write, in ascending order.
+///
+/// Transaction markers and unsupported events touch no table.
+fn batch_table_ids(events: &[Event]) -> BTreeSet<TableId> {
+    let mut table_ids = BTreeSet::new();
+    for event in events {
+        match event {
+            Event::Insert(insert) => {
+                table_ids.insert(insert.replicated_table_schema.id());
+            }
+            Event::Update(update) => {
+                table_ids.insert(update.replicated_table_schema.id());
+            }
+            Event::Delete(delete) => {
+                table_ids.insert(delete.replicated_table_schema.id());
+            }
+            Event::Relation(relation) => {
+                table_ids.insert(relation.replicated_table_schema.id());
+            }
+            Event::Truncate(truncate) => {
+                table_ids.extend(truncate.truncated_tables.iter().map(ReplicatedTableSchema::id));
+            }
+            Event::Begin(_) | Event::Commit(_) | Event::Unsupported => {}
+        }
+    }
+    table_ids
+}
+
+/// Per-table fences that keep event batches for one table in dispatch order.
+///
+/// The apply loop keeps at most one event batch in flight per worker. Any
+/// error that exits the apply loop breaks that guarantee. The loop abandons
+/// its pending batch, but the batch task keeps running. The retried attempt
+/// then replays from the last flushed LSN through this same destination.
+/// Without a fence, the replay's `TRUNCATE` can overtake the abandoned
+/// `INSERT`, and the insert then restores rows the truncate removed.
+///
+/// [`Destination::write_events`] acquires the fence of every table the batch
+/// touches before it spawns the batch task. The task holds the fences until the
+/// batch is acknowledged. Acquiring in the caller is what guarantees the
+/// order. The apply loop dispatches batches in source stream order, so fences
+/// taken there follow that order too. A lock taken inside the task would
+/// follow the scheduler instead.
+///
+/// A fence is not the same lock as a `create_locks` entry. A fence spans a
+/// whole batch. Inside the batch, DDL takes the create lock one statement at a
+/// time. A tokio mutex cannot be locked again by the task that already holds
+/// it, so one lock cannot play both roles.
+struct EventBatchFences {
+    /// One fence per table, created on first use. The map lock is a brief,
+    /// await-free `parking_lot::Mutex`.
+    fences: Mutex<HashMap<TableId, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl EventBatchFences {
+    fn new() -> Self {
+        Self { fences: Mutex::new(HashMap::new()) }
+    }
+
+    /// Acquires the fence of every table that `events` write and returns the
+    /// guards. Dropping the guards releases the fences.
+    ///
+    /// Fences are acquired in ascending table id order. Two batches that
+    /// share tables therefore lock them in the same order, so neither can
+    /// hold one fence while waiting for the other's. Guards live inside the
+    /// batch task, so aborting the task releases them too.
+    async fn acquire(&self, events: &[Event]) -> Vec<OwnedMutexGuard<()>> {
+        let table_ids = batch_table_ids(events);
+        let fences: Vec<Arc<tokio::sync::Mutex<()>>> = {
+            let mut map = self.fences.lock();
+            table_ids
+                .into_iter()
+                .map(|table_id| Arc::clone(map.entry(table_id).or_default()))
+                .collect()
+        };
+
+        let mut guards = Vec::with_capacity(fences.len());
+        for fence in fences {
+            #[cfg(feature = "test-utils")]
+            if fence.try_lock().is_err() {
+                notify_fence_wait_for_tests();
+            }
+            guards.push(fence.lock_owned().await);
+        }
+        guards
+    }
+}
+
+/// Tests waiting to hear that a batch dispatch had to wait for a fence.
+#[cfg(feature = "test-utils")]
+static FENCE_WAIT_OBSERVERS: Mutex<Vec<tokio::sync::oneshot::Sender<()>>> = Mutex::new(Vec::new());
+
+/// Returns a receiver that fires the next time a batch dispatch has to wait
+/// for a fence held by an earlier batch. Each receiver fires once.
+#[cfg(feature = "test-utils")]
+pub fn notify_on_fence_wait_for_tests() -> tokio::sync::oneshot::Receiver<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    FENCE_WAIT_OBSERVERS.lock().push(sender);
+    receiver
+}
+
+/// Fires every armed fence-wait observer.
+#[cfg(feature = "test-utils")]
+fn notify_fence_wait_for_tests() {
+    for observer in FENCE_WAIT_OBSERVERS.lock().drain(..) {
+        let _ = observer.send(());
+    }
 }
 
 impl<S> ClickHouseDestination<S>
@@ -713,21 +875,61 @@ where
     ) -> Self {
         register_metrics();
         Self {
-            client,
-            inserter_config,
-            store: Arc::new(store),
-            table_cache: Arc::new(RwLock::new(HashMap::new())),
-            create_locks: Arc::new(Mutex::new(HashMap::new())),
+            writer: DestinationWriter {
+                client,
+                inserter_config,
+                store: Arc::new(store),
+                table_cache: Arc::new(RwLock::new(HashMap::new())),
+                create_locks: Arc::new(Mutex::new(HashMap::new())),
+            },
+            tasks: TaskRegistry::new(),
+            fences: Arc::new(EventBatchFences::new()),
         }
     }
 
     /// Probes the server version and rejects unsupported engine/version pairs.
     /// Currently the only gate: ReplacingMergeTree requires CH >= 23.5.
     pub async fn validate_engine_support(&self) -> EtlResult<()> {
-        let server_version = self.client.server_version().await?;
-        ensure_engine_supported(self.inserter_config.engine, server_version)
+        let server_version = self.writer.client.server_version().await?;
+        ensure_engine_supported(self.writer.inserter_config.engine, server_version)
     }
 
+    /// Writes an initial-copy batch directly to the destination table,
+    /// awaiting the write inline instead of reporting through the trait's
+    /// async completion result.
+    ///
+    /// Test-only entrypoint for exercising the production write path without
+    /// pipeline plumbing.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_table_rows(
+        &self,
+        schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.writer.write_table_rows_inner(schema, table_rows).await
+    }
+
+    /// Dispatches a streaming event batch through the [`Destination`] trait
+    /// and awaits its asynchronous completion.
+    ///
+    /// Test-only entrypoint for exercising the production dispatch path,
+    /// including task admission and the async result channel, without
+    /// pipeline plumbing.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()>
+    where
+        S: 'static,
+    {
+        etl::test_utils::destination::write_events(self, WriteEventsDurability::MayDefer, events)
+            .await
+            .map(|_| ())
+    }
+}
+
+impl<S> DestinationWriter<S>
+where
+    S: StateStore + SchemaStore + Send + Sync,
+{
     /// Creates a ClickHouse table for a never-before-seen `table_id`,
     /// bracketing the DDL with `DestinationTableMetadata` writes so the
     /// operation is crash-recoverable.
@@ -899,6 +1101,11 @@ where
         match metadata {
             None => {
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
+                validate_clickhouse_table_name(
+                    &clickhouse_table_name,
+                    schema.name(),
+                    self.inserter_config.engine,
+                )?;
                 // Detect an unmanaged pre-existing table with an incompatible
                 // engine before recording ownership or issuing creation DDL.
                 self.ensure_engine_matches(&clickhouse_table_name).await?;
@@ -913,6 +1120,11 @@ where
             }
             Some(metadata) if metadata.is_pending() => {
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
+                validate_clickhouse_table_name(
+                    &clickhouse_table_name,
+                    schema.name(),
+                    self.inserter_config.engine,
+                )?;
                 self.ensure_engine_matches(&clickhouse_table_name).await?;
                 self.recover_pending_metadata(table_id, &clickhouse_table_name, schema, metadata)
                     .await?;
@@ -1100,6 +1312,15 @@ where
     }
 
     async fn drop_table_for_copy_inner(&self, schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        #[cfg(feature = "test-utils")]
+        if std::mem::take(&mut *DROP_TABLE_FOR_COPY_FAILURE.lock()) {
+            return Err(etl_error!(
+                ErrorKind::DestinationError,
+                "Injected ClickHouse table reset failure",
+                "One-shot failure armed by arm_fail_drop_table_for_copy_once_for_tests"
+            ));
+        }
+
         let clickhouse_table_name = try_stringify_table_name(schema.name())?;
 
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
@@ -1111,32 +1332,6 @@ where
         self.table_cache.write().remove(&schema.id());
 
         Ok(())
-    }
-
-    /// Writes an initial-copy batch directly to the destination table, awaiting
-    /// the write inline instead of reporting through the trait's async
-    /// completion result.
-    ///
-    /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing.
-    #[cfg(feature = "test-utils")]
-    pub async fn write_table_rows(
-        &self,
-        schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        self.write_table_rows_inner(schema, table_rows).await
-    }
-
-    /// Writes a streaming event batch directly to the destination, awaiting the
-    /// write inline instead of reporting through the trait's async completion
-    /// result.
-    ///
-    /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing.
-    #[cfg(feature = "test-utils")]
-    pub async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
-        self.write_events_inner(events).await
     }
 
     async fn write_table_rows_inner(
@@ -1664,7 +1859,7 @@ where
     }
 
     /// Encodes the accumulated `PendingRow` batches and inserts them into
-    /// ClickHouse, one `JoinSet` task per table. No-op if `pending` is empty.
+    /// ClickHouse, one task per table. No-op if `pending` is empty.
     ///
     /// All `prepare_table_for_writes` calls run sequentially before any insert
     /// is spawned, so a schema-resolution failure aborts the whole pass without
@@ -1685,13 +1880,13 @@ where
             prepared.push((clickhouse_table_name, nullable_flags, rows));
         }
 
-        let mut join_set: JoinSet<EtlResult<()>> = JoinSet::new();
+        let mut tasks: TaskGroup<()> = TaskGroup::new();
         let engine = self.inserter_config.engine;
         for (clickhouse_table_name, nullable_flags, rows) in prepared {
             let client = self.client.clone();
             let max_bytes = self.inserter_config.max_bytes_per_insert;
 
-            join_set.spawn(async move {
+            tasks.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
                     .map(|PendingRow { operation, sequence_key, cells }| {
@@ -1714,11 +1909,7 @@ where
             });
         }
 
-        while let Some(result) = join_set.join_next().await {
-            result.map_err(
-                |err| etl_error!(ErrorKind::ApplyWorkerPanic, "Insert task failed", source: err),
-            )??;
-        }
+        tasks.wait().await?;
 
         Ok(())
     }
@@ -1839,6 +2030,35 @@ fn validate_clickhouse_table_shape(
 ) -> EtlResult<()> {
     replicated_table_schema.validate_destination_column_names(CLICKHOUSE_COLUMN_NAME_MAPPING)?;
     validate_clickhouse_schema_capabilities(replicated_table_schema, engine)
+}
+
+/// Rejects destination table names that ReplacingMergeTree reserves for
+/// current views.
+///
+/// The encoder doubles underscores, so a source table ending in `_current`
+/// encodes to `<other>__current`, the current view name of the table whose
+/// encoding is `<other>`. ClickHouse's `IF NOT EXISTS` keeps whichever object
+/// exists first, so the collision would otherwise pass silently.
+fn validate_clickhouse_table_name(
+    clickhouse_table_name: &str,
+    source_table_name: &TableName,
+    engine: ClickHouseEngine,
+) -> EtlResult<()> {
+    if matches!(engine, ClickHouseEngine::ReplacingMergeTree)
+        && clickhouse_table_name.ends_with(CURRENT_VIEW_SUFFIX)
+    {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse table name collides with a current view name",
+            format!(
+                "Table '{source_table_name}' maps to '{clickhouse_table_name}', which \
+                 ReplacingMergeTree reserves for the current view of another table; rename the \
+                 source table or set `engine: merge_tree`."
+            )
+        ));
+    }
+
+    Ok(())
 }
 
 /// Validates ClickHouse-specific schema capabilities.
@@ -2293,28 +2513,42 @@ fn default_cell(typ: &Type) -> Cell {
 
 impl<S> Destination for ClickHouseDestination<S>
 where
-    S: StateStore + SchemaStore + Send + Sync,
+    S: StateStore + SchemaStore + Send + Sync + 'static,
 {
     fn name() -> &'static str {
         etl_config::shared::DestinationKind::ClickHouse.as_str()
     }
 
-    // The trait methods below intentionally do not use `?` on the inner work.
-    // Errors must reach the caller via `async_result.send(result)`, not via the
-    // outer `EtlResult<()>`; using `?` would short-circuit before `send` runs
-    // and leave the receiver waiting. The outer return value just signals "work
-    // accepted, watch the channel for completion". `AsyncResult::send` itself
-    // returns `()`, and its `Drop` impl synthesizes a "dropped without sending"
-    // error if the path ever skips `send`, so the receiver is never silently
-    // abandoned.
+    async fn shutdown(&self) -> EtlResult<()> {
+        self.tasks.shutdown().await
+    }
+
+    // The trait methods below use `?` only for lifecycle failures raised
+    // before work is admitted (task reaping and registry draining). Errors
+    // from admitted work must reach the caller via `async_result.send(result)`;
+    // using `?` there would short-circuit before `send` runs and leave the
+    // receiver waiting. `AsyncResult::send` itself returns `()`, and its
+    // `Drop` impl synthesizes a "dropped without sending" error if a path
+    // (including an aborted background task) skips `send`, so the receiver is
+    // never silently abandoned.
 
     async fn drop_table_for_copy(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let result = self.drop_table_for_copy_inner(replicated_table_schema).await;
+        // Acquire the task registry before any client work. Event tasks have
+        // no registry access, so they can finish while the reset waits for
+        // them; their inserts and DDL all carry client-side timeouts, so the
+        // drain cannot wait unboundedly.
+        let task_guard = self.tasks.drain().await?;
+
+        let result = self.writer.drop_table_for_copy_inner(replicated_table_schema).await;
+
+        // Publish the remote result before allowing another event task to run.
         async_result.send(result);
+        drop(task_guard);
+
         Ok(())
     }
 
@@ -2325,7 +2559,7 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = self.write_table_rows_inner(replicated_table_schema, table_rows).await;
+        let result = self.writer.write_table_rows_inner(replicated_table_schema, table_rows).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
@@ -2336,8 +2570,31 @@ where
         _durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        let result = self.write_events_inner(events).await;
-        async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+        // Surface panics from previously admitted event tasks before
+        // admitting more work.
+        self.tasks.try_reap().await?;
+
+        // Wait until every earlier batch that touches one of this batch's
+        // tables has finished. Batches take their fences in dispatch order.
+        // On the normal path no such batch is in flight and this returns at
+        // once. See `EventBatchFences`.
+        let fence_guards = self.fences.acquire(&events).await;
+
+        // Durability needs no branch: the task completes only after every
+        // INSERT in the batch is acknowledged under `wait_for_async_insert=1`,
+        // so each result is already `Durable` and `RequireDurable` calls are
+        // satisfied by construction. `Accepted` is never reported.
+        let writer = self.writer.clone();
+        self.tasks
+            .spawn_with(move || async move {
+                let result = writer.write_events_inner(events).await;
+                // Release the fences first so the next batch for these tables
+                // can start as soon as this one has finished.
+                drop(fence_guards);
+                async_result.send(result.map(|_| DestinationWriteStatus::Durable));
+            })
+            .await;
+
         Ok(())
     }
 }
@@ -2355,10 +2612,25 @@ fn clickhouse_engine_matches(existing: &str, configured: &str) -> bool {
     normalize_clickhouse_engine(existing) == normalize_clickhouse_engine(configured)
 }
 
+/// One-shot failure armed for the next table reset's remote work.
+#[cfg(feature = "test-utils")]
+static DROP_TABLE_FOR_COPY_FAILURE: Mutex<bool> = Mutex::new(false);
+
+/// Arms the next [`ClickHouseDestination`] table reset to fail once before
+/// any remote work, after its task-registry drain.
+#[cfg(feature = "test-utils")]
+pub fn arm_fail_drop_table_for_copy_once_for_tests() {
+    *DROP_TABLE_FOR_COPY_FAILURE.lock() = true;
+}
+
 #[cfg(test)]
 mod tests {
     use etl::{
         data::{ArrayCell, PartialTableRow},
+        event::{
+            BeginEvent, CommitEvent, DeleteEvent, InsertEvent, RelationEvent, TruncateEvent,
+            UpdateEvent,
+        },
         schema::{
             ColumnSchema, IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema,
         },
@@ -2380,6 +2652,166 @@ mod tests {
 
     fn clickhouse_column(name: &str, type_name: &str) -> ClickHouseTableColumn {
         ClickHouseTableColumn { name: name.to_owned(), type_name: type_name.to_owned() }
+    }
+
+    /// Builds a minimal replicated schema for `table_id`; only the id matters.
+    fn schema_for_table(table_id: u32) -> ReplicatedTableSchema {
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(table_id),
+            TableName::new("public".to_owned(), format!("table_{table_id}")),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+        ));
+        ReplicatedTableSchema::all(table_schema)
+    }
+
+    /// Every event kind that writes a table contributes that table to the
+    /// fence set, including each table of a multi-table truncate, while
+    /// transaction markers and unsupported events contribute nothing. The
+    /// events name tables out of order; the result is ascending regardless.
+    #[test]
+    fn batch_table_ids_cover_every_written_table() {
+        let lsn = PgLsn::from(100);
+        let events = vec![
+            Event::Begin(BeginEvent { commit_lsn: lsn, tx_ordinal: 0, timestamp: 0, xid: 1 }),
+            Event::Insert(InsertEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                replicated_table_schema: schema_for_table(4),
+                table_row: TableRow::new(vec![Cell::I32(1)]),
+            }),
+            Event::Update(UpdateEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 2,
+                replicated_table_schema: schema_for_table(2),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![Cell::I32(1)])),
+                old_table_row: None,
+            }),
+            Event::Delete(DeleteEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 3,
+                replicated_table_schema: schema_for_table(6),
+                old_table_row: None,
+            }),
+            Event::Relation(RelationEvent { replicated_table_schema: schema_for_table(1) }),
+            Event::Truncate(TruncateEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 4,
+                options: 0,
+                truncated_tables: vec![
+                    schema_for_table(5),
+                    schema_for_table(3),
+                    schema_for_table(4),
+                ],
+            }),
+            Event::Commit(CommitEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 5,
+                flags: 0,
+                end_lsn: lsn,
+                timestamp: 0,
+            }),
+            Event::Unsupported,
+        ];
+
+        let table_ids: Vec<TableId> = batch_table_ids(&events).into_iter().collect();
+
+        assert_eq!(table_ids, (1..=6).map(TableId::new).collect::<Vec<_>>());
+    }
+
+    /// Batches with no table writes hold no fences.
+    #[test]
+    fn batch_table_ids_of_marker_only_batch_are_empty() {
+        let lsn = PgLsn::from(100);
+        let events = vec![
+            Event::Begin(BeginEvent { commit_lsn: lsn, tx_ordinal: 0, timestamp: 0, xid: 1 }),
+            Event::Commit(CommitEvent {
+                commit_lsn: lsn,
+                tx_ordinal: 1,
+                flags: 0,
+                end_lsn: lsn,
+                timestamp: 0,
+            }),
+        ];
+
+        assert!(batch_table_ids(&events).is_empty());
+        assert!(batch_table_ids(&[]).is_empty());
+    }
+
+    /// Builds one insert event for `schema`; only the table matters.
+    fn insert_for(schema: &ReplicatedTableSchema) -> Event {
+        Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 0,
+            replicated_table_schema: schema.clone(),
+            table_row: TableRow::new(vec![Cell::I32(1)]),
+        })
+    }
+
+    /// Two dispatches that share tables acquire their fences in the same
+    /// order, so neither can hold one fence while waiting for the other's.
+    ///
+    /// This test is here to catch future deadlocks. The fences stay
+    /// deadlock-free only because every batch locks them in the same order.
+    /// The only thing enforcing that order is the `BTreeSet` in
+    /// [`batch_table_ids`]. Swapping it for an unsorted collection would
+    /// compile without complaint.
+    ///
+    /// The scenario is the classic two-lock deadlock. One batch names the
+    /// tables left then right, the other right then left. Each takes its
+    /// first fence and then waits for its second, which the other holds. With
+    /// acquisition in event order the two would wait on each other forever.
+    ///
+    /// The paused clock makes that deadlock observable at once. When every
+    /// task is blocked on a fence, the runtime has nothing to run and jumps
+    /// straight to the timeout. On the success path the timeout never fires.
+    ///
+    /// We checked that this test can catch such a deadlock by introducing
+    /// one on purpose (locking fences in event order instead of sorted
+    /// order) and observing the test fail within a fraction of a second.
+    /// Reversing the sorted order still passes, because that is still one
+    /// shared order. The test cares that the order is shared, not which
+    /// direction it runs.
+    #[tokio::test(start_paused = true)]
+    async fn fences_of_overlapping_batches_do_not_deadlock() {
+        let fences = Arc::new(EventBatchFences::new());
+        let left = schema_for_table(1);
+        let right = schema_for_table(2);
+
+        // Two earlier batches hold one fence each, so both dispatches below
+        // have to wait. The release order below controls how they wake.
+        let left_held = fences.acquire(&[insert_for(&left)]).await;
+        let right_held = fences.acquire(&[insert_for(&right)]).await;
+
+        let forward = tokio::spawn({
+            let fences = Arc::clone(&fences);
+            let events = vec![insert_for(&left), insert_for(&right)];
+            async move { fences.acquire(&events).await }
+        });
+        let backward = tokio::spawn({
+            let fences = Arc::clone(&fences);
+            let events = vec![insert_for(&right), insert_for(&left)];
+            async move { fences.acquire(&events).await }
+        });
+        // Let both dispatches reach their first wait before anything is
+        // released.
+        tokio::task::yield_now().await;
+
+        // Release right first. With event-ordered acquisition, the backward
+        // dispatch would take right and then wait for left. Releasing left
+        // would then hand it to the forward dispatch, which would wait for
+        // right. Neither could finish.
+        drop(right_held);
+        tokio::task::yield_now().await;
+        drop(left_held);
+
+        let both = async {
+            forward.await.unwrap();
+            backward.await.unwrap();
+        };
+        // The timeout only bounds the failure path; see the test doc.
+        tokio::time::timeout(Duration::from_secs(1), both)
+            .await
+            .expect("fence acquisition deadlocked");
     }
 
     #[test]
@@ -3017,6 +3449,30 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_clickhouse_table_name_rejects_current_view_suffix_under_replacing_merge_tree() {
+        // GIVEN: an encoded name that equals another table's current view.
+        let source_name = TableName::new("public".to_owned(), "foo_current".to_owned());
+        let clickhouse_table_name = "public_foo__current";
+
+        // WHEN: validated for both engines.
+        let error = validate_clickhouse_table_name(
+            clickhouse_table_name,
+            &source_name,
+            ClickHouseEngine::ReplacingMergeTree,
+        )
+        .unwrap_err();
+        let merge_tree = validate_clickhouse_table_name(
+            clickhouse_table_name,
+            &source_name,
+            ClickHouseEngine::MergeTree,
+        );
+
+        // THEN: only the engine with current views rejects it.
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        merge_tree.unwrap();
     }
 
     #[test]

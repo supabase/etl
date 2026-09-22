@@ -1,47 +1,29 @@
-use tokio::sync::watch;
+//! Cooperative cancellation of individual waits.
 
-use crate::runtime::concurrency::signal::{SignalRx, SignalTx, create_signal};
-
-/// Transmitter side of the shutdown coordination channel.
+/// Polls a future until completion or cancellation, with shutdown taking
+/// priority when both are ready. Expands to an expression in an async context;
+/// the future's output is preserved inside [`ShutdownResult::Ok`], including
+/// any error it returns.
 ///
-/// [`ShutdownTx`] enables sending shutdown signals to multiple workers
-/// simultaneously. It wraps a signal transmitter with shutdown-specific
-/// semantics and provides methods for triggering shutdown and creating receiver
-/// subscriptions.
-#[derive(Debug, Clone)]
-pub struct ShutdownTx(SignalTx);
+/// Both arguments are evaluated once. Cancellation drops the supplied future,
+/// so use this only where dropping that future is safe. It does not abort or
+/// join spawned work, undo remote effects, or perform graceful cleanup.
+macro_rules! with_shutdown {
+    ($future:expr, $shutdown_token:expr $(,)?) => {{
+        let shutdown_token = &$shutdown_token;
+        ::tokio::select! {
+            biased;
 
-impl ShutdownTx {
-    /// Wraps a signal transmitter with shutdown semantics.
-    fn wrap(tx: SignalTx) -> Self {
-        Self(tx)
-    }
+            _ = shutdown_token.cancelled() => {
+                $crate::runtime::concurrency::ShutdownResult::Shutdown(())
+            }
 
-    /// Triggers shutdown for all subscribed workers.
-    ///
-    /// This method broadcasts a shutdown signal to all workers that have
-    /// subscribed to this shutdown channel. Workers should respond by
-    /// completing their current operations gracefully and terminating.
-    pub fn shutdown(&self) -> Result<(), watch::error::SendError<()>> {
-        self.0.send(())
-    }
-
-    /// Creates a new shutdown receiver for worker subscription.
-    ///
-    /// Each worker should call this method to get its own receiver that can be
-    /// used to detect when shutdown has been requested. Multiple receivers can
-    /// be created from the same transmitter.
-    pub(crate) fn subscribe(&self) -> ShutdownRx {
-        self.0.subscribe()
-    }
+            output = $future => $crate::runtime::concurrency::ShutdownResult::Ok(output),
+        }
+    }};
 }
 
-/// Receiver side of the shutdown coordination channel.
-///
-/// [`ShutdownRx`] is used by workers to detect when shutdown has been
-/// requested. It's a type alias for [`SignalRx`] with shutdown-specific
-/// semantics.
-pub(crate) type ShutdownRx = SignalRx;
+pub(crate) use with_shutdown;
 
 /// Result type that distinguishes between normal operation and shutdown
 /// scenarios.
@@ -50,7 +32,8 @@ pub(crate) type ShutdownRx = SignalRx;
 /// signals. It preserves both successful results and any partial data that was
 /// being processed when shutdown was requested.
 pub(crate) enum ShutdownResult<T, I> {
-    /// Normal successful completion with result data.
+    /// Normal completion with the future's output, which may itself be an
+    /// error.
     Ok(T),
     /// Operation was interrupted by shutdown, with any partial data preserved.
     Shutdown(I),
@@ -63,13 +46,57 @@ impl<T, I> ShutdownResult<T, I> {
     }
 }
 
-/// Creates a new shutdown coordination channel.
-///
-/// This function creates a broadcast channel for coordinating shutdown across
-/// multiple workers. The transmitter can be used to trigger shutdown, while
-/// receivers can be distributed to workers that need to respond to shutdown
-/// signals.
-pub(crate) fn create_shutdown_channel() -> (ShutdownTx, ShutdownRx) {
-    let (tx, rx) = create_signal();
-    (ShutdownTx::wrap(tx), rx)
+#[cfg(test)]
+mod tests {
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::runtime::concurrency::ShutdownResult;
+
+    /// Fallible output is preserved without conflating errors with shutdown.
+    #[tokio::test]
+    async fn completion_preserves_success_and_failure() {
+        let token = CancellationToken::new();
+        for output in [Ok(7), Err("Test failure")] {
+            let ShutdownResult::Ok(actual) = with_shutdown!(async { output }, token) else {
+                panic!("Unexpected shutdown");
+            };
+            assert_eq!(actual, output);
+        }
+    }
+
+    /// A retained request wins even when the supplied future is already ready.
+    #[tokio::test]
+    async fn cancellation_takes_priority_without_polling_ready_work() {
+        let token = CancellationToken::new();
+        token.cancel();
+        for _ in 0..2 {
+            let result =
+                with_shutdown!(async { panic!("Cancelled work must not be polled") }, token);
+            assert!(matches!(result, ShutdownResult::Shutdown(())));
+        }
+    }
+
+    /// Cancelling an active wait drops its future before reporting shutdown.
+    #[tokio::test]
+    async fn cancellation_drops_pending_work() {
+        let token = CancellationToken::new();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (lifetime_tx, mut lifetime_rx) = oneshot::channel::<()>();
+        let future = async move {
+            let _lifetime = lifetime_tx;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        };
+        let waiting = async { with_shutdown!(future, token) };
+        tokio::pin!(waiting);
+        tokio::select! {
+            _ = &mut waiting => panic!("Wait completed before cancellation"),
+
+            result = started_rx => result.unwrap(),
+        }
+        token.cancel();
+        assert!(matches!(waiting.await, ShutdownResult::Shutdown(())));
+        assert_eq!(lifetime_rx.try_recv(), Err(oneshot::error::TryRecvError::Closed));
+    }
 }

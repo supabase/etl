@@ -265,13 +265,23 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
+    // Keep the same completion future alive through shutdown. Dropping it
+    // would abort apply work and skip asynchronous destination cleanup.
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+
     tokio::select! {
-        result = pipeline.wait() => {
-            info!("pipeline completed normally (this usually indicates an error condition)");
+        result = &mut pipeline_wait => {
             result?;
+
+            info!("pipeline completed");
         }
+
         _ = shutdown_signal => {
             info!("gracefully shutting down pipeline and cleaning up resources");
+
+            pipeline.shutdown();
+            pipeline_wait.await?;
         }
     }
 

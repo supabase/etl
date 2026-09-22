@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use etl::{
     activity::{self, ActivityKind},
-    data::{Cell, TableRow},
+    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationWriteStatus, DropTableForCopyResult, PipelineDestination,
         TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
@@ -10,7 +10,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventType},
-    pipeline::PipelineId,
+    pipeline::{Pipeline, PipelineId},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId},
     store::{SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
@@ -26,7 +26,7 @@ use etl::{
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_pipeline, create_pipeline_with_batch_config,
-            create_pipeline_with_table_sync_copy_config,
+            create_pipeline_with_table_sync_copy_config, wait_for_pipeline_error,
         },
         schema::assert_table_schema_columns,
         test_destination_wrapper::TestDestinationWrapper,
@@ -37,14 +37,17 @@ use etl::{
         },
     },
 };
-use etl_config::shared::{BatchConfig, InvalidatedSlotBehavior, TableSyncCopyConfig};
+use etl_config::shared::{
+    BatchConfig, InvalidatedSlotBehavior, PipelineConfig, TableSyncCopyConfig,
+};
 use etl_postgres::{
     below_version,
     slots::EtlReplicationSlot,
-    tokio::test_utils::{ReplicationSlotState, id_column_schema},
+    tokio::test_utils::{PgDatabase, ReplicationSlotState, id_column_schema},
     version::POSTGRES_15,
 };
 use etl_telemetry::tracing::init_test_tracing;
+use futures::FutureExt;
 use pg_escape::{quote_identifier, quote_literal};
 use rand::random;
 use tokio::{
@@ -392,6 +395,151 @@ async fn pipeline_rejects_second_start_before_destination_startup() {
     assert_eq!(err.kind(), ErrorKind::InvalidState);
 }
 
+/// Shutdown requested before startup must reach workers created afterward.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_preserves_shutdown_requested_before_start() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        database_schema.publication_name(),
+        store,
+        destination.clone(),
+    );
+
+    pipeline.shutdown();
+    pipeline.start().await.unwrap();
+    pipeline.wait().await.unwrap();
+
+    assert!(destination.shutdown_called().await);
+}
+
+/// Shutdown interrupts either worker's slot creation while an unrelated
+/// transaction still holds the snapshot boundary, and restart copies its row.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_interrupts_worker_slot_creation() {
+    for existing_apply_slot in [false, true] {
+        let mut database = spawn_source_database().await;
+        let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+        let observer = PgDatabase::try_connect(database.config.clone()).await.unwrap();
+        let client = observer.client.as_ref().unwrap();
+        let pipeline_id = random();
+        let apply_slot: String =
+            EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        if existing_apply_slot {
+            client
+                .query(
+                    "select * from pg_create_logical_replication_slot($1, 'pgoutput')",
+                    &[&apply_slot],
+                )
+                .await
+                .unwrap();
+        }
+        let waiting_slot: String = if existing_apply_slot {
+            EtlReplicationSlot::for_table_sync_worker(pipeline_id, schema.users_schema().id)
+                .try_into()
+                .unwrap()
+        } else {
+            apply_slot
+        };
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+        );
+        let mut transaction = database.begin_transaction().await;
+        insert_users_data(&mut transaction, &schema.users_schema().name, 1..=1).await;
+        pipeline.start().await.unwrap();
+
+        tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
+            loop {
+                let row = client
+                    .query_one(
+                        "select exists(select 1 from pg_stat_activity where datname = \
+                         current_database() and backend_type = 'walsender' and query ilike \
+                         '%create_replication_slot%' and query like '%' || $1 || '%' and \
+                         wait_event_type = 'Lock')",
+                        &[&waiting_slot],
+                    )
+                    .await
+                    .unwrap();
+                if row.get::<_, bool>(0) {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, pipeline.shutdown_and_wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(destination.shutdown_called().await);
+        transaction.commit_transaction().await;
+
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+        );
+        let synced = store.notify_on_table_sync_complete(schema.users_schema().id).await;
+        pipeline.start().await.unwrap();
+        synced.notified().await;
+        pipeline.shutdown_and_wait().await.unwrap();
+        assert_eq!(destination.get_table_rows().await[&schema.users_schema().id].len(), 1);
+    }
+}
+
+/// Cancelling initialization still allows destination teardown and reports its
+/// failures without ever starting replication workers.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_startup_shuts_down_destination() {
+    let database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let startup_hold = destination.hold_next(FaultyOp::Startup).await;
+    destination
+        .inject_fault(
+            FaultyOp::Shutdown,
+            FaultAction::fail_after_write(ErrorKind::DestinationError, "Test shutdown failure"),
+        )
+        .await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        schema.publication_name(),
+        store,
+        destination.clone(),
+    );
+
+    let mut startup = Box::pin(pipeline.start());
+    tokio::select! {
+        result = &mut startup => panic!("Startup completed before release: {result:?}"),
+
+        _ = startup_hold.wait_reached() => {}
+    }
+    // Drop the initialization future before borrowing the pipeline for cleanup.
+    drop(startup);
+    let error = pipeline.shutdown_and_wait().await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationError);
+    assert!(destination.shutdown_called().await);
+    assert_eq!(destination.write_table_rows_called().await, 0);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_shutdown_calls_destination_shutdown() {
     init_test_tracing();
@@ -421,10 +569,89 @@ async fn pipeline_shutdown_calls_destination_shutdown() {
     // Shutdown should not have been called yet.
     assert!(!destination.shutdown_called().await);
 
-    pipeline.shutdown_and_wait().await.unwrap();
+    pipeline.shutdown();
+    pipeline.wait().await.unwrap();
 
     // Verify that shutdown was called on the destination.
     assert!(destination.shutdown_called().await);
+}
+
+/// The owner can request shutdown while waiting and receives teardown errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_shutdown_while_waiting_propagates_destination_error() {
+    let database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+    let synced = store.notify_on_table_sync_complete(schema.users_schema().id).await;
+    pipeline.start().await.unwrap();
+    synced.notified().await;
+    destination
+        .inject_fault(
+            FaultyOp::Shutdown,
+            FaultAction::fail_after_write(ErrorKind::DestinationError, "Test shutdown failure"),
+        )
+        .await;
+
+    let waiting = pipeline.wait();
+    tokio::pin!(waiting);
+    assert!(waiting.as_mut().now_or_never().is_none());
+    pipeline.shutdown();
+    let error = waiting.await.unwrap_err();
+
+    assert!(error.kinds().contains(&ErrorKind::DestinationError));
+    assert!(destination.shutdown_called().await);
+    assert_eq!(pipeline.wait().await.unwrap_err().kind(), ErrorKind::InvalidState);
+}
+
+/// Apply failure skips a stalled destination shutdown even if the caller
+/// retains the pipeline after waiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_failure_returns_without_destination_teardown() {
+    let mut database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+    let copied = store.notify_on_table_sync_complete(schema.users_schema().id).await;
+    let ready =
+        store.notify_on_table_state_type(schema.users_schema().id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+    insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+    ready.notified().await;
+
+    let held_shutdown = destination.hold_next(FaultyOp::Shutdown).await;
+    destination
+        .inject_fault(
+            FaultyOp::WriteEvents,
+            FaultAction::reject(ErrorKind::WithNoRetry, "Test apply failure"),
+        )
+        .await;
+    insert_users_data(&mut database, &schema.users_schema().name, 2..=2).await;
+
+    let error = wait_for_pipeline_error(&pipeline).await;
+    assert_eq!(error.kind(), ErrorKind::WithNoRetry);
+    assert!(!destination.shutdown_called().await);
+    assert_eq!(pipeline.wait().await.unwrap_err().kind(), ErrorKind::InvalidState);
+    assert_eq!(pipeline.start().await.unwrap_err().kind(), ErrorKind::InvalidState);
+
+    // Destination-owned resources retain their explicit teardown contract.
+    held_shutdown.release_ok();
+    destination.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -505,6 +732,55 @@ async fn table_copy_shutdown_interrupts_pending_result_wait() {
 
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
     assert!(matches!(table_state, TableState::DataSync));
+}
+
+/// Shutdown interrupts a stalled copy write, including the final empty call,
+/// and the incomplete copy restarts from scratch.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_shutdown_interrupts_stalled_write_and_restarts() {
+    // An empty table reaches the final write; a populated table stalls a child.
+    for row_count in [0, 1000] {
+        let mut database = spawn_source_database().await;
+        let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+        let table_id = schema.users_schema().id;
+        insert_users_data(&mut database, &schema.users_schema().name, 1..=row_count).await;
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+        let write_hold = destination.hold_next(FaultyOp::WriteTableRows).await;
+        let pipeline_id = random();
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+        );
+        pipeline.start().await.unwrap();
+        write_hold.wait_reached().await;
+
+        tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, pipeline.shutdown_and_wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(destination.shutdown_called().await);
+        assert!(matches!(
+            store.get_table_state(table_id).await.unwrap(),
+            Some(TableState::DataSync)
+        ));
+
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            store.clone(),
+            destination.clone(),
+        );
+        let synced = store.notify_on_table_sync_complete(table_id).await;
+        pipeline.start().await.unwrap();
+        synced.notified().await;
+        pipeline.shutdown_and_wait().await.unwrap();
+        assert_eq!(destination.get_table_rows().await[&table_id].len(), row_count);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -972,10 +1248,9 @@ async fn exclusive_pipeline_fails_when_slot_invalidated_with_error_behavior() {
 
     pipeline.start().await.unwrap();
 
-    // The error surfaces when we wait for the pipeline to complete
-    let wait_result = pipeline.shutdown_and_wait().await;
-    assert!(wait_result.is_err());
-    let err = wait_result.unwrap_err();
+    // Requesting shutdown here could cancel worker initialization before it
+    // checks the invalidated apply slot. Wait for the failure itself instead.
+    let err = wait_for_pipeline_error(&pipeline).await;
     assert!(err.kinds().contains(&ErrorKind::ReplicationSlotInvalidated));
 }
 
@@ -1361,6 +1636,98 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     assert_eq!(orders_inserts.len(), 1);
 }
 
+/// Changing a row filter affects CDC without reconciling previously copied
+/// rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_row_filter_changes_apply_without_restart() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    if below_version!(database.server_version(), POSTGRES_15) {
+        return;
+    }
+
+    let table_name = test_table_name("filtered_rows");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "integer not null")])
+        .await
+        .unwrap();
+    let table = table_name.as_quoted_identifier();
+    client
+        .batch_execute(&format!(
+            "alter table {table} replica identity full;
+             insert into {table} (id, value) values (1, 10), (2, 20), (3, 30), (4, 40);
+             create publication filtered_pub for table {table} where (value >= 20)"
+        ))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        "filtered_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let sync_complete = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    sync_complete.notified().await;
+
+    // The new predicate includes an uncopied row and excludes two copied rows.
+    let changes_complete = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
+        ])
+        .await;
+
+    client
+        .batch_execute(&format!(
+            "alter publication filtered_pub set table {table} where (value < 30);
+             begin;
+             update {table} set value = 11 where id = 1;
+             update {table} set value = 30 where id = 2;
+             update {table} set value = 50 where id = 4;
+             update {table} set value = 20 where id = 3;
+             commit"
+        ))
+        .await
+        .unwrap();
+
+    changes_complete.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let row = |id, value| TableRow::new(vec![Cell::I64(id), Cell::I32(value)]);
+    let mut copied_rows = destination.get_table_rows().await.remove(&table_id).unwrap();
+    copied_rows.sort_by_key(|row| match row.values()[0] {
+        Cell::I64(id) => id,
+        _ => unreachable!(),
+    });
+    assert_eq!(copied_rows, vec![row(2, 20), row(3, 30), row(4, 40)]);
+
+    let events = destination.get_events().await;
+    let changes: Vec<_> = events
+        .iter()
+        .filter(|event| event.has_table_id(&table_id))
+        .filter(|event| matches!(event, Event::Insert(_) | Event::Update(_) | Event::Delete(_)))
+        .collect();
+    let [Event::Update(update), Event::Delete(exit), Event::Insert(entry)] = changes.as_slice()
+    else {
+        panic!("Expected the filtered update, delete, insert sequence");
+    };
+    assert_eq!(update.updated_table_row, UpdatedTableRow::Full(row(1, 11)));
+    assert_eq!(exit.old_table_row, Some(OldTableRow::Full(row(2, 20))));
+    assert_eq!(entry.table_row, row(3, 20));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn publication_changes_are_correctly_handled() {
     init_test_tracing();
@@ -1382,6 +1749,8 @@ async fn publication_changes_are_correctly_handled() {
 
     let publication_name = "test_pub_cleanup";
     database.create_publication_for_all(publication_name, Some(&table_1.schema)).await.unwrap();
+
+    database.insert_values(table_2.clone(), &["value"], &[&0]).await.unwrap();
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -1481,6 +1850,10 @@ async fn publication_changes_are_correctly_handled() {
     assert!(states.contains_key(&table_1_id));
     assert!(!states.contains_key(&table_2_id));
     assert!(states.contains_key(&table_3_id));
+    assert_eq!(
+        destination.get_table_rows().await[&table_2_id],
+        vec![TableRow::new(vec![Cell::I64(1), Cell::I32(0)])]
+    );
 
     // Assert that the table sync slot for table_2 is also deleted.
     let table_2_slot_name: String =
@@ -2882,4 +3255,28 @@ async fn pipeline_processes_concurrent_inserts_during_startup() {
     assert_eq!(users_deletes, rows_to_delete);
     assert_eq!(orders_updates, rows_to_update);
     assert_eq!(orders_deletes, rows_to_delete);
+}
+
+/// Direct library callers receive a config error before any source startup
+/// work.
+#[tokio::test]
+async fn pipeline_retry_delay_is_validated_before_startup() {
+    for delay_ms in [0, 999, 86_400_001, u64::MAX] {
+        let config: PipelineConfig = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "publication_name": "publication",
+            "table_error_retry_delay_ms": delay_ms,
+            "pg_connection": {
+                "host": "127.0.0.1", "port": 0, "name": "postgres", "username": "postgres",
+                "tls": { "enabled": false, "trusted_root_certs": "" }
+            }
+        }))
+        .unwrap();
+        let store = NotifyingStore::new();
+        let destination = MemoryDestination::new(store.clone());
+        let mut pipeline = Pipeline::new(config, store, destination);
+
+        let err = pipeline.start().await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+    }
 }

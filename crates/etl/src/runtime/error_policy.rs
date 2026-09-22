@@ -46,9 +46,11 @@ impl ErrorHandlingPolicy {
 pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     match error.kind() {
         // Automatically retriable errors. Keep this list narrow and limited to transient source or
-        // destination connectivity/capacity failures and loss of replication feedback. Retry
-        // attempts are bounded; persistent failures still require intervention.
+        // destination connectivity/capacity failures, source lock contention, and loss of
+        // replication feedback. Retry attempts are bounded; persistent failures still require
+        // intervention.
         ErrorKind::SourceConnectionFailed
+        | ErrorKind::SourceLockTimeout
         | ErrorKind::ReplicationFeedbackUnavailable
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
@@ -116,9 +118,9 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
             RetryDirective::Manual,
             Some("Inspect the table sync worker panic logs and manually retry the table."),
         ),
-        ErrorKind::TableCopyWorkerPanic => ErrorHandlingPolicy::new(
+        ErrorKind::TaskPanic | ErrorKind::TaskCancelled => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
-            Some("Inspect the table copy worker panic logs and manually retry the table."),
+            Some("Inspect the task failure and resolve its cause before manually retrying."),
         ),
 
         // Special handling for fault injection tests.
@@ -163,8 +165,11 @@ mod tests {
         for (kind, retry) in [
             (ErrorKind::DeserializationError, RetryDirective::Manual),
             (ErrorKind::InvalidState, RetryDirective::Manual),
+            (ErrorKind::TaskPanic, RetryDirective::Manual),
+            (ErrorKind::TaskCancelled, RetryDirective::Manual),
             (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
             (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
+            (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
             (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
         ] {
             let error = EtlError::from((kind, "Test replication failure"));

@@ -1,12 +1,15 @@
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    schema::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression},
+    schema::{
+        ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression,
+        unquote_postgres_string_literal,
+    },
 };
 use etl_config::shared::ClickHouseEngine;
 use tracing::warn;
 
-use crate::clickhouse::sql::quote_identifier;
+use crate::clickhouse::sql::{quote_identifier, quote_string_literal};
 
 /// (For MergeTree engine) CDC operation column.
 pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
@@ -118,49 +121,65 @@ pub(super) fn clickhouse_default_expression(
 }
 
 /// Renders a parsed default expression as ClickHouse SQL.
+///
+/// Literal variants carry the PostgreSQL SQL literal. They are decoded and
+/// re-quoted with ClickHouse escapes because the dialects disagree on
+/// backslashes: PostgreSQL stores them, ClickHouse interprets them.
 fn render_clickhouse_default_expression(
     expression: &DefaultExpression,
     typ: &Type,
 ) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression) => {
-            is_clickhouse_string_default_type(typ).then(|| expression.clone())
+        DefaultExpression::StringLiteral(expression) if is_clickhouse_string_default_type(typ) => {
+            clickhouse_string_literal(expression)
         }
         DefaultExpression::NumericLiteral(expression) => {
             if is_clickhouse_numeric_default_type(typ) {
                 Some(expression.clone())
             } else if is_clickhouse_numeric_string_default_type(typ) {
-                Some(quote_numeric_literal_as_string(expression))
+                Some(quote_string_literal(expression))
             } else {
                 None
             }
         }
-        DefaultExpression::BooleanLiteral(expression) => {
-            matches!(typ, &Type::BOOL).then(|| expression.clone())
+        DefaultExpression::BooleanLiteral(expression) if matches!(typ, &Type::BOOL) => {
+            Some(expression.clone())
         }
-        DefaultExpression::TimeLiteral(expression) => {
-            matches!(typ, &Type::TIME).then(|| expression.clone())
+        DefaultExpression::TimeLiteral(expression) if matches!(typ, &Type::TIME) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::TimeTzLiteral(expression) => {
-            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        DefaultExpression::TimeTzLiteral(expression) if matches!(typ, &Type::TIMETZ) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::IntervalLiteral(expression) => {
-            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
+        DefaultExpression::IntervalLiteral(expression) if matches!(typ, &Type::INTERVAL) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
-        DefaultExpression::DateLiteral(expression) => {
-            matches!(typ, &Type::DATE).then(|| format!("toDate32({expression})"))
+        DefaultExpression::JsonLiteral(expression) if is_json_type(typ) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::TimestampLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMP).then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
+        DefaultExpression::DateLiteral(expression) if matches!(typ, &Type::DATE) => {
+            clickhouse_string_literal(expression).map(|literal| format!("toDate32({literal})"))
+        }
+        DefaultExpression::TimestampLiteral(expression) if matches!(typ, &Type::TIMESTAMP) => {
+            clickhouse_string_literal(expression)
+                .map(|literal| format!("toDateTime64({literal}, 6, 'UTC')"))
         }
         // `parseDateTime64BestEffort` (not `toDateTime64`) because Postgres renders `timestamptz`
         // defaults with a UTC offset (for example `'2026-01-01 12:30:00+00'`), which `toDateTime64`
         // string parsing rejects. The best-effort parser accepts the offset and normalizes to the
         // timezone.
-        DefaultExpression::TimestampTzLiteral(expression) => matches!(typ, &Type::TIMESTAMPTZ)
-            .then(|| format!("parseDateTime64BestEffort({expression}, 6, 'UTC')")),
+        DefaultExpression::TimestampTzLiteral(expression) if matches!(typ, &Type::TIMESTAMPTZ) => {
+            clickhouse_string_literal(expression)
+                .map(|literal| format!("parseDateTime64BestEffort({literal}, 6, 'UTC')"))
+        }
+        _ => None,
     }
+}
+
+/// Re-quotes one parser-validated PostgreSQL string literal with ClickHouse
+/// escapes.
+fn clickhouse_string_literal(expression: &str) -> Option<String> {
+    unquote_postgres_string_literal(expression).map(|value| quote_string_literal(&value))
 }
 
 /// Returns whether a Postgres type is a ClickHouse numeric column.
@@ -201,11 +220,6 @@ fn is_clickhouse_text_default_type(typ: &Type) -> bool {
 /// Returns whether a Postgres JSON type is stored as ClickHouse String.
 fn is_json_type(typ: &Type) -> bool {
     matches!(typ, &Type::JSON | &Type::JSONB)
-}
-
-/// Quotes a parser-validated numeric literal as a SQL string literal.
-fn quote_numeric_literal_as_string(expression: &str) -> String {
-    format!("'{expression}'")
 }
 
 /// Trailing CDC column names appended to each replicated row, by engine.
@@ -536,6 +550,40 @@ mod tests {
                 .with_default_expression(expression.to_owned());
 
             assert_eq!(clickhouse_default_clause(&column), None);
+        }
+    }
+
+    /// PostgreSQL string literals treat backslashes as plain characters, while
+    /// ClickHouse treats them as escapes. The renderer must re-quote the
+    /// decoded value in ClickHouse's dialect so the destination default holds
+    /// the same characters as the source default.
+    #[test]
+    fn clickhouse_default_clause_escapes_backslashes_for_clickhouse() {
+        // GIVEN: PostgreSQL literals with plain backslashes, one trailing.
+        let cases = [
+            (Type::TEXT, r"'C:\temp'::text", r" DEFAULT 'C:\\temp'"),
+            (Type::TEXT, r"'abc\'::text", r" DEFAULT 'abc\\'"),
+            (Type::TEXT, "'it''s'::text", r" DEFAULT 'it\'s'"),
+            (Type::VARCHAR, r"'\'", r" DEFAULT '\\'"),
+            (Type::JSONB, r#"'{"p":"C:\\dir"}'::jsonb"#, r#" DEFAULT '{"p":"C:\\\\dir"}'"#),
+            (Type::INTERVAL, r"'1 day\'::interval", r" DEFAULT '1 day\\'"),
+            (Type::DATE, r"'2026-01-01\'::date", r" DEFAULT toDate32('2026-01-01\\')"),
+            (
+                Type::TIMESTAMP,
+                r"'2026-01-01 00:00:00\'::timestamp",
+                r" DEFAULT toDateTime64('2026-01-01 00:00:00\\', 6, 'UTC')",
+            ),
+        ];
+
+        for (typ, expression, expected) in cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
+
+            // WHEN: the default clause is rendered for ClickHouse.
+            let clause = clickhouse_default_clause(&column);
+
+            // THEN: backslashes are escaped so ClickHouse keeps the characters.
+            assert_eq!(clause.as_deref(), Some(expected));
         }
     }
 

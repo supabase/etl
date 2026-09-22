@@ -1,5 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
+use tokio_util::sync::CancellationToken;
+
 mod copy;
 mod monitor;
 
@@ -30,7 +32,7 @@ use crate::{
     replication::state::{TableState, TableStateType},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerState,
-        concurrency::{ShutdownResult, ShutdownRx},
+        concurrency::{ShutdownResult, with_shutdown},
     },
     schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
     store::{PipelineStore, SchemaStore, StateStore},
@@ -105,7 +107,7 @@ pub(crate) async fn start_table_sync<S, D>(
     store: S,
     destination: D,
     out_of_band_source_pool: OutOfBandSourcePool,
-    mut shutdown_rx: ShutdownRx,
+    shutdown_token: CancellationToken,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableSyncResult>
@@ -216,7 +218,7 @@ where
                     .drop_table_for_copy(&current_replication_table_schema, drop_result)
                     .await?;
                 let ShutdownResult::Ok(completed_drop_result) =
-                    pending_drop_result.with_shutdown(&mut shutdown_rx).await
+                    with_shutdown!(pending_drop_result, shutdown_token)
                 else {
                     return Ok(TableSyncResult::Stopped);
                 };
@@ -251,9 +253,16 @@ where
             // If a slot already exists at this point, we could delete it and
             // try to recover, but it means that the state was somehow reset
             // without the slot being deleted, and we want to surface this.
-            let (replication_transaction, slot) = replication_client
-                .create_slot_with_transaction(&slot_name, config.replication_slot.failover)
-                .await?;
+            // Slot creation can wait for an unrelated source transaction. The
+            // persisted DataSync state makes cancellation restart the copy.
+            let ShutdownResult::Ok(created) = with_shutdown!(
+                replication_client
+                    .create_slot_with_transaction(&slot_name, config.replication_slot.failover),
+                shutdown_token,
+            ) else {
+                return Ok(TableSyncResult::Stopped);
+            };
+            let (replication_transaction, slot) = created?;
 
             let activity_registration =
                 ActivityRegistration::register(ActivityKind::InitialTableCopy);
@@ -333,7 +342,7 @@ where
                     out_of_band_source_pool.clone(),
                     Duration::from_millis(config.table_sync_monitor_refresh_interval_ms),
                     config.batch.clone(),
-                    shutdown_rx.clone(),
+                    shutdown_token.clone(),
                     destination.clone(),
                     memory_monitor.clone(),
                     batch_memory_governor.clone(),
@@ -374,16 +383,27 @@ where
             // also the terminal table-wide durability barrier.
             if total_table_copy_rows == 0 || table_copy_barrier_required {
                 let (flush_result, pending_flush_result) = WriteTableRowsResult::new(());
-                destination
-                    .write_table_rows(&replicated_table_schema, None, Vec::new(), flush_result)
-                    .await?;
-                let ShutdownResult::Ok(completed_flush_result) =
-                    pending_flush_result.with_shutdown(&mut shutdown_rx).await
-                else {
+                // The copy is still incomplete, so both the method call and
+                // its result wait can be interrupted. Restart drops the partial
+                // destination table and copies it again from a fresh snapshot.
+                let ShutdownResult::Ok(write_status) = with_shutdown!(
+                    async {
+                        destination
+                            .write_table_rows(
+                                &replicated_table_schema,
+                                None,
+                                Vec::new(),
+                                flush_result,
+                            )
+                            .await?;
+                        pending_flush_result.await.into_result()
+                    },
+                    shutdown_token,
+                ) else {
                     return Ok(TableSyncResult::Stopped);
                 };
 
-                match completed_flush_result.into_result()? {
+                match write_status? {
                     DestinationWriteStatus::Durable => activity_handle.ping(),
                     DestinationWriteStatus::Accepted => bail!(
                         ErrorKind::DestinationError,
@@ -423,7 +443,7 @@ where
     // We also wait to be signaled to catch up with the main apply worker up to
     // a specific lsn.
     let result = table_sync_worker_state
-        .wait_for_state_type(&[TableStateType::Catchup], shutdown_rx.clone())
+        .wait_for_state_type(&[TableStateType::Catchup], shutdown_token.clone())
         .await;
 
     // If we are told to shut down while waiting for a state change, we will

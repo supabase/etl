@@ -27,10 +27,14 @@ use tokio::{
     sync::{Semaphore, watch},
 };
 use tokio_postgres::types::PgLsn;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
-use crate::failpoints::{STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active_for_parameter};
+use crate::failpoints::{
+    APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, STORE_REPLICATION_CHECKPOINT_FP,
+    etl_fail_point_active_for_parameter,
+};
 use crate::{
     activity::{ActivityHandle, ActivityKind, ActivityRegistration},
     bail,
@@ -75,8 +79,8 @@ use crate::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
         TableSyncWorkerState,
         concurrency::{
-            MemoryBackpressureStream, ShutdownRx, apply_worker_apply_stream_id,
-            table_sync_worker_apply_stream_id,
+            MemoryBackpressureStream, ShutdownResult, apply_worker_apply_stream_id,
+            table_sync_worker_apply_stream_id, with_shutdown,
         },
     },
     schema::{
@@ -173,8 +177,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) destination: D,
     /// Shared pool for out-of-band source database queries.
     pub(crate) out_of_band_source_pool: OutOfBandSourcePool,
-    /// Shutdown signal receiver for graceful termination.
-    pub(crate) shutdown_rx: ShutdownRx,
+    /// Cancellation token for graceful termination.
+    pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
     pub(crate) table_sync_worker_permits: Arc<Semaphore>,
     /// Shared memory backpressure controller.
@@ -793,8 +797,8 @@ pub(crate) struct ApplyLoop<S, D> {
     /// Connection-local per-table protocol state used to decode relation and
     /// row messages.
     table_decoding_states: HashMap<TableId, TableDecodingState>,
-    /// Shutdown signal receiver.
-    shutdown_rx: ShutdownRx,
+    /// Cancellation token.
+    shutdown_token: CancellationToken,
     /// Worker-specific dependencies and coordination hooks.
     worker_context: WorkerContext<S, D>,
     /// Shared memory backpressure controller.
@@ -827,7 +831,7 @@ where
         destination: D,
         out_of_band_source_pool: OutOfBandSourcePool,
         worker_context: WorkerContext<S, D>,
-        shutdown_rx: ShutdownRx,
+        shutdown_token: CancellationToken,
         memory_monitor: MemoryMonitor,
         batch_memory_governor: BatchMemoryGovernor,
         initial_replicated_table_schema: Option<ReplicatedTableSchema>,
@@ -839,29 +843,51 @@ where
         );
 
         let worker_type = worker_context.worker_type();
-        let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
-        let wal_sender_timeout = match wal_sender_timeout_result {
-            Ok(Some(wal_sender_timeout)) => wal_sender_timeout,
-            Ok(None) => {
-                warn!(
-                    %worker_type,
-                    "wal sender timeout is disabled; using fallback timeout",
-                );
+        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
 
-                DEFAULT_WAL_SENDER_TIMEOUT
-            }
-            Err(error) => {
-                warn!(
-                    %worker_type,
-                    error = %error,
-                    "failed to read wal sender timeout; using fallback timeout",
-                );
+        // No events or background tasks exist until the replication handshake
+        // completes, so stalled protocol setup can be cancelled as one unit.
+        let ShutdownResult::Ok(initialized) = with_shutdown!(
+            async {
+                let wal_sender_timeout_result = replication_client.get_wal_sender_timeout().await;
+                let wal_sender_timeout = match wal_sender_timeout_result {
+                    Ok(Some(wal_sender_timeout)) => wal_sender_timeout,
+                    Ok(None) => {
+                        warn!(
+                            %worker_type,
+                            "wal sender timeout is disabled; using fallback timeout",
+                        );
 
-                DEFAULT_WAL_SENDER_TIMEOUT
-            }
+                        DEFAULT_WAL_SENDER_TIMEOUT
+                    }
+                    Err(error) => {
+                        warn!(
+                            %worker_type,
+                            error = %error,
+                            "failed to read wal sender timeout; using fallback timeout",
+                        );
+
+                        DEFAULT_WAL_SENDER_TIMEOUT
+                    }
+                };
+                let keep_alive_deadline_duration =
+                    Self::compute_keep_alive_deadline_duration(wal_sender_timeout);
+
+                let stream = replication_client
+                    .start_logical_replication(
+                        &config.publication_name,
+                        &slot_name,
+                        start_lsn,
+                        Some(keep_alive_deadline_duration),
+                    )
+                    .await?;
+                Ok::<_, EtlError>((stream, wal_sender_timeout))
+            },
+            shutdown_token,
+        ) else {
+            return Ok(ApplyLoopResult::Paused);
         };
-        let keep_alive_deadline_duration =
-            Self::compute_keep_alive_deadline_duration(wal_sender_timeout);
+        let ((replication_message_stream, feedback), wal_sender_timeout) = initialized?;
 
         // A restart LSN is an inclusive WAL frontier, not an exact schema
         // snapshot. Use the maximum message LSN so a restart at a transaction's
@@ -870,17 +896,6 @@ where
 
         let replication_progress = ReplicationProgress::new(start_lsn);
         let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
-
-        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
-
-        let (replication_message_stream, feedback) = replication_client
-            .start_logical_replication(
-                &config.publication_name,
-                &slot_name,
-                start_lsn,
-                Some(keep_alive_deadline_duration),
-            )
-            .await?;
 
         let activity_registration =
             ActivityRegistration::register(ActivityKind::WalApply { wal_sender_timeout });
@@ -929,7 +944,7 @@ where
             schema_store,
             destination,
             table_decoding_states,
-            shutdown_rx,
+            shutdown_token,
             worker_context,
             memory_monitor,
             batch_memory_governor,
@@ -938,11 +953,12 @@ where
             state,
         };
 
-        let result = apply_loop.run(replication_client, replication_message_stream).await;
+        let result = apply_loop.run(replication_client, replication_message_stream).await?;
 
-        apply_loop.tasks.teardown(worker_type).await;
+        // We tear down all the tasks of the apply loop.
+        apply_loop.tasks.teardown().await?;
 
-        result
+        Ok(result)
     }
 
     /// Runs the main event processing loop with its feedback sender already
@@ -1046,7 +1062,7 @@ where
 
             // PRIORITY 1: Handle shutdown signals. Shutdown stops new intake
             // first and then lets the loop drain or wait as needed.
-            _ = self.shutdown_rx.changed() => {
+            _ = self.shutdown_token.cancelled() => {
                 self.handle_shutdown_signal();
             }
 
@@ -1093,7 +1109,6 @@ where
                 )
                 .await?;
             }
-
         }
 
         Ok(self.try_finish_active_iteration())
@@ -1832,8 +1847,28 @@ where
         // destination and the pending receiver is stored on the loop state
         // until the destination signals completion.
         let (flush_result, pending_flush_result) = WriteEventsResult::new(metadata);
+        // Await dispatch without racing shutdown so an inline write is not
+        // interrupted. Destinations should offload long-running writes and
+        // return promptly; only then can this loop poll the result separately.
         self.destination.write_events(events, durability, flush_result).await?;
         self.state.pending_flush_result = Some(pending_flush_result);
+
+        // Models a source failure right after dispatch: the loop exits with a
+        // retriable error while the destination still owns the batch.
+        #[cfg(feature = "failpoints")]
+        if etl_fail_point_active_for_parameter(
+            APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
+            self.worker_context.worker_type().as_str(),
+        ) {
+            bail!(
+                ErrorKind::WithTimedRetry,
+                "Failpoint triggered an error",
+                format!(
+                    "Failpoint '{APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP}' failed the apply loop \
+                     after dispatching an event batch"
+                )
+            );
+        }
 
         // Reset only after dispatch. A batch deferred behind an in-flight write
         // keeps its deadline until that write completes and dispatch is
@@ -3324,7 +3359,7 @@ mod apply_worker {
         let result = worker_state
             .wait_for_state_type(
                 &[TableStateType::SyncDone, TableStateType::Errored],
-                ctx.shutdown_rx.clone(),
+                ctx.shutdown_token.clone(),
             )
             .await;
 
@@ -4020,7 +4055,7 @@ mod apply_worker {
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.out_of_band_source_pool.clone(),
-            ctx.shutdown_rx.clone(),
+            ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
             ctx.batch_memory_governor.clone(),

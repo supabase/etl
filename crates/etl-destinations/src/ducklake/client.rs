@@ -19,9 +19,9 @@ use metrics::histogram;
 use regex::Regex;
 use tokio::{
     sync::{Semaphore, oneshot},
-    task::JoinHandle,
     time::Instant,
 };
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{info, trace, warn};
 
 use crate::ducklake::{
@@ -59,7 +59,6 @@ enum DuckLakeInterruptReason {
     None = 0,
     QueryTimeout = 1,
     DestinationShutdown = 2,
-    ProcessShutdown = 3,
     ExternalInterrupt = 4,
 }
 
@@ -70,7 +69,6 @@ impl DuckLakeInterruptReason {
             Self::None => "none",
             Self::QueryTimeout => "query_timeout",
             Self::DestinationShutdown => "destination_shutdown",
-            Self::ProcessShutdown => "process_shutdown",
             Self::ExternalInterrupt => "external_interrupt",
         }
     }
@@ -80,7 +78,6 @@ impl DuckLakeInterruptReason {
         match value {
             1 => Self::QueryTimeout,
             2 => Self::DestinationShutdown,
-            3 => Self::ProcessShutdown,
             4 => Self::ExternalInterrupt,
             _ => Self::None,
         }
@@ -220,7 +217,7 @@ pub(super) struct DuckDbQueryWatchdog {
     timed_out: Arc<AtomicBool>,
     interrupt_tx: Option<oneshot::Sender<DuckDbQueryInterruptHandle>>,
     done_tx: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<()>>,
+    task: Option<AbortOnDropHandle<()>>,
 }
 
 impl DuckDbQueryWatchdog {
@@ -229,22 +226,27 @@ impl DuckDbQueryWatchdog {
         let timeout_flag = Arc::clone(&timed_out);
         let (interrupt_tx, interrupt_rx) = oneshot::channel::<DuckDbQueryInterruptHandle>();
         let (done_tx, done_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
+        let task = AbortOnDropHandle::new(tokio::spawn(async move {
             let mut interrupt_rx = Box::pin(interrupt_rx);
             let mut done_rx = Box::pin(done_rx);
             let interrupt_handle = tokio::select! {
                 biased;
+
                 _ = &mut done_rx => return,
+
                 result = &mut interrupt_rx => match result {
                     Ok(handle) => handle,
                     Err(_) => return,
                 },
+
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
                     // If we didn't receive the interrupt_rx yet, make sure to get it to call interrupt() later
                     tokio::select! {
                         biased;
+
                         _ = &mut done_rx => return,
+
                         result = &mut interrupt_rx => match result {
                             Ok(handle) => handle,
                             Err(_) => return,
@@ -260,13 +262,15 @@ impl DuckDbQueryWatchdog {
 
             tokio::select! {
                 biased;
+
                 _ = &mut done_rx => {}
+
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
                     interrupt_handle.interrupt();
                 }
             }
-        });
+        }));
 
         Self {
             timed_out,
@@ -296,7 +300,7 @@ impl DuckDbQueryWatchdog {
         self.timed_out.load(Ordering::Relaxed)
     }
 
-    fn async_task_handle(&mut self) -> EtlResult<JoinHandle<()>> {
+    fn async_task_handle(&mut self) -> EtlResult<AbortOnDropHandle<()>> {
         self.task.take().ok_or_else(|| {
             etl_error!(
                 ErrorKind::DestinationError,
@@ -563,7 +567,7 @@ impl DuckLakeConnectionManager {
         shutdown_requested: Arc<AtomicBool>,
     ) -> EtlResult<Self> {
         let setup_plan_for_initialization = Arc::clone(&setup_plan);
-        let instance = tokio::task::spawn_blocking(move || {
+        let instance = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
             Self::open_initialized_duckdb_instance(
                 setup_plan_for_initialization.as_ref(),
                 disable_extension_autoload,
@@ -575,14 +579,9 @@ impl DuckLakeConnectionManager {
                     source: error
                 )
             })
-        })
+        }))
         .await
-        .map_err(|_| {
-            etl_error!(
-                ErrorKind::ApplyWorkerPanic,
-                "DuckLake shared instance initialization task panicked"
-            )
-        })??;
+        .map_err(EtlError::from)??;
 
         Ok(Self {
             setup_plan,
@@ -613,12 +612,6 @@ impl DuckLakeConnectionManager {
         self.shutdown_requested.store(true, Ordering::Relaxed);
         self.interrupt_registry
             .interrupt_all_with_reason(DuckLakeInterruptReason::DestinationShutdown)
-    }
-
-    /// Records process shutdown and interrupts all live managed connections.
-    pub(super) fn interrupt_all_connections_for_process_shutdown(&self) -> usize {
-        self.shutdown_requested.store(true, Ordering::Relaxed);
-        self.interrupt_registry.interrupt_all_with_reason(DuckLakeInterruptReason::ProcessShutdown)
     }
 
     /// Interrupts all currently live managed DuckLake connections.
@@ -697,10 +690,9 @@ impl DuckLakeConnectionManager {
 
     /// Replaces the shared database used by future pooled connections.
     pub(super) async fn recreate_shared_instance(&self) -> EtlResult<()> {
-        let shared_instance = Arc::clone(&self.shared_instance);
         let setup_plan = Arc::clone(&self.setup_plan);
         let disable_extension_autoload = self.disable_extension_autoload;
-        tokio::task::spawn_blocking(move || -> EtlResult<()> {
+        let instance = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
             let instance = Self::open_initialized_duckdb_instance(
                 setup_plan.as_ref(),
                 disable_extension_autoload,
@@ -712,22 +704,18 @@ impl DuckLakeConnectionManager {
                     source: error
                 )
             })?;
-            let mut current = shared_instance.lock().map_err(|_| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "DuckLake shared DuckDB instance mutex was poisoned"
-                )
-            })?;
-            *current = instance;
-            Ok(())
-        })
+            Ok::<_, EtlError>(instance)
+        }))
         .await
-        .map_err(|_| {
+        .map_err(EtlError::from)??;
+        let mut current = self.shared_instance.lock().map_err(|_| {
             etl_error!(
-                ErrorKind::ApplyWorkerPanic,
-                "DuckLake shared instance recreation task panicked"
+                ErrorKind::InvalidState,
+                "DuckLake shared DuckDB instance mutex was poisoned"
             )
-        })?
+        })?;
+        *current = instance;
+        Ok(())
     }
 
     /// Returns the number of successfully initialized DuckDB connections.
@@ -791,7 +779,7 @@ pub(super) async fn build_warm_ducklake_pool(
     pool_size: u32,
     purpose: &'static str,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
-    tokio::task::spawn_blocking(move || -> EtlResult<_> {
+    AbortOnDropHandle::new(tokio::task::spawn_blocking(move || -> EtlResult<_> {
         let started = Instant::now();
         let pool = r2d2::Pool::builder()
             .max_size(pool_size)
@@ -831,14 +819,9 @@ pub(super) async fn build_warm_ducklake_pool(
         );
 
         Ok(pool)
-    })
+    }))
     .await
-    .map_err(|_| {
-        etl_error!(
-            ErrorKind::ApplyWorkerPanic,
-            "DuckLake connection pool initialization task panicked"
-        )
-    })?
+    .map_err(EtlError::from)?
 }
 
 /// Builds a consistent timeout error for one blocking DuckDB stage.
@@ -978,8 +961,8 @@ where
     let permit = tokio::time::timeout_at(deadline, Arc::clone(&blocking_slots).acquire_owned())
         .await
         .map_err(|_| duckdb_blocking_timeout_error(timeout, "slot_wait"))?
-        .map_err(|_| {
-            etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake blocking slot acquisition failed")
+        .map_err(|error| {
+            etl_error!(ErrorKind::InvalidState, "DuckLake blocking slot acquisition failed", source: error)
         })?;
     histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
         .record(slot_wait_started.elapsed().as_secs_f64());
@@ -995,7 +978,22 @@ where
     let watchdog_task = watchdog.async_task_handle()?;
     let abort_deadline = deadline + BLOCKING_ABORT_GRACE;
 
-    let blocking_task = tokio::task::spawn_blocking(move || -> EtlResult<R> {
+    // The blocking closure owns both guards: cancelling its async caller must
+    // not disable native interruption or the hard deadline.
+    let (blocking_done_tx, blocking_done_rx) = oneshot::channel::<()>();
+    let abort_task = AbortOnDropHandle::new(tokio::spawn(async move {
+        tokio::select! {
+            biased;
+
+            _ = blocking_done_rx => {}
+
+            _ = tokio::time::sleep_until(abort_deadline) => {
+                abort_stuck_duckdb_blocking_operation(timeout, BLOCKING_ABORT_GRACE);
+            }
+        }
+    }));
+
+    let blocking_work = move || -> EtlResult<R> {
         // Please if you modify the code inside this blocking task do not add
         // any blocking operations that could delay other tasks waiting on this
         // slot.
@@ -1055,31 +1053,22 @@ where
 
             result
         })
-    });
-
-    let blocking_result = tokio::select! {
-        biased;
-        result = blocking_task => result,
-        _ = tokio::time::sleep_until(abort_deadline) => {
-            // The blocking task still owns the pooled connection here, so the
-            // async side cannot mark it broken and return it to r2d2 for
-            // eviction. If DuckDB does not return after interrupt plus grace,
-            // the stuck native call also keeps holding its semaphore permit and
-            // blocking thread, so restarting the process is the recoverable
-            // boundary.
-            abort_stuck_duckdb_blocking_operation(timeout, BLOCKING_ABORT_GRACE);
-        }
     };
 
-    // Await the watchdog so it cannot outlive the finished blocking task and
-    // accidentally interrupt a later operation that reuses the connection.
-    watchdog_task.await.map_err(|_| {
-        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake query watchdog task panicked")
-    })?;
+    let blocking_task = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
+        let _blocking_done = blocking_done_tx;
+        (blocking_work(), watchdog_task, abort_task)
+    }));
 
-    blocking_result.map_err(|_| {
-        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake blocking operation task panicked")
-    })?
+    let (blocking_result, watchdog_task, abort_task) =
+        blocking_task.await.map_err(EtlError::from)?;
+
+    // Native work has returned, so failed operations can drop their monitors.
+    let result = blocking_result?;
+    watchdog_task.await.map_err(EtlError::from)?;
+    abort_task.await.map_err(EtlError::from)?;
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -1365,6 +1354,43 @@ mod tests {
         assert_eq!(value, 1);
     }
 
+    /// Cancelling the async owner must leave native interruption active and
+    /// retain the blocking permit until the operation actually exits.
+    #[tokio::test]
+    async fn cancelled_blocking_caller_retains_watchdog_and_permit() {
+        let pool = Arc::new(
+            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test").await.unwrap(),
+        );
+        let slots = Arc::new(Semaphore::new(1));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (interrupted_tx, interrupted_rx) = oneshot::channel();
+        let task = tokio::spawn(run_duckdb_blocking_with_provider_and_context(
+            Arc::clone(&pool),
+            Arc::clone(&slots),
+            Duration::from_secs(1),
+            move |_conn, context| {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                // The timeout runs on Tokio while this closure keeps the native
+                // slot.
+                while context.interrupt_state.reason() == DuckLakeInterruptReason::None {
+                    std::thread::yield_now();
+                }
+                interrupted_tx.send(()).unwrap();
+                Ok(())
+            },
+        ));
+        started_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(slots.available_permits(), 0);
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), interrupted_rx).await.unwrap().unwrap();
+        let _permit =
+            tokio::time::timeout(Duration::from_secs(5), slots.acquire()).await.unwrap().unwrap();
+    }
+
     #[test]
     fn format_query_error_detail_compacts_sql() {
         let sql = r#"CREATE TABLE lake."orders" ("id" INTEGER NOT NULL)"#;
@@ -1426,9 +1452,9 @@ mod tests {
         assert_eq!(context.timeout_ms(), 250);
         assert_eq!(context.interrupt_reason_label(), "none");
 
-        state.record(DuckLakeInterruptReason::ProcessShutdown);
+        state.record(DuckLakeInterruptReason::DestinationShutdown);
 
-        assert_eq!(context.interrupt_reason_label(), "process_shutdown");
+        assert_eq!(context.interrupt_reason_label(), "destination_shutdown");
     }
 
     #[test]

@@ -543,7 +543,7 @@ async fn run_raw_replica_identity_scenario(
     let publication_name = "raw_replica_identity_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("raw_replica_identity_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -605,7 +605,7 @@ async fn replication_client_creates_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let slot_name = test_slot_name("my_slot");
     let create_slot = client.create_slot(&slot_name, false).await.unwrap();
@@ -627,7 +627,7 @@ async fn replication_client_rejects_failover_slot_before_postgres_17() {
         return;
     }
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("unsupported_failover_slot");
 
     let error = client.create_slot(&slot_name, true).await.unwrap_err();
@@ -643,7 +643,7 @@ async fn create_and_delete_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let slot_name = test_slot_name("my_slot");
 
@@ -681,7 +681,7 @@ async fn delete_slot_if_exists_deletes_existing_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let slot_name = test_slot_name("delete_if_exists_slot");
     client.create_slot(&slot_name, false).await.unwrap();
@@ -708,7 +708,7 @@ async fn replication_client_doesnt_recreate_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let slot_name = test_slot_name("my_slot");
     assert!(client.create_slot(&slot_name, false).await.is_ok());
@@ -754,6 +754,138 @@ async fn table_schema_copy_is_consistent() {
     assert_eq!(table_1_schema.id, table_1_id);
     assert_eq!(table_1_schema.name, test_table_name("table_1"));
     assert_table_schema_columns(&table_1_schema, &[id_column_schema(), age_schema.clone()]);
+}
+
+/// Both slot creation paths must outlive the normal lock timeout while waiting
+/// for old writers.
+#[tokio::test(flavor = "multi_thread")]
+async fn slot_creation_exempts_lock_timeout() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    database.create_table(test_table_name("writer"), true, &[("age", "integer")]).await.unwrap();
+    let mut apply_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut copy_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let apply_slot = test_slot_name("apply_lock_timeout");
+    let copy_slot = test_slot_name("copy_lock_timeout");
+
+    database.run_sql("begin").await.unwrap();
+    database.run_sql("insert into test.writer (id) values (1)").await.unwrap();
+    let release_writer = async {
+        // Observe both slot creations actually waiting before measuring the
+        // exemption.
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let row = database
+                    .client
+                    .as_ref()
+                    .unwrap()
+                    .query_one(
+                        "select count(*) from pg_stat_activity where datname = current_database() \
+                         and backend_type = 'walsender' and wait_event_type = 'Lock' and \
+                         wait_event = 'transactionid'",
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                if row.get::<_, i64>(0) == 2 {
+                    break;
+                }
+                database.run_sql("select pg_stat_clear_snapshot()").await.unwrap();
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_secs(31)).await;
+        database.run_sql("commit").await.unwrap();
+    };
+    let (apply_result, copy_result, ()) = timeout(Duration::from_secs(60), async {
+        tokio::join!(
+            apply_client.create_slot(&apply_slot, false),
+            copy_client.create_slot_with_transaction(&copy_slot, false),
+            release_writer,
+        )
+    })
+    .await
+    .unwrap();
+    apply_result.unwrap();
+    let (transaction, _) = copy_result.unwrap();
+    let snapshot = transaction.export_snapshot().await.unwrap();
+    let mut child = transaction.fork_child().await.unwrap();
+    child.begin_transaction(&snapshot).await.unwrap().commit().await.unwrap();
+    transaction.commit().await.unwrap();
+}
+
+/// Slot creation success and errors must not leave ordinary catalog queries
+/// exempt.
+#[tokio::test(flavor = "multi_thread")]
+async fn slot_creation_restores_lock_timeout_after_errors() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("restore_lock_timeout");
+    client.create_slot(&slot_name, false).await.unwrap();
+    assert_eq!(
+        client.create_slot(&slot_name, false).await.unwrap_err().kind(),
+        ErrorKind::ReplicationSlotAlreadyExists,
+    );
+    assert_eq!(
+        client.create_slot_with_transaction(&slot_name, false).await.unwrap_err().kind(),
+        ErrorKind::ReplicationSlotAlreadyExists,
+    );
+
+    database.run_sql("begin").await.unwrap();
+    database.run_sql("lock table pg_publication in access exclusive mode").await.unwrap();
+    let error = timeout(Duration::from_secs(45), client.publication_exists("missing"))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::SourceLockTimeout);
+    database.run_sql("rollback").await.unwrap();
+    assert!(!client.publication_exists("missing").await.unwrap());
+}
+
+/// Schema planning and child COPY inherit bounded lock waits after slot
+/// creation.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_copy_lock_timeout_applies_to_parent_and_child() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("locked_copy");
+    let table_id = database.create_table(table_name, true, &[("age", "integer")]).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let (transaction, _) =
+        client.create_slot_with_transaction(&test_slot_name("bounded_copy"), false).await.unwrap();
+    let snapshot = transaction.export_snapshot().await.unwrap();
+    let mut child = transaction.fork_child().await.unwrap();
+    let child_transaction = child.begin_transaction(&snapshot).await.unwrap();
+    let columns = [id_column_schema()];
+    let partition = CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() };
+
+    database.run_sql("begin").await.unwrap();
+    database.run_sql("lock table test.locked_copy in access exclusive mode").await.unwrap();
+    let (parent_result, child_result) = timeout(Duration::from_secs(45), async {
+        tokio::join!(
+            transaction.get_table_copy_planning_estimate(table_id),
+            child_transaction.get_table_copy_stream_with_ctid_partition(
+                table_id, table_id, &columns, None, &partition,
+            ),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(parent_result.unwrap_err().kind(), ErrorKind::SourceLockTimeout);
+    assert_eq!(child_result.err().unwrap().kind(), ErrorKind::SourceLockTimeout);
+    drop(child_transaction);
+    drop(transaction);
+    database.run_sql("rollback").await.unwrap();
+
+    let (transaction, _) = client
+        .create_slot_with_transaction(&test_slot_name("copy_after_timeout"), false)
+        .await
+        .unwrap();
+    assert_eq!(transaction.get_table_schema(table_id).await.unwrap().id, table_id);
+    transaction.commit().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -909,7 +1041,7 @@ async fn ddl_message_primary_key_order_matches_loaded_table_schema() {
     let publication_name = "ddl_composite_pk_order_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_composite_pk_order_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -1715,7 +1847,7 @@ async fn start_logical_replication() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     // We create a slot which is going to replicate data before we insert the
     // data.
@@ -1777,7 +1909,7 @@ async fn schema_change_messages_emit_enriched_payload_for_multiple_alter_table_v
     let publication_name = "ddl_message_payload_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_message_payload_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -1945,7 +2077,7 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
     let publication_name = "ddl_default_payload_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_default_payload_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -2036,7 +2168,7 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
         .await
         .unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_filter_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -2097,7 +2229,7 @@ async fn schema_change_messages_allow_alter_table_from_table_owner_role() {
     let publication_name = "ddl_table_owner_role_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_table_owner_role_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -2136,7 +2268,7 @@ async fn single_alter_table_statement_with_multiple_subcommands_emits_one_ddl_me
     let publication_name = "ddl_multi_subcommand_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_multi_subcommand_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -2190,7 +2322,7 @@ async fn schema_change_messages_respect_skip_ddl_log_setting() {
     let publication_name = "ddl_skip_log_pub";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_skip_log_slot");
     let slot = client.create_slot(&slot_name, false).await.unwrap();
     let (stream, _) = client
@@ -2219,7 +2351,7 @@ async fn get_slot_state_returns_not_invalidated_for_healthy_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     // Create a slot
     let slot_name = test_slot_name("healthy_slot");
@@ -2251,7 +2383,7 @@ async fn exclusive_get_slot_state_returns_invalidated_for_lost_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     // Create a slot
     let slot_name = test_slot_name("invalidated_slot");

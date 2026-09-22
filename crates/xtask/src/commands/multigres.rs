@@ -170,6 +170,7 @@ impl TestArgs {
         test.args([
             "nextest",
             "run",
+            "--locked",
             "-p",
             "etl",
             "--features",
