@@ -168,18 +168,15 @@ cargo run --bin bigquery -p etl-examples --features bigquery -- \
 
 ## ClickHouse
 
-**Status: Private alpha.** ClickHouse is a private alpha destination. Access is
-limited while the integration stabilizes.
+**Status: Private alpha.** Access is limited, and behavior may change before
+general availability.
 
-Replicates a Postgres publication to ClickHouse over HTTP(S). ClickHouse **23.5
-or newer** is required for the default `ReplacingMergeTree` engine. See the
+Replicates a Postgres publication to ClickHouse over HTTP(S). The default
+`ReplacingMergeTree` engine needs ClickHouse **23.5 or newer**. See the
 [ClickHouse destination guide][clickhouse-guide] for table layouts, read
 patterns, and operator guidance.
 
 [clickhouse-guide]: ../etl-destinations/src/clickhouse/README.md
-
-`cargo x init` starts a local ClickHouse on `http://localhost:8123` with user
-`etl` / password `etl`.
 
 ### Run
 
@@ -197,7 +194,7 @@ cargo run --bin clickhouse -p etl-examples --features clickhouse -- \
     --publication seed_pub
 ```
 
-For HTTPS, pass an `https://` URL. TLS uses webpki root certificates.
+For HTTPS, pass an `https://` URL. TLS uses `webpki` root certificates.
 
 ### All Flags
 
@@ -221,15 +218,13 @@ For HTTPS, pass an `https://` URL. TLS uses webpki root certificates.
 
 Choose the layout per pipeline with `--clickhouse-engine`:
 
-| Flag value                       | Engine               | Use it for                                              |
-| -------------------------------- | -------------------- | ------------------------------------------------------- |
-| `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replicas. Source must have a primary key. |
-| `merge_tree`                     | `MergeTree`          | Append-only event log. Works for PK-less source tables. |
+| Flag value                       | Engine               | Use it for                                       |
+| -------------------------------- | -------------------- | ------------------------------------------------ |
+| `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replica. Requires a primary key.   |
+| `merge_tree`                     | `MergeTree`          | Append-only event log. No primary key required.  |
 
-Column layouts, the `<table>__current` view, current-state queries, replica
-identity requirements, `OPTIMIZE` guidance, and the upgrade procedure for
-tables created before `cdc_tx_ordinal` are documented in the
-[ClickHouse destination guide][clickhouse-guide].
+See the [ClickHouse destination guide][clickhouse-guide] for column layouts,
+read patterns, replica identity requirements, and upgrades.
 
 ---
 

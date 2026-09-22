@@ -23,9 +23,9 @@ mature cloud destination.**
 
 - **Stable:** The most mature built-in destination. Review its limitations and
   validate it against your production workload.
-- **Private alpha:** Functional and under active hardening with a limited set of
-  users. Access is limited while the integration stabilizes; behavior and
-  operational requirements may still change.
+- **Private alpha:** Works end to end but is available to a limited set of
+  users. Expect behavior and operational requirements to change before general
+  availability.
 - **In progress:** Functional, but behavior, configuration, schema support, and
   operational requirements may still change. Test recovery and schema changes
   before production use.
@@ -186,7 +186,7 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 
 ClickHouse is the local default destination. `cargo x init` starts ClickHouse
 on `http://localhost:8123` (`etl` / `etl`), and `cargo x setup replicator`
-writes config for that service. No cloud account is required.
+writes config for that service. It needs no cloud account.
 
 The [Standalone Replicator](/guides/standalone-replicator/) guide uses
 ClickHouse as its default example.
@@ -194,33 +194,31 @@ ClickHouse as its default example.
 ClickHouse supports a current-state layout with `ReplacingMergeTree` and an
 append-only event-log layout with `MergeTree`.
 
-`engine` is applied only when a table is created or recreated; restarting a
-pipeline or changing `engine` does not modify an existing table. ClickHouse
-has no way to alter a table's engine, so if `engine` no longer matches a
-table that already exists, ETL returns an error on write instead of silently
-applying the new setting. Drop and resynchronize the table, or revert
-`engine` to match it.
+`engine` applies only when ETL creates or recreates a table. ClickHouse cannot
+change a table's engine, so if the configured `engine` differs from an existing
+table, ETL fails the write rather than silently keeping the old layout. Drop
+and resynchronize the table, or revert `engine`.
 
 ### Limitations
 
 - The default `ReplacingMergeTree` layout requires a source primary key with
   every primary-key column included in the publication, and requires
   ClickHouse 23.5 or newer.
-- Tables with a primary key need `REPLICA IDENTITY DEFAULT` or `REPLICA
-  IDENTITY FULL` for updates and deletes. With `USING INDEX` or `NOTHING`, ETL
-  rejects the affected updates and deletes instead of leaving stale
-  primary-key rows. A primary-key-changing update writes a tombstone for the
-  old key followed by the new row.
-- `MergeTree` preserves an append-only event log; it does not expose a
-  current-state replica by itself.
-- Source type changes are warned about, but physical type DDL is not currently
-  applied or validated. Later RowBinary writes may fail or behave unpredictably;
-  resynchronize the table after a source type change.
+- Tables with a primary key need `REPLICA IDENTITY DEFAULT` or
+  `REPLICA IDENTITY FULL` for updates and deletes. With `USING INDEX` or
+  `NOTHING`, ETL rejects the affected updates and deletes instead of leaving
+  stale primary-key rows. A primary-key-changing update writes a tombstone for
+  the old key followed by the new row.
+- `MergeTree` keeps an append-only event log; current state needs a
+  `limit 1 by` query over `cdc_lsn` and `cdc_tx_ordinal`.
+- ETL warns on source type changes but does not alter or validate the
+  ClickHouse column type. Later RowBinary writes may fail; resynchronize the
+  table after a type change.
 - ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
   array cannot be encoded in RowBinary and fails the write; empty arrays and
   `NULL` array elements remain supported.
-- Values that RowBinary can represent are sent without local ClickHouse domain
-  checks and follow ClickHouse's native conversion or rejection behavior.
+- ETL sends any value RowBinary can encode; ClickHouse applies its own
+  conversion and rejection rules.
 - Dotted nested subcolumns can be renamed only within the same parent, matching
   ClickHouse's documented `RENAME COLUMN` limitation.
 - Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.
