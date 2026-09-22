@@ -13,3 +13,6 @@ logs/
 Thumbs.db
 venv/
 vendor/duckdb/extensions/
+
+# Runtime configuration can contain credentials.
+**/configuration/

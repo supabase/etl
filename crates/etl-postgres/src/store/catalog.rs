@@ -58,7 +58,7 @@ pub const ETL_TABLES: [EtlTable; 5] = [
     REPLICATION_PROGRESS_TABLE,
 ];
 
-/// Core state tables needed for API state inspection and cleanup.
+/// Core state tables needed for state inspection and cleanup.
 pub const ETL_CORE_STATE_TABLES: [EtlTable; 4] = [
     REPLICATION_STATE_TABLE,
     DESTINATION_TABLES_METADATA_TABLE,

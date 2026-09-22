@@ -279,19 +279,6 @@ jobs:
           esac
           ./scripts/bin/vendor-duckdb-extensions.sh --platform "${duckdb_platform}"
 
-      - name: Install sqlx-cli
-        run: |
-          cargo install sqlx-cli \
-            --version 0.9.0-alpha.1 \
-            --features native-tls,postgres \
-            --no-default-features \
-            --locked
-
-      - name: Migrate Database
-        run: |
-          sudo apt-get install libpq-dev -y
-          cargo --locked x migrate etl-api
-
       - name: Set up BigQuery Credentials
         # Conditional: fork PRs never receive secrets, BigQuery tests skipped gracefully.
         env:

@@ -87,7 +87,7 @@ jobs:
           echo "✅ Validation passed: building experimental image from non-main branch"
 
   build:
-    name: Build and Push Images
+    name: Build and Push Image
     needs: [resolve-ref, validate-experimental]
     # Run only when the PR is merged and is NOT a release PR, or manual run.
     if: |
@@ -99,16 +99,13 @@ jobs:
           !contains(github.event.pull_request.labels.*.name, 'release')
         )
       )
-    strategy:
-      matrix:
-        image: [etl-api, etl-replicator]
     uses: ./.github/workflows/docker-build.yml
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
     with:
-      image: public.ecr.aws/supabase/${{ matrix.image }}
+      image: public.ecr.aws/supabase/etl-replicator
       context: .
-      file: ./crates/${{ matrix.image }}/Dockerfile
+      file: ./crates/etl-replicator/Dockerfile
       push: true
       tag_with_version: false
       experimental: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental || false }}

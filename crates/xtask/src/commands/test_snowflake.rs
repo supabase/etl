@@ -78,19 +78,6 @@ impl TestSnowflakeArgs {
             return Ok(());
         }
 
-        eprintln!("{GREEN}🔑 running Snowflake API validator integration tests.{RESET}");
-        let tests = CargoFeatureSelection::new(
-            true,
-            vec!["snowflake".to_owned()],
-            vec!["etl-api".to_owned()],
-        )
-        .apply_to(
-            cmd!(sh, "cargo nextest run --locked --no-fail-fast --run-ignored only"),
-            DefaultFeatureBehavior::CargoDefault,
-        )
-        .arg("snowflake");
-        with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
-
         eprintln!("{GREEN}❄️  running Snowflake destination integration tests.{RESET}");
         let tests = CargoFeatureSelection::new(
             true,

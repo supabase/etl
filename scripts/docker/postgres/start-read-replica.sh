@@ -104,6 +104,8 @@ if [ "$postgres_major_version" -ge 17 ]; then
   slot_sync_args=(-c sync_replication_slots=on)
 fi
 
+# The Compose template supplies a whitespace-separated list of trusted local options.
+# shellcheck disable=SC2086
 exec_as_postgres postgres \
   -D "$pgdata" \
   -N 1000 \
