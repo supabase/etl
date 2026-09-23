@@ -1,4 +1,4 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, error::Error, time::Duration};
 
 use etl::{
     error::ErrorKind,
@@ -14,9 +14,13 @@ use etl::{
         test_schema::create_partitioned_table,
     },
 };
+use etl_config::shared::IntoConnectOptions;
 use etl_postgres::{
     below_version,
-    tokio::test_utils::{TableModification, id_column_schema},
+    tokio::{
+        test_utils::{TableModification, id_column_schema},
+        tls::MakeRustlsConnect,
+    },
     type_utils::convert_type_oid_to_type,
     version::{POSTGRES_15, POSTGRES_17},
 };
@@ -24,10 +28,15 @@ use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use pg_escape::{quote_identifier, quote_literal};
 use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
+use rustls::{
+    ClientConfig, RootCertStore,
+    pki_types::{CertificateDer, pem::PemObject},
+};
 use serde_json::Value as JsonValue;
 use tokio::{pin, time::timeout};
 use tokio_postgres::{
-    CopyOutStream,
+    CopyOutStream, NoTls,
+    config::{ChannelBinding, ReplicationMode},
     types::{ToSql, Type},
 };
 
@@ -598,6 +607,42 @@ async fn run_raw_replica_identity_scenario(
     let changes = collect_update_delete_messages(stream, 4).await;
 
     RawReplicaIdentityScenarioResult { changes }
+}
+
+/// Requires SCRAM channel binding when TLS is configured and rejects it without
+/// TLS.
+#[tokio::test(flavor = "multi_thread")]
+async fn replication_channel_binding_requires_tls() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let mut config: tokio_postgres::Config = database.config.with_db(None);
+    config.replication_mode(ReplicationMode::Logical).channel_binding(ChannelBinding::Require);
+
+    if !database.config.tls.enabled {
+        let error = config.connect(NoTls).await.err().unwrap();
+        assert_eq!(error.source().unwrap().to_string(), "server did not use channel binding");
+        return;
+    }
+
+    let mut roots = RootCertStore::empty();
+    for certificate in
+        CertificateDer::pem_slice_iter(database.config.tls.trusted_root_certs.as_bytes())
+    {
+        roots.add(certificate.unwrap()).unwrap();
+    }
+    let tls_config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+    let (client, connection) = config.connect(MakeRustlsConnect::new(tls_config)).await.unwrap();
+
+    let (query, connection) = tokio::join!(
+        async move {
+            let result = client.simple_query("IDENTIFY_SYSTEM").await;
+            drop(client);
+            result
+        },
+        connection,
+    );
+    assert!(!query.unwrap().is_empty());
+    connection.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
