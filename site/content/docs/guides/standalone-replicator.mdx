@@ -123,7 +123,11 @@ pipeline:
 
 Those host, port, and password values match the published `cargo x init` Docker
 defaults. For a remote ClickHouse, change `url`, `user`, `password`, and
-`database`, and enable TLS on both connections.
+`database`, and enable TLS on both connections. Keep credentials out of `url`:
+a value with embedded credentials, such as
+`https://alice:secret@clickhouse.example:8443`, or with a query string is
+rejected when the configuration is loaded, because the URL is treated as
+non-secret configuration.
 
 Create `/absolute/path/to/etl-config/prod.yaml` for production overrides. It
 may be empty when `base.yaml` contains the complete configuration:

@@ -204,7 +204,7 @@ mod clickhouse {
             requires_public_network_policy(replicator_config.supabase.is_some(), url.scheme());
         let destination = if enforce_public_network_policy {
             ClickHouseDestination::new_public(
-                url.clone(),
+                url.as_url().clone(),
                 user,
                 password,
                 database,
@@ -215,7 +215,7 @@ mod clickhouse {
             .await?
         } else {
             ClickHouseDestination::new(
-                url.clone(),
+                url.as_url().clone(),
                 user,
                 password,
                 database,
