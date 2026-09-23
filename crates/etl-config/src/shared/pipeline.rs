@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, Validate, ValidationError,
+    PgConnectionConfig, PgConnectionConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
 };
 
 /// Batch processing configuration for pipelines.
@@ -329,7 +329,8 @@ pub struct PipelineConfig {
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// The connection configuration for the Postgres instance to which the
-    /// pipeline connects for replication.
+    /// pipeline connects for replication. TLS requires a nonblank trusted
+    /// root certificate bundle.
     pub pg_connection: PgConnectionConfig,
     /// Optional Postgres connection configuration for pipeline state storage.
     ///
@@ -443,6 +444,24 @@ impl PipelineConfig {
     }
 }
 
+/// Rejects a blank trust bundle when source TLS is enabled.
+///
+/// Replication trusts only the certificates supplied in
+/// [`crate::shared::TlsConfig::trusted_root_certs`]. This source-specific check
+/// does not apply to SQLx store connections, which also load default roots.
+/// Certificate parsing and the requirement for at least one trust anchor are
+/// checked when the replication TLS config is built.
+pub fn validate_source_tls_config(tls: &TlsConfig) -> Result<(), ValidationError> {
+    if tls.enabled && tls.trusted_root_certs.trim().is_empty() {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "pg_connection.tls.trusted_root_certs".to_owned(),
+            constraint: "must not be blank when source TLS is enabled".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 impl Validate for PipelineConfig {
     /// Validates pipeline configuration settings.
     fn validate(&self) -> Result<(), ValidationError> {
@@ -455,6 +474,7 @@ impl Validate for PipelineConfig {
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
         )?;
+        validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
         self.table_sync_copy.validate()
     }
@@ -579,7 +599,8 @@ pub struct PipelineConfigWithoutSecrets {
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// The connection configuration for the Postgres instance to which the
-    /// pipeline connects for replication.
+    /// pipeline connects for replication. TLS requires a nonblank trusted
+    /// root certificate bundle.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
     /// Optional Postgres connection configuration for pipeline state storage.
     ///
@@ -657,6 +678,7 @@ impl Validate for PipelineConfigWithoutSecrets {
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
         )?;
+        validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
         self.table_sync_copy.validate()
     }
@@ -688,7 +710,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::{TcpKeepaliveConfig, TlsConfig};
+    use crate::shared::TcpKeepaliveConfig;
 
     fn pg_connection(host: &str, port: u16) -> PgConnectionConfig {
         PgConnectionConfig {
@@ -717,6 +739,61 @@ mod tests {
                 "tls": { "enabled": false, "trusted_root_certs": "" }
             }
         })
+    }
+
+    /// Both config representations reject blank source trust bundles when
+    /// TLS is enabled.
+    #[test]
+    fn pipeline_source_tls_rejects_blank_trust_bundle() {
+        for trusted_root_certs in ["", " \t\r\n"] {
+            let mut json = pipeline_config_json();
+            json["pg_connection"]["tls"] = serde_json::json!({
+                "enabled": true,
+                "trusted_root_certs": trusted_root_certs,
+            });
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+            let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
+
+            for result in [config.validate(), without_secrets.validate()] {
+                let ValidationError::InvalidFieldValue { field, constraint } = result.unwrap_err();
+                assert_eq!(field, "pg_connection.tls.trusted_root_certs");
+                assert_eq!(constraint, "must not be blank when source TLS is enabled");
+            }
+        }
+    }
+
+    /// Disabled TLS permits blank roots, and validation leaves certificate
+    /// parsing to connection setup.
+    #[test]
+    fn pipeline_source_tls_accepts_disabled_or_nonblank_trust_bundle() {
+        for (enabled, trusted_root_certs) in
+            [(false, ""), (false, " \t\r\n"), (true, "placeholder-certificate")]
+        {
+            let mut json = pipeline_config_json();
+            json["pg_connection"]["tls"] = serde_json::json!({
+                "enabled": enabled,
+                "trusted_root_certs": trusted_root_certs,
+            });
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+
+            config.validate().unwrap();
+            PipelineConfigWithoutSecrets::from(config).validate().unwrap();
+        }
+    }
+
+    /// SQLx store connections may use default trust roots independently of
+    /// the source's explicit bundle.
+    #[test]
+    fn pipeline_store_tls_accepts_empty_custom_trust_bundle() {
+        let mut config: PipelineConfig = serde_json::from_value(pipeline_config_json()).unwrap();
+        config.pg_connection.tls =
+            TlsConfig { enabled: true, trusted_root_certs: "placeholder-certificate".to_owned() };
+        let mut store_pg_connection = pg_connection("127.0.0.1", 6432);
+        store_pg_connection.tls.enabled = true;
+        config.store_pg_connection = Some(store_pg_connection);
+
+        config.validate().unwrap();
+        PipelineConfigWithoutSecrets::from(config).validate().unwrap();
     }
 
     /// Both runtime config representations enforce the same inclusive retry
