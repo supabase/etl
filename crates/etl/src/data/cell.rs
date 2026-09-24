@@ -1,7 +1,7 @@
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use uuid::Uuid;
 
-use crate::data::{PgNumeric, PgTimeTz};
+use crate::data::{Date, PgNumeric, PgTime, PgTimeTz, Timestamp};
 
 /// Represents a single database cell value with support for Postgres types.
 ///
@@ -11,6 +11,10 @@ use crate::data::{PgNumeric, PgTimeTz};
 /// type remains available on the corresponding [`crate::schema::ColumnSchema`],
 /// so values without specialized Rust semantics can be preserved as
 /// [`Cell::String`] while destinations still know the source column type.
+///
+/// Temporal values preserve infinities and the distinct `24:00:00` time.
+/// Finite dates and timestamps remain limited to chrono's calendar range.
+/// Destinations must report values their encoding cannot preserve.
 ///
 /// The enum is designed to make destination conversion efficient while
 /// maintaining data fidelity.
@@ -37,15 +41,15 @@ pub enum Cell {
     /// Postgres NUMERIC/DECIMAL type with arbitrary precision
     Numeric(PgNumeric),
     /// Date without time information.
-    Date(NaiveDate),
+    Date(Date<NaiveDate>),
     /// Time of day without time zone information.
-    Time(NaiveTime),
+    Time(PgTime),
     /// Time of day with a fixed UTC offset.
     TimeTz(PgTimeTz),
     /// Timestamp without time zone information.
-    Timestamp(NaiveDateTime),
+    Timestamp(Timestamp<NaiveDateTime>),
     /// Timestamp with time zone information normalized to UTC.
-    TimestampTz(DateTime<Utc>),
+    TimestampTz(Timestamp<DateTime<Utc>>),
     /// UUID (Universally Unique Identifier)
     Uuid(Uuid),
     /// JSON data as parsed value
@@ -69,11 +73,11 @@ impl Cell {
             Cell::F32(i) => *i = 0.,
             Cell::F64(i) => *i = 0.,
             Cell::Numeric(n) => *n = PgNumeric::default(),
-            Cell::Date(t) => *t = NaiveDate::default(),
-            Cell::Time(t) => *t = NaiveTime::default(),
+            Cell::Date(t) => *t = Date::Value(NaiveDate::default()),
+            Cell::Time(t) => *t = PgTime::default(),
             Cell::TimeTz(t) => *t = PgTimeTz::default(),
-            Cell::Timestamp(t) => *t = NaiveDateTime::default(),
-            Cell::TimestampTz(t) => *t = DateTime::<Utc>::default(),
+            Cell::Timestamp(t) => *t = Timestamp::Value(NaiveDateTime::default()),
+            Cell::TimestampTz(t) => *t = Timestamp::Value(DateTime::<Utc>::default()),
             Cell::Uuid(u) => *u = Uuid::default(),
             Cell::Json(j) => *j = serde_json::Value::default(),
             Cell::U32(u) => *u = 0,
@@ -114,16 +118,16 @@ pub enum ArrayCell {
     /// Array of nullable Postgres numeric values
     Numeric(Vec<Option<PgNumeric>>),
     /// Array of nullable dates.
-    Date(Vec<Option<NaiveDate>>),
+    Date(Vec<Option<Date<NaiveDate>>>),
     /// Array of nullable times of day without time zone information.
-    Time(Vec<Option<NaiveTime>>),
+    Time(Vec<Option<PgTime>>),
     /// Array of nullable times of day with fixed UTC offsets.
     TimeTz(Vec<Option<PgTimeTz>>),
     /// Array of nullable timestamps without time zone information.
-    Timestamp(Vec<Option<NaiveDateTime>>),
+    Timestamp(Vec<Option<Timestamp<NaiveDateTime>>>),
     /// Array of nullable timestamps with time zone information normalized to
     /// UTC.
-    TimestampTz(Vec<Option<DateTime<Utc>>>),
+    TimestampTz(Vec<Option<Timestamp<DateTime<Utc>>>>),
     /// Array of nullable UUIDs
     Uuid(Vec<Option<Uuid>>),
     /// Array of nullable JSON values

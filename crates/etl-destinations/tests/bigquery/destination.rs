@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use etl::{
-    data::{Cell, TableRow},
+    data::{Cell, Date, TableRow},
     destination::WriteEventsDurability,
     event::{Event, InsertEvent, RelationEvent},
     schema::{
@@ -519,7 +519,7 @@ async fn table_options_support_time_column_and_ingestion_time_partitioning() {
             &ReplicatedTableSchema::all(Arc::new(time_column_schema.clone())),
             vec![TableRow::new(vec![
                 Cell::I32(1),
-                Cell::Date(chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap()),
+                Cell::Date(Date::Value(chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap())),
             ])],
         )
         .await

@@ -14,7 +14,10 @@ use duckdb::{
     types::{TimeUnit, Value},
 };
 use etl::{
-    data::{ArrayCell, Cell, TableRow},
+    data::{
+        ArrayCell, Cell, Date, PgTime, TableRow, Timestamp, format_date, format_timestamp,
+        format_timestamptz,
+    },
     error::{ErrorKind, EtlResult},
     etl_error,
     schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
@@ -174,19 +177,19 @@ impl ArrowColumnValues {
             (Self::Utf8(values), Cell::Uuid(value)) => values.push(Some(value.to_string())),
             (Self::Utf8(values), Cell::Json(value)) => values.push(Some(value.to_string())),
             (Self::Date32(values), Cell::Null) => values.push(None),
-            (Self::Date32(values), Cell::Date(value)) => {
+            (Self::Date32(values), Cell::Date(Date::Value(value))) => {
                 values.push(Some(date_days_since_epoch(value, column_name)?));
             }
             (Self::Time64Microsecond(values), Cell::Null) => values.push(None),
-            (Self::Time64Microsecond(values), Cell::Time(value)) => {
+            (Self::Time64Microsecond(values), Cell::Time(PgTime::Value(value))) => {
                 values.push(Some(time_micros_since_midnight(value)));
             }
             (Self::TimestampMicrosecond(values), Cell::Null) => values.push(None),
-            (Self::TimestampMicrosecond(values), Cell::Timestamp(value)) => {
+            (Self::TimestampMicrosecond(values), Cell::Timestamp(Timestamp::Value(value))) => {
                 values.push(Some(value.and_utc().timestamp_micros()));
             }
             (Self::TimestampTzMicrosecond(values), Cell::Null) => values.push(None),
-            (Self::TimestampTzMicrosecond(values), Cell::TimestampTz(value)) => {
+            (Self::TimestampTzMicrosecond(values), Cell::TimestampTz(Timestamp::Value(value))) => {
                 values.push(Some(value.timestamp_micros()));
             }
             (Self::Binary(values), Cell::Null) => values.push(None),
@@ -293,10 +296,10 @@ fn cell_matches_arrow_kind(cell: &Cell, kind: ArrowColumnKind) -> bool {
                     | Cell::Uuid(_)
                     | Cell::Json(_)
             )
-            | (ArrowColumnKind::Date32, Cell::Date(_))
-            | (ArrowColumnKind::Time64Microsecond, Cell::Time(_))
-            | (ArrowColumnKind::TimestampMicrosecond, Cell::Timestamp(_))
-            | (ArrowColumnKind::TimestampTzMicrosecond, Cell::TimestampTz(_))
+            | (ArrowColumnKind::Date32, Cell::Date(Date::Value(_)))
+            | (ArrowColumnKind::Time64Microsecond, Cell::Time(PgTime::Value(_)))
+            | (ArrowColumnKind::TimestampMicrosecond, Cell::Timestamp(Timestamp::Value(_)))
+            | (ArrowColumnKind::TimestampTzMicrosecond, Cell::TimestampTz(Timestamp::Value(_)))
             | (ArrowColumnKind::Binary, Cell::Bytes(_))
     )
 }
@@ -374,7 +377,14 @@ pub(super) fn cell_to_sql_literal_ref(cell: &Cell) -> String {
 
 /// Returns whether a cell must bypass the DuckDB appender path.
 fn cell_requires_sql_literals(cell: &Cell) -> bool {
-    matches!(cell, Cell::Array(_))
+    matches!(
+        cell,
+        Cell::Array(_)
+            | Cell::Date(Date::PosInfinity | Date::NegInfinity)
+            | Cell::Time(PgTime::EndOfDay)
+            | Cell::Timestamp(Timestamp::PosInfinity | Timestamp::NegInfinity)
+            | Cell::TimestampTz(Timestamp::PosInfinity | Timestamp::NegInfinity)
+    )
 }
 
 /// Serializes a row into a SQL `VALUES (...)` tuple.
@@ -401,14 +411,14 @@ fn cell_to_sql_literal(cell: Cell) -> String {
         Cell::F32(f) => float_literal(f64::from(f), false),
         Cell::F64(f) => float_literal(f, true),
         Cell::Numeric(n) => quote_literal(&n.to_string()),
-        Cell::Date(d) => format!("DATE '{}'", d.format("%Y-%m-%d")),
-        Cell::Time(t) => format!("TIME '{}'", t.format("%H:%M:%S%.6f")),
+        Cell::Date(d) => format!("DATE '{}'", format_date(&d)),
+        Cell::Time(t) => format!("TIME '{t}'"),
         Cell::TimeTz(t) => quote_literal(&t.to_string()),
         Cell::Timestamp(dt) => {
-            format!("TIMESTAMP '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f"))
+            format!("TIMESTAMP '{}'", format_timestamp(&dt))
         }
         Cell::TimestampTz(dt) => {
-            format!("TIMESTAMPTZ '{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f%:z"))
+            format!("TIMESTAMPTZ '{}'", format_timestamptz(&dt))
         }
         Cell::Uuid(u) => format!("CAST({} AS UUID)", quote_literal(&u.to_string())),
         Cell::Json(j) => format!("CAST({} AS JSON)", quote_literal(&j.to_string())),
@@ -516,18 +526,13 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .map(|o| {
                 o.map_or_else(
                     || "NULL".to_owned(),
-                    |value| format!("DATE '{}'", value.format("%Y-%m-%d")),
+                    |value| format!("DATE '{}'", format_date(&value)),
                 )
             })
             .collect(),
         ArrayCell::Time(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or_else(
-                    || "NULL".to_owned(),
-                    |value| format!("TIME '{}'", value.format("%H:%M:%S%.6f")),
-                )
-            })
+            .map(|o| o.map_or_else(|| "NULL".to_owned(), |value| format!("TIME '{value}'")))
             .collect(),
         ArrayCell::TimeTz(v) => v
             .into_iter()
@@ -538,7 +543,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .map(|o| {
                 o.map_or_else(
                     || "NULL".to_owned(),
-                    |value| format!("TIMESTAMP '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f")),
+                    |value| format!("TIMESTAMP '{}'", format_timestamp(&value)),
                 )
             })
             .collect(),
@@ -547,7 +552,7 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
             .map(|o| {
                 o.map_or_else(
                     || "NULL".to_owned(),
-                    |value| format!("TIMESTAMPTZ '{}'", value.format("%Y-%m-%d %H:%M:%S%.6f%:z")),
+                    |value| format!("TIMESTAMPTZ '{}'", format_timestamptz(&value)),
                 )
             })
             .collect(),
@@ -632,13 +637,23 @@ fn cell_to_value(cell: Cell) -> Value {
         Cell::F64(f) => Value::Double(f),
         // NUMERIC stored as VARCHAR to avoid precision loss.
         Cell::Numeric(n) => Value::Text(n.to_string()),
-        Cell::Date(d) => Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32),
-        Cell::Time(t) => Value::Time64(TimeUnit::Microsecond, time_micros_since_midnight(t)),
+        Cell::Date(Date::Value(d)) => {
+            Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32)
+        }
+        Cell::Time(PgTime::Value(t)) => {
+            Value::Time64(TimeUnit::Microsecond, time_micros_since_midnight(t))
+        }
         Cell::TimeTz(t) => Value::Text(t.to_string()),
-        Cell::Timestamp(dt) => {
+        Cell::Timestamp(Timestamp::Value(dt)) => {
             Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
         }
-        Cell::TimestampTz(dt) => Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros()),
+        Cell::TimestampTz(Timestamp::Value(dt)) => {
+            Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros())
+        }
+        Cell::Date(value) => Value::Text(format_date(&value).to_string()),
+        Cell::Time(value) => Value::Text(value.to_string()),
+        Cell::Timestamp(value) => Value::Text(format_timestamp(&value).to_string()),
+        Cell::TimestampTz(value) => Value::Text(format_timestamptz(&value).to_string()),
         // UUID stored as text; DuckDB casts VARCHAR → UUID automatically.
         Cell::Uuid(u) => Value::Text(u.to_string()),
         // JSON serialised as text.
@@ -667,41 +682,22 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
             v.into_iter().map(|o| o.map_or(Value::Null, |n| Value::Text(n.to_string()))).collect()
         }
         ArrayCell::Date(v) => {
-            let epoch_date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-            v.into_iter()
-                .map(|o| {
-                    o.map_or(Value::Null, |d| {
-                        Value::Date32(d.signed_duration_since(epoch_date).num_days() as i32)
-                    })
-                })
-                .collect()
+            v.into_iter().map(|value| cell_to_value(value.map_or(Cell::Null, Cell::Date))).collect()
         }
-        ArrayCell::Time(v) => v
+        ArrayCell::Time(v) => {
+            v.into_iter().map(|value| cell_to_value(value.map_or(Cell::Null, Cell::Time))).collect()
+        }
+        ArrayCell::TimeTz(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(Value::Null, |t| {
-                    Value::Time64(TimeUnit::Microsecond, time_micros_since_midnight(t))
-                })
-            })
+            .map(|value| cell_to_value(value.map_or(Cell::Null, Cell::TimeTz)))
             .collect(),
-        ArrayCell::TimeTz(v) => {
-            v.into_iter().map(|o| o.map_or(Value::Null, |t| Value::Text(t.to_string()))).collect()
-        }
         ArrayCell::Timestamp(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(Value::Null, |dt| {
-                    Value::Timestamp(TimeUnit::Microsecond, dt.and_utc().timestamp_micros())
-                })
-            })
+            .map(|value| cell_to_value(value.map_or(Cell::Null, Cell::Timestamp)))
             .collect(),
         ArrayCell::TimestampTz(v) => v
             .into_iter()
-            .map(|o| {
-                o.map_or(Value::Null, |dt| {
-                    Value::Timestamp(TimeUnit::Microsecond, dt.timestamp_micros())
-                })
-            })
+            .map(|value| cell_to_value(value.map_or(Cell::Null, Cell::TimestampTz)))
             .collect(),
         ArrayCell::Uuid(v) => {
             v.into_iter().map(|o| o.map_or(Value::Null, |u| Value::Text(u.to_string()))).collect()
@@ -716,8 +712,11 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use etl::schema::{
-        ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type as PgType,
+    use etl::{
+        data::{PgTime, Timestamp},
+        schema::{
+            ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type as PgType,
+        },
     };
 
     use super::*;
@@ -749,9 +748,9 @@ mod tests {
         let micros = 45_296_789_012;
         let value = Value::Time64(TimeUnit::Microsecond, micros);
 
-        assert_eq!(cell_to_value(Cell::Time(time)), value);
+        assert_eq!(cell_to_value(Cell::Time(PgTime::Value(time))), value);
         assert_eq!(
-            array_cell_to_value(ArrayCell::Time(vec![Some(time), None])),
+            array_cell_to_value(ArrayCell::Time(vec![Some(PgTime::Value(time)), None])),
             Value::List(vec![value, Value::Null])
         );
     }
@@ -798,12 +797,12 @@ mod tests {
             TableRow::new(vec![
                 Cell::I32(1),
                 Cell::String("alice".to_owned()),
-                Cell::Timestamp(
+                Cell::Timestamp(Timestamp::Value(
                     chrono::NaiveDate::from_ymd_opt(2026, 1, 2)
                         .unwrap()
                         .and_hms_opt(3, 4, 5)
                         .unwrap(),
-                ),
+                )),
             ]),
             TableRow::new(vec![Cell::I32(2), Cell::Null, Cell::Null]),
         ];
@@ -870,6 +869,67 @@ mod tests {
             PreparedRows::SqlLiterals(_) | PreparedRows::ArrowRecordBatch(_) => {
                 panic!("expected row appender fallback")
             }
+        }
+    }
+    #[test]
+    fn special_temporal_values_use_sql_literals_for_copy_and_cdc() {
+        let schema = replicated_schema(vec![
+            ColumnSchema::new("d".to_owned(), PgType::DATE, -1, 1, true),
+            ColumnSchema::new("t".to_owned(), PgType::TIME, -1, 2, true),
+            ColumnSchema::new("ts".to_owned(), PgType::TIMESTAMP, -1, 3, true),
+            ColumnSchema::new("tsz".to_owned(), PgType::TIMESTAMPTZ, -1, 4, true),
+        ]);
+        let row = TableRow::new(vec![
+            Cell::Date(Date::NegInfinity),
+            Cell::Time(PgTime::EndOfDay),
+            Cell::Timestamp(Timestamp::PosInfinity),
+            Cell::TimestampTz(Timestamp::NegInfinity),
+        ]);
+        for prepared in
+            [prepare_copy_rows(&schema, vec![row.clone()]).unwrap(), prepare_rows(vec![row])]
+        {
+            let PreparedRows::SqlLiterals(rows) = prepared else {
+                panic!("expected SQL literals for special temporal values");
+            };
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            let valid: bool = conn
+                .query_row(
+                    &format!(
+                        "select d = date '-infinity' and t = time '24:00:00' and t <> time \
+                         '00:00:00' and ts = timestamp 'infinity' and tsz = timestamptz \
+                         '-infinity' from (values {}) as v(d, t, ts, tsz)",
+                        rows.join(",")
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(valid);
+        }
+    }
+
+    #[test]
+    fn temporal_sql_literals_preserve_calendar_years() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        for year in [-43, 0, 12023] {
+            let date = NaiveDate::from_ymd_opt(year, 2, 1).unwrap();
+            let timestamp = date.and_hms_opt(11, 12, 13).unwrap();
+            let row = TableRow::new(vec![
+                Cell::Date(Date::Value(date)),
+                Cell::Timestamp(Timestamp::Value(timestamp)),
+            ]);
+            let literal = table_row_to_sql_literal(row);
+            let valid: bool = conn
+                .query_row(
+                    &format!(
+                        "select extract(year from d) = {year} and extract(year from ts) = {year} \
+                         and ts::time = time '11:12:13' from (values {literal}) as v(d, ts)"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(valid);
         }
     }
 }

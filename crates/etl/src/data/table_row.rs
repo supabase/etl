@@ -1,6 +1,8 @@
 use std::mem::size_of;
 
-use crate::data::{ArrayCell, Cell, PgNumeric, PgTimeTz, SizeHint, owned_heap_size_hint};
+use crate::data::{
+    ArrayCell, Cell, Date, PgNumeric, PgTime, PgTimeTz, SizeHint, Timestamp, owned_heap_size_hint,
+};
 
 /// Represents a complete row of data from a database table.
 ///
@@ -334,20 +336,18 @@ fn estimate_array_allocated_bytes(value: &ArrayCell) -> usize {
             total
         }
         ArrayCell::Date(values) => {
-            values.capacity().saturating_mul(size_of::<Option<chrono::NaiveDate>>())
+            values.capacity().saturating_mul(size_of::<Option<Date<chrono::NaiveDate>>>())
         }
-        ArrayCell::Time(values) => {
-            values.capacity().saturating_mul(size_of::<Option<chrono::NaiveTime>>())
-        }
+        ArrayCell::Time(values) => values.capacity().saturating_mul(size_of::<Option<PgTime>>()),
         ArrayCell::TimeTz(values) => {
             values.capacity().saturating_mul(size_of::<Option<PgTimeTz>>())
         }
         ArrayCell::Timestamp(values) => {
-            values.capacity().saturating_mul(size_of::<Option<chrono::NaiveDateTime>>())
+            values.capacity().saturating_mul(size_of::<Option<Timestamp<chrono::NaiveDateTime>>>())
         }
-        ArrayCell::TimestampTz(values) => {
-            values.capacity().saturating_mul(size_of::<Option<chrono::DateTime<chrono::Utc>>>())
-        }
+        ArrayCell::TimestampTz(values) => values
+            .capacity()
+            .saturating_mul(size_of::<Option<Timestamp<chrono::DateTime<chrono::Utc>>>>()),
         ArrayCell::Uuid(values) => {
             values.capacity().saturating_mul(size_of::<Option<uuid::Uuid>>())
         }

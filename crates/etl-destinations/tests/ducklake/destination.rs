@@ -32,7 +32,7 @@ use chrono::NaiveDate;
 use chrono::{TimeDelta, Utc};
 use duckdb::Connection;
 use etl::{
-    data::{Cell, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
+    data::{Cell, Date, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
         TableCopyAttemptId, TableCopyBatchId,
@@ -5116,7 +5116,7 @@ async fn type_mapping_round_trip() {
                 Cell::String("hello".to_owned()),
                 Cell::F64(PI),
                 Cell::Bool(true),
-                Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
+                Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap())),
             ])],
         )
         .await
