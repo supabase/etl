@@ -234,10 +234,12 @@ Enable probes only with a replicator image that supports these endpoints.
 
 `etl_postgres_query_duration_seconds` records client request duration for the
 `postgres_store` and `out_of_band` pools, including connection waits and result
-consumption. Failed and cancelled requests count too. Replication and COPY
-connections are not instrumented.
+consumption. Failed and cancelled requests count once polling has started.
+Explicit `BEGIN` and `COMMIT` requests count separately, and a raw SQL batch
+counts as one request. Implicit SQLx operations, including rollback on drop,
+are excluded. Replication and COPY connections are not instrumented.
 
-Query rate by pool:
+Request rate by pool:
 
 ```text
 sum by (pool) (rate(etl_postgres_query_duration_seconds_count[5m]))

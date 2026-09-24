@@ -1,9 +1,10 @@
 //! Named SQLx pools with query duration and count metrics.
 //!
 //! Each polled request records one sample on completion or cancellation,
-//! including pool wait and result consumption. Explicit transaction commands
-//! count separately; implicit SQLx operations do not. Raw SQL batches count
-//! once. Labels contain only the fixed pool name.
+//! including pool wait and result consumption. Explicit BEGIN and COMMIT
+//! requests count separately; implicit SQLx operations, including rollback on
+//! drop, do not. Raw SQL batches count once, and unpolled requests do not
+//! count. Labels contain only the fixed pool name.
 
 use std::{task::Poll, time::Instant};
 

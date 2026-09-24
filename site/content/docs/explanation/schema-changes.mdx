@@ -43,13 +43,21 @@ supported `ALTER TABLE` or publication column-list change:
 
 1. PostgreSQL emits a transactional schema snapshot in WAL order.
 2. ETL stores the new versioned table schema.
-3. PostgreSQL sends a fresh `RELATION` message before following row events.
+3. ETL combines the snapshot with column masks from PostgreSQL's `RELATION`
+   metadata. If no-op DDL produces no fresh relation, ETL reuses the previous
+   masks before the next insert, update, or delete.
 4. ETL sends the destination an ordered `Event::Relation` containing the new
-   `ReplicatedTableSchema`.
-5. The destination applies its supported DDL before writing following rows.
+   `ReplicatedTableSchema` before the affected data event. PostgreSQL supplies
+   a protocol relation before truncate.
+5. Destinations that support the transition apply any required DDL and record
+   the new snapshot before writing following rows.
 
-`Relation` is an ordered event, not a batch boundary. One `write_events()` call
-can contain several relation and row events, which must be processed in order.
+`Relation` is an ordered notification, not a batch boundary. One `write_events()`
+call can contain several relation and row events, which must be processed in
+order. Reconnects and maintenance can resend an unchanged snapshot and mask;
+that identical pair needs no schema transition. Supported publication
+column-list changes use a newer snapshot even when the full table schema is
+unchanged.
 
 ETL captures the complete schema after PostgreSQL has applied the DDL instead
 of replaying raw PostgreSQL SQL. It matches columns by PostgreSQL `attnum`, so a
@@ -183,8 +191,10 @@ ETL does not infer missing recovery state:
 
 - Previous snapshot and mask values must be stored together.
 - Incomplete or stale recovery metadata fails during loading.
-- An older relation, or an equal snapshot with a different replication mask,
-  is rejected instead of rewinding destination DDL.
+- An equal snapshot with a different replication mask is rejected.
+- Older relations never rewind destination DDL. DuckLake ignores these replay
+  markers and validates retained row and truncate events after filtering its
+  durable replay prefix. The other built-in destinations reject older relations.
 
 Recovery then follows each destination's DDL guarantees:
 
@@ -213,11 +223,13 @@ Resynchronize the affected table when recovery cannot prove a safe endpoint.
 
 ## Custom destinations
 
-Custom destinations receive schema transitions through `Event::Relation`.
+Custom destinations receive schema notifications through `Event::Relation`.
 They should:
 
 1. Process the batch in order and flush writes using the previous schema.
-2. Compare the applied and incoming logical schemas.
+2. Compare the incoming snapshot and replication mask with applied metadata;
+   an identical pair needs no transition. For a newer snapshot, compare the
+   projected logical schemas.
 3. Validate the complete plan before recording `Applying` or issuing DDL.
 4. Apply supported operations in the supplied order.
 5. Record `Applied` only after following rows can safely use the new schema.

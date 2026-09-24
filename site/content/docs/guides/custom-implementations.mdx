@@ -29,10 +29,12 @@ then catches up changes before ongoing replication begins.
   idempotent across retries and restarts.
 </Callout>
 
-Schema changes arrive as ordered `Event::Relation` values inside
-`write_events()` batches. If your destination keeps physical schemas, flush
-writes that still use the previous schema, apply the supported operations in
-the supplied order, then continue with following rows. See
+Schema notifications arrive as ordered `Event::Relation` values inside
+`write_events()` batches. Compare the snapshot and replication mask with applied
+metadata first; repeated identical notifications need no transition. If your
+destination keeps physical schemas, flush writes that still use the previous
+schema before applying a supported transition, then continue with following
+rows. See
 [Schema Changes](/explanation/schema-changes/) for publication-mask additions,
 defaults, recovery, and current limitations.
 
@@ -71,7 +73,7 @@ tracing-subscriber = "0.3"
 
 Create `src/custom_store.rs`. A store must implement **four traits** (see [Extension Points](/explanation/traits/) for full details):
 
-- `CachedStore` - Complete cache preparation before startup
+- `CachedStore` - Complete cache preparation and refresh
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
 - `StateStore` - Table state, persisted replication checkpoints, and destination table metadata tracking
 - `TableStateLifecycleStore` - Store lifecycle operations for table-copy preparation, resync resets, and publication changes

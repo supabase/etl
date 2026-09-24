@@ -44,7 +44,7 @@ pub trait Destination {
 - `write_table_rows()` and `write_events()` must tolerate **duplicate delivery** because ETL may retry or replay after failure.
 - Handle **concurrent calls** safely, especially from parallel table sync workers.
 - Preserve **per-table event order**. During initial sync and catch-up, transaction markers are not a reliable all-tables transaction boundary.
-- Treat `Event::Relation` as an ordered schema transition, not a `write_events()` batch boundary. ETL batches ongoing replication events by size and time, so one call can contain multiple schema changes, including multiple relation events for the same table.
+- Process `Event::Relation` as an ordered schema notification. Compare its snapshot and replication mask with applied metadata; an identical pair needs no transition. ETL batches ongoing replication events by size and time, so one `write_events()` call can contain multiple schema changes or repeated notifications for the same table. See [Events](/explanation/events/#relation) for snapshot and replay semantics.
 - Always complete the supplied async result handle. Dropping it reports a destination error to ETL.
 - `startup()` runs after ETL has loaded destination metadata and table schemas from the store and purged tables removed from the publication. It may recover `Creating` or destination-recoverable `Applying` operations and rebuild process-local state. It should trust `Applied` metadata rather than recreate or structurally repair the data-bearing destination table; read-only destination metadata calls are appropriate only when indispensable to rebuild local write state or fail fast.
 - All three write-like methods use async results, but ETL awaits each method call before it can observe that result. `write_events()` should dispatch long-running work to owned tasks or queues and return promptly: an inline write stalls the apply loop, including its shutdown handling. After dispatch, the loop can process WAL while the result is pending, but it waits for that result before dispatching another batch. Shutdown drains apply writes rather than cancelling them.
@@ -156,7 +156,7 @@ pub trait SchemaStore: CachedStore {
 | Method | Purpose |
 |--------|---------|
 | `get_table_schema()` | Returns the newest cached schema at or before the requested snapshot, or `None` |
-| `get_table_schemas()` | Returns all cached schemas, recovering an unusable cache when needed |
+| `get_table_schemas()` | Returns every retained schema version for every table, recovering an unusable cache when needed |
 | `store_table_schema()` | Saves a schema version to both cache and persistent storage and returns the cached `Arc` |
 | `prune_table_schemas()` | Keeps the newest schema at or before each table's boundary and all newer versions; removes older versions from storage and cache |
 

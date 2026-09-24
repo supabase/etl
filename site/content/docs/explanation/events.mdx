@@ -239,8 +239,8 @@ pub struct CommitEvent {
 
 ### Relation
 
-Provides **table schema information**. Sent before data events for a table and
-again after supported schema changes.
+Provides **table schema and column-mask information** before subsequent data
+events. A repeated notification does not necessarily mean the schema changed.
 
 ```rust
 pub struct RelationEvent {
@@ -248,16 +248,23 @@ pub struct RelationEvent {
 }
 ```
 
-Relation messages are connection-local protocol metadata. PostgreSQL can emit
-the same relation again after a reconnect even when the source schema did not
-change. A `RelationEvent` therefore has no durable event sequence key and does
-not consume a transaction ordinal.
+PostgreSQL relation messages are connection-local protocol metadata. A reconnect
+or catalog invalidation, including maintenance, can resend an unchanged schema.
+ETL can also synthesize a `RelationEvent` before an insert, update, or delete
+when a pending DDL snapshot has no following protocol relation. These events
+have no durable event sequence key and do not consume a transaction ordinal.
 
-The carried `SnapshotId` identifies the underlying stored table schema, not the
-complete `ReplicatedTableSchema`. A relation for the same physical schema can
-carry different replication or identity masks. Destinations must process those
-mask changes as ordered schema barriers for following row events, rather than
-using relation delivery itself as a checkpoint or deduplication key.
+The carried `SnapshotId` identifies a stored table-schema version, while the
+masks describe its replicated projection and row identity. Supported publication
+column-list changes receive a new snapshot even when the full table schema is
+unchanged. No-op DDL can also advance the snapshot without changing columns;
+receiving a protocol relation alone does not create a new version.
+
+Destinations compare the snapshot and replication mask with applied metadata.
+An identical pair needs no schema transition. A newer snapshot must be
+validated even when its projected schema needs no physical DDL. An equal
+snapshot with a different replication mask is ambiguous and must be rejected.
+Preserve event order; relation delivery is not a checkpoint or deduplication key.
 
 PostgreSQL pgoutput builds relation messages by walking the table descriptor in
 `pg_attribute.attnum` order and skipping columns that are not published. It

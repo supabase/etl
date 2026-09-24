@@ -22,7 +22,7 @@ pub trait SchemaStore: CachedStore {
         snapshot_id: SnapshotId,
     ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
 
-    /// Returns all cached table schemas.
+    /// Returns every retained schema version for every table.
     ///
     /// Implementations may refresh an uninitialized or invalidated cache.
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;

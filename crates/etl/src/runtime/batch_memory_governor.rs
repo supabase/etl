@@ -80,7 +80,7 @@ struct BatchMemoryState {
 }
 
 impl BatchMemoryState {
-    /// Creates shared state from the initial memory snapshot target.
+    /// Creates shared state from the initial capacity-derived target.
     fn new(
         memory_capacity_revision: u64,
         snapshot_batch_target_bytes: u64,
@@ -188,10 +188,9 @@ impl BatchMemoryGovernor {
     /// Returns the current advisory batch-size target in bytes.
     ///
     /// The common path compares two atomic revisions and loads the atomic
-    /// target. The first caller to observe a new memory-capacity revision
-    /// refreshes the shared target while holding the same lock used for slot
-    /// changes. This keeps one frozen global target per revision and one
-    /// consistent per-slot target for all callers.
+    /// target. A caller observing a new memory-capacity revision tries to
+    /// refresh the shared target under the lock used for slot changes. If that
+    /// lock is busy, it uses the current advisory target; a later call retries.
     pub(crate) fn batch_size_target_bytes(&self) -> usize {
         // Usage-only samples leave the capacity revision unchanged, so they
         // do not require locking or recalculating the target.
@@ -227,8 +226,8 @@ impl BatchMemoryGovernor {
         let snapshot_batch_target_bytes =
             calculate_batch_memory_target(memory.total_memory_bytes, self.memory_budget_ratio);
 
-        // Freeze the global target for this snapshot, then divide it across the
-        // currently registered batch slots.
+        // Freeze the global target for this capacity revision, then divide it
+        // across the currently registered batch slots.
         update.snapshot_batch_target_bytes = snapshot_batch_target_bytes;
         self.state.recalculate_batch_size_target(&update);
 

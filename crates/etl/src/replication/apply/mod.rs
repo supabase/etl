@@ -1299,10 +1299,11 @@ where
     /// Cleanup removes replay state, so the apply loop's in-memory flush
     /// position alone cannot establish a boundary that survives a crash.
     ///
-    /// Pending candidates remain in [`ApplyLoopState`] when a transient failure
-    /// prevents evaluation or queueing, so the next durable result retries
-    /// them. They are cleared only after successful evaluation and, when
-    /// needed, successful queueing.
+    /// Evaluation errors and a full queue leave candidates pending for the
+    /// next durable commit-bearing result. Successful evaluation clears tables
+    /// that need no cleanup; successful queueing clears the others. If pruning
+    /// later fails in the cleanup worker, another relation event must trigger
+    /// a new attempt.
     async fn try_queue_schema_cleanup(&mut self) {
         if self.state.pending_schema_cleanup_table_ids.is_empty() {
             return;
@@ -1503,9 +1504,8 @@ where
             // until a durable result carries a commit boundary we can persist.
             // That boundary may precede relations in the batch, so retention
             // must preserve schemas needed to replay the unfinished
-            // transaction. The first relation after restart also
-            // triggers a new check if an earlier cleanup was
-            // missed.
+            // transaction. The first relation after restart also triggers a
+            // new check if an earlier cleanup was missed.
             self.state
                 .pending_schema_cleanup_table_ids
                 .extend(metadata.relation_table_ids.iter().copied());

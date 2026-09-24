@@ -59,7 +59,7 @@ static POSTGRES_STORE_OPTIONS: LazyLock<PgConnectionOptions> =
 
 /// Creates a lazily connected pool with automatic idle connection cleanup.
 fn create_database_pool(connection_config: &PgConnectionConfig) -> InstrumentedPgPool {
-    // Each cache read must take a fresh snapshot after acquiring the
+    // Reload queries need fresh database snapshots after acquiring the
     // transaction lock, even if the database defaults to repeatable read.
     let options: PgConnectOptions = connection_config.with_db(Some(&POSTGRES_STORE_OPTIONS));
     let options = options.options([("default_transaction_isolation", "read committed")]);
@@ -84,8 +84,8 @@ fn emit_table_metrics(counts_by_state: &HashMap<TableStateType, u64>) {
 
 /// Inner state of [`PostgresStore`].
 ///
-/// A single pipeline lock orders database mutations and all affected caches.
-/// Lifecycle operations deliberately keep the caches in one critical section.
+/// The shared mutex orders cache access and database mutations. Lifecycle
+/// operations keep every affected cache in the same critical section.
 #[derive(Debug, Default)]
 struct Inner {
     /// False until a complete load or mutation publishes confirmed state.
@@ -94,7 +94,7 @@ struct Inner {
     /// the cache unusable before database work and mark it usable only after
     /// a full reload or a confirmed mutation while holding the mutex.
     usable: bool,
-    /// Count of number of tables in each state. Used for metrics.
+    /// Number of tables in each state, used for metrics.
     state_counts: HashMap<TableStateType, u64>,
     /// Cached table states indexed by table ID.
     table_states: TableStates,
@@ -104,8 +104,8 @@ struct Inner {
     table_schemas: Arc<TableSchemaSnapshots>,
     /// Last successfully pruned retention boundary per table.
     ///
-    /// Successful lifecycle changes and schema writes at or below a remembered
-    /// boundary invalidate it together with the corresponding cached data.
+    /// Schema writes at or below a remembered boundary and table lifecycle
+    /// changes clear the affected entries. Full reloads clear every entry.
     schema_prune_boundaries: BTreeMap<TableId, SnapshotId>,
     /// Cached destination table metadata indexed by table ID.
     destination_tables_metadata: DestinationTablesMetadata,
@@ -448,7 +448,7 @@ impl StateStore for PostgresStore {
         Ok(())
     }
 
-    /// Rolls back a table's table state to the previous version.
+    /// Rolls back a table to its previous state.
     ///
     /// Returns the restored state, or an error if no previous state exists.
     async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {

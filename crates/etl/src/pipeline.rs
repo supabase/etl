@@ -127,9 +127,8 @@ where
     /// Starts the pipeline and begins replication processing.
     ///
     /// This method initializes the connection to Postgres, prepares every
-    /// store cache, creates the worker pool for table
-    /// synchronization, and starts the apply worker for processing replication
-    /// stream events.
+    /// store cache, creates the table synchronization worker pool, and starts
+    /// the apply worker for processing replication stream events.
     ///
     /// An unsupported retry delay returns [`ErrorKind::ConfigError`] before
     /// any startup work. After this method succeeds, subsequent calls return
@@ -166,8 +165,8 @@ where
         let replication_client =
             PgReplicationClient::connect(self.config.pg_connection.clone()).await?;
 
-        // Warm every store cache before initialization reads, destinations, or
-        // workers.
+        // Load every store cache before reconciling table states or starting
+        // destinations and workers.
         self.store.load_cache().await?;
 
         // Reconcile the cached table states with current publication
