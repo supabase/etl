@@ -1,9 +1,21 @@
 use etl::{
-    data::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow},
-    error::{ErrorKind, EtlError},
+    data::{ArrayCell, Cell, TableRow, Timestamp, format_date, format_timestamp},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
 use prost::bytes;
+
+/// Encodes a finite timestamp in BigQuery's integer wire representation.
+fn timestamp_micros(value: &Timestamp<chrono::DateTime<chrono::Utc>>) -> EtlResult<i64> {
+    match value {
+        Timestamp::Value(value) => Ok(value.timestamp_micros()),
+        Timestamp::PosInfinity | Timestamp::NegInfinity => Err(etl_error!(
+            ErrorKind::ConversionError,
+            "Cannot encode infinite timestamp",
+            "BigQuery TIMESTAMP uses finite microseconds"
+        )),
+    }
+}
 
 /// Protocol buffer wrapper for a BigQuery table row, holding its Protocol
 /// Buffer encoding rather than the source cells.
@@ -133,11 +145,11 @@ fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) -> Res
             prost::encoding::string::encode(tag, &s, buf);
         }
         Cell::Date(t) => {
-            let s = t.format(DATE_FORMAT).to_string();
+            let s = format_date(t).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         Cell::Time(t) => {
-            let s = t.format(TIME_FORMAT).to_string();
+            let s = t.to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         Cell::TimeTz(t) => {
@@ -145,11 +157,11 @@ fn cell_encode_prost(cell: &Cell, tag: u32, buf: &mut impl bytes::BufMut) -> Res
             prost::encoding::string::encode(tag, &s, buf);
         }
         Cell::Timestamp(t) => {
-            let s = t.format(TIMESTAMP_FORMAT).to_string();
+            let s = format_timestamp(t).to_string();
             prost::encoding::string::encode(tag, &s, buf);
         }
         Cell::TimestampTz(t) => {
-            let micros = t.timestamp_micros();
+            let micros = timestamp_micros(t)?;
             prost::encoding::int64::encode(tag, &micros, buf);
         }
         Cell::Uuid(u) => {
@@ -272,13 +284,13 @@ fn array_cell_encode_prost(
         }
         ArrayCell::Date(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.format(DATE_FORMAT).to_string();
+                let s = format_date(element(value, index)?).to_string();
                 prost::encoding::string::encode(tag, &s, buf);
             }
         }
         ArrayCell::Time(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.format(TIME_FORMAT).to_string();
+                let s = element(value, index)?.to_string();
                 prost::encoding::string::encode(tag, &s, buf);
             }
         }
@@ -290,7 +302,7 @@ fn array_cell_encode_prost(
         }
         ArrayCell::Timestamp(vec) => {
             for (index, value) in vec.iter().enumerate() {
-                let s = element(value, index)?.format(TIMESTAMP_FORMAT).to_string();
+                let s = format_timestamp(element(value, index)?).to_string();
                 prost::encoding::string::encode(tag, &s, buf);
             }
         }
@@ -298,7 +310,7 @@ fn array_cell_encode_prost(
             let values = vec
                 .iter()
                 .enumerate()
-                .map(|(index, value)| element(value, index).map(chrono::DateTime::timestamp_micros))
+                .map(|(index, value)| element(value, index).and_then(timestamp_micros))
                 .collect::<Result<Vec<_>, _>>()?;
             prost::encoding::int64::encode_packed(tag, &values, buf);
         }
@@ -330,7 +342,7 @@ mod tests {
 
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
     use etl::{
-        data::{Cell, PgNumeric},
+        data::{Cell, Date, PgNumeric, PgTime, Timestamp},
         error::ErrorKind,
     };
     use prost::Message;
@@ -391,7 +403,7 @@ mod tests {
     fn bigquery_table_row_try_from_delegates_date_domain_behavior_to_bigquery() {
         let invalid_date = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().pred_opt().unwrap(); // Date before year 1
 
-        let table_row = TableRow::new(vec![Cell::Date(invalid_date)]);
+        let table_row = TableRow::new(vec![Cell::Date(Date::Value(invalid_date))]);
 
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_ok());
@@ -478,9 +490,9 @@ mod tests {
         let valid_datetime = NaiveDateTime::new(valid_date, valid_time);
 
         let table_row = TableRow::new(vec![
-            Cell::Date(valid_date),
-            Cell::Time(valid_time),
-            Cell::Timestamp(valid_datetime),
+            Cell::Date(Date::Value(valid_date)),
+            Cell::Time(PgTime::Value(valid_time)),
+            Cell::Timestamp(Timestamp::Value(valid_datetime)),
         ]);
 
         let result = BigQueryTableRow::try_from(table_row);
@@ -492,9 +504,11 @@ mod tests {
         let timestamptz = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
         let expected_micros = timestamptz.timestamp_micros();
 
-        let row =
-            BigQueryTableRow::try_from_tagged_cells(vec![(1, Cell::TimestampTz(timestamptz))])
-                .unwrap();
+        let row = BigQueryTableRow::try_from_tagged_cells(vec![(
+            1,
+            Cell::TimestampTz(Timestamp::Value(timestamptz)),
+        )])
+        .unwrap();
         let mut actual = Vec::new();
         row.encode(&mut actual).unwrap();
 
@@ -506,7 +520,9 @@ mod tests {
 
         let array_row = BigQueryTableRow::try_from_tagged_cells(vec![(
             1,
-            Cell::Array(etl::data::ArrayCell::TimestampTz(vec![Some(timestamptz)])),
+            Cell::Array(etl::data::ArrayCell::TimestampTz(vec![Some(Timestamp::Value(
+                timestamptz,
+            ))])),
         )])
         .unwrap();
         let mut actual_array = Vec::new();
@@ -528,5 +544,30 @@ mod tests {
 
         let result = BigQueryTableRow::try_from(table_row);
         assert!(result.is_ok());
+    }
+    #[test]
+    fn infinite_timestamps_fail_scalar_and_array_wire_encoding() {
+        for value in [Timestamp::PosInfinity, Timestamp::NegInfinity] {
+            for cell in
+                [Cell::TimestampTz(value), Cell::Array(ArrayCell::TimestampTz(vec![Some(value)]))]
+            {
+                let error = BigQueryTableRow::try_from(TableRow::new(vec![cell])).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::ConversionError);
+            }
+        }
+    }
+
+    #[test]
+    fn special_values_with_text_wire_forms_are_sent_to_bigquery() {
+        let row = BigQueryTableRow::try_from(TableRow::new(vec![
+            Cell::Date(Date::PosInfinity),
+            Cell::Time(PgTime::EndOfDay),
+            Cell::Timestamp(Timestamp::NegInfinity),
+        ]))
+        .unwrap();
+        let bytes = row.encode_to_vec();
+        for value in ["infinity", "24:00:00", "-infinity"] {
+            assert!(bytes.windows(value.len()).any(|bytes| bytes == value.as_bytes()));
+        }
     }
 }

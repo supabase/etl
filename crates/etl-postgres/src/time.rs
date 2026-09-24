@@ -7,7 +7,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use chrono::{FixedOffset, NaiveTime};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+pub use tokio_postgres::types::{Date, Timestamp};
 
 /// Postgres date format string for parsing dates in YYYY-MM-DD format.
 pub const DATE_FORMAT: &str = "%Y-%m-%d";
@@ -67,23 +68,112 @@ impl std::error::Error for ParseTimeError {
     }
 }
 
+/// A Postgres time of day, including the distinct end-of-day value.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PgTime {
+    /// A time before the end of the day.
+    Value(NaiveTime),
+    /// The end of the day, `24:00:00`, distinct from midnight.
+    EndOfDay,
+}
+
+impl Default for PgTime {
+    fn default() -> Self {
+        Self::Value(NaiveTime::default())
+    }
+}
+
+impl From<NaiveTime> for PgTime {
+    fn from(time: NaiveTime) -> Self {
+        Self::Value(time)
+    }
+}
+
+impl FromStr for PgTime {
+    type Err = ParseTimeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value == "24:00:00"
+            || value.strip_prefix("24:00:00.").is_some_and(|fraction| {
+                !fraction.is_empty() && fraction.bytes().all(|byte| byte == b'0')
+            })
+        {
+            return Ok(Self::EndOfDay);
+        }
+        Ok(Self::Value(NaiveTime::parse_from_str(value, TIME_FORMAT)?))
+    }
+}
+
+impl fmt::Display for PgTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Value(time) => write!(f, "{}", time.format(TIME_FORMAT)),
+            Self::EndOfDay => f.write_str("24:00:00"),
+        }
+    }
+}
+
+/// Formats a date using astronomical year numbering or an infinity literal.
+pub fn format_date(value: &Date<NaiveDate>) -> impl fmt::Display + '_ {
+    fmt::from_fn(move |f| match value {
+        Date::Value(value) if value.year() > 9999 => {
+            // Native SQL parsers accept expanded positive years without
+            // chrono's leading `+`.
+            write!(f, "{}{}", value.year(), value.format("-%m-%d"))
+        }
+        Date::Value(value) => write!(f, "{}", value.format(DATE_FORMAT)),
+        Date::PosInfinity => f.write_str("infinity"),
+        Date::NegInfinity => f.write_str("-infinity"),
+    })
+}
+
+/// Formats a timestamp using astronomical year numbering or an infinity
+/// literal.
+pub fn format_timestamp(value: &Timestamp<NaiveDateTime>) -> impl fmt::Display + '_ {
+    fmt::from_fn(move |f| match value {
+        Timestamp::Value(value) => write!(
+            f,
+            "{} {}",
+            format_date(&Date::Value(value.date())),
+            value.time().format(TIME_FORMAT)
+        ),
+        Timestamp::PosInfinity => f.write_str("infinity"),
+        Timestamp::NegInfinity => f.write_str("-infinity"),
+    })
+}
+
+/// Formats a UTC timestamp using astronomical year numbering or an infinity
+/// literal.
+pub fn format_timestamptz(value: &Timestamp<DateTime<Utc>>) -> impl fmt::Display + '_ {
+    fmt::from_fn(move |f| match value {
+        Timestamp::Value(value) => write!(
+            f,
+            "{} {}",
+            format_date(&Date::Value(value.date_naive())),
+            value.format("%H:%M:%S%.f%:z")
+        ),
+        Timestamp::PosInfinity => f.write_str("infinity"),
+        Timestamp::NegInfinity => f.write_str("-infinity"),
+    })
+}
+
 /// A Postgres `time with time zone` value.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct PgTimeTz {
     /// The time of day without a date.
-    time: NaiveTime,
+    time: PgTime,
     /// The fixed UTC offset associated with the time.
     offset: FixedOffset,
 }
 
 impl PgTimeTz {
     /// Creates a new [`PgTimeTz`] from a time of day and fixed UTC offset.
-    pub fn new(time: NaiveTime, offset: FixedOffset) -> Self {
-        Self { time, offset }
+    pub fn new(time: impl Into<PgTime>, offset: FixedOffset) -> Self {
+        Self { time: time.into(), offset }
     }
 
     /// Returns the time of day.
-    pub fn time(&self) -> NaiveTime {
+    pub fn time(&self) -> PgTime {
         self.time
     }
 
@@ -96,7 +186,7 @@ impl PgTimeTz {
 impl Default for PgTimeTz {
     fn default() -> Self {
         Self {
-            time: NaiveTime::default(),
+            time: PgTime::default(),
             offset: FixedOffset::east_opt(0).expect("zero UTC offset should be valid"),
         }
     }
@@ -112,7 +202,7 @@ impl FromStr for PgTimeTz {
 
 impl fmt::Display for PgTimeTz {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.time.format(TIME_FORMAT))?;
+        write!(f, "{}", self.time)?;
         write_utc_offset(f, self.offset)
     }
 }
@@ -120,7 +210,7 @@ impl fmt::Display for PgTimeTz {
 /// Parses a Postgres timetz text value with supported UTC offset forms.
 fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeError> {
     let (time, offset) = split_timetz_offset(value).ok_or(ParseTimeError::InvalidSyntax)?;
-    let time = NaiveTime::parse_from_str(time.trim_end(), TIME_FORMAT)?;
+    let time = time.trim_end().parse::<PgTime>()?;
     let offset = parse_postgres_utc_offset(offset).ok_or(ParseTimeError::InvalidSyntax)?;
 
     Ok(PgTimeTz::new(time, offset))
@@ -244,7 +334,10 @@ mod tests {
     fn timetz_preserves_local_time_and_fixed_offset() {
         let value: PgTimeTz = "12:30:00.123456+02:30".parse().unwrap();
 
-        assert_eq!(value.time(), NaiveTime::from_hms_micro_opt(12, 30, 0, 123_456).unwrap());
+        assert_eq!(
+            value.time(),
+            crate::time::PgTime::Value(NaiveTime::from_hms_micro_opt(12, 30, 0, 123_456).unwrap())
+        );
         assert_eq!(value.offset().local_minus_utc(), 9_000);
     }
 
@@ -260,7 +353,7 @@ mod tests {
     #[test]
     fn timetz_rejects_invalid_values() {
         assert!("12:30:00".parse::<PgTimeTz>().is_err());
-        assert!("24:00:00+00".parse::<PgTimeTz>().is_err());
+        assert!("24:00:01+00".parse::<PgTimeTz>().is_err());
         assert!("12:30:00+16".parse::<PgTimeTz>().is_err());
         assert!("12:30:00+16:00".parse::<PgTimeTz>().is_err());
         assert!("12:30:00+15:60".parse::<PgTimeTz>().is_err());
@@ -273,7 +366,7 @@ mod tests {
     #[test]
     fn timetz_distinguishes_chrono_and_offset_errors() {
         assert!(matches!(
-            "24:00:00+00".parse::<PgTimeTz>().unwrap_err(),
+            "24:00:01+00".parse::<PgTimeTz>().unwrap_err(),
             ParseTimeError::Chrono(_)
         ));
         assert_eq!("12:30:00+16".parse::<PgTimeTz>().unwrap_err(), ParseTimeError::InvalidSyntax);

@@ -2559,7 +2559,7 @@ mod tests {
     use std::error::Error as _;
 
     use etl::{
-        data::{OldTableRow, PartialTableRow, UpdatedTableRow},
+        data::{OldTableRow, PartialTableRow, Timestamp, UpdatedTableRow},
         destination::TableCopyAttemptId,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
@@ -2797,12 +2797,12 @@ mod tests {
                 TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_owned()),
-                    Cell::Timestamp(
+                    Cell::Timestamp(Timestamp::Value(
                         chrono::NaiveDate::from_ymd_opt(2026, 1, 2)
                             .unwrap()
                             .and_hms_opt(3, 4, 5)
                             .unwrap(),
-                    ),
+                    )),
                 ]),
                 TableRow::new(vec![Cell::I32(2), Cell::Null, Cell::Null]),
             ],

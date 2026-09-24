@@ -1915,3 +1915,118 @@ async fn schema_change_matches_simulator_generated_column_types() {
         }
     );
 }
+
+/// Verifies COPY and CDC preserve special temporal values in persisted DuckLake
+/// data.
+#[tokio::test(flavor = "multi_thread")]
+async fn special_temporal_values_survive_copy_and_cdc() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("special_temporal_values");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[
+                ("id", "bigint primary key"),
+                ("d", "date"),
+                ("t", "time"),
+                ("tz", "timetz"),
+                ("ts", "timestamp"),
+                ("tsz", "timestamptz"),
+                ("da", "date[]"),
+                ("ta", "time[]"),
+                ("tsa", "timestamp[]"),
+                ("tsza", "timestamptz[]"),
+            ],
+        )
+        .await
+        .unwrap();
+    let publication = "special_temporal_values_pub";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let source = database.client.as_ref().unwrap();
+    let source_table = table_name.as_quoted_identifier();
+    // Include null array elements and both infinities to distinguish them from
+    // nulls.
+    let values = "'-infinity', '24:00:00', '24:00:00+02', '0044-02-01 11:12:13 BC', 'infinity',
+        array['-infinity'::date, null, 'infinity'::date, '0001-01-01 BC'::date],
+        array['24:00:00'::time, null, '00:00:00'::time],
+        array['infinity'::timestamp, null, '-infinity'::timestamp, '0044-02-01 11:12:13 \
+                  BC'::timestamp],
+        array['-infinity'::timestamptz, null, 'infinity'::timestamptz]";
+    source
+        .batch_execute(&format!(
+            "alter table {source_table} replica identity full; insert into {source_table} values \
+             (1, {values}), (2, {values})"
+        ))
+        .await
+        .unwrap();
+
+    let lake = create_test_lake("special_temporal_values").await;
+    let store = NotifyingStore::new();
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+    let destination = build_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        publication.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    synced.notified().await;
+    let applied = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
+        ])
+        .await;
+    source
+        .batch_execute(&format!(
+            "insert into {source_table} values (3, {values});
+        update {source_table} set d = 'infinity', tsz = '-infinity' where id = 2;
+        delete from {source_table} where id = 3;"
+        ))
+        .await
+        .unwrap();
+    applied.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&lake.catalog_url, &lake.data_url);
+
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let destination_table =
+        qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
+    let total: i64 = conn
+        .query_row(&format!("select count(*) from {destination_table}"), [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(total, 2);
+    for (name, predicate) in [
+        (
+            "date and timestamptz",
+            "(id = 1 and d = date '-infinity' and tsz = timestamptz 'infinity') or (id = 2 and d \
+             = date 'infinity' and tsz = timestamptz '-infinity')",
+        ),
+        ("time", "t = time '24:00:00' and t <> time '00:00:00'"),
+        ("timetz", "tz = '24:00:00+02'"),
+        ("timestamp", "ts = timestamp '-0043-02-01 11:12:13'"),
+        ("date array", "da = [date '-infinity', null, date 'infinity', date '0000-01-01']"),
+        ("time array", "ta = [time '24:00:00', null, time '00:00:00']"),
+        (
+            "timestamp array",
+            "tsa = [timestamp 'infinity', null, timestamp '-infinity', timestamp '-0043-02-01 \
+             11:12:13']",
+        ),
+        ("timestamptz array", "tsza = [timestamptz '-infinity', null, timestamptz 'infinity']"),
+    ] {
+        let valid: i64 = conn
+            .query_row(
+                &format!("select count(*) from {destination_table} where {predicate}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(valid, 2, "{name}");
+    }
+}

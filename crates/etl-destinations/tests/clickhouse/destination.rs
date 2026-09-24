@@ -32,7 +32,9 @@ use std::{
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
-    data::{ArrayCell, Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
+    data::{
+        ArrayCell, Cell, Date, OldTableRow, PgNumeric, PgTime, TableRow, Timestamp, UpdatedTableRow,
+    },
     destination::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
         TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
@@ -482,8 +484,8 @@ async fn string_mapped_values_roundtrip_through_destination() {
                         Cell::Numeric(wn.clone()),
                         opt_cell(vj.clone(), Cell::Json),
                         Cell::Json(wj.clone()),
-                        opt_cell(*vtime, Cell::Time),
-                        Cell::Time(*wtime),
+                        opt_cell(*vtime, |value| Cell::Time(PgTime::Value(value))),
+                        Cell::Time(PgTime::Value(*wtime)),
                         opt_cell(vbytes.clone(), Cell::Bytes),
                         Cell::Bytes(wbytes.clone()),
                     ])
@@ -554,12 +556,12 @@ async fn temporal_values_roundtrip_through_destination() {
             let row: TemporalsRow = block_on(async {
                 let id = table
                     .write(vec![
-                        opt_cell(*vd, Cell::Date),
-                        Cell::Date(*wd),
-                        opt_cell(*vts, Cell::Timestamp),
-                        Cell::Timestamp(*wts),
-                        opt_cell(*vtstz, Cell::TimestampTz),
-                        Cell::TimestampTz(*wtstz),
+                        opt_cell(*vd, |value| Cell::Date(Date::Value(value))),
+                        Cell::Date(Date::Value(*wd)),
+                        opt_cell(*vts, |value| Cell::Timestamp(Timestamp::Value(value))),
+                        Cell::Timestamp(Timestamp::Value(*wts)),
+                        opt_cell(*vtstz, |value| Cell::TimestampTz(Timestamp::Value(value))),
+                        Cell::TimestampTz(Timestamp::Value(*wtstz)),
                     ])
                     .await?;
                 Ok(table.read("vd, wd, vts, wts, vtstz, wtstz", id).await)
@@ -658,7 +660,9 @@ async fn array_values_roundtrip_through_destination() {
                     Cell::Array(ArrayCell::String(at.clone())),
                     Cell::Array(ArrayCell::F64(af.clone())),
                     Cell::Array(ArrayCell::Bytes(ab.clone())),
-                    Cell::Array(ArrayCell::Date(ad.clone())),
+                    Cell::Array(ArrayCell::Date(
+                        ad.iter().map(|value| value.map(Date::Value)).collect(),
+                    )),
                 ])
                 .await?;
             Ok(table.read("ai, at, af, ab, ad", id).await)
@@ -742,8 +746,10 @@ async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     );
     run_property("clickhouse timestamp rejection", &strategy, |(ts, tstz)| {
         // Loud rejection is a valid outcome.
-        let Ok(id) = block_on(table.write(vec![Cell::Timestamp(*ts), Cell::TimestampTz(*tstz)]))
-        else {
+        let Ok(id) = block_on(table.write(vec![
+            Cell::Timestamp(Timestamp::Value(*ts)),
+            Cell::TimestampTz(Timestamp::Value(*tstz)),
+        ])) else {
             return Ok(());
         };
 

@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
-    data::{ArrayCell, Cell, TableRow},
+    data::{ArrayCell, Cell, Date, PgTime, TableRow, Timestamp},
     schema::{ColumnSchema, Type},
     test_utils::test_schema::assert_table_rows_equal_ignoring_size,
 };
@@ -339,19 +339,19 @@ async fn insert_nullable_scalars() {
             Cell::F64(std::f64::consts::E),  // float8_col
             Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                               * String in Iceberg) */
-            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-            Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-            Cell::Timestamp(NaiveDateTime::new(
+            Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap())), // date_col
+            Cell::Time(PgTime::Value(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap())),
+            Cell::Timestamp(Timestamp::Value(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                 NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-            )),
-            Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+            ))),
+            Cell::TimestampTz(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                     NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
                 ),
                 Utc,
-            )),
+            ))),
             Cell::Uuid(Uuid::new_v4()),
             Cell::String(r#"{"key": "value"}"#.to_owned()), /* json_col (maps to String in
                                                              * Iceberg) */
@@ -484,19 +484,19 @@ async fn insert_non_nullable_scalars() {
         Cell::F64(std::f64::consts::E),  // float8_col
         Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                           * String in Iceberg) */
-        Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-        Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-        Cell::Timestamp(NaiveDateTime::new(
+        Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap())), // date_col
+        Cell::Time(PgTime::Value(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap())),
+        Cell::Timestamp(Timestamp::Value(NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
             NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-        )),
-        Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+        ))),
+        Cell::TimestampTz(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
             NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                 NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
             ),
             Utc,
-        )),
+        ))),
         Cell::Uuid(Uuid::new_v4()),
         Cell::String(r#"{"key": "value"}"#.to_owned()), // json_col (maps to String in Iceberg)
         Cell::String(r#"{"key": "value"}"#.to_owned()), // jsonb_col (maps to String in Iceberg)
@@ -612,38 +612,38 @@ async fn insert_nullable_array() {
                 Some("678.90".parse().unwrap()),
             ])), /* numeric_array_col */
             Cell::Array(ArrayCell::Date(vec![
-                Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
-                Some(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()),
+                Some(Date::Value(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap())),
+                Some(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap())),
             ])), /* date_array_col */
             Cell::Array(ArrayCell::Time(vec![
-                Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
-                Some(NaiveTime::from_hms_opt(17, 30, 0).unwrap()),
+                Some(PgTime::Value(NaiveTime::from_hms_opt(9, 0, 0).unwrap())),
+                Some(PgTime::Value(NaiveTime::from_hms_opt(17, 30, 0).unwrap())),
             ])), /* time_array_col */
             Cell::Array(ArrayCell::Timestamp(vec![
-                Some(NaiveDateTime::new(
+                Some(Timestamp::Value(NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                     NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-                )),
-                Some(NaiveDateTime::new(
+                ))),
+                Some(Timestamp::Value(NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                     NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-                )),
+                ))),
             ])), /* timestamp_array_col */
             Cell::Array(ArrayCell::TimestampTz(vec![
-                Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                     NaiveDateTime::new(
                         NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                         NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                     ),
                     Utc,
-                )),
-                Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                ))),
+                Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                     NaiveDateTime::new(
                         NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                         NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
                     ),
                     Utc,
-                )),
+                ))),
             ])), /* timestamptz_array_col */
             Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
             Cell::Array(ArrayCell::Json(vec![
@@ -818,38 +818,38 @@ async fn insert_non_nullable_array() {
             Some("678.90".parse().unwrap()),
         ])), // numeric_array_col
         Cell::Array(ArrayCell::Date(vec![
-            Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
-            Some(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()),
+            Some(Date::Value(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap())),
+            Some(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap())),
         ])), // date_array_col
         Cell::Array(ArrayCell::Time(vec![
-            Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
-            Some(NaiveTime::from_hms_opt(17, 30, 0).unwrap()),
+            Some(PgTime::Value(NaiveTime::from_hms_opt(9, 0, 0).unwrap())),
+            Some(PgTime::Value(NaiveTime::from_hms_opt(17, 30, 0).unwrap())),
         ])), // time_array_col
         Cell::Array(ArrayCell::Timestamp(vec![
-            Some(NaiveDateTime::new(
+            Some(Timestamp::Value(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                 NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-            )),
-            Some(NaiveDateTime::new(
+            ))),
+            Some(Timestamp::Value(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                 NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-            )),
+            ))),
         ])), // timestamp_array_col
         Cell::Array(ArrayCell::TimestampTz(vec![
-            Some(DateTime::<Utc>::from_naive_utc_and_offset(
+            Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                     NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 ),
                 Utc,
-            )),
-            Some(DateTime::<Utc>::from_naive_utc_and_offset(
+            ))),
+            Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                     NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
                 ),
                 Utc,
-            )),
+            ))),
         ])), // timestamptz_array_col
         Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
         Cell::Array(ArrayCell::Json(vec![

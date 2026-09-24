@@ -107,11 +107,11 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         ),
         Type::TIMESTAMPTZ => {
             let val = parse_postgres_timestamptz(str)?;
-            Ok(Cell::TimestampTz(val.into()))
+            Ok(Cell::TimestampTz(val))
         }
         Type::TIMESTAMPTZ_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(parse_postgres_timestamptz(str)?.into())),
+            |str| Ok(Some(parse_postgres_timestamptz(str)?)),
             ArrayCell::TimestampTz,
         ),
         Type::UUID => {
@@ -317,6 +317,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::data::{Date, PgTime, Timestamp};
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {
@@ -662,7 +663,7 @@ mod tests {
     #[test]
     fn try_from_str_dates() {
         let cell = parse_cell_from_postgres_text(&Type::DATE, "2023-12-25").unwrap();
-        if let Cell::Date(date) = cell {
+        if let Cell::Date(Date::Value(date)) = cell {
             assert_eq!(date.year(), 2023);
             assert_eq!(date.month(), 12);
             assert_eq!(date.day(), 25);
@@ -676,7 +677,7 @@ mod tests {
     #[test]
     fn try_from_str_time() {
         let cell = parse_cell_from_postgres_text(&Type::TIME, "14:30:45.123").unwrap();
-        if let Cell::Time(time) = cell {
+        if let Cell::Time(PgTime::Value(time)) = cell {
             assert_eq!(time.hour(), 14);
             assert_eq!(time.minute(), 30);
             assert_eq!(time.second(), 45);
@@ -710,7 +711,7 @@ mod tests {
     fn try_from_str_timestamp() {
         let cell =
             parse_cell_from_postgres_text(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
-        if let Cell::Timestamp(ts) = cell {
+        if let Cell::Timestamp(Timestamp::Value(ts)) = cell {
             assert_eq!(ts.date().year(), 2023);
             assert_eq!(ts.time().hour(), 14);
         } else {
@@ -723,7 +724,7 @@ mod tests {
         let cell =
             parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00")
                 .unwrap();
-        if let Cell::TimestampTz(ts) = cell {
+        if let Cell::TimestampTz(Timestamp::Value(ts)) = cell {
             assert_eq!(ts.year(), 2023);
         } else {
             panic!("Expected TimeStampTz cell");
@@ -745,16 +746,18 @@ mod tests {
             parse_cell_from_postgres_text(&Type::DATE_ARRAY, "{2023-12-25,NULL,2024-02-29}")
                 .unwrap(),
             Cell::Array(ArrayCell::Date(vec![
-                Some("2023-12-25".parse().unwrap()),
+                Some(Date::Value("2023-12-25".parse().unwrap())),
                 None,
-                Some("2024-02-29".parse().unwrap()),
+                Some(Date::Value("2024-02-29".parse().unwrap())),
             ]))
         );
 
         assert_eq!(
             parse_cell_from_postgres_text(&Type::TIME_ARRAY, r#"{"14:30:45.123",NULL}"#).unwrap(),
             Cell::Array(ArrayCell::Time(vec![
-                Some(NaiveTime::parse_from_str("14:30:45.123", TIME_FORMAT).unwrap()),
+                Some(PgTime::Value(
+                    NaiveTime::parse_from_str("14:30:45.123", TIME_FORMAT).unwrap()
+                )),
                 None,
             ]))
         );
@@ -766,10 +769,10 @@ mod tests {
             )
             .unwrap(),
             Cell::Array(ArrayCell::Timestamp(vec![
-                Some(
+                Some(Timestamp::Value(
                     NaiveDateTime::parse_from_str("2023-12-25 14:30:45.123", TIMESTAMP_FORMAT,)
-                        .unwrap(),
-                ),
+                        .unwrap()
+                )),
                 None,
             ]))
         );

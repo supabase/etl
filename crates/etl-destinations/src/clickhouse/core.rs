@@ -5,7 +5,7 @@ use std::{
 };
 
 use etl::{
-    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    data::{Cell, Date, OldTableRow, TableRow, Timestamp, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
@@ -1351,8 +1351,11 @@ where
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
             .map(|table_row| {
-                let mut values: Vec<ClickHouseValue> =
-                    table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
+                let mut values: Vec<ClickHouseValue> = table_row
+                    .into_values()
+                    .into_iter()
+                    .map(cell_to_clickhouse_value)
+                    .collect::<EtlResult<Vec<_>>>()?;
                 // Initial-copy rows are tagged as INSERT with LSN 0 /
                 // tx_ordinal 0 (sentinel meaning "this row pre-dates the
                 // streaming cursor"). For ReplacingMergeTree, any streaming
@@ -1896,8 +1899,10 @@ where
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
                     .map(|PendingRow { operation, sequence_key, cells }| {
-                        let mut values: Vec<ClickHouseValue> =
-                            cells.into_iter().map(cell_to_clickhouse_value).collect();
+                        let mut values: Vec<ClickHouseValue> = cells
+                            .into_iter()
+                            .map(cell_to_clickhouse_value)
+                            .collect::<EtlResult<Vec<_>>>()?;
                         append_cdc_columns(&mut values, operation, sequence_key, engine);
                         Ok(values)
                     })
@@ -2493,9 +2498,11 @@ fn default_cell(typ: &Type) -> Cell {
         Type::OID => Cell::U32(0),
         Type::FLOAT4 => Cell::F32(0.0),
         Type::FLOAT8 => Cell::F64(0.0),
-        Type::DATE => Cell::Date(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
-        Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
-        Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
+        Type::DATE => Cell::Date(Date::Value(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())),
+        Type::TIMESTAMP => {
+            Cell::Timestamp(Timestamp::Value(chrono::DateTime::UNIX_EPOCH.naive_utc()))
+        }
+        Type::TIMESTAMPTZ => Cell::TimestampTz(Timestamp::Value(chrono::DateTime::UNIX_EPOCH)),
         Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
         Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
         Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
@@ -3328,8 +3335,12 @@ mod tests {
         .unwrap();
 
         // THEN: The null array is accepted for later encoding.
-        let values =
-            row.into_values().into_iter().map(cell_to_clickhouse_value).collect::<Vec<_>>();
+        let values = row
+            .into_values()
+            .into_iter()
+            .map(cell_to_clickhouse_value)
+            .collect::<EtlResult<Vec<_>>>()
+            .unwrap();
 
         // WHEN: RowBinary encodes the array as non-nullable.
         let error = encode_to_row_binary(values, &[false], &mut Vec::new()).unwrap_err();

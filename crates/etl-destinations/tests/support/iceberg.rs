@@ -5,7 +5,7 @@ use arrow::{
     array::{ArrayRef, RecordBatch},
     datatypes::TimeUnit,
 };
-use etl::data::{ArrayCell, Cell, TableRow};
+use etl::data::{ArrayCell, Cell, Date, PgTime, TableRow, Timestamp};
 use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
 use futures::StreamExt;
 
@@ -74,7 +74,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             } else {
                 UNIX_EPOCH.checked_sub_days(chrono::Days::new(-days as u64)).unwrap()
             };
-            Cell::Date(date)
+            Cell::Date(Date::Value(date))
         }
         DataType::Time64(TimeUnit::Microsecond) => {
             let arr = array.as_any().downcast_ref::<Time64MicrosecondArray>().unwrap();
@@ -84,7 +84,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                 ((micros % 1_000_000) * 1000) as u32,
             )
             .unwrap();
-            Cell::Time(time)
+            Cell::Time(PgTime::Value(time))
         }
         DataType::Timestamp(TimeUnit::Microsecond, tz) => {
             let arr = array.as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
@@ -93,11 +93,11 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
             if tz.is_some() {
                 // Timezone-aware timestamp
                 let dt = chrono::DateTime::from_timestamp_micros(micros).unwrap();
-                Cell::TimestampTz(dt)
+                Cell::TimestampTz(Timestamp::Value(dt))
             } else {
                 // Naive timestamp
                 let dt = chrono::DateTime::from_timestamp_micros(micros).unwrap().naive_utc();
-                Cell::Timestamp(dt)
+                Cell::Timestamp(Timestamp::Value(dt))
             }
         }
         DataType::FixedSizeBinary(16) => {
@@ -229,7 +229,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                                     .checked_sub_days(chrono::Days::new(-days as u64))
                                     .unwrap()
                             };
-                            values.push(Some(date));
+                            values.push(Some(Date::Value(date)));
                         }
                     }
 
@@ -250,7 +250,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                                 ((micros % 1_000_000) * 1000) as u32,
                             )
                             .unwrap();
-                            values.push(Some(time));
+                            values.push(Some(PgTime::Value(time)));
                         }
                     }
 
@@ -269,7 +269,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                             } else {
                                 let micros = ts_array.value(i);
                                 let dt = chrono::DateTime::from_timestamp_micros(micros).unwrap();
-                                tz_values.push(Some(dt));
+                                tz_values.push(Some(Timestamp::Value(dt)));
                             }
                         }
                         Cell::Array(ArrayCell::TimestampTz(tz_values))
@@ -284,7 +284,7 @@ fn arrow_value_to_cell(array: &ArrayRef, row_idx: usize) -> Cell {
                                 let dt = chrono::DateTime::from_timestamp_micros(micros)
                                     .unwrap()
                                     .naive_utc();
-                                values.push(Some(dt));
+                                values.push(Some(Timestamp::Value(dt)));
                             }
                         }
                         Cell::Array(ArrayCell::Timestamp(values))
