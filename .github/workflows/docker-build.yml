@@ -46,14 +46,15 @@ on:
 
 permissions:
   contents: read
-  actions: write
-  id-token: write
 
 jobs:
   # Build each platform natively on its own runner
   build-platform:
     name: Build ${{ matrix.platform }} Image
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       matrix:
         include:
@@ -138,6 +139,9 @@ jobs:
     needs: build-platform
     runs-on: blacksmith-4vcpu-ubuntu-2404
     if: inputs.push == true
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Extract Image Name
         id: extract-name
