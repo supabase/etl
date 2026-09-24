@@ -43,7 +43,7 @@ sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "post
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tokio-util = { workspace = true }
-tracing = { workspace = true, default-features = true }
+tracing = { workspace = true, features = ["default"] }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "fmt"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

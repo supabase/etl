@@ -1,0 +1,46 @@
+name: Build image
+description: Build one native platform with a persistent Blacksmith cache.
+inputs:
+  context:
+    description: Checked-out source directory used as the Docker build context.
+    default: '.'
+  platform:
+    description: Native target platform (linux/amd64 or linux/arm64).
+    required: true
+  image:
+    description: Registry image name for publication by digest.
+    default: ''
+  push:
+    description: Publish platform images by digest after registry login.
+    default: 'false'
+outputs:
+  digest:
+    description: Built platform image digest.
+    value: ${{ steps.build.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - name: Verify native architecture
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        case "$(uname -m):$PLATFORM" in
+          x86_64:linux/amd64|aarch64:linux/arm64) ;;
+          *) echo '::error::Image platform must match the native runner'; exit 1 ;;
+        esac
+    # Reuse CI caches when publishing; persistent BuildKit needs no cache export/import.
+    - name: Set up Docker builder
+      uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184 # v2.2.0
+      with:
+        cache-key: ${{ github.repository }}/crates/etl-replicator/Dockerfile-${{ inputs.platform }}
+        platforms: ${{ inputs.platform }}
+    - name: Build image
+      id: build
+      uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
+      with:
+        context: ${{ inputs.context }}
+        file: ${{ inputs.context }}/crates/etl-replicator/Dockerfile
+        platforms: ${{ inputs.platform }}
+        build-args: ENABLE_EGRESS=true
+        outputs: ${{ inputs.push == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', inputs.image) || 'type=cacheonly' }}

@@ -21,7 +21,7 @@
   <a href="https://github.com/supabase/etl/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/supabase/etl/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://coveralls.io/github/supabase/etl?branch=main"><img alt="Coverage" src="https://coveralls.io/repos/github/supabase/etl/badge.svg?branch=main"></a>
   <a href="https://github.com/supabase/etl/actions/workflows/docs.yml"><img alt="Docs" src="https://github.com/supabase/etl/actions/workflows/docs.yml/badge.svg?branch=main"></a>
-  <a href="https://github.com/supabase/etl/actions/workflows/audit.yml"><img alt="Security audit" src="https://github.com/supabase/etl/actions/workflows/audit.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/supabase/etl/actions/workflows/dependency-audit.yml"><img alt="Dependency audit" src="https://github.com/supabase/etl/actions/workflows/dependency-audit.yml/badge.svg?branch=main"></a>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
 </p>
 
@@ -145,6 +145,27 @@ required when the replication connection points at a physical read replica.
 The source must use `wal_level = logical`, and the replication user needs the
 `REPLICATION` role. See [Configure Postgres](https://supabase.github.io/etl/guides/configure-postgres/)
 for the complete setup and production guidance.
+
+## Container images
+
+The standalone replicator is publicly available; no private registry credentials
+are required. Set `IMAGE_TAG` to a published full commit SHA or release tag:
+
+```bash
+docker pull "public.ecr.aws/supabase/etl-replicator:$IMAGE_TAG"
+```
+
+Each newly published tag contains Linux AMD64 and ARM64 images. Docker selects
+the host architecture automatically; use `--platform linux/amd64` or
+`--platform linux/arm64` to select it explicitly. Pin deployments to a commit,
+release tag, or digest. `latest` follows the current `main` tip and is mutable.
+Manual builds publish only `<full-commit-sha>-experimental`, even for commits on `main`.
+
+The image includes the replicator, the DuckLake maintenance binary, and DuckDB
+extensions. Supply configuration at runtime; see the
+[replicator guide](crates/etl-replicator/README.md). The separate API, controller,
+and simulator use their own private registries; this does not change public
+access to ETL replicator images.
 
 ## Development
 
