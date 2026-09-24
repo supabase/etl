@@ -15,10 +15,6 @@ on:
         description: Compile instrumented tests instead of consuming the regular test archive.
         type: boolean
         default: false
-      postgres-only:
-        description: Skip source-independent tests covered by another compatibility lane.
-        type: boolean
-        default: false
     secrets:
       TESTS_BIGQUERY_PROJECT_ID:
         required: false
@@ -57,7 +53,7 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - name: Set up BigQuery credentials
-        if: inputs.coverage
+        # Fork PRs do not receive secrets; all other lanes use the same credentials.
         env:
           TESTS_BIGQUERY_PROJECT_ID: ${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}
           TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
@@ -119,14 +115,11 @@ jobs:
       - name: Run tests
         env:
           COVERAGE: ${{ inputs.coverage }}
-          POSTGRES_ONLY: ${{ inputs.postgres-only }}
         run: |
           if [[ "$COVERAGE" == true ]]; then
             cargo --locked xtask nextest llvm-cov
           else
-            args=()
-            if [[ "$POSTGRES_ONLY" == true ]]; then args+=(--postgres-only); fi
-            target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst "${args[@]}"
+            target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst
           fi
       - name: Export coverage
         if: inputs.coverage
@@ -147,5 +140,5 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path-to-lcov: lcov.info
       - name: Remove BigQuery credentials
-        if: always() && inputs.coverage
+        if: always()
         run: rm -f "$RUNNER_TEMP/bigquery-sa-key.json"

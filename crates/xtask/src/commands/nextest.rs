@@ -51,11 +51,6 @@ pub(crate) struct NextestArgs {
     #[arg(long)]
     archive_file: Option<PathBuf>,
 
-    /// Skip the source-independent tests when another compatibility lane runs
-    /// them.
-    #[arg(long)]
-    postgres_only: bool,
-
     /// Extra arguments forwarded to every nextest invocation.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     extra: Vec<String>,
@@ -119,15 +114,13 @@ impl NextestArgs {
 
         let mut lanes: Vec<Lane> = Vec::with_capacity(1 + self.shards as usize);
 
-        // Run source-independent tests once across the compatibility matrix.
-        if !self.postgres_only {
-            lanes.push(Lane {
-                name: "non-pg".to_owned(),
-                filter: format!("not ({SHARED_PG_FILTER})"),
-                partition: None,
-                pg_port: None,
-            });
-        }
+        // Every compatibility job runs the full suite, including destinations.
+        lanes.push(Lane {
+            name: "non-pg".to_owned(),
+            filter: format!("not ({SHARED_PG_FILTER})"),
+            partition: None,
+            pg_port: None,
+        });
 
         // One lane per Postgres shard, each on a dedicated port.
         for shard in 1..=self.shards {
@@ -397,7 +390,6 @@ mod tests {
             "run",
             "--archive-file",
             "tests.tar.zst",
-            "--postgres-only",
             "--shards",
             "2",
             "--",
@@ -407,7 +399,6 @@ mod tests {
         .unwrap();
         assert!(matches!(cli.args.mode, Mode::Run));
         assert_eq!(cli.args.archive_file.as_deref(), Some(Path::new("tests.tar.zst")));
-        assert!(cli.args.postgres_only);
         assert_eq!(cli.args.shards, 2);
         assert_eq!(cli.args.extra, ["--test-threads", "1"]);
     }

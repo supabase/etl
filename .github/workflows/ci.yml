@@ -240,7 +240,9 @@ jobs:
     with:
       postgres-version: ${{ matrix.version }}
       postgres-image: ${{ matrix.image }}
-      postgres-only: ${{ matrix.image != 'postgres:17' }}
+    secrets:
+      TESTS_BIGQUERY_PROJECT_ID: ${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}
+      TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
 
   coverage:
     name: Tests (PostgreSQL 18, coverage)

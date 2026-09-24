@@ -162,7 +162,10 @@ Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
 Parser fuzz targets live in `fuzz/`.
 
 CI builds one nextest archive for the Postgres compatibility matrix and
-Multigres; coverage uses a separate instrumented build. Postgres shards start
+Multigres; coverage uses a separate instrumented build. Every Postgres and
+OrioleDB lane runs the full regular suite, including destination tests and
+BigQuery integration tests when credentials are available. Credentialed
+Snowflake tests and Multigres tests run separately. Postgres shards start
 concurrently and must all pass readiness checks before tests run. To reuse a
 local build:
 
@@ -173,8 +176,7 @@ cargo --locked xtask nextest run --archive-file target/ci/tests.tar.zst
 cargo --locked xtask multigres test --archive-file target/ci/tests.tar.zst
 ```
 
-Use `--postgres-only` to skip source-independent tests already covered by another
-lane. Archive consumers must use compatible operating systems and architectures.
+Archive consumers must use compatible operating systems and architectures.
 CI sets `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0`; use both locally
 when reproducing CI to reuse the same build profile instead of recompiling
 dependencies with local debug settings.
