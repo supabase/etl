@@ -146,6 +146,27 @@ The source must use `wal_level = logical`, and the replication user needs the
 `REPLICATION` role. See [Configure Postgres](https://supabase.github.io/etl/guides/configure-postgres/)
 for the complete setup and production guidance.
 
+## Container images
+
+The standalone replicator is publicly available; no private registry credentials
+are required. Set `IMAGE_TAG` to a published full commit SHA or release tag:
+
+```bash
+docker pull "public.ecr.aws/supabase/etl-replicator:$IMAGE_TAG"
+```
+
+Each newly published tag contains Linux AMD64 and ARM64 images. Docker selects
+the host architecture automatically; use `--platform linux/amd64` or
+`--platform linux/arm64` to select it explicitly. Pin deployments to a commit,
+release tag, or digest. `latest` follows the current `main` tip and is mutable.
+Manual builds publish only `<full-commit-sha>-experimental`, even for commits on `main`.
+
+The image includes the replicator, the DuckLake maintenance binary, and DuckDB
+extensions. Supply configuration at runtime; see the
+[replicator guide](crates/etl-replicator/README.md). The separate API, controller,
+and simulator use their own private registries; this does not change public
+access to ETL replicator images.
+
 ## Development
 
 ```bash

@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
-# Build stage with cargo-chef for dependency layer caching.
-# Native build: each runner builds for its own architecture.
+
+# Pull: docker pull public.ecr.aws/supabase/etl-replicator:<full-commit-sha>
+# No authentication required; one tag supports AMD64 and ARM64.
+# Experimental tags end in -experimental; see DEVELOPMENT.md for local builds.
+
 ARG RUST_VERSION=1.95.0
 FROM rust:${RUST_VERSION}-slim-bookworm AS chef
 ARG RUST_VERSION
@@ -9,8 +12,7 @@ ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 WORKDIR /app
 RUN cargo install cargo-chef --version 0.1.72 --locked
 
-# Fetch DuckDB extensions during the Docker build so they do not need to live
-# in the repository or the local build context.
+# Fetch DuckDB extensions at build time instead of vendoring them in the repository.
 FROM debian:bookworm-slim AS duckdb-extensions
 ARG TARGETPLATFORM
 RUN apt-get update && \
@@ -34,7 +36,6 @@ FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
-# Build dependencies.
 FROM chef AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -43,7 +44,6 @@ ARG ENABLE_EGRESS="false"
 ENV RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld"
 RUN test "$BUILDPLATFORM" = "$TARGETPLATFORM"
 
-# Install build dependencies including lld linker for faster linking.
 # TODO: remove protobuf-compiler once the upstream gcp-bigquery-client removes it from its deps.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -69,7 +69,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo chef cook --locked --release --package etl-replicator --bins \
       --features "$features" --recipe-path recipe.json
 
-# Build both runtime binaries with thin LTO and opt-level=3 from Cargo.toml.
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -81,7 +80,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --locked --release --package etl-replicator --bins --features "$features" && \
     strip target/release/etl-replicator target/release/etl-ducklake-maintenance
 
-# Runtime stage with distroless for security.
 FROM gcr.io/distroless/cc-debian12:nonroot
 WORKDIR /app
 
@@ -91,10 +89,8 @@ USER nonroot:nonroot
 # Use MALLOC_CONF env var to override at runtime if needed.
 # Example: MALLOC_CONF="narenas:4,dirty_decay_ms:5000"
 
-# Copy binary; configuration must be provided at runtime via mounted volume or environment overrides.
 COPY --from=builder /app/target/release/etl-replicator ./etl-replicator
 COPY --from=builder /app/target/release/etl-ducklake-maintenance ./etl-ducklake-maintenance
 COPY --from=duckdb-extensions /duckdb_extensions ./duckdb_extensions
 
-# Use exec form for proper signal handling.
 ENTRYPOINT ["./etl-replicator"]

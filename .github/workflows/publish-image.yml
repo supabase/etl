@@ -6,11 +6,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      experimental:
-        description: "Build the selected workflow ref as experimental (main excluded); disable to publish a commit from main"
-        type: boolean
+      commit:
+        description: "Optional full commit SHA to build; defaults to the selected workflow ref"
+        type: string
         required: false
-        default: true
+        default: ''
 
 permissions:
   contents: read
@@ -26,6 +26,6 @@ jobs:
       )
     uses: ./.github/workflows/reusable-publish-image.yml
     with:
-      experimental: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental }}
+      commit: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || '' }}
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}

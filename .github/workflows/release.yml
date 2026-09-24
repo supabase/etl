@@ -1,19 +1,13 @@
 name: Release
 
 concurrency:
-  group: release-${{ inputs.version || github.event.pull_request.head.ref }}
+  group: release-${{ github.event.pull_request.head.ref }}
   cancel-in-progress: false
 
 on:
   pull_request:
     types: [closed]
     branches: [main]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release (e.g. 1.2.3)"
-        type: string
-        required: true
 
 permissions:
   contents: read
@@ -21,16 +15,13 @@ permissions:
 jobs:
   tag:
     name: Create release tag
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: write
     if: |
-      github.event_name == 'workflow_dispatch' || (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.merged == true &&
-        contains(github.event.pull_request.labels.*.name, 'release')
-      )
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'release')
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
@@ -39,12 +30,11 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
 
       - name: Validate release version
         id: ver
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          INPUT_VERSION: ${{ inputs.version }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           python3 - <<'PYTHON'
@@ -54,13 +44,10 @@ jobs:
 
           with open("crates/etl-replicator/Cargo.toml", "rb") as manifest:
               package_version = tomllib.load(manifest)["package"]["version"]
-          if os.environ["EVENT_NAME"] == "workflow_dispatch":
-              version = os.environ.get("INPUT_VERSION", "").removeprefix("v")
-          else:
-              branch = os.environ.get("PR_HEAD_REF", "")
-              if not branch.startswith("release/v"):
-                  raise SystemExit("Expected release branch release/vX.Y.Z")
-              version = branch.removeprefix("release/v")
+          branch = os.environ.get("PR_HEAD_REF", "")
+          if not branch.startswith("release/v"):
+              raise SystemExit("Expected release branch release/vX.Y.Z")
+          version = branch.removeprefix("release/v")
           if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
               raise SystemExit("Expected release version X.Y.Z without leading zeroes")
           if version != package_version:
@@ -85,7 +72,7 @@ jobs:
           git fetch --tags
           if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
             if [[ "$(git rev-parse "refs/tags/${TAG}^{commit}")" != "$(git rev-parse HEAD)" ]]; then
-              echo "::error::Tag $TAG already exists on a different commit; run this workflow from that tag to retry it"
+              echo "::error::Tag $TAG already exists on a different commit; rerun the workflow for the original release merge"
               exit 1
             fi
             echo "Tag $TAG already exists on this commit; skipping creation."
@@ -111,7 +98,7 @@ jobs:
   release:
     name: Publish GitHub release
     needs: [tag, image]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: write

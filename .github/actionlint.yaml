@@ -1,12 +1,12 @@
 self-hosted-runner:
   labels:
+    - blacksmith-2vcpu-ubuntu-2404
     - blacksmith-4vcpu-ubuntu-2404
     - blacksmith-8vcpu-ubuntu-2404
     - blacksmith-8vcpu-ubuntu-2404-arm
     - blacksmith-16vcpu-ubuntu-2404
     - blacksmith-32vcpu-ubuntu-2404
-# GitHub supports queued concurrency; actionlint 1.7.12 does not parse it yet.
-# Remove this narrow exception when actionlint adds support.
+# actionlint 1.7.12 does not yet support GitHub's queued concurrency.
 paths:
   .github/workflows/reusable-publish-image.yml:
     ignore:

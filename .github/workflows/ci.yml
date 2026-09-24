@@ -20,7 +20,7 @@ concurrency:
 jobs:
   format:
     name: Format
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -163,7 +163,7 @@ jobs:
 
   workflow-lint:
     name: Workflow lint
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - name: Check out source
@@ -310,7 +310,7 @@ jobs:
     name: CI passed
     if: always()
     needs: [format, clippy, tls, snowflake, workflow-lint, test-build, test, coverage, multigres, image]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions: {}
     steps:

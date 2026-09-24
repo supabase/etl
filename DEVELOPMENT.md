@@ -201,10 +201,31 @@ When a workspace dependency disables default features, consumers that need them
 request `features = ["default"]`. This also lets cargo-chef preserve the feature
 selection without modifying its generated recipe.
 
-CI uses native AMD64/ARM64 builders and publishes to
-`public.ecr.aws/supabase/etl-replicator`. Only the current main tip can promote
-`latest`; experimental builds never do. Require `CI passed` in branch protection
+CI builds AMD64 and ARM64 on separate native workers, pushes each image by
+digest, and verifies the combined manifest before tagging it at
+`public.ecr.aws/supabase/etl-replicator`. Both builds check out the same resolved
+source SHA. CI image checks and publishing share the build action and persistent
+Blacksmith layer cache. Pulling these images requires no private registry access. Only a merged-main PR at the current main tip can promote
+`latest`; manual builds never do. Require `CI passed` in branch protection
 after its first run, replacing old required job names including `Snowflake Gate`.
+
+Run **Publish image** with **Use workflow from: main** to use the current CI.
+Set optional `commit` to a full 40-character lowercase SHA available in this
+repository; leave it empty to build the selected workflow branch/tag's commit.
+The source supplies the Dockerfile and application; publishing actions come from
+the selected workflow revision, so older sources need not contain the new CI.
+
+Every manual build publishes only `<full-sha>-experimental`, including rebuilds
+of commits already on `main`. Only a PR merged into `main` publishes the plain
+SHA tag, and only its current tip can update `latest`. Both architectures always
+build the same resolved commit; there is no manual tag-mode override.
+
+With `COMMIT` set to the desired source SHA:
+
+```bash
+gh workflow run publish-image.yml --repo supabase/etl --ref main \
+  -f commit="$COMMIT"
+```
 
 ## Documentation
 
@@ -247,3 +268,26 @@ printed by the server.
   cluster (for example the first-pipeline tutorial). `cargo x setup
   replicator` drops an inactive leftover slot. If the slot is still active,
   stop that process, then re-run setup.
+
+### Blacksmith caching
+
+Image builds use native 8-vCPU AMD64 and ARM64 runners. Each Dockerfile and
+architecture has one persistent BuildKit cache shared by CI and publication;
+changing a workflow or commit does not create another cache. Dependency layers
+stay ahead of application source, and package-manager cache mounts retain downloads
+when a lockfile changes. Do not add `cache-from`/`cache-to` exports to these builds.
+
+Regular dependency caches use upstream actions, which Blacksmith accelerates
+automatically. Rust checks keep separate caches for compilation modes (Clippy,
+tests, and coverage); only successful main-branch jobs save dependency caches.
+Formatting, workflow lint, and publication orchestration use 2-vCPU runners;
+Clippy and precompiled test execution use 4-vCPU runners; test archive builds
+and coverage use 8-vCPU runners. Enable Blacksmith's **Branch Protection
+for sticky disks** so pull requests can read trusted Docker caches without updating
+the snapshots used for publication. Main-branch CI warms those snapshots.
+
+The first build for a new cache key is cold. Check cache hits and build duration in
+Blacksmith before increasing runner sizes; local rebuild timings do not measure
+Blacksmith performance. See [Docker caching](https://docs.blacksmith.sh/blacksmith-caching/docker-builds),
+[dependency caching](https://docs.blacksmith.sh/blacksmith-caching/dependencies-actions),
+and [sticky disk protection](https://docs.blacksmith.sh/blacksmith-caching/dependencies-sticky-disks).

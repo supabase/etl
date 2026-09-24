@@ -3,14 +3,18 @@ name: Publish image (reusable)
 on:
   workflow_call:
     inputs:
+      commit:
+        description: Optional full source commit SHA, independent of the workflow revision.
+        type: string
+        default: ''
+      build-vcpus:
+        description: Native build worker size (4 for Python images, 8 for Rust images).
+        type: number
+        default: 8
       version:
         description: Optional release version (X.Y.Z).
         type: string
         default: ''
-      experimental:
-        description: Publish an experimental non-main commit without updating latest.
-        type: boolean
-        default: false
     secrets:
       PROD_AWS_ROLE:
         description: AWS IAM role for publishing to the existing ECR Public repository.
@@ -24,67 +28,88 @@ permissions:
   contents: read
 
 concurrency:
-  group: image-build-${{ github.sha }}
+  group: image-build-${{ inputs.commit || github.event.pull_request.merge_commit_sha || github.sha }}
   cancel-in-progress: false
   queue: max
 
 jobs:
   prepare:
     name: Prepare image tags
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     outputs:
       sha: ${{ steps.tags.outputs.sha }}
       tags: ${{ steps.tags.outputs.tags }}
+      stable: ${{ steps.tags.outputs.stable }}
     steps:
+      - name: Validate source commit
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          if [[ -n "$COMMIT" && ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Commit must be a full 40-character lowercase SHA'
+            exit 1
+          fi
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
+          # Resolve source once; both native builds use prepare.outputs.sha.
+          ref: ${{ inputs.commit || github.event.pull_request.merge_commit_sha || github.sha }}
+      - name: Validate build worker size
+        env:
+          BUILD_VCPUS: ${{ inputs.build-vcpus }}
+        run: |
+          case "$BUILD_VCPUS" in
+            4|8) ;;
+            *) echo '::error::Image builds require 4 or 8 vCPUs'; exit 1 ;;
+          esac
       - name: Validate image tags
         id: tags
         env:
-          EXPERIMENTAL: ${{ inputs.experimental }}
+          STABLE: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' }}
+          COMMIT: ${{ inputs.commit }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
 
           sha=$(git rev-parse HEAD)
           main_sha=$(git rev-parse origin/main)
-          tags="$sha"
-          if [[ "$EXPERIMENTAL" == true ]]; then
-            if [[ -n "$VERSION" || "$sha" == "$main_sha" || "$GITHUB_REF" == refs/heads/main ]]; then
-              echo '::error::Experimental publication requires a non-main commit and no release version'
+          if [[ "$STABLE" == true ]]; then
+            if [[ -n "$COMMIT" ]] || ! git merge-base --is-ancestor "$sha" "$main_sha"; then
+              echo '::error::Stable publication must build the merged main commit without a source override'
               exit 1
             fi
-            tags="$sha $sha-experimental"
-          else
-            if ! git merge-base --is-ancestor "$sha" origin/main; then
-              echo '::error::Stable publication requires a commit on main'
-              exit 1
-            fi
+            tags="$sha"
             if [[ -n "$VERSION" ]]; then
               if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
                 echo '::error::Release version must have the form X.Y.Z without leading zeroes'
                 exit 1
               fi
               if [[ "$(git rev-parse "refs/tags/v$VERSION^{commit}")" != "$sha" ]]; then
-                echo '::error::Release tag must point to the workflow commit'
+                echo '::error::Release tag must point to the merged commit'
                 exit 1
               fi
               tags="$sha v$VERSION"
             fi
+          else
+            if [[ -n "$VERSION" ]]; then
+              echo '::error::Release image tags require a merged main PR'
+              exit 1
+            fi
+            tags="$sha-experimental"
           fi
           {
             echo "sha=$sha"
             echo "tags=$tags"
+            echo "stable=$STABLE"
           } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build image (${{ matrix.name }})
     needs: prepare
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ format('blacksmith-{0}vcpu-ubuntu-2404{1}', inputs.build-vcpus, matrix.arch == 'arm64' && '-arm' || '') }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -96,16 +121,21 @@ jobs:
           - name: AMD64
             arch: amd64
             platform: linux/amd64
-            runner: blacksmith-8vcpu-ubuntu-2404
           - name: ARM64
             arch: arm64
             platform: linux/arm64
-            runner: blacksmith-8vcpu-ubuntu-2404-arm
     steps:
-      - name: Check out source
+      - name: Check out workflow actions
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+          ref: ${{ github.workflow_sha }}
+      - name: Check out image source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.sha }}
+          path: .image-source
       - name: Log in to ECR Public
         id: registry
         uses: ./.github/actions/registry-login
@@ -115,6 +145,7 @@ jobs:
         id: build
         uses: ./.github/actions/build-image
         with:
+          context: .image-source
           platform: ${{ matrix.platform }}
           image: ${{ steps.registry.outputs.image }}
           push: 'true'
@@ -137,16 +168,17 @@ jobs:
   manifest:
     name: Publish image manifest
     needs: [prepare, build]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
     steps:
-      - name: Check out source
+      - name: Check out workflow actions
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
+          ref: ${{ github.workflow_sha }}
       - name: Log in to ECR Public
         id: registry
         uses: ./.github/actions/registry-login
@@ -194,9 +226,9 @@ jobs:
 
   latest:
     name: Promote latest image
-    if: '!inputs.experimental'
+    if: needs.prepare.outputs.stable == 'true'
     needs: [prepare, manifest]
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: read
@@ -206,8 +238,10 @@ jobs:
       cancel-in-progress: false
       queue: max
     steps:
-      - name: Check out source
+      - name: Check out workflow actions
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.workflow_sha }}
       - name: Log in to ECR Public
         id: registry
         uses: ./.github/actions/registry-login
