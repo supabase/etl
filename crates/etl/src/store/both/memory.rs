@@ -13,7 +13,7 @@ use crate::{
     replication::{WorkerType, state::TableState},
     schema::{SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
+        CachedStore, DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
         TableStateLifecycleStore, TableStateOperation, TableStates,
     },
 };
@@ -78,6 +78,12 @@ impl Default for MemoryStore {
     }
 }
 
+impl CachedStore for MemoryStore {
+    async fn load_cache(&self) -> EtlResult<()> {
+        Ok(())
+    }
+}
+
 impl StateStore for MemoryStore {
     async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         let inner = self.inner.lock().await;
@@ -89,12 +95,6 @@ impl StateStore for MemoryStore {
         let inner = self.inner.lock().await;
 
         Ok(Arc::clone(&inner.table_states))
-    }
-
-    async fn load_table_states(&self) -> EtlResult<usize> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_states.len())
     }
 
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
@@ -182,12 +182,6 @@ impl StateStore for MemoryStore {
         Ok(inner.destination_tables_metadata.get(&table_id).cloned())
     }
 
-    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.destination_tables_metadata.len())
-    }
-
     async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -222,12 +216,6 @@ impl SchemaStore for MemoryStore {
         Ok(inner.table_schemas.all())
     }
 
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        let inner = self.inner.lock().await;
-
-        Ok(inner.table_schemas.total_snapshots_count())
-    }
-
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
         let mut inner = self.inner.lock().await;
 
@@ -245,10 +233,7 @@ impl SchemaStore for MemoryStore {
 }
 
 impl TableStateLifecycleStore for MemoryStore {
-    async fn apply_table_state_operation(
-        &self,
-        operation: TableStateOperation,
-    ) -> EtlResult<usize> {
+    async fn apply_table_state_operation(&self, operation: TableStateOperation) -> EtlResult<()> {
         match operation {
             TableStateOperation::PrepareForCopy { table_id } => {
                 let mut inner = self.inner.lock().await;
@@ -256,7 +241,7 @@ impl TableStateLifecycleStore for MemoryStore {
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
                 inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
 
-                Ok(0)
+                Ok(())
             }
             TableStateOperation::ResetForResync => {
                 let mut guard = self.inner.lock().await;
@@ -264,7 +249,6 @@ impl TableStateLifecycleStore for MemoryStore {
 
                 let states = Arc::make_mut(&mut inner.table_states);
                 let table_ids = states.keys().copied().collect::<Vec<_>>();
-                let reset_count = table_ids.len();
 
                 for table_id in table_ids {
                     if let Some(current_state) = states.get(&table_id).cloned() {
@@ -280,11 +264,10 @@ impl TableStateLifecycleStore for MemoryStore {
 
                 inner.replication_checkpoints.remove(&WorkerType::Apply);
 
-                Ok(reset_count)
+                Ok(())
             }
             TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.lock().await;
-                let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
 
                 Arc::make_mut(&mut inner.table_states).remove(&table_id);
                 inner.table_state_history.remove(&table_id);
@@ -292,7 +275,7 @@ impl TableStateLifecycleStore for MemoryStore {
                 Arc::make_mut(&mut inner.destination_tables_metadata).remove(&table_id);
                 inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
 
-                Ok(affected_table_count)
+                Ok(())
             }
         }
     }

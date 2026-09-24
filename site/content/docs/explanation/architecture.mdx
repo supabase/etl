@@ -102,8 +102,12 @@ Three store traits persist the state needed to resume after restarts:
 - **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions behind persisted checkpoints while preserving the retained boundary schema and newer versions
 - **TableStateLifecycleStore**: Prepares table-copy state, resets table states for resync, and deletes all ETL-owned state when a table leaves the publication
 
-See [Extension Points](/explanation/traits/#schemastore) for the cache and
-durability contracts.
+Use one store and its clones per pipeline to share cached state. External
+changes to ETL state or destination data are unsupported.
+
+Each store trait requires `CachedStore`, which loads all cache domains together
+during startup, before workers run. See [Extension Points](/explanation/traits/#cachedstore)
+for the cache and durability contracts.
 
 ## Delivery Guarantees
 

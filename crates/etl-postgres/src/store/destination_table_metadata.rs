@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use sqlx::{PgExecutor, PgPool, Row, Type, postgres::types::Oid as SqlxTableId};
+use sqlx::{PgExecutor, Row, Type, postgres::types::Oid as SqlxTableId};
 
 use crate::schema::{SnapshotId, TableId};
 
@@ -62,8 +62,8 @@ pub struct StoredDestinationTableMetadataRow {
 /// upsert semantics: if a row exists for (pipeline_id, table_id), all fields
 /// are updated.
 #[expect(clippy::too_many_arguments)]
-pub async fn store_destination_table_metadata(
-    pool: &PgPool,
+pub async fn store_destination_table_metadata<'c, E>(
+    executor: E,
     pipeline_id: i64,
     table_id: TableId,
     destination_table_id: &str,
@@ -72,7 +72,10 @@ pub async fn store_destination_table_metadata(
     previous_snapshot_id: Option<SnapshotId>,
     previous_replication_mask: Option<&[u8]>,
     schema_status: StoredDestinationTableSchemaStatus,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
     sqlx::query(
         r#"
         insert into etl.destination_tables_metadata
@@ -98,7 +101,7 @@ pub async fn store_destination_table_metadata(
     .bind(previous_snapshot_id.map(|snapshot_id| snapshot_id.to_string()))
     .bind(previous_replication_mask)
     .bind(schema_status)
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())
@@ -107,10 +110,13 @@ pub async fn store_destination_table_metadata(
 /// Loads all destination table metadata for a pipeline.
 ///
 /// Returns a map from table_id to the complete metadata row.
-pub async fn load_destination_tables_metadata(
-    pool: &PgPool,
+pub async fn load_destination_tables_metadata<'c, E>(
+    executor: E,
     pipeline_id: i64,
-) -> Result<HashMap<TableId, StoredDestinationTableMetadataRow>, sqlx::Error> {
+) -> Result<HashMap<TableId, StoredDestinationTableMetadataRow>, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
     let rows = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id,
@@ -120,7 +126,7 @@ pub async fn load_destination_tables_metadata(
         "#,
     )
     .bind(pipeline_id)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut metadata = HashMap::new();
@@ -150,11 +156,14 @@ pub async fn load_destination_tables_metadata(
 }
 
 /// Gets destination table metadata for a single table.
-pub async fn get_destination_table_metadata(
-    pool: &PgPool,
+pub async fn get_destination_table_metadata<'c, E>(
+    executor: E,
     pipeline_id: i64,
     table_id: TableId,
-) -> Result<Option<StoredDestinationTableMetadataRow>, sqlx::Error> {
+) -> Result<Option<StoredDestinationTableMetadataRow>, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
     let row = sqlx::query(
         r#"
         select table_id, destination_table_id, snapshot_id,
@@ -165,7 +174,7 @@ pub async fn get_destination_table_metadata(
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     match row {

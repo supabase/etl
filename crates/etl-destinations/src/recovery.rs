@@ -35,6 +35,9 @@ pub(crate) fn warn_unsupported_column_type_change(
 /// Validates that a relation can advance an applied destination schema.
 ///
 /// Supported schema and publication-mask changes receive a new [`SnapshotId`].
+/// Publication snapshots order changes to the replicated projection even when
+/// the full source table is unchanged. Repeated relation metadata with the same
+/// snapshot and mask is valid and needs no new schema transition.
 /// An equal snapshot with a different mask therefore has no valid ordering and
 /// must fail closed instead of driving destination DDL.
 pub(crate) fn ensure_relation_schema_transition(

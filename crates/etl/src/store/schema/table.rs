@@ -13,11 +13,6 @@ pub(crate) struct TableSchemaSnapshots {
 }
 
 impl TableSchemaSnapshots {
-    /// Returns the total number of stored schema snapshots.
-    pub(crate) fn total_snapshots_count(&self) -> usize {
-        self.table_schemas.values().map(BTreeMap::len).sum()
-    }
-
     /// Returns the number of stored schema snapshots for a table.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn snapshots_count(&self, table_id: TableId) -> usize {
@@ -52,34 +47,6 @@ impl TableSchemaSnapshots {
             .entry(table_id)
             .or_default()
             .insert(snapshot_id, Arc::clone(&table_schema));
-
-        table_schema
-    }
-
-    /// Inserts a schema snapshot and keeps at most `max_snapshots` for its
-    /// table.
-    pub(crate) fn insert_with_eviction(
-        &mut self,
-        table_schema: TableSchema,
-        max_snapshots: usize,
-    ) -> Arc<TableSchema> {
-        let table_id = table_schema.id;
-        let table_schema = self.insert(table_schema);
-
-        if max_snapshots == 0 {
-            self.table_schemas.remove(&table_id);
-            return table_schema;
-        }
-
-        if let Some(schemas) = self.table_schemas.get_mut(&table_id) {
-            while schemas.len() > max_snapshots {
-                let Some(oldest_snapshot_id) = schemas.keys().next().copied() else {
-                    break;
-                };
-
-                schemas.remove(&oldest_snapshot_id);
-            }
-        }
 
         table_schema
     }
@@ -222,29 +189,6 @@ mod tests {
             .get_at_or_before(table_id, SnapshotId::at_lsn(PgLsn::from(u64::MAX)))
             .expect("maximum snapshot should be eligible at the maximum WAL frontier");
         assert_eq!(schema.snapshot_id, SnapshotId::max());
-    }
-
-    #[test]
-    fn insert_with_eviction_keeps_newest_snapshots_for_table() {
-        let table_id = TableId::new(10);
-        let other_table_id = TableId::new(20);
-        let mut snapshots = TableSchemaSnapshots::default();
-
-        snapshots.insert_with_eviction(test_schema(table_id, 100), 2);
-        snapshots.insert_with_eviction(test_schema(table_id, 200), 2);
-        snapshots.insert_with_eviction(test_schema(table_id, 300), 2);
-        snapshots.insert_with_eviction(test_schema(other_table_id, 50), 2);
-
-        assert!(snapshots.get_at_or_before(table_id, test_snapshot_id(100, 100)).is_none());
-        assert_eq!(
-            snapshots
-                .get_at_or_before(table_id, test_snapshot_id(250, 250))
-                .expect("schema should exist")
-                .snapshot_id,
-            test_snapshot_id(200, 200)
-        );
-        assert_eq!(snapshots.snapshots_count(table_id), 2);
-        assert_eq!(snapshots.snapshots_count(other_table_id), 1);
     }
 
     #[test]

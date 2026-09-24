@@ -472,13 +472,16 @@ struct ApplyLoopState {
     /// durability interval without emitting one sample for every intermediate
     /// accepted result.
     pending_durability_interval: Option<PendingDurabilityInterval>,
-    /// Relation tables not yet covered by persisted commit-boundary progress.
+    /// Tables with relation events awaiting schema-cleanup evaluation.
     ///
-    /// This includes relations from `Accepted` writes and from durable
-    /// mid-transaction writes that carry no commit end LSN. A later durable
-    /// commit-bearing result covers them cumulatively and makes their tables
-    /// candidates for obsolete schema cleanup.
-    pending_relation_table_ids: HashSet<TableId>,
+    /// Accumulates table IDs from successfully completed batches, including
+    /// accepted writes. A later durable result also confirms earlier accepted
+    /// writes in the same apply-loop stream. Once its commit boundary is
+    /// persisted, these tables are evaluated for cleanup at that boundary.
+    /// Relations beyond that boundary remain protected by schema retention.
+    ///
+    /// Entries remain pending if evaluation fails or the cleanup queue is full.
+    pending_schema_cleanup_table_ids: HashSet<TableId>,
     /// The LSN of the commit WAL entry of the transaction that is currently
     /// being processed.
     remote_final_lsn: Option<PgLsn>,
@@ -536,7 +539,7 @@ impl ApplyLoopState {
             activity_handle,
             last_commit_end_lsn: None,
             pending_durability_interval: None,
-            pending_relation_table_ids: HashSet::new(),
+            pending_schema_cleanup_table_ids: HashSet::new(),
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
@@ -1290,20 +1293,19 @@ where
         }
     }
 
-    /// Tries to queue best-effort cleanup for relation tables covered by
-    /// durable progress.
+    /// Tries to queue schema cleanup for pending tables at persisted progress.
     ///
-    /// The persisted checkpoint row is deliberately reloaded here instead of
-    /// using the apply loop's in-memory flush position. Cleanup removes replay
-    /// state, so its boundary must survive a crash independently of this
-    /// process.
+    /// The store supplies its cached checkpoint confirmed by persistence.
+    /// Cleanup removes replay state, so the apply loop's in-memory flush
+    /// position alone cannot establish a boundary that survives a crash.
     ///
-    /// Pending candidates remain in [`ApplyLoopState`] when a transient failure
-    /// prevents evaluation or queueing, so the next durable result retries
-    /// them. They are cleared only after successful evaluation and, when
-    /// needed, successful queueing.
+    /// Evaluation errors and a full queue leave candidates pending for the
+    /// next durable commit-bearing result. Successful evaluation clears tables
+    /// that need no cleanup; successful queueing clears the others. If pruning
+    /// later fails in the cleanup worker, another relation event must trigger
+    /// a new attempt.
     async fn try_queue_schema_cleanup(&mut self) {
-        if self.state.pending_relation_table_ids.is_empty() {
+        if self.state.pending_schema_cleanup_table_ids.is_empty() {
             return;
         }
 
@@ -1353,7 +1355,7 @@ where
 
         // If there are no tables to try to prune, we don't want to attempt it.
         if retention_snapshot_ids.is_empty() {
-            self.state.pending_relation_table_ids.clear();
+            self.state.pending_schema_cleanup_table_ids.clear();
 
             return;
         }
@@ -1374,8 +1376,14 @@ where
             }
         }
 
+        // A queued boundary can precede a relation in a durable batch that ends
+        // mid-transaction. We still remove that table here, so later checkpoint
+        // progress alone will not retry cleanup. This deliberately keeps
+        // best-effort cleanup tracking to table IDs: extra schema versions may
+        // remain until another relation, including the first after restart,
+        // triggers a new check with a sufficiently advanced checkpoint.
         self.state
-            .pending_relation_table_ids
+            .pending_schema_cleanup_table_ids
             .retain(|table_id| deferred_table_ids.contains(table_id));
     }
 
@@ -1403,7 +1411,7 @@ where
     ) -> EtlResult<BTreeMap<TableId, SnapshotId>> {
         let mut retention_snapshot_ids = BTreeMap::new();
 
-        for &table_id in &self.state.pending_relation_table_ids {
+        for &table_id in &self.state.pending_schema_cleanup_table_ids {
             // Only prune snapshots for tables this worker would apply at this
             // checkpoint. This keeps table sync workers limited to their
             // assigned table while preserving apply worker ownership rules.
@@ -1491,16 +1499,15 @@ where
         let status = result?;
 
         if let Some(metadata) = metadata.as_ref() {
-            // Relation events are optimistic cleanup signals: the first
-            // relation after startup need not represent a schema change, while
-            // a real DDL is communicated downstream through one. Accumulate
-            // them until a durable result also carries a commit end LSN,
-            // because only then can persisted progress cover every preceding
-            // relation in this ordered apply-loop stream. This also makes
-            // cleanup self-healing across restarts: the first later relation
-            // rebuilds the candidate even though this in-memory set was lost.
+            // Relation events trigger cleanup checks even when the schema has
+            // not changed. Accumulate their table IDs across accepted writes
+            // until a durable result carries a commit boundary we can persist.
+            // That boundary may precede relations in the batch, so retention
+            // must preserve schemas needed to replay the unfinished
+            // transaction. The first relation after restart also triggers a
+            // new check if an earlier cleanup was missed.
             self.state
-                .pending_relation_table_ids
+                .pending_schema_cleanup_table_ids
                 .extend(metadata.relation_table_ids.iter().copied());
 
             if metadata.durability == WriteEventsDurability::RequireDurable
@@ -1610,9 +1617,8 @@ where
                         self.process_syncing_tables_after_flush(commit_end_lsn).await?;
 
                         // Progress and table-sync state are now durable. Freeze
-                        // cleanup boundaries for all cumulatively covered
-                        // relations before allowing their database deletion to
-                        // run asynchronously.
+                        // cleanup boundaries for pending tables using persisted
+                        // progress, which may precede relations in this batch.
                         self.try_queue_schema_cleanup().await;
                     }
                 }
@@ -2034,26 +2040,21 @@ where
     /// logical message is decoded and record the exact snapshot that any
     /// following relation must materialize.
     ///
-    /// This ordering matches how `pgoutput` produces the stream:
-    /// - `pgoutput_message()` writes logical `Message` records directly and
-    ///   does not inject `Relation` metadata.
-    /// - `Relation` records are synthesized lazily by `maybe_send_schema()`
-    ///   only when `pgoutput_change()` is about to emit a DML change.
-    /// - relcache invalidation from the DDL resets `schema_sent`, so the first
-    ///   post-DDL DML for the relation gets a fresh `Relation` message just
-    ///   before the row event.
+    /// Supported publication DDL also advances this cursor: a column-list
+    /// change needs an ordered snapshot for its new replication mask even
+    /// though the stored full-table columns can remain identical.
     ///
-    /// In other words, the protocol variant this code relies on is: `... -> ddl
-    /// Message -> Relation(new schema) -> Insert/Update/Delete ...`. Because
-    /// the DDL message itself is not a DML event, we must record the new schema
-    /// cursor here so the next `Relation` rebuilds the masks against that exact
-    /// snapshot. PostgreSQL omits the relation when the DDL did not invalidate
-    /// pgoutput's cached relation state. In that case the first row combines
-    /// the stored new table schema with the previous relation masks and
-    /// materializes `WithSchema`. The retained masks are only a fallback: a new
-    /// relation replaces them before any row is decoded. Without previous
-    /// masks, a table-sync worker cannot hand over this incomplete state until
-    /// a relation provides both masks.
+    /// `pgoutput_message()` emits the logical message directly. A protocol
+    /// relation follows lazily before a row or truncate when PostgreSQL's
+    /// relation cache needs refreshing. This is independent of ETL's snapshot
+    /// lineage: maintenance can resend a relation without a DDL message, and
+    /// no-op DDL can emit a message without invalidating the relation cache.
+    ///
+    /// When no relation follows DDL, the first row combines the pending schema
+    /// with the previous masks and emits a destination-facing relation event.
+    /// A received relation replaces those fallback masks before row decoding.
+    /// Without previous masks, a table-sync worker must wait for a relation
+    /// before handing over its decoding state.
     async fn handle_message(
         &mut self,
         message: &protocol::MessageBody,
@@ -2393,6 +2394,8 @@ where
                 RelationSchemaSelection::Exact(snapshot_id)
             }
             Some(TableDecodingState::WithSchema(schema)) => {
+                // A cache invalidation can resend the same schema. Preserve
+                // its lineage instead of selecting a newer preloaded snapshot.
                 RelationSchemaSelection::Exact(schema.inner().snapshot_id)
             }
             None => {

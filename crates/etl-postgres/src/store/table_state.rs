@@ -116,66 +116,35 @@ where
 ///
 /// Restores the previous state by updating the current flags in the database,
 /// returning the restored state if successful.
-pub async fn rollback_table_state(
-    conn: &mut sqlx::PgConnection,
+pub async fn rollback_table_state<'c, E>(
+    executor: E,
     pipeline_id: i64,
     table_id: TableId,
-) -> sqlx::Result<Option<StoredTableStateRow>> {
-    // Get current row and its prev id
-    let current_row: Option<(i64, Option<i64>)> = sqlx::query_as(
+) -> sqlx::Result<Option<StoredTableStateRow>>
+where
+    E: PgExecutor<'c>,
+{
+    // Delete the rolled-back row to bound retry history. Depending on its
+    // RETURNING output ensures deletion precedes restoring the unique current
+    // row. A state without a predecessor is left unchanged.
+    sqlx::query_as(
         r#"
-        select id, prev from etl.replication_state
-        where pipeline_id = $1 and table_id = $2 and is_current = true
+        with removed as (
+            delete from etl.replication_state
+            where pipeline_id = $1 and table_id = $2 and is_current = true
+              and prev is not null
+            returning prev
+        )
+        update etl.replication_state
+        set is_current = true, updated_at = now()
+        where id = (select prev from removed)
+        returning id, pipeline_id, table_id, state, metadata, prev, is_current
         "#,
     )
     .bind(pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
-    .fetch_optional(&mut *conn)
-    .await?;
-
-    if let Some((current_id, Some(prev_id))) = current_row {
-        // Delete the row we are rolling back from to avoid buildup.
-        // Technically, we could keep the previous row for tracking purposes,
-        // but especially during timed retries, we might end up with an infinite
-        // growth of the database.
-        sqlx::query(
-            r#"
-            delete from etl.replication_state
-            where id = $1
-            "#,
-        )
-        .bind(current_id)
-        .execute(&mut *conn)
-        .await?;
-
-        // Set previous row to current
-        sqlx::query(
-            r#"
-            update etl.replication_state
-            set is_current = true, updated_at = now()
-            where id = $1
-            "#,
-        )
-        .bind(prev_id)
-        .execute(&mut *conn)
-        .await?;
-
-        // Fetch the restored row
-        let restored_row: StoredTableStateRow = sqlx::query_as(
-            r#"
-            select id, pipeline_id, table_id, state, metadata, prev, is_current
-            from etl.replication_state
-            where id = $1
-            "#,
-        )
-        .bind(prev_id)
-        .fetch_one(&mut *conn)
-        .await?;
-
-        return Ok(Some(restored_row));
-    }
-
-    Ok(None)
+    .fetch_optional(executor)
+    .await
 }
 
 /// Replaces table state history with one fresh state within a transaction.

@@ -6,7 +6,7 @@ use etl::{
         ReplicationMessageStream,
         client::{CtidPartition, PgReplicationClient, SlotState},
     },
-    schema::ColumnSchema,
+    schema::{ColumnSchema, TableId},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         pipeline::test_slot_name,
@@ -910,8 +910,9 @@ async fn table_copy_lock_timeout_applies_to_parent_and_child() {
     database.run_sql("begin").await.unwrap();
     database.run_sql("lock table test.locked_copy in access exclusive mode").await.unwrap();
     let (parent_result, child_result) = timeout(Duration::from_secs(45), async {
+        let table_ids = [table_id];
         tokio::join!(
-            transaction.get_table_copy_planning_estimate(table_id),
+            transaction.get_table_copy_planning_estimates(&table_ids),
             child_transaction.get_table_copy_stream_with_ctid_partition(
                 table_id, table_id, &columns, None, &partition,
             ),
@@ -1189,7 +1190,12 @@ async fn plan_ctid_partitions_returns_correct_partitions() {
     let (transaction, _) =
         client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
 
-    let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
+    let estimate = transaction
+        .get_table_copy_planning_estimates(&[table_id])
+        .await
+        .unwrap()
+        .remove(&table_id)
+        .unwrap();
     let partitions = estimate.plan_ctid_partitions(4).unwrap();
 
     assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
@@ -1237,26 +1243,34 @@ async fn plan_ctid_partitions_returns_correct_partitions() {
     transaction.commit().await.unwrap();
 }
 
+/// Batched planning handles empty input, empty tables, and nonempty tables, and
+/// reports a missing source table rather than silently omitting its data.
 #[tokio::test(flavor = "multi_thread")]
-async fn plan_ctid_partitions_returns_empty_for_empty_table() {
-    init_test_tracing();
+async fn table_copy_planning_estimates_cover_all_requested_tables() {
     let database = spawn_source_database().await;
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-
-    let table_id = database
-        .create_table(test_table_name("table_1"), true, &[("age", "integer")])
+    let full_name = test_table_name("planning_full");
+    let full = database.create_table(full_name.clone(), true, &[("age", "integer")]).await.unwrap();
+    let empty = database
+        .create_table(test_table_name("planning_empty"), true, &[("age", "integer")])
         .await
         .unwrap();
-
+    database.insert_generate_series(full_name, &["age"], 1, 100, 1).await.unwrap();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) =
-        client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
-
-    let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
-    let partitions = estimate.plan_ctid_partitions(4).unwrap();
-
-    assert!(partitions.is_empty(), "expected no partitions for empty table");
-
+        client.create_slot_with_transaction(&test_slot_name("planning"), false).await.unwrap();
+    assert!(transaction.get_table_copy_planning_estimates(&[]).await.unwrap().is_empty());
+    let estimates = transaction.get_table_copy_planning_estimates(&[empty, full]).await.unwrap();
+    assert_eq!(estimates.len(), 2);
+    assert!(estimates[&empty].plan_ctid_partitions(2).unwrap().is_empty());
+    assert!(!estimates[&full].plan_ctid_partitions(2).unwrap().is_empty());
+    assert_eq!(
+        transaction
+            .get_table_copy_planning_estimates(&[full, TableId::new(0)])
+            .await
+            .unwrap_err()
+            .kind(),
+        ErrorKind::SourceSchemaError
+    );
     transaction.commit().await.unwrap();
 }
 
@@ -1282,7 +1296,12 @@ async fn table_copy_stream_with_ctid_partition() {
         client.create_slot_with_transaction(&test_slot_name("my_slot"), false).await.unwrap();
 
     let column_schemas = [test_column("age", Type::INT4, 2, true, false)];
-    let estimate = transaction.get_table_copy_planning_estimate(table_id).await.unwrap();
+    let estimate = transaction
+        .get_table_copy_planning_estimates(&[table_id])
+        .await
+        .unwrap()
+        .remove(&table_id)
+        .unwrap();
     let partitions = estimate.plan_ctid_partitions(4).unwrap();
     assert!(!partitions.is_empty(), "expected at least one partition for non-empty table");
     assert!(partitions.len() <= 4, "planner should not exceed requested partitions");
@@ -1319,20 +1338,25 @@ async fn table_copy_stream_with_ctid_partition() {
     );
 }
 
+/// Serial and partitioned COPY quote names without changing the row filter.
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_stream_respects_row_filter() {
+async fn table_copy_stream_quotes_names_and_respects_row_filter() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    // Row filters in publication are only available from Postgres 15+;
+    // Publication row filters require PostgreSQL 15+.
     if below_version!(database.server_version(), POSTGRES_15) {
         eprintln!("Skipping test: PostgreSQL 15+ required for row filters");
         return;
     }
-    // We create a table and insert one row.
-    let test_table_name = test_table_name("table_1");
-    let test_table_id =
-        database.create_table(test_table_name.clone(), true, &[("age", "integer")]).await.unwrap();
+    let publication_name = r#"pub'"; select 1; --\"#;
+    let column_name = r#"age'"; select 1; --\"#;
+    let quoted_column = quote_identifier(column_name);
+    let test_table_name = test_table_name(r#"table'"; select 1; --\"#);
+    let test_table_id = database
+        .create_table(test_table_name.clone(), true, &[(&quoted_column, "integer")])
+        .await
+        .unwrap();
 
     database
         .run_sql(&format!(
@@ -1343,8 +1367,8 @@ async fn table_copy_stream_respects_row_filter() {
         .unwrap();
     database
         .run_sql(&format!(
-            "create publication {} for table {} where (age >= 18)",
-            quote_identifier("test_pub"),
+            "create publication {} for table {} where ({quoted_column} >= 18)",
+            quote_identifier(publication_name),
             test_table_name.as_quoted_identifier()
         ))
         .await
@@ -1352,38 +1376,49 @@ async fn table_copy_stream_respects_row_filter() {
 
     let mut parent_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    // We apply a row filter (age >= 18), so we expect the number of rows
-    // post-synchronization to be the numbers 18..=30 when inserting the range
-    // 1..=30 (`insert_generate_series` has an inclusive end) We use (18..30+1)
-    // since inclusive ranges don't have a `len` for i32.
-    let total_rows_count = 30;
-    let expected_rows_count = (18..1 + total_rows_count as i32).len();
+    database.insert_generate_series(test_table_name, &[&quoted_column], 1, 30, 1).await.unwrap();
 
-    database
-        .insert_generate_series(test_table_name, &["age"], 1, total_rows_count, 1)
-        .await
-        .unwrap();
-
-    // We create the slot when the database schema contains only 'table_1' data.
     let (transaction, _) = parent_client
         .create_slot_with_transaction(&test_slot_name("my_slot"), false)
         .await
         .unwrap();
 
-    // We create a transaction to copy the table data consistently.
-    let column_schemas = [test_column("age", Type::INT4, 2, true, false)];
+    let column_schemas = [test_column(column_name, Type::INT4, 2, true, false)];
     let stream = transaction
-        .get_table_copy_stream(test_table_id, &column_schemas, Some("test_pub"))
+        .get_table_copy_stream(test_table_id, &column_schemas, Some(publication_name))
         .await
         .unwrap();
 
-    let rows_count = count_stream_rows(stream).await;
+    assert_eq!(count_stream_rows(stream).await, 13);
 
-    // Transaction should be committed after the copy stream is exhausted.
+    let estimate = transaction
+        .get_table_copy_planning_estimates(&[test_table_id])
+        .await
+        .unwrap()
+        .remove(&test_table_id)
+        .unwrap();
+    let snapshot = transaction.export_snapshot().await.unwrap();
+    let mut partitioned_rows = 0;
+    for planned in estimate.plan_ctid_partitions(2).unwrap() {
+        let (partition, _) = planned.into_parts();
+        let mut child = transaction.fork_child().await.unwrap();
+        let child_tx = child.begin_transaction(&snapshot).await.unwrap();
+        let stream = child_tx
+            .get_table_copy_stream_with_ctid_partition(
+                test_table_id,
+                test_table_id,
+                &column_schemas,
+                Some(publication_name),
+                &partition,
+            )
+            .await
+            .unwrap();
+        partitioned_rows += count_stream_rows(stream).await;
+        child_tx.commit().await.unwrap();
+    }
+
     transaction.commit().await.unwrap();
-
-    // We expect to have the inserted number of rows.
-    assert_eq!(rows_count, expected_rows_count as u64);
+    assert_eq!(partitioned_rows, 13);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -3,45 +3,29 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::{
     error::EtlResult,
     schema::{SnapshotId, TableId, TableSchema},
+    store::CachedStore,
 };
 
-/// Trait for storing and retrieving database table schema information.
+/// Stores table schemas versioned by commit LSN, then message LSN.
 ///
-/// [`SchemaStore`] implementations are responsible for defining how the schema
-/// information is stored and retrieved. The store supports schema versioning
-/// where each schema version is identified by a snapshot ID ordered by commit
-/// LSN and then message LSN. Stores may prune obsolete versions behind a
-/// persisted replication checkpoint.
-///
-/// Implementations should ensure thread-safety and handle concurrent access to
-/// the data.
-pub trait SchemaStore {
-    /// Returns the table schema for the given table at the specified snapshot
-    /// point.
+/// Implementations follow the shared-cache contract in [`crate::store`].
+pub trait SchemaStore: CachedStore {
+    /// Returns the newest cached schema at or before the requested snapshot,
+    /// or `None` if no version qualifies.
     ///
-    /// Returns the newest schema version at or before the requested snapshot.
-    /// If not found in cache, loads from the persistent store. As an
-    /// optimization, also loads the latest schema version when fetching from
-    /// the database.
-    ///
-    /// Returns `None` if no schema version exists for the table at or before
-    /// the given snapshot.
+    /// The cache must contain all retained versions to avoid selecting an
+    /// outdated schema. Implementations may refresh it when uninitialized or
+    /// invalidated.
     fn get_table_schema(
         &self,
         table_id: &TableId,
         snapshot_id: SnapshotId,
     ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
 
-    /// Returns all cached table schemas.
+    /// Returns every retained schema version for every table.
     ///
-    /// Does not read from the persistent store.
+    /// Implementations may refresh an uninitialized or invalidated cache.
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
-
-    /// Loads table schemas from the persistent state into the cache.
-    ///
-    /// This should be called once the program starts to load the schemas into
-    /// the cache.
-    fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
     /// Stores a table schema in both the cache and the persistent store.
     ///
@@ -60,6 +44,9 @@ pub trait SchemaStore {
     /// because PostgreSQL may replay them, or the destination may need them for
     /// schema application. The ordered map keeps per-table cleanup iteration
     /// deterministic.
+    ///
+    /// Implementations may skip completed boundaries unless schema writes or
+    /// lifecycle changes require another pass.
     ///
     /// Returns the number of schema versions removed.
     fn prune_table_schemas(
