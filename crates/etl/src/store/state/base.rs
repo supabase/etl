@@ -4,7 +4,7 @@ use crate::{
     destination::DestinationTableMetadata,
     error::EtlResult,
     schema::{PgLsn, TableId},
-    store::{TableState, WorkerType},
+    store::{CachedStore, TableState, WorkerType},
 };
 
 /// Arc-wrapped dictionary of table states.
@@ -16,10 +16,10 @@ pub(crate) type DestinationTablesMetadata = Arc<BTreeMap<TableId, DestinationTab
 /// Stores table states, replication checkpoints, and destination metadata.
 ///
 /// Implementations follow the shared-cache contract in [`crate::store`].
-pub trait StateStore {
+pub trait StateStore: CachedStore {
     /// Returns table state for table with id `table_id` from the cache.
     ///
-    /// Does not load any new data into the cache.
+    /// Implementations may refresh an uninitialized or invalidated cache.
     fn get_table_state(
         &self,
         table_id: TableId,
@@ -27,13 +27,8 @@ pub trait StateStore {
 
     /// Returns the table states for all the tables from the cache.
     ///
-    /// Does not read from the persistent store.
+    /// Implementations may refresh an uninitialized or invalidated cache.
     fn get_table_states(&self) -> impl Future<Output = EtlResult<TableStates>> + Send;
-
-    /// Loads the table states from the persistent store into the cache.
-    ///
-    /// Call once at startup; subsequent writes maintain the cache.
-    fn load_table_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
     /// Persists state updates atomically, then updates the cache.
     fn update_table_states(
@@ -57,17 +52,10 @@ pub trait StateStore {
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<TableState>> + Send;
 
-    /// Loads all worker checkpoints from persistent storage into the cache.
-    ///
-    /// Call once at startup before workers run. Later writes and resets keep
-    /// the cache current. Returns the number of checkpoints loaded.
-    fn load_replication_checkpoints(&self) -> impl Future<Output = EtlResult<usize>> + Send;
-
     /// Returns the worker's cached durable replay checkpoint, or `None`.
     ///
-    /// Call [`Self::load_replication_checkpoints`] at startup. Reads never
-    /// query storage; in-memory apply progress alone does not establish a
-    /// checkpoint.
+    /// Implementations may refresh an uninitialized or invalidated cache.
+    /// In-memory apply progress alone does not establish a checkpoint.
     fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,
@@ -85,8 +73,9 @@ pub trait StateStore {
 
     /// Deletes the persisted checkpoint for a replication worker.
     ///
-    /// Used when resetting slot lineage. Invalidate the cached checkpoint
-    /// before database work so cancellation cannot leave a stale boundary.
+    /// Used when resetting slot lineage. Remove the cached checkpoint only
+    /// after persistence succeeds. Cancellation must not expose a stale cache
+    /// while the deletion can still finish in the database.
     fn delete_replication_checkpoint(
         &self,
         worker_type: WorkerType,
@@ -94,18 +83,11 @@ pub trait StateStore {
 
     /// Returns destination table metadata for a specific table from the cache.
     ///
-    /// Does not load any new data into the cache.
+    /// Implementations may refresh an uninitialized or invalidated cache.
     fn get_destination_table_metadata(
         &self,
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
-
-    /// Loads all destination table metadata from the persistent store into the
-    /// cache.
-    ///
-    /// This should be called during startup to load the metadata into the
-    /// cache.
-    fn load_destination_tables_metadata(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
     /// Stores destination table metadata in both the cache and persistent
     /// store.

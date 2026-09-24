@@ -13,11 +13,6 @@ pub(crate) struct TableSchemaSnapshots {
 }
 
 impl TableSchemaSnapshots {
-    /// Returns the total number of stored schema snapshots.
-    pub(crate) fn total_snapshots_count(&self) -> usize {
-        self.table_schemas.values().map(BTreeMap::len).sum()
-    }
-
     /// Returns the number of stored schema snapshots for a table.
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn snapshots_count(&self, table_id: TableId) -> usize {

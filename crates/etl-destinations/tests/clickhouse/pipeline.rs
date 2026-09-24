@@ -7,7 +7,7 @@ use etl::{
     failpoints::APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
     pipeline::PipelineId,
     schema::ReplicatedTableSchema,
-    store::{PostgresStore, SchemaStore, StateStore, TableStateType, WorkerType},
+    store::{CachedStore, PostgresStore, SchemaStore, StateStore, TableStateType, WorkerType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -1362,14 +1362,17 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     let update_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
         .await;
+
     database
         .run_sql("update test.restart_flow set value = 'checkpointed' where id = 1")
         .await
         .unwrap();
+
     update_notify.notified().await;
     wait_for_table_state_type(&store, table_id, TableStateType::Ready, RESTART_STATE_TIMEOUT)
         .await
         .unwrap();
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify first run produced exactly one row.
@@ -1386,8 +1389,10 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     drop(store);
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    store.load_replication_checkpoints().await.unwrap();
+    store.load_cache().await.unwrap();
+
     assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );

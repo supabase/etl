@@ -5,8 +5,8 @@ use etl::{
     error::{EtlError, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateLifecycleStore,
-        TableStateOperation, TableStates, WorkerType,
+        CachedStore, SchemaStore, StateStore, TableRetryPolicy, TableState,
+        TableStateLifecycleStore, TableStateOperation, TableStates, WorkerType,
     },
 };
 use tracing::info;
@@ -76,9 +76,18 @@ impl<S> ErrorReportingStateStore<S> {
     }
 }
 
+impl<S> CachedStore for ErrorReportingStateStore<S>
+where
+    S: CachedStore + Sync,
+{
+    async fn load_cache(&self) -> EtlResult<()> {
+        self.inner.load_cache().await
+    }
+}
+
 impl<S> StateStore for ErrorReportingStateStore<S>
 where
-    S: StateStore + Send + Sync,
+    S: StateStore + Sync,
 {
     async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         self.inner.get_table_state(table_id).await
@@ -86,10 +95,6 @@ where
 
     async fn get_table_states(&self) -> EtlResult<TableStates> {
         self.inner.get_table_states().await
-    }
-
-    async fn load_table_states(&self) -> EtlResult<usize> {
-        self.inner.load_table_states().await
     }
 
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
@@ -110,10 +115,6 @@ where
 
     async fn rollback_table_state(&self, table_id: TableId) -> EtlResult<TableState> {
         self.inner.rollback_table_state(table_id).await
-    }
-
-    async fn load_replication_checkpoints(&self) -> EtlResult<usize> {
-        self.inner.load_replication_checkpoints().await
     }
 
     async fn get_replication_checkpoint(
@@ -142,10 +143,6 @@ where
         self.inner.get_destination_table_metadata(table_id).await
     }
 
-    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
-        self.inner.load_destination_tables_metadata().await
-    }
-
     async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -157,7 +154,7 @@ where
 
 impl<S> SchemaStore for ErrorReportingStateStore<S>
 where
-    S: SchemaStore + Send + Sync,
+    S: SchemaStore + Sync,
 {
     async fn get_table_schema(
         &self,
@@ -169,10 +166,6 @@ where
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         self.inner.get_table_schemas().await
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        self.inner.load_table_schemas().await
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
@@ -189,12 +182,9 @@ where
 
 impl<S> TableStateLifecycleStore for ErrorReportingStateStore<S>
 where
-    S: TableStateLifecycleStore + Send + Sync,
+    S: TableStateLifecycleStore + Sync,
 {
-    async fn apply_table_state_operation(
-        &self,
-        operation: TableStateOperation,
-    ) -> EtlResult<usize> {
+    async fn apply_table_state_operation(&self, operation: TableStateOperation) -> EtlResult<()> {
         self.inner.apply_table_state_operation(operation).await
     }
 

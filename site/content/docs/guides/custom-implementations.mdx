@@ -69,8 +69,9 @@ tracing-subscriber = "0.3"
 
 ## Implement a custom store [#implement-a-custom-store] [step]
 
-Create `src/custom_store.rs`. A store must implement **three traits** (see [Extension Points](/explanation/traits/) for full details):
+Create `src/custom_store.rs`. A store must implement **four traits** (see [Extension Points](/explanation/traits/) for full details):
 
+- `CachedStore` - Complete cache preparation before startup
 - `SchemaStore` - Versioned table schema storage, retrieval, and pruning
 - `StateStore` - Table state, persisted replication checkpoints, and destination table metadata tracking
 - `TableStateLifecycleStore` - Store lifecycle operations for table-copy preparation, resync resets, and publication changes
@@ -78,10 +79,22 @@ Create `src/custom_store.rs`. A store must implement **three traits** (see [Exte
 `SharedStateStore`, `DestinationStore`, and `PipelineStore` are
 blanket-implemented facades over these traits plus the required
 clone/thread-safety bounds, so custom stores do not implement those directly.
+The state, schema, and lifecycle traits inherit `CachedStore`, so helpers do
+not repeat that bound when using one of those capabilities.
 
-Startup loads all retained schemas, table states, destination metadata, and
-worker checkpoints before destinations or workers run. Getters read the shared
-cache; writes and lifecycle operations maintain it after persistence succeeds.
+Startup calls `CachedStore::load_cache()` once to prepare all retained schemas,
+table states, destination metadata, and worker checkpoints before initialization
+reads, destinations, or workers run. Persistent implementations load these
+together and publish a complete cache only after success. Failed or cancelled
+loads must not expose partial state. Getters can recover an unusable cache;
+writes and lifecycle operations maintain it after persistence succeeds.
+
+For a persistent cache, an interrupted commit can leave the database outcome
+unknown even when the Rust future has been dropped. Prevent subsequent access
+from trusting stale data until recovery has established the committed state.
+See [PostgreSQL cache concurrency and recovery](/explanation/traits/#postgresql-ownership-and-concurrency)
+for the built-in store's ownership contract, locking protocol, isolation level,
+and recovery behavior.
 
 <Callout className="etl-callout" type="warn" title="Instructional store">
   This example keeps state in memory so the trait contract is visible in one
@@ -102,7 +115,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        SchemaStore, StateStore, TableState, TableStateLifecycleStore, TableStateOperation,
+        CachedStore, SchemaStore, StateStore, TableState, TableStateLifecycleStore, TableStateOperation,
         TableStates, WorkerType,
     },
 };
@@ -132,6 +145,13 @@ impl CustomStore {
     }
 }
 
+impl CachedStore for CustomStore {
+    async fn load_cache(&self) -> EtlResult<()> {
+        // This store keeps its authoritative state in memory.
+        Ok(())
+    }
+}
+
 // Compare SnapshotId values directly. Their display strings use variable-width
 // decimal components and therefore do not have the same lexical ordering.
 impl SchemaStore for CustomStore {
@@ -157,10 +177,6 @@ impl SchemaStore for CustomStore {
             .values()
             .flat_map(|entry| entry.schemas.values().cloned())
             .collect())
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        Ok(0)
     }
 
     async fn store_table_schema(&self, schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
@@ -224,10 +240,6 @@ impl StateStore for CustomStore {
         ))
     }
 
-    async fn load_table_states(&self) -> EtlResult<usize> {
-        Ok(0)
-    }
-
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
         for (table_id, state) in updates {
@@ -253,11 +265,6 @@ impl StateStore for CustomStore {
         })?;
         entry.state = Some(previous_state.clone());
         Ok(previous_state)
-    }
-
-    async fn load_replication_checkpoints(&self) -> EtlResult<usize> {
-        let checkpoints = self.checkpoints.lock().await;
-        Ok(checkpoints.len())
     }
 
     async fn get_replication_checkpoint(
@@ -295,10 +302,6 @@ impl StateStore for CustomStore {
             .and_then(|e| e.destination_metadata.clone()))
     }
 
-    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
-        Ok(0)
-    }
-
     async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -314,7 +317,7 @@ impl TableStateLifecycleStore for CustomStore {
     async fn apply_table_state_operation(
         &self,
         operation: TableStateOperation,
-    ) -> EtlResult<usize> {
+    ) -> EtlResult<()> {
         match operation {
             TableStateOperation::PrepareForCopy { table_id } => {
                 let mut tables = self.tables.lock().await;
@@ -324,11 +327,11 @@ impl TableStateLifecycleStore for CustomStore {
                 }
                 let mut checkpoints = self.checkpoints.lock().await;
                 checkpoints.remove(&WorkerType::TableSync { table_id });
-                Ok(0)
+
+                Ok(())
             }
             TableStateOperation::ResetForResync => {
                 let mut tables = self.tables.lock().await;
-                let reset_count = tables.len();
                 for entry in tables.values_mut() {
                     if let Some(current_state) = entry.state.replace(TableState::Init) {
                         entry.state_history.push(current_state);
@@ -336,14 +339,16 @@ impl TableStateLifecycleStore for CustomStore {
                 }
                 let mut checkpoints = self.checkpoints.lock().await;
                 checkpoints.remove(&WorkerType::Apply);
-                Ok(reset_count)
+
+                Ok(())
             }
             TableStateOperation::Delete { table_id } => {
                 let mut tables = self.tables.lock().await;
-                let removed = usize::from(tables.remove(&table_id).is_some());
+                tables.remove(&table_id);
                 let mut checkpoints = self.checkpoints.lock().await;
                 checkpoints.remove(&WorkerType::TableSync { table_id });
-                Ok(removed)
+
+                Ok(())
             }
         }
     }

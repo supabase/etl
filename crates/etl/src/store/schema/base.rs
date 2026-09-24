@@ -3,17 +3,19 @@ use std::{collections::BTreeMap, sync::Arc};
 use crate::{
     error::EtlResult,
     schema::{SnapshotId, TableId, TableSchema},
+    store::CachedStore,
 };
 
 /// Stores table schemas versioned by commit LSN, then message LSN.
 ///
 /// Implementations follow the shared-cache contract in [`crate::store`].
-pub trait SchemaStore {
+pub trait SchemaStore: CachedStore {
     /// Returns the newest cached schema at or before the requested snapshot,
     /// or `None` if no version qualifies.
     ///
-    /// Call [`Self::load_table_schemas`] at startup. The cache must contain all
-    /// retained versions to avoid selecting an outdated schema.
+    /// The cache must contain all retained versions to avoid selecting an
+    /// outdated schema. Implementations may refresh it when uninitialized or
+    /// invalidated.
     fn get_table_schema(
         &self,
         table_id: &TableId,
@@ -22,14 +24,8 @@ pub trait SchemaStore {
 
     /// Returns all cached table schemas.
     ///
-    /// Does not read from the persistent store.
+    /// Implementations may refresh an uninitialized or invalidated cache.
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
-
-    /// Loads all retained schema versions from persistent storage into cache.
-    ///
-    /// Pipeline startup calls this before workers begin. Writes and
-    /// durable-checkpoint pruning maintain the cache afterward.
-    fn load_table_schemas(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
     /// Stores a table schema in both the cache and the persistent store.
     ///

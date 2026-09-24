@@ -491,7 +491,7 @@ async fn table_copy_worker<D>(
     batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyProgress>
 where
-    D: Destination + Clone + Send + 'static,
+    D: Destination + Clone,
 {
     let child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
@@ -541,7 +541,7 @@ async fn table_copy_partition_rows<D>(
     batch_memory_governor: BatchMemoryGovernor,
 ) -> EtlResult<TableCopyProgress>
 where
-    D: Destination + Clone + Send + 'static,
+    D: Destination,
 {
     let start_time = Instant::now();
     let replicated_column_schemas =
@@ -617,7 +617,7 @@ async fn table_copy_rows_from_stream<D, S>(
     destination: D,
 ) -> EtlResult<TableCopyProgress>
 where
-    D: Destination + Clone + Send + 'static,
+    D: Destination,
     S: Stream<Item = EtlResult<Vec<TableCopyRow>>>,
 {
     let mut progress = TableCopyProgress::default();

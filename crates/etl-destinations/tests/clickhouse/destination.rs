@@ -1747,7 +1747,7 @@ struct DispatchTimingProbe<D> {
 
 impl<D> Destination for DispatchTimingProbe<D>
 where
-    D: Destination + Send + Sync,
+    D: Destination + Sync,
 {
     fn name() -> &'static str {
         D::name()

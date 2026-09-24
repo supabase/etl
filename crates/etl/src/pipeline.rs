@@ -126,8 +126,8 @@ where
 
     /// Starts the pipeline and begins replication processing.
     ///
-    /// This method initializes the connection to Postgres, loads destination
-    /// table metadata and schemas, creates the worker pool for table
+    /// This method initializes the connection to Postgres, prepares every
+    /// store cache, creates the worker pool for table
     /// synchronization, and starts the apply worker for processing replication
     /// stream events.
     ///
@@ -168,10 +168,7 @@ where
 
         // Warm every store cache before initialization reads, destinations, or
         // workers.
-        self.store.load_table_states().await?;
-        self.store.load_destination_tables_metadata().await?;
-        self.store.load_table_schemas().await?;
-        self.store.load_replication_checkpoints().await?;
+        self.store.load_cache().await?;
 
         // Reconcile the cached table states with current publication
         // membership.

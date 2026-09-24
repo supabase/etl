@@ -486,10 +486,9 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
                 "replication slot is invalidated, resetting all table states and recreating slot"
             );
 
-            let reset_count = store.reset_table_states_for_resync().await?;
+            store.reset_table_states_for_resync().await?;
 
             info!(
-                reset_count,
                 "reset table states to init and deleted the apply worker checkpoint for \
                  invalidated slot recovery"
             );
