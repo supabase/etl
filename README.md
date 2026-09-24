@@ -163,9 +163,7 @@ Manual builds publish only `<full-commit-sha>-experimental`, even for commits on
 
 The image includes the replicator, the DuckLake maintenance binary, and DuckDB
 extensions. Supply configuration at runtime; see the
-[replicator guide](crates/etl-replicator/README.md). The separate API, controller,
-and simulator use their own private registries; this does not change public
-access to ETL replicator images.
+[replicator guide](crates/etl-replicator/README.md).
 
 ## Development
 
