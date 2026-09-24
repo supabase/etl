@@ -15,12 +15,12 @@ use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_
 ///
 /// This must stay in sync with the `shared-pg` test group in
 /// `.config/nextest.toml`.
-const SHARED_PG_FILTER: &str = "\
+const SHARED_PG_FILTER: &str =
+    "\
     test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
-                                test(/^(bigquery|ducklake|iceberg)::/)) | \
-                                (binary_id(etl-destinations::main) & \
-                                test(/^clickhouse::pipeline/)) | (binary_id(etl-destinations) & \
-                                test(/ducklake::core::tests::postgres_backed::/))";
+     test(/^(bigquery|ducklake|iceberg)::/) & not test(/^bigquery::destination::/)) | \
+     (binary_id(etl-destinations::main) & test(/^clickhouse::pipeline/)) | \
+     (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))";
 
 /// Test execution mode.
 #[derive(Clone, Copy, ValueEnum)]
@@ -122,12 +122,12 @@ impl NextestArgs {
             pg_port: None,
         });
 
-        // One lane per Postgres shard, each on a dedicated port.
+        // Round-robin slices balance test counts across dedicated clusters.
         for shard in 1..=self.shards {
             lanes.push(Lane {
                 name: format!("pg-{shard}"),
                 filter: SHARED_PG_FILTER.to_owned(),
-                partition: Some(format!("hash:{shard}/{}", self.shards)),
+                partition: Some(format!("slice:{shard}/{}", self.shards)),
                 pg_port: Some(self.base_port + shard - 1),
             });
         }
@@ -183,8 +183,8 @@ struct Lane {
     name: String,
     /// Nextest filter expression (`-E`) selecting which tests this lane runs.
     filter: String,
-    /// Nextest hash partition (e.g. `hash:1/3`). `None` for unpartitioned
-    /// lanes.
+    /// Nextest round-robin partition (e.g. `slice:1/3`). `None` for
+    /// unpartitioned lanes.
     partition: Option<String>,
     /// Port of the Postgres cluster for this lane. `None` for non-Postgres
     /// lanes.
@@ -255,7 +255,6 @@ fn nextest_command(mode: Mode, archive_target: Option<&Path>) -> Command {
         Mode::LlvmCov => cmd.args(["llvm-cov", "nextest"]),
     };
 
-    cmd.arg("--no-fail-fast");
     if let Some(target) = archive_target {
         cmd.arg("--cargo-metadata")
             .arg(target.join("nextest/cargo-metadata.json"))
@@ -277,15 +276,16 @@ fn nextest_command(mode: Mode, archive_target: Option<&Path>) -> Command {
     cmd
 }
 
-/// Runs one lane with its own cluster binding and prefixed output.
-fn run_lane(
+/// Builds one lane's command with its isolated cluster binding.
+fn lane_command(
     lane: &Lane,
     mode: Mode,
     extra: &[String],
     pg_env: &PgEnv,
     archive_target: Option<&Path>,
-) -> Result<()> {
+) -> Command {
     let mut cmd = nextest_command(mode, archive_target);
+    cmd.arg("--no-fail-fast");
     cmd.args(["-E", &lane.filter]);
 
     if let Some(partition) = &lane.partition {
@@ -302,6 +302,18 @@ fn run_lane(
     }
 
     cmd.args(extra);
+    cmd
+}
+
+/// Runs one lane with its own cluster binding and prefixed output.
+fn run_lane(
+    lane: &Lane,
+    mode: Mode,
+    extra: &[String],
+    pg_env: &PgEnv,
+    archive_target: Option<&Path>,
+) -> Result<()> {
+    let mut cmd = lane_command(lane, mode, extra, pg_env, archive_target);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -368,11 +380,13 @@ fn install_llvm_tools() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::BTreeMap, ffi::OsStr, path::Path};
 
     use clap::Parser;
 
-    use crate::commands::nextest::{Mode, NextestArgs, SHARED_PG_FILTER, nextest_command};
+    use crate::commands::nextest::{
+        Lane, Mode, NextestArgs, PgEnv, SHARED_PG_FILTER, lane_command, nextest_command,
+    };
 
     /// Standalone parser for testing task-runner options and passthrough.
     #[derive(Parser)]
@@ -429,6 +443,60 @@ mod tests {
         assert!(args.contains(&std::ffi::OsStr::new("--target-dir-remap")));
     }
 
+    /// Build-only invocations must not receive execution-only flags.
+    #[test]
+    fn prebuild_omits_execution_options() {
+        let command = nextest_command(Mode::Run, None);
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("--locked")));
+        assert!(args.contains(&std::ffi::OsStr::new("--workspace")));
+        assert!(args.contains(&std::ffi::OsStr::new("--all-features")));
+        assert!(!args.contains(&std::ffi::OsStr::new("--no-fail-fast")));
+    }
+
+    /// Ordinary, archive, and coverage execution preserve shard isolation.
+    #[test]
+    fn lane_commands_bind_each_primary_and_replica() {
+        let pg_env = PgEnv {
+            host: "127.0.0.1".to_owned(),
+            replica_host: "localhost".to_owned(),
+            username: "postgres".to_owned(),
+            password: "postgres".to_owned(),
+        };
+        for (mode, archive) in [
+            (Mode::Run, None),
+            (Mode::Run, Some(Path::new("target/archive/target"))),
+            (Mode::LlvmCov, None),
+        ] {
+            for shard in 1..=4 {
+                let lane = Lane {
+                    name: format!("pg-{shard}"),
+                    filter: SHARED_PG_FILTER.to_owned(),
+                    partition: Some(format!("slice:{shard}/4")),
+                    pg_port: Some(5430 + shard - 1),
+                };
+                let command = lane_command(&lane, mode, &[], &pg_env, archive);
+                let env: BTreeMap<_, _> = command.get_envs().collect();
+                for (key, value) in [
+                    ("TESTS_DATABASE_HOST", "127.0.0.1".to_owned()),
+                    ("TESTS_DATABASE_REPLICA_HOST", "localhost".to_owned()),
+                    ("TESTS_DATABASE_PORT", (5430 + shard - 1).to_string()),
+                    ("TESTS_DATABASE_REPLICA_PORT", (6430 + shard - 1).to_string()),
+                ] {
+                    assert_eq!(env[OsStr::new(key)], Some(OsStr::new(&value)));
+                }
+                let args: Vec<_> = command.get_args().collect();
+                assert!(args.windows(2).any(|pair| pair == ["-E", SHARED_PG_FILTER]));
+                assert!(
+                    args.windows(2).any(|pair| {
+                        pair == ["--partition", lane.partition.as_deref().unwrap()]
+                    })
+                );
+                assert!(args.contains(&OsStr::new("--no-fail-fast")));
+            }
+        }
+    }
+
     /// Sharding and in-process serialization must classify the same tests.
     #[test]
     fn postgres_filter_matches_nextest_group() {
@@ -443,5 +511,27 @@ mod tests {
             SHARED_PG_FILTER.split_whitespace().collect::<String>(),
             group["filter"].as_str().unwrap().split_whitespace().collect::<String>()
         );
+    }
+
+    /// Remote-only BigQuery tests have their own bounded concurrency group.
+    #[test]
+    fn bigquery_destination_group_is_separate_and_bounded() {
+        let config: toml::Table = include_str!("../../../../.config/nextest.toml").parse().unwrap();
+        assert_eq!(config["test-groups"]["shared-pg"]["max-threads"].as_integer(), Some(1));
+        assert_eq!(
+            config["test-groups"]["bigquery-destination"]["max-threads"].as_integer(),
+            Some(1)
+        );
+        let group = config["profile"]["default"]["overrides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["test-group"].as_str() == Some("bigquery-destination"))
+            .unwrap();
+        assert_eq!(
+            group["filter"].as_str().unwrap(),
+            "binary_id(etl-destinations::main) & test(/^bigquery::destination::/)"
+        );
+        assert!(group["priority"].as_integer().unwrap() > 0);
     }
 }
