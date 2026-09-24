@@ -360,10 +360,17 @@ pub struct PipelineConfig {
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
-    /// Maximum number of table sync workers that can run at a time
+    /// Maximum number of table sync workers that can run at a time.
+    ///
+    /// Must be positive. The product with
+    /// [`Self::max_copy_connections_per_table`] must not exceed
+    /// [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Maximum worker connections per table during initial copy.
+    ///
+    /// Must be positive. The product with [`Self::max_table_sync_workers`]
+    /// must not exceed [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     ///
     /// Initial copy always uses ctid range work items, including when this is
     /// set to 1. ETL may plan more ctid ranges than worker connections so
@@ -421,6 +428,12 @@ impl PipelineConfig {
 
     /// Default maximum number of retry attempts for table errors.
     pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+    /// Maximum aggregate copy worker connections configured for one pipeline.
+    ///
+    /// Parent replication connections and other database connections are
+    /// additional to this ceiling.
+    pub const MAX_TOTAL_COPY_CONNECTIONS: u32 = 256;
 
     /// Default maximum number of concurrent table sync workers.
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
@@ -480,6 +493,43 @@ impl Validate for PipelineConfig {
     }
 }
 
+/// Validates positive concurrency and the aggregate initial-copy ceiling.
+///
+/// The configured worker count times the per-table copy connection count must
+/// not exceed [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
+pub fn validate_copy_concurrency(
+    max_table_sync_workers: u16,
+    max_copy_connections_per_table: u16,
+) -> Result<(), ValidationError> {
+    if max_table_sync_workers == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_table_sync_workers".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    if max_copy_connections_per_table == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_copy_connections_per_table".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    let total_copy_connections =
+        u32::from(max_table_sync_workers) * u32::from(max_copy_connections_per_table);
+    if total_copy_connections > PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_copy_connections_per_table".to_owned(),
+            constraint: format!(
+                "multiplied by `max_table_sync_workers` must not exceed {}",
+                PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS,
+            ),
+        });
+    }
+
+    Ok(())
+}
+
 /// Validates pipeline settings shared by secret and without-secret configs.
 fn validate_pipeline_settings(
     batch: &BatchConfig,
@@ -492,23 +542,11 @@ fn validate_pipeline_settings(
 ) -> Result<(), ValidationError> {
     batch.validate()?;
 
-    if max_table_sync_workers == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "max_table_sync_workers".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
+    validate_copy_concurrency(max_table_sync_workers, max_copy_connections_per_table)?;
 
     if table_error_retry_max_attempts == 0 {
         return Err(ValidationError::InvalidFieldValue {
             field: "table_error_retry_max_attempts".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
-
-    if max_copy_connections_per_table == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "max_copy_connections_per_table".to_owned(),
             constraint: "must be greater than 0".to_owned(),
         });
     }
@@ -627,10 +665,17 @@ pub struct PipelineConfigWithoutSecrets {
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
-    /// Maximum number of table sync workers that can run at a time
+    /// Maximum number of table sync workers that can run at a time.
+    ///
+    /// Must be positive. The product with
+    /// [`Self::max_copy_connections_per_table`] must not exceed
+    /// [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Maximum worker connections per table during initial copy.
+    ///
+    /// Must be positive. The product with [`Self::max_table_sync_workers`]
+    /// must not exceed [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     ///
     /// Initial copy always uses ctid range work items, including when this is
     /// set to 1. ETL may plan more ctid ranges than worker connections so
@@ -794,6 +839,39 @@ mod tests {
 
         config.validate().unwrap();
         PipelineConfigWithoutSecrets::from(config).validate().unwrap();
+    }
+
+    /// Both config representations enforce positive concurrency and the
+    /// aggregate copy connection ceiling.
+    #[test]
+    fn pipeline_copy_concurrency_validation() {
+        for (workers, connections, expected_field) in [
+            (1, 1, None),
+            (4, 4, None),
+            (1, 256, None),
+            (256, 1, None),
+            (8, 32, None),
+            (3, 85, None),
+            (0, 1, Some("max_table_sync_workers")),
+            (1, 0, Some("max_copy_connections_per_table")),
+            (1, 257, Some("max_copy_connections_per_table")),
+            (257, 1, Some("max_copy_connections_per_table")),
+            (3, 86, Some("max_copy_connections_per_table")),
+            (256, 256, Some("max_copy_connections_per_table")),
+            (u16::MAX, u16::MAX, Some("max_copy_connections_per_table")),
+        ] {
+            let mut json = pipeline_config_json();
+            json["max_table_sync_workers"] = workers.into();
+            json["max_copy_connections_per_table"] = connections.into();
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+            let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
+
+            for result in [config.validate(), without_secrets.validate()] {
+                let field =
+                    result.err().map(|ValidationError::InvalidFieldValue { field, .. }| field);
+                assert_eq!(field.as_deref(), expected_field, "{workers} x {connections}");
+            }
+        }
     }
 
     /// Both runtime config representations enforce the same inclusive retry
