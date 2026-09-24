@@ -1321,7 +1321,13 @@ where
             ));
         }
 
-        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
+        // Destination metadata names the table this source table writes to. The
+        // current source name differs from it after a rename.
+        let metadata = self.store.get_destination_table_metadata(schema.id()).await?;
+        let clickhouse_table_name = metadata.as_ref().map_or_else(
+            || try_stringify_table_name(schema.name()),
+            |metadata| Ok(metadata.table_id().to_owned()),
+        )?;
 
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             let drop_view = drop_current_view_sql(&clickhouse_table_name);
