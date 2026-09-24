@@ -21,7 +21,7 @@
   <a href="https://github.com/supabase/etl/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/supabase/etl/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://coveralls.io/github/supabase/etl?branch=main"><img alt="Coverage" src="https://coveralls.io/repos/github/supabase/etl/badge.svg?branch=main"></a>
   <a href="https://github.com/supabase/etl/actions/workflows/docs.yml"><img alt="Docs" src="https://github.com/supabase/etl/actions/workflows/docs.yml/badge.svg?branch=main"></a>
-  <a href="https://github.com/supabase/etl/actions/workflows/audit.yml"><img alt="Security audit" src="https://github.com/supabase/etl/actions/workflows/audit.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/supabase/etl/actions/workflows/dependency-audit.yml"><img alt="Dependency audit" src="https://github.com/supabase/etl/actions/workflows/dependency-audit.yml/badge.svg?branch=main"></a>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
 </p>
 

@@ -128,37 +128,38 @@ impl StartArgs {
 
         let tls_files = if self.no_tls { None } else { Some(self.prepare_tls_files()?) };
 
-        // Start the full stack on the base port unless the caller only needs
-        // source Postgres.
-        let first_shard_services =
-            if self.source_only { &SOURCE_POSTGRES_SERVICES[..] } else { &[] };
-        self.start_cluster(None, self.base_port, first_shard_services, tls_files.as_ref())?;
+        // Clusters have separate ports and volumes. Share the certificates, but
+        // overlap their startup, replica initialization, and TLS restarts.
+        thread::scope(|scope| -> Result<()> {
+            let handles: Vec<_> = (1..=self.shards)
+                .map(|shard| {
+                    let args = &self;
+                    let tls_files = tls_files.as_ref();
+                    scope.spawn(move || {
+                        let port = args.base_port + shard - 1;
+                        let project = (shard > 1)
+                            .then(|| format!("etl-stack-pg-{}-shard-{shard}", args.pg_version));
+                        let project_and_port = project.as_deref().map(|project| (project, port));
+                        // Only the first shard owns the destination services.
+                        let services = if shard == 1 && !args.source_only {
+                            &[][..]
+                        } else {
+                            &SOURCE_POSTGRES_SERVICES[..]
+                        };
+                        args.start_cluster(project_and_port, port, services, tls_files)?;
+                        args.wait_for_pg(project_and_port, port)?;
+                        args.wait_for_pg(project_and_port, port + READ_REPLICA_PORT_OFFSET)
+                    })
+                })
+                .collect();
 
-        // Start additional source-postgres containers on subsequent ports.
-        for shard in 2..=self.shards {
-            let port = self.base_port + shard - 1;
-            let project = format!("etl-stack-pg-{}-shard-{shard}", self.pg_version);
-            self.start_cluster(
-                Some((&project, port)),
-                port,
-                &SOURCE_POSTGRES_SERVICES,
-                tls_files.as_ref(),
-            )?;
-        }
-
-        // Wait for all clusters to accept connections.
-        for shard in 1..=self.shards {
-            let port = self.base_port + shard - 1;
-            let project = if shard == 1 {
-                None
-            } else {
-                Some(format!("etl-stack-pg-{}-shard-{shard}", self.pg_version))
-            };
-            let project_and_port = project.as_deref().map(|project| (project, port));
-
-            self.wait_for_pg(project_and_port, port)?;
-            self.wait_for_pg(project_and_port, port + READ_REPLICA_PORT_OFFSET)?;
-        }
+            // The scope also joins remaining startup tasks if one returns an
+            // error.
+            for handle in handles {
+                handle.join().expect("Postgres startup thread panicked")?;
+            }
+            Ok(())
+        })?;
 
         if tls_files.is_some() {
             eprintln!(

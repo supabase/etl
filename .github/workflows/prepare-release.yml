@@ -1,7 +1,7 @@
-name: Prepare Release
+name: Prepare release
 
 concurrency:
-  group: prepare-release-${{ github.ref }}
+  group: prepare-release
   cancel-in-progress: false
 
 on:
@@ -26,24 +26,30 @@ permissions:
   pull-requests: write
 
 jobs:
-  prepare-release:
-    name: Prepare Release
+  prepare:
+    name: Prepare release PR
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
     steps:
-      - name: Checkout (Full History)
+      - name: Check out main
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Set up Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: false
 
-      - name: Install cargo-edit
-        run: cargo install cargo-edit --locked
+      - name: Install release tools
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-edit@0.13.13,git-cliff@2.14.2
 
-      - name: Set Workspace Version (manual or bump)
+      - name: Set workspace version
         shell: bash
         env:
           MANUAL_RELEASE: ${{ inputs.release }}
@@ -52,7 +58,7 @@ jobs:
           set -euo pipefail
           if [[ -n "${MANUAL_RELEASE}" ]]; then
             # Validate SemVer (strict X.Y.Z numeric to align with repo conventions).
-            if [[ ! "${MANUAL_RELEASE}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            if [[ ! "${MANUAL_RELEASE}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
               echo "Provided release '${MANUAL_RELEASE}' is not a valid SemVer (expected X.Y.Z)." >&2
               exit 1
             fi
@@ -63,31 +69,29 @@ jobs:
             cargo set-version --workspace --bump "${BUMP}"
           fi
 
-      - name: Read New Version
+      - name: Read release version
         id: ver
         shell: bash
         run: |
-          set -euo pipefail
-          NEXT_VERSION=$(grep -m1 '^version = "' crates/etl/Cargo.toml | sed -E 's/version = "([0-9]+\.[0-9]+\.[0-9]+)"/\1/')
-          if [[ -z "${NEXT_VERSION}" ]]; then
-            echo "Failed to parse bumped version from crates/etl/Cargo.toml" >&2
-            exit 1
-          fi
-          echo "next=${NEXT_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "Next version: ${NEXT_VERSION}"
+          python3 - <<'PYTHON'
+          import os
+          import re
+          import tomllib
 
-      - name: Install git-cliff
-        run: cargo install git-cliff --locked
+          with open("crates/etl-replicator/Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+              raise SystemExit("Expected package version X.Y.Z")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"next={version}\n")
+          PYTHON
 
-      - name: Generate CHANGELOG.md
+      - name: Update changelog
         env:
           NEXT_VERSION: ${{ steps.ver.outputs.next }}
-        run: |
-          # Generate changelog with the new tag, containing only unreleased changes (difference from last tag)
-          # and prepend it to the existing changelog.
-          git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --unreleased --prepend CHANGELOG.md
+        run: git cliff --config cliff.toml --tag "v${NEXT_VERSION}" --unreleased --prepend CHANGELOG.md
 
-      - name: Create Release Pull Request
+      - name: Create release PR
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           commit-message: "chore(release): v${{ steps.ver.outputs.next }}"
@@ -104,4 +108,9 @@ jobs:
           labels: |
             release
             automated
+          add-paths: |
+            Cargo.toml
+            Cargo.lock
+            crates/*/Cargo.toml
+            CHANGELOG.md
           delete-branch: true

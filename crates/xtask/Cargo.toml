@@ -16,6 +16,7 @@ schemars = "0.8.0"
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = "1.1.0"
 xshell = "0.2.0"

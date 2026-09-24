@@ -11,6 +11,8 @@ services:
   # Start Postgres
   source-postgres:
     image: ${POSTGRES_IMAGE:-postgres:18}
+    # Keep orphaned health checks from being reaped as crashed Postgres workers.
+    init: true
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -44,6 +46,7 @@ services:
 
   source-postgres-read-replica:
     image: ${POSTGRES_IMAGE:-postgres:18}
+    init: true
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}

@@ -1,0 +1,24 @@
+name: Log in to ECR Public
+description: Use the existing GitHub OIDC role to publish public ETL images.
+inputs:
+  role:
+    description: AWS IAM role from the PROD_AWS_ROLE repository secret.
+    required: true
+outputs:
+  image:
+    description: Public replicator image name.
+    value: public.ecr.aws/supabase/etl-replicator
+runs:
+  using: composite
+  steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+      with:
+        role-to-assume: ${{ inputs.role }}
+        aws-region: us-east-1
+    - name: Log in to ECR Public
+      shell: bash
+      run: |
+        set -euo pipefail
+        aws ecr-public get-login-password --region us-east-1 |
+          docker login --username AWS --password-stdin public.ecr.aws

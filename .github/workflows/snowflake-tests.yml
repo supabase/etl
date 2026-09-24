@@ -1,0 +1,76 @@
+name: Snowflake tests
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run paid integration tests once a day, away from the top of the hour.
+    - cron: "17 4 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests (Snowflake)
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
+      TESTS_DATABASE_TLS_ENABLED: "true"
+      TESTS_DATABASE_TLS_ROOT_CERT: ${{ github.workspace }}/target/postgres-tls/root.crt
+    steps:
+      - name: Validate Snowflake credentials
+        shell: bash
+        env:
+          TESTS_SNOWFLAKE_CONNECTION: ${{ secrets.TESTS_SNOWFLAKE_CONNECTION }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TESTS_SNOWFLAKE_CONNECTION}" ]]; then
+            echo "TESTS_SNOWFLAKE_CONNECTION secret is required for Snowflake tests." >&2
+            exit 1
+          fi
+
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ''
+          cache-key: test-snowflake
+          cache-on-failure: false
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Start Postgres
+        run: |
+          POSTGRES_IMAGE=postgres:18 \
+          POSTGRES_VERSION=18 \
+            cargo --locked xtask postgres start --shards 1 --source-only
+
+      - name: Install nextest
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-nextest@0.9.133
+
+      - name: Run Snowflake tests
+        env:
+          TESTS_SNOWFLAKE_CONNECTION: ${{ secrets.TESTS_SNOWFLAKE_CONNECTION }}
+        run: cargo --locked xtask test-snowflake --credentials required

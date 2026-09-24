@@ -44,7 +44,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 tokio-postgres = { workspace = true, features = ["runtime", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
-tracing = { workspace = true, default-features = true }
+tracing = { workspace = true, features = ["default"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]

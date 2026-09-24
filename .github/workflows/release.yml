@@ -1,7 +1,7 @@
 name: Release
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.version || github.event.pull_request.head.ref }}
   cancel-in-progress: false
 
 on:
@@ -16,15 +16,15 @@ on:
         required: true
 
 permissions:
-  contents: write
-  actions: write
-  id-token: write
+  contents: read
 
 jobs:
-  version:
-    name: Determine Version
+  tag:
+    name: Create release tag
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    # Gate: manual dispatch OR merged PRs labeled 'release'.
+    timeout-minutes: 10
+    permissions:
+      contents: write
     if: |
       github.event_name == 'workflow_dispatch' || (
         github.event_name == 'pull_request' &&
@@ -34,72 +34,61 @@ jobs:
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
-      is_pr_merge: ${{ steps.ver.outputs.is_pr_merge }}
     steps:
-      - name: Extract Tag and Version
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Validate release version
         id: ver
-        shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          PR_MERGED: ${{ github.event.pull_request.merged }}
         run: |
-          set -euo pipefail
-          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            RAW="${INPUT_VERSION}"
-            TAG="v${RAW#v}"
-            PR_MERGE=false
-          else
-            # pull_request closed event (merged into main)
-            HEAD_REF="${PR_HEAD_REF}"
-            if [[ "$HEAD_REF" =~ ^release/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-              RAW="${BASH_REMATCH[1]}"
-            else
-              echo "Failed to extract version from PR branch name: $HEAD_REF (expected release/vX.Y.Z)" >&2
-              exit 1
-            fi
-            TAG="v${RAW}"
-            PR_MERGE="${PR_MERGED}"
-          fi
-          CLEANED="${RAW#v}"
-          if [[ ! "$CLEANED" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid version: $CLEANED" >&2
+          python3 - <<'PYTHON'
+          import os
+          import re
+          import tomllib
+
+          with open("crates/etl-replicator/Cargo.toml", "rb") as manifest:
+              package_version = tomllib.load(manifest)["package"]["version"]
+          if os.environ["EVENT_NAME"] == "workflow_dispatch":
+              version = os.environ.get("INPUT_VERSION", "").removeprefix("v")
+          else:
+              branch = os.environ.get("PR_HEAD_REF", "")
+              if not branch.startswith("release/v"):
+                  raise SystemExit("Expected release branch release/vX.Y.Z")
+              version = branch.removeprefix("release/v")
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
+              raise SystemExit("Expected release version X.Y.Z without leading zeroes")
+          if version != package_version:
+              raise SystemExit("Release version must match the checked-out package version")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\ntag=v{version}\n")
+          PYTHON
+
+      - name: Validate release source
+        run: |
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo '::error::Releases must use a commit on main'
             exit 1
           fi
-          {
-            echo "tag=${TAG}"
-            echo "version=${CLEANED}"
-            echo "is_pr_merge=${PR_MERGE}"
-          } >> "$GITHUB_OUTPUT"
 
-  create-tag:
-    name: Create Tag
-    needs: version
-    if: needs.version.outputs.is_pr_merge == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout merge commit (PR merge)
-        if: github.event_name == 'pull_request'
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-
-      - name: Checkout main (manual dispatch)
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Create and Push Tag
+      - name: Create release tag
         shell: bash
         env:
-          TAG: ${{ needs.version.outputs.tag }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
           git fetch --tags
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists; skipping creation."
+          if git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            if [[ "$(git rev-parse "refs/tags/${TAG}^{commit}")" != "$(git rev-parse HEAD)" ]]; then
+              echo "::error::Tag $TAG already exists on a different commit; run this workflow from that tag to retry it"
+              exit 1
+            fi
+            echo "Tag $TAG already exists on this commit; skipping creation."
             exit 0
           fi
           git config user.name "github-actions[bot]"
@@ -107,54 +96,36 @@ jobs:
           git tag -a "$TAG" -m "Release $TAG"
           git push origin "$TAG"
 
-  build-and-push:
-    name: Build and Push Docker Image
-    needs: [version, create-tag]
-    uses: ./.github/workflows/docker-build.yml
+  image:
+    name: Publish image
+    needs: tag
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/reusable-publish-image.yml
     with:
-      image: public.ecr.aws/supabase/etl-replicator
-      context: .
-      file: ./crates/etl-replicator/Dockerfile
-      push: true
-      tag_with_version: true
-      version: ${{ needs.version.outputs.version }}
-      checkout_ref: refs/tags/${{ needs.version.outputs.tag }}
-      build_args: |
-        ENABLE_EGRESS=true
+      version: ${{ needs.tag.outputs.version }}
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
 
-  github-release:
-    name: Create GitHub Release
-    needs: [version, create-tag, build-and-push]
+  release:
+    name: Publish GitHub release
+    needs: [tag, image]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - name: Generate Release Notes
-        id: notes
-        shell: bash
-        env:
-          TAG: ${{ needs.version.outputs.tag }}
-        run: |
-          set -euo pipefail
-          {
-            echo "body<<MARKER"
-            echo "Release ${TAG}"
-            echo
-            echo "Docker image published:"
-            echo "- public.ecr.aws/supabase/etl-replicator:latest"
-            echo "- public.ecr.aws/supabase/etl-replicator:${TAG}"
-            echo
-            echo "View on ECR Public Gallery:"
-            echo "- https://gallery.ecr.aws/supabase/etl-replicator"
-            echo "MARKER"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Create Release
-        id: create_release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: Release ${{ needs.version.outputs.tag }}
-          body: ${{ steps.notes.outputs.body }}
-          draft: false
-          prerelease: false
+          tag_name: ${{ needs.tag.outputs.tag }}
+          name: Release ${{ needs.tag.outputs.tag }}
+          body: |
+            Release ${{ needs.tag.outputs.tag }}
+
+            Public Docker images:
+            - `public.ecr.aws/supabase/etl-replicator:${{ needs.tag.outputs.tag }}`
+            - `public.ecr.aws/supabase/etl-replicator:${{ needs.image.outputs.sha }}`
+
+            [ECR Public Gallery](https://gallery.ecr.aws/supabase/etl-replicator)

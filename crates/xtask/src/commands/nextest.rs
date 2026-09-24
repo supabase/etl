@@ -1,11 +1,13 @@
 use std::{
     io::{BufRead, BufReader},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
 };
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+use tempfile::TempDir;
 
 use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
 
@@ -15,10 +17,12 @@ use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_
 /// `.config/nextest.toml`.
 const SHARED_PG_FILTER: &str = "\
     test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & \
-                                test(/^(bigquery|clickhouse|ducklake|iceberg)::/)) | \
-                                (binary_id(etl-destinations) & \
+                                test(/^(bigquery|ducklake|iceberg)::/)) | \
+                                (binary_id(etl-destinations::main) & \
+                                test(/^clickhouse::pipeline/)) | (binary_id(etl-destinations) & \
                                 test(/ducklake::core::tests::postgres_backed::/))";
 
+/// Test execution mode.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Mode {
     /// Run tests via `cargo nextest run`.
@@ -27,6 +31,7 @@ pub(crate) enum Mode {
     LlvmCov,
 }
 
+/// Arguments for running isolated test lanes, optionally from a shared build.
 #[derive(Args)]
 pub(crate) struct NextestArgs {
     /// Whether to collect coverage.
@@ -42,12 +47,22 @@ pub(crate) struct NextestArgs {
     #[arg(long, env = "TESTS_DATABASE_START_PORT", default_value_t = DEFAULT_BASE_PORT)]
     base_port: u16,
 
+    /// Run previously compiled tests from a nextest archive without rebuilding.
+    #[arg(long)]
+    archive_file: Option<PathBuf>,
+
+    /// Skip the source-independent tests when another compatibility lane runs
+    /// them.
+    #[arg(long)]
+    postgres_only: bool,
+
     /// Extra arguments forwarded to every nextest invocation.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     extra: Vec<String>,
 }
 
 impl NextestArgs {
+    /// Builds or restores tests, then waits for every isolated lane.
     pub(crate) fn run(self) -> Result<()> {
         if self.shards == 0 {
             bail!("--shards must be at least 1");
@@ -75,23 +90,44 @@ impl NextestArgs {
             self.base_port + READ_REPLICA_PORT_OFFSET + self.shards - 1,
         );
 
-        if matches!(self.mode, Mode::LlvmCov) {
-            install_llvm_tools()?;
+        if self.archive_file.is_some() && matches!(self.mode, Mode::LlvmCov) {
+            bail!("Archive reuse requires run mode; coverage must use instrumented builds");
         }
 
-        if matches!(self.mode, Mode::Run) {
+        if matches!(self.mode, Mode::LlvmCov) {
+            install_llvm_tools()?;
+            let status = Command::new("cargo")
+                .args(["llvm-cov", "clean", "--locked", "--workspace"])
+                .status()
+                .context("Failed to clean previous coverage data")?;
+            if !status.success() {
+                bail!("Failed to clean previous coverage data");
+            }
+        }
+
+        let archive = if let Some(archive) = &self.archive_file {
+            Some(extract_archive(archive)?)
+        } else {
+            None
+        };
+
+        if matches!(self.mode, Mode::Run) && archive.is_none() {
             prebuild_test_binaries()?;
         }
 
+        let archive_target = archive.as_ref().map(|directory| directory.path().join("target"));
+
         let mut lanes: Vec<Lane> = Vec::with_capacity(1 + self.shards as usize);
 
-        // Non-Postgres lane: everything that doesn't need a cluster.
-        lanes.push(Lane {
-            name: "non-pg".to_owned(),
-            filter: format!("not ({SHARED_PG_FILTER})"),
-            partition: None,
-            pg_port: None,
-        });
+        // Run source-independent tests once across the compatibility matrix.
+        if !self.postgres_only {
+            lanes.push(Lane {
+                name: "non-pg".to_owned(),
+                filter: format!("not ({SHARED_PG_FILTER})"),
+                partition: None,
+                pg_port: None,
+            });
+        }
 
         // One lane per Postgres shard, each on a dedicated port.
         for shard in 1..=self.shards {
@@ -109,7 +145,10 @@ impl NextestArgs {
                 let mode = self.mode;
                 let extra = self.extra.clone();
                 let pg_env = pg_env.clone();
-                thread::spawn(move || run_lane(&lane, mode, &extra, &pg_env))
+                let archive_target = archive_target.clone();
+                thread::spawn(move || {
+                    run_lane(&lane, mode, &extra, &pg_env, archive_target.as_deref())
+                })
             })
             .collect();
 
@@ -135,6 +174,7 @@ impl NextestArgs {
         Ok(())
     }
 
+    /// Returns the command name used in progress output.
     fn mode_label(&self) -> &'static str {
         match self.mode {
             Mode::Run => "nextest",
@@ -171,6 +211,7 @@ struct PgEnv {
 }
 
 impl PgEnv {
+    /// Reads local connection defaults before worker threads start.
     fn from_env() -> Self {
         let host = std::env::var("TESTS_DATABASE_HOST").unwrap_or_else(|_| "localhost".to_owned());
         let replica_host =
@@ -187,9 +228,33 @@ impl PgEnv {
     }
 }
 
-/// Builds a nextest `Command` with mode-specific args and the common flags
-/// shared by all lanes (`--locked --workspace --all-features --no-fail-fast`).
-fn nextest_command(mode: Mode) -> Command {
+/// Extracts an archive once before parallel lanes read its binaries and
+/// metadata.
+fn extract_archive(archive: &Path) -> Result<TempDir> {
+    let target = std::env::current_dir()?.join("target");
+    std::fs::create_dir_all(&target).context("Failed to create target directory")?;
+    // Each invocation owns its extraction until all shard lanes have joined.
+    let destination = tempfile::Builder::new()
+        .prefix("nextest-archive-")
+        .tempdir_in(target)
+        .context("Failed to create archive extraction directory")?;
+    let status = Command::new("cargo")
+        .args(["nextest", "list", "--list-type", "binaries-only", "--archive-file"])
+        .arg(archive)
+        .arg("--extract-to")
+        .arg(destination.path())
+        .args(["--workspace-remap", "."])
+        .stdout(Stdio::null())
+        .status()
+        .context("Failed to extract nextest archive")?;
+    if !status.success() {
+        bail!("Failed to extract nextest archive");
+    }
+    Ok(destination)
+}
+
+/// Builds a nextest command, preserving an archive's original build selection.
+fn nextest_command(mode: Mode, archive_target: Option<&Path>) -> Command {
     let mut cmd = Command::new("cargo");
 
     match mode {
@@ -197,17 +262,37 @@ fn nextest_command(mode: Mode) -> Command {
         Mode::LlvmCov => cmd.args(["llvm-cov", "nextest"]),
     };
 
-    cmd.args(["--locked", "--workspace", "--all-features", "--no-fail-fast"]);
+    cmd.arg("--no-fail-fast");
+    if let Some(target) = archive_target {
+        cmd.arg("--cargo-metadata")
+            .arg(target.join("nextest/cargo-metadata.json"))
+            .arg("--binaries-metadata")
+            .arg(target.join("nextest/binaries-metadata.json"))
+            .arg("--target-dir-remap")
+            .arg(target)
+            .args(["--workspace-remap", "."]);
+    } else {
+        cmd.args(["--locked", "--workspace", "--all-features"]);
+    }
 
     if matches!(mode, Mode::LlvmCov) {
+        // --no-report also disables cleaning. Clean once before the lanes run
+        // so each lane preserves the profiles written by the others.
         cmd.arg("--no-report");
     }
 
     cmd
 }
 
-fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result<()> {
-    let mut cmd = nextest_command(mode);
+/// Runs one lane with its own cluster binding and prefixed output.
+fn run_lane(
+    lane: &Lane,
+    mode: Mode,
+    extra: &[String],
+    pg_env: &PgEnv,
+    archive_target: Option<&Path>,
+) -> Result<()> {
+    let mut cmd = nextest_command(mode, archive_target);
     cmd.args(["-E", &lane.filter]);
 
     if let Some(partition) = &lane.partition {
@@ -261,8 +346,8 @@ fn run_lane(lane: &Lane, mode: Mode, extra: &[String], pg_env: &PgEnv) -> Result
 /// on cargo file locks during compilation.
 fn prebuild_test_binaries() -> Result<()> {
     eprintln!("prebuilding test binaries.");
-    let status = Command::new("cargo")
-        .args(["nextest", "run", "--locked", "--workspace", "--all-features", "--no-run"])
+    let status = nextest_command(Mode::Run, None)
+        .arg("--no-run")
         .status()
         .context("failed to prebuild test binaries")?;
 
@@ -273,6 +358,7 @@ fn prebuild_test_binaries() -> Result<()> {
     Ok(())
 }
 
+/// Installs the active toolchain's coverage tools.
 fn install_llvm_tools() -> Result<()> {
     eprintln!("installing llvm-tools-preview.");
     let status = Command::new("rustup")
@@ -285,4 +371,86 @@ fn install_llvm_tools() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use clap::Parser;
+
+    use crate::commands::nextest::{Mode, NextestArgs, SHARED_PG_FILTER, nextest_command};
+
+    /// Standalone parser for testing task-runner options and passthrough.
+    #[derive(Parser)]
+    struct Cli {
+        /// Sharded test options.
+        #[command(flatten)]
+        args: NextestArgs,
+    }
+
+    /// Archive and lane options must be consumed before nextest passthrough.
+    #[test]
+    fn archive_options_preserve_passthrough() {
+        let cli = Cli::try_parse_from([
+            "nextest",
+            "run",
+            "--archive-file",
+            "tests.tar.zst",
+            "--postgres-only",
+            "--shards",
+            "2",
+            "--",
+            "--test-threads",
+            "1",
+        ])
+        .unwrap();
+        assert!(matches!(cli.args.mode, Mode::Run));
+        assert_eq!(cli.args.archive_file.as_deref(), Some(Path::new("tests.tar.zst")));
+        assert!(cli.args.postgres_only);
+        assert_eq!(cli.args.shards, 2);
+        assert_eq!(cli.args.extra, ["--test-threads", "1"]);
+    }
+
+    /// An ordinary archive cannot silently produce an uninstrumented coverage
+    /// run.
+    #[test]
+    fn coverage_rejects_archive_before_running_commands() {
+        let cli = Cli::try_parse_from(["nextest", "llvm-cov", "--archive-file", "missing.tar.zst"])
+            .unwrap();
+        assert_eq!(
+            cli.args.run().unwrap_err().to_string(),
+            "Archive reuse requires run mode; coverage must use instrumented builds"
+        );
+    }
+
+    /// Reusing a build must not override its package or feature selection.
+    #[test]
+    fn archive_execution_preserves_build_selection() {
+        let command = nextest_command(Mode::Run, Some(Path::new("target/archive/target")));
+        let args: Vec<_> = command.get_args().collect();
+        for build_arg in ["--locked", "--workspace", "--all-features", "--no-run"] {
+            assert!(!args.contains(&std::ffi::OsStr::new(build_arg)));
+        }
+        assert!(args.contains(&std::ffi::OsStr::new("--cargo-metadata")));
+        assert!(args.contains(&std::ffi::OsStr::new("--binaries-metadata")));
+        assert!(args.contains(&std::ffi::OsStr::new("--workspace-remap")));
+        assert!(args.contains(&std::ffi::OsStr::new("--target-dir-remap")));
+    }
+
+    /// Sharding and in-process serialization must classify the same tests.
+    #[test]
+    fn postgres_filter_matches_nextest_group() {
+        let config: toml::Table = include_str!("../../../../.config/nextest.toml").parse().unwrap();
+        let group = config["profile"]["default"]["overrides"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["test-group"].as_str() == Some("shared-pg"))
+            .unwrap();
+        assert_eq!(
+            SHARED_PG_FILTER.split_whitespace().collect::<String>(),
+            group["filter"].as_str().unwrap().split_whitespace().collect::<String>()
+        );
+    }
 }

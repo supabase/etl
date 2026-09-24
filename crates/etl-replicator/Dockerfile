@@ -1,6 +1,11 @@
-# Build stage with cargo-chef for better layer caching.
+# syntax=docker/dockerfile:1
+# Build stage with cargo-chef for dependency layer caching.
 # Native build: each runner builds for its own architecture.
-FROM rust:1.95.0-slim-bookworm AS chef
+ARG RUST_VERSION=1.95.0
+FROM rust:${RUST_VERSION}-slim-bookworm AS chef
+ARG RUST_VERSION
+# Use the image's installed toolchain without installing local lint components.
+ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 WORKDIR /app
 RUN cargo install cargo-chef --version 0.1.72 --locked
 
@@ -9,7 +14,7 @@ RUN cargo install cargo-chef --version 0.1.72 --locked
 FROM debian:bookworm-slim AS duckdb-extensions
 ARG TARGETPLATFORM
 RUN apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gzip && \
@@ -25,24 +30,23 @@ RUN chmod +x /usr/local/bin/vendor-duckdb-extensions.sh && \
       --output-root /duckdb_extensions \
       --platform "$DUCKDB_PLATFORM"
 
-# Install system dependencies
 FROM chef AS planner
 COPY . .
-# xtask is a local dev tool and must not be part of the Docker build.
-# Remove it from the workspace so cargo-chef / cargo metadata ignores it.
-RUN sed -i '\#"crates/xtask"#d' Cargo.toml && rm -rf crates/xtask
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Build dependencies.
 FROM chef AS builder
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
-RUN echo "Native build on $BUILDPLATFORM for $TARGETPLATFORM"
+# Select the same package, binaries, features, and flags in both build stages.
+ARG ENABLE_EGRESS="false"
+ENV RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld"
+RUN test "$BUILDPLATFORM" = "$TARGETPLATFORM"
 
 # Install build dependencies including lld linker for faster linking.
 # TODO: remove protobuf-compiler once the upstream gcp-bigquery-client removes it from its deps.
 RUN apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     protobuf-compiler \
@@ -51,28 +55,36 @@ RUN apt-get update && \
     make && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy cargo config for build optimizations (lld linker, etc.).
+# Keep Cargo configuration identical during dependency and application builds.
 COPY .cargo/config.toml /app/.cargo/config.toml
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    case "$ENABLE_EGRESS" in \
+      true) features="egress" ;; \
+      false) features="" ;; \
+      *) echo "ENABLE_EGRESS must be true or false" >&2; exit 1 ;; \
+    esac && \
+    cargo chef cook --locked --release --package etl-replicator --bins \
+      --features "$features" --recipe-path recipe.json
 
-# Build application with optimizations.
-# The release profile in Cargo.toml handles: thin LTO, strip, opt-level=3.
-# ENABLE_EGRESS: set to "true" to enable egress metrics logging.
-ARG ENABLE_EGRESS="false"
+# Build both runtime binaries with thin LTO and opt-level=3 from Cargo.toml.
 COPY . .
-RUN sed -i '\#"crates/xtask"#d' Cargo.toml && rm -rf crates/xtask
-RUN FEATURES=""; \
-    if [ "$ENABLE_EGRESS" = "true" ]; then FEATURES="--features egress"; fi && \
-    RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld" cargo build --release -p etl-replicator $FEATURES && \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    case "$ENABLE_EGRESS" in \
+      true) features="egress" ;; \
+      false) features="" ;; \
+      *) echo "ENABLE_EGRESS must be true or false" >&2; exit 1 ;; \
+    esac && \
+    cargo build --locked --release --package etl-replicator --bins --features "$features" && \
     strip target/release/etl-replicator target/release/etl-ducklake-maintenance
 
 # Runtime stage with distroless for security.
 FROM gcr.io/distroless/cc-debian12:nonroot
 WORKDIR /app
 
-# Create non-root user (distroless already has nonroot user).
 USER nonroot:nonroot
 
 # jemalloc configuration is compiled into the binary (see main.rs).

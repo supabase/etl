@@ -161,6 +161,43 @@ ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
 Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
 Parser fuzz targets live in `fuzz/`.
 
+CI builds one nextest archive for the Postgres compatibility matrix and
+Multigres; coverage uses a separate instrumented build. Postgres shards start
+concurrently and must all pass readiness checks before tests run. To reuse a
+local build:
+
+```bash
+mkdir -p target/ci
+cargo nextest archive --locked --workspace --all-features --archive-file target/ci/tests.tar.zst
+cargo --locked xtask nextest run --archive-file target/ci/tests.tar.zst
+cargo --locked xtask multigres test --archive-file target/ci/tests.tar.zst
+```
+
+Use `--postgres-only` to skip source-independent tests already covered by another
+lane. Archive consumers must use compatible operating systems and architectures.
+CI sets `CARGO_INCREMENTAL=0` and `CARGO_PROFILE_DEV_DEBUG=0`; use both locally
+when reproducing CI to reuse the same build profile instead of recompiling
+dependencies with local debug settings.
+Coverage: `cargo --locked xtask nextest llvm-cov`, followed by
+`cargo llvm-cov report --locked --lcov --output-path target/ci/lcov.info`.
+
+Check workflow syntax with `actionlint`. Build the production image on the
+Docker daemon's native architecture:
+
+```bash
+docker buildx build --load --build-arg ENABLE_EGRESS=true \
+  -f crates/etl-replicator/Dockerfile -t etl-replicator:local .
+```
+
+When a workspace dependency disables default features, consumers that need them
+request `features = ["default"]`. This also lets cargo-chef preserve the feature
+selection without modifying its generated recipe.
+
+CI uses native AMD64/ARM64 builders and publishes to
+`public.ecr.aws/supabase/etl-replicator`. Only the current main tip can promote
+`latest`; experimental builds never do. Require `CI passed` in branch protection
+after its first run, replacing old required job names including `Snowflake Gate`.
+
 ## Documentation
 
 The docs site uses Next.js and Fumadocs. Use Node.js 22, matching CI. From the

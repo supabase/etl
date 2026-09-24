@@ -1,0 +1,31 @@
+name: Publish image
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      experimental:
+        description: "Build the selected workflow ref as experimental (main excluded); disable to publish a commit from main"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  image:
+    name: Publish image
+    if: |
+      github.event_name == 'workflow_dispatch' || (
+        github.event.pull_request.merged == true &&
+        !contains(github.event.pull_request.labels.*.name, 'release')
+      )
+    uses: ./.github/workflows/reusable-publish-image.yml
+    with:
+      experimental: ${{ github.event_name == 'workflow_dispatch' && inputs.experimental }}
+    secrets:
+      PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}
