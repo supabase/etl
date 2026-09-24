@@ -243,8 +243,8 @@ async fn assert_status_default_absent(
 
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
-async fn create_table_with_simulator_defaults() {
-    fn make_simulator_defaults_table_schema(
+async fn create_table_with_default_expressions() {
+    fn make_default_expressions_table_schema(
         table_id: u32,
         schema: &str,
         table: &str,
@@ -286,7 +286,7 @@ async fn create_table_with_simulator_defaults() {
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
 
-    let table_schema = make_simulator_defaults_table_schema(1012, "public", &src_table);
+    let table_schema = make_default_expressions_table_schema(1012, "public", &src_table);
     let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
 
     harness.store.store_table_schema(table_schema).await.unwrap();
@@ -296,7 +296,7 @@ async fn create_table_with_simulator_defaults() {
         assert_eq!(status, DestinationWriteStatus::Durable);
 
         let exists = harness.sql.table_exists(&sf_table).await.unwrap();
-        assert!(exists, "table with simulator defaults should have been created");
+        assert!(exists);
     })
     .await;
 }

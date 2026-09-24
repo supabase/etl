@@ -63,17 +63,17 @@ struct SchemaMutationRow {
     email: Option<String>,
 }
 
-/// Expected row shape after simulator-style generated-column rotation.
+/// Expected row shape after generated-column rotation.
 #[derive(Debug, Eq, PartialEq)]
-struct SimulatorDdlRotationRow {
+struct DdlRotationRow {
     id: i64,
     text_col: String,
     ddl_col_0_0: Option<String>,
 }
 
-/// Expected row shape after simulator-style generated-column type changes.
+/// Expected row shape after generated-column type changes.
 #[derive(Debug, Eq, PartialEq)]
-struct SimulatorDdlTypeRow {
+struct DdlTypeRow {
     id: i64,
     text_col: String,
     ddl_col_0_0: Option<String>,
@@ -336,15 +336,15 @@ fn query_schema_mutation_rows(
     result
 }
 
-/// Queries rows after simulator-style generated-column rotation using blocking
+/// Queries rows after generated-column rotation using blocking
 /// DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_simulator_ddl_rotation_rows(
+fn query_ddl_rotation_rows(
     conn: &Connection,
     table_name: &DuckLakeTableName,
-) -> Vec<SimulatorDdlRotationRow> {
+) -> Vec<DdlRotationRow> {
     let sql = format!(
         "select id, text_col, ddl_col_0_0 from {} order by id",
         qualified_lake_table_name(table_name)
@@ -354,7 +354,7 @@ fn query_simulator_ddl_rotation_rows(
     let mut result = Vec::new();
 
     while let Some(row) = rows.next().unwrap() {
-        result.push(SimulatorDdlRotationRow {
+        result.push(DdlRotationRow {
             id: row.get(0).unwrap(),
             text_col: row.get(1).unwrap(),
             ddl_col_0_0: row.get(2).unwrap(),
@@ -364,15 +364,12 @@ fn query_simulator_ddl_rotation_rows(
     result
 }
 
-/// Queries the final row after simulator-style generated-column type changes
+/// Queries the final row after generated-column type changes
 /// using blocking DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_simulator_ddl_type_row(
-    conn: &Connection,
-    table_name: &DuckLakeTableName,
-) -> SimulatorDdlTypeRow {
+fn query_ddl_type_row(conn: &Connection, table_name: &DuckLakeTableName) -> DdlTypeRow {
     let sql = format!(
         "select id, text_col, ddl_col_0_0, ddl_col_1_0, ddl_col_2_0, ddl_col_3_0 is not null, \
          ddl_col_4_0 from {} where id = 5",
@@ -380,7 +377,7 @@ fn query_simulator_ddl_type_row(
     );
     let mut statement = conn.prepare(&sql).unwrap();
     let row = statement.query_row([], |row| {
-        Ok(SimulatorDdlTypeRow {
+        Ok(DdlTypeRow {
             id: row.get(0)?,
             text_col: row.get(1)?,
             ddl_col_0_0: row.get(2)?,
@@ -1601,19 +1598,19 @@ async fn schema_change_then_update_and_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_matches_simulator_generated_column_rotation() {
+async fn schema_change_handles_generated_column_rotation() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let table_name = test_table_name("ducklake_schema_simulator_rotation");
+    let table_name = test_table_name("ducklake_schema_rotation");
     let table_id = database
         .create_table(table_name.clone(), true, &[("text_col", "text not null")])
         .await
         .unwrap();
-    let publication_name = "test_pub_ducklake_schema_simulator_rotation";
+    let publication_name = "test_pub_ducklake_schema_rotation";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let lake = create_test_lake("schema_change_matches_simulator_generated_column_rotation").await;
+    let lake = create_test_lake("schema_change_handles_generated_column_rotation").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
@@ -1724,16 +1721,12 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         vec!["id", "text_col", "ddl_col_0_0"]
     );
     assert_eq!(
-        query_simulator_ddl_rotation_rows(&conn, &ducklake_table_name),
+        query_ddl_rotation_rows(&conn, &ducklake_table_name),
         vec![
-            SimulatorDdlRotationRow { id: 1, text_col: "after_add".to_owned(), ddl_col_0_0: None },
-            SimulatorDdlRotationRow {
-                id: 2,
-                text_col: "after_rename".to_owned(),
-                ddl_col_0_0: None,
-            },
-            SimulatorDdlRotationRow { id: 3, text_col: "after_drop".to_owned(), ddl_col_0_0: None },
-            SimulatorDdlRotationRow {
+            DdlRotationRow { id: 1, text_col: "after_add".to_owned(), ddl_col_0_0: None },
+            DdlRotationRow { id: 2, text_col: "after_rename".to_owned(), ddl_col_0_0: None },
+            DdlRotationRow { id: 3, text_col: "after_drop".to_owned(), ddl_col_0_0: None },
+            DdlRotationRow {
                 id: 4,
                 text_col: "after_readd".to_owned(),
                 ddl_col_0_0: Some("slot0_readded".to_owned()),
@@ -1743,19 +1736,19 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_matches_simulator_generated_column_types() {
+async fn schema_change_handles_generated_column_types() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let table_name = test_table_name("ducklake_schema_simulator_types");
+    let table_name = test_table_name("ducklake_schema_types");
     let table_id = database
         .create_table(table_name.clone(), true, &[("text_col", "text not null")])
         .await
         .unwrap();
-    let publication_name = "test_pub_ducklake_schema_simulator_types";
+    let publication_name = "test_pub_ducklake_schema_types";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let lake = create_test_lake("schema_change_matches_simulator_generated_column_types").await;
+    let lake = create_test_lake("schema_change_handles_generated_column_types").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
@@ -1903,8 +1896,8 @@ async fn schema_change_matches_simulator_generated_column_types() {
         ]
     );
     assert_eq!(
-        query_simulator_ddl_type_row(&conn, &ducklake_table_name),
-        SimulatorDdlTypeRow {
+        query_ddl_type_row(&conn, &ducklake_table_name),
+        DdlTypeRow {
             id: 5,
             text_col: "after_numeric".to_owned(),
             ddl_col_0_0: Some("text_4".to_owned()),
