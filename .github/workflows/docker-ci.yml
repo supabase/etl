@@ -18,8 +18,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
-  id-token: write
 jobs:
   resolve-ref:
     name: Resolve Checkout Ref
@@ -99,6 +97,9 @@ jobs:
           !contains(github.event.pull_request.labels.*.name, 'release')
         )
       )
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/docker-build.yml
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}

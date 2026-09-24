@@ -16,9 +16,7 @@ on:
         required: true
 
 permissions:
-  contents: write
-  actions: write
-  id-token: write
+  contents: read
 
 jobs:
   version:
@@ -110,6 +108,9 @@ jobs:
   build-and-push:
     name: Build and Push Docker Image
     needs: [version, create-tag]
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/docker-build.yml
     with:
       image: public.ecr.aws/supabase/etl-replicator
@@ -128,6 +129,8 @@ jobs:
     name: Create GitHub Release
     needs: [version, create-tag, build-and-push]
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: write
     steps:
       - name: Generate Release Notes
         id: notes
