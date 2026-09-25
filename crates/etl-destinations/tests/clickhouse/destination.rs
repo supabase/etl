@@ -845,25 +845,6 @@ async fn store_status_default_schema(
     ReplicatedTableSchema::all(schema)
 }
 
-/// Returns ClickHouse's stored `DEFAULT` expression for `column_name`.
-async fn clickhouse_column_default_expression(
-    database: &ClickHouseTestDatabase,
-    table_name: &str,
-    column_name: &str,
-) -> Option<String> {
-    database
-        .db_client()
-        .query(
-            "select default_expression from system.columns where database = currentDatabase() and \
-             table = ? and name = ? and default_kind = 'DEFAULT'",
-        )
-        .bind(table_name)
-        .bind(column_name)
-        .fetch_optional::<String>()
-        .await
-        .unwrap()
-}
-
 /// Stores the source schema shared by upgrade and replay scenarios.
 async fn store_id_value_schema(store: &MemoryStore, table: &str) -> ReplicatedTableSchema {
     let schema = store
@@ -1251,86 +1232,88 @@ async fn partial_key_change_restart_replay_replacing_merge_tree() {
     partial_key_change_restart_replay_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
+/// Changing or dropping a source default keeps the value that rows older than
+/// the column got when it was added, as Postgres does.
 #[tokio::test(flavor = "multi_thread")]
-async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
+async fn default_changes_keep_values_of_rows_older_than_the_column() {
+    // GIVEN: rows 1 and 2 were copied, then the source added
+    // `status text default 'pending'`, which Postgres returns for both rows.
     init_test_tracing();
     install_crypto_provider();
-
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let table_id = TableId::new(4245);
-    let table_name = TableName::new("public".to_owned(), "default_changes".to_owned());
-    let initial_schema = store_status_default_schema(
-        &store,
-        table_id,
-        &table_name,
-        test_snapshot_id(100, 100),
-        Some("lower('unsupported')"),
-    )
-    .await;
-    let supported_schema = store_status_default_schema(
+    let table_name = TableName::new("public".to_owned(), "tickets".to_owned());
+    let initial = ReplicatedTableSchema::all(
+        store
+            .store_table_schema(TableSchema::with_snapshot_id(
+                table_id,
+                table_name.clone(),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                        .with_primary_key(1),
+                ],
+                test_snapshot_id(100, 100),
+            ))
+            .await
+            .unwrap(),
+    );
+    let added = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(200, 200),
-        Some("'queued'::text"),
+        Some("'pending'::text"),
     )
     .await;
-    let unsupported_schema = store_status_default_schema(
+    let changed = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(300, 300),
-        Some("lower('unsupported')"),
+        Some("'new'::text"),
     )
     .await;
-    let supported_again_schema = store_status_default_schema(
+    let dropped = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(400, 400),
-        Some("'done'::text"),
-    )
-    .await;
-    let dropped_schema = store_status_default_schema(
-        &store,
-        table_id,
-        &table_name,
-        test_snapshot_id(500, 500),
         None,
     )
     .await;
     let destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
+    destination
+        .write_table_rows(
+            &initial,
+            vec![TableRow::new(vec![Cell::I64(1)]), TableRow::new(vec![Cell::I64(2)])],
+        )
+        .await
+        .unwrap();
+    destination
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: added })])
+        .await
+        .unwrap();
 
-    destination.write_table_rows(&initial_schema, vec![]).await.unwrap();
-    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(metadata.is_applied());
-    let destination_table_name = metadata.table_id().to_owned();
+    // WHEN: the source changes the default to 'new', then drops it.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: changed }),
+            Event::Relation(RelationEvent { replicated_table_schema: dropped }),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: rows 1 and 2 still read the value they got when the column was
+    // added.
     assert_eq!(
-        clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
+        clickhouse_db
+            .query::<(i64, Option<String>)>("select id, status from public_tickets order by id")
             .await,
-        None
+        vec![(1, Some("pending".to_owned())), (2, Some("pending".to_owned()))]
     );
-
-    for (schema, expected_default) in [
-        (supported_schema, Some("'queued'")),
-        (unsupported_schema, None),
-        (supported_again_schema, Some("'done'")),
-        (dropped_schema, None),
-    ] {
-        destination
-            .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: schema })])
-            .await
-            .unwrap();
-        assert_eq!(
-            clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
-                .await
-                .as_deref(),
-            expected_default,
-        );
-    }
 }
 
 /// A source default containing backslashes reaches ClickHouse with the same

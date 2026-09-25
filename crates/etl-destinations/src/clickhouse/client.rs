@@ -8,7 +8,6 @@ use clickhouse::Client;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    schema::Type,
 };
 use tracing::debug;
 use url::Url;
@@ -25,7 +24,7 @@ use crate::clickhouse::{
         REPLICATION_PATH_LABEL,
     },
     network::new_public_client,
-    schema::{clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression},
+    schema::{clickhouse_column_type, clickhouse_default_clause},
     sql::quote_identifier,
 };
 
@@ -162,31 +161,6 @@ fn build_rename_column_sql(table_name: &str, old_name: &str, new_name: &str) -> 
     let old_name = quote_identifier(old_name);
     let new_name = quote_identifier(new_name);
     format!("ALTER TABLE {table_name} RENAME COLUMN IF EXISTS {old_name} TO {new_name}")
-}
-
-/// Builds the SQL used to set a supported column default in ClickHouse.
-fn build_set_default_sql(
-    table_name: &str,
-    column_name: &str,
-    typ: &Type,
-    default_expression: &str,
-) -> Option<String> {
-    let rendered_default_expression = clickhouse_default_expression(default_expression, typ)?;
-    let table_name = quote_identifier(table_name);
-    let column_name = quote_identifier(column_name);
-
-    Some(format!(
-        "ALTER TABLE {table_name} MODIFY COLUMN {column_name} DEFAULT \
-         {rendered_default_expression}"
-    ))
-}
-
-/// Builds the SQL used to drop a column default in ClickHouse.
-fn build_drop_default_sql(table_name: &str, column_name: &str) -> String {
-    let table_name = quote_identifier(table_name);
-    let column_name = quote_identifier(column_name);
-
-    format!("ALTER TABLE {table_name} MODIFY COLUMN {column_name} REMOVE DEFAULT")
 }
 
 /// Builds the SQL used to relax a scalar column to `Nullable`.
@@ -536,64 +510,6 @@ impl ClickHouseClient {
         self.execute_ddl(DdlKind::RenameColumn, &sql).await
     }
 
-    /// Sets a supported default expression on a ClickHouse column.
-    pub(crate) async fn set_column_default(
-        &self,
-        table_name: &str,
-        column_name: &str,
-        typ: &Type,
-        default_expression: &str,
-    ) -> EtlResult<()> {
-        let Some(sql) = build_set_default_sql(table_name, column_name, typ, default_expression)
-        else {
-            return Ok(());
-        };
-
-        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
-    }
-
-    /// Drops a default expression from a ClickHouse column when present.
-    pub(crate) async fn drop_column_default(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> EtlResult<()> {
-        // ClickHouse returns BAD_ARGUMENTS when REMOVE DEFAULT targets a column
-        // without a default, so make the default-removal step idempotent with a
-        // metadata check while schema DDL is serialized.
-        let schema_secs = floor_secs(self.config.schema_query_timeout);
-        let query = self
-            .inner
-            .query(
-                "select count() from system.columns where database = currentDatabase() and table \
-                 = ? and name = ? and default_kind = 'DEFAULT'",
-            )
-            .with_option("max_execution_time", &schema_secs)
-            .bind(table_name)
-            .bind(column_name);
-        let start = Instant::now();
-        let default_count = timeout_call(
-            ClickHouseOperationKind::SchemaQuery,
-            &self.config,
-            Some(&format!("table: {table_name}, column: {column_name}")),
-            query.fetch_one::<u64>(),
-        )
-        .await?;
-        metrics::histogram!(ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS)
-            .record(start.elapsed().as_secs_f64());
-
-        if default_count == 0 {
-            debug!(
-                table_name,
-                column_name, "clickhouse column has no default; skipping drop default"
-            );
-            return Ok(());
-        }
-
-        let sql = build_drop_default_sql(table_name, column_name);
-        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
-    }
-
     /// Relaxes an existing scalar column to nullable when needed.
     pub(crate) async fn drop_column_not_null(
         &self,
@@ -877,24 +793,6 @@ mod tests {
             sql,
             "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"score\" Int32 DEFAULT 42 AFTER \
              \"id\""
-        );
-    }
-
-    #[test]
-    fn set_default_sql_preserves_existing_column_type() {
-        let sql =
-            build_set_default_sql("test_table", "score", &Type::INT4, "42").expect("default sql");
-
-        assert_eq!(sql, "ALTER TABLE \"test_table\" MODIFY COLUMN \"score\" DEFAULT 42");
-    }
-
-    #[test]
-    fn drop_default_sql_quotes_identifiers() {
-        let sql = build_drop_default_sql("table\"name", "old\"column");
-
-        assert_eq!(
-            sql,
-            "ALTER TABLE \"table\\\"name\" MODIFY COLUMN \"old\\\"column\" REMOVE DEFAULT"
         );
     }
 
