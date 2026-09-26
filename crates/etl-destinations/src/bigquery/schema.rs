@@ -2,13 +2,16 @@ use etl::{
     error::EtlResult,
     schema::{
         ColumnSchema, DefaultExpression, ReplicatedTableSchema, Type, is_array_type,
-        parse_default_expression,
+        parse_default_expression, unquote_postgres_string_literal,
     },
 };
 use gcp_bigquery_client::storage::{ColumnMode, ColumnType, FieldDescriptor, TableDescriptor};
 use tracing::warn;
 
-use crate::bigquery::{BIGQUERY_COLUMN_NAME_MAPPING, sql::quote_identifier};
+use crate::bigquery::{
+    BIGQUERY_COLUMN_NAME_MAPPING,
+    sql::{quote_identifier, quote_string_literal},
+};
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
@@ -60,10 +63,15 @@ fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String
 }
 
 /// Renders a parsed default expression as BigQuery SQL.
+///
+/// Literal variants carry the PostgreSQL SQL literal. They are decoded and
+/// re-quoted with GoogleSQL escapes because the dialects disagree on quotes and
+/// backslashes: PostgreSQL doubles quotes and stores backslashes, GoogleSQL
+/// rejects doubled quotes and interprets backslashes.
 fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression) => {
-            is_bigquery_string_default_type(typ).then(|| expression.clone())
+        DefaultExpression::StringLiteral(expression) if is_bigquery_string_default_type(typ) => {
+            bigquery_string_literal(expression)
         }
         DefaultExpression::NumericLiteral(expression) => {
             if is_bigquery_numeric_default_type(typ) {
@@ -77,28 +85,35 @@ fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Opti
         DefaultExpression::BooleanLiteral(expression) => {
             matches!(typ, &Type::BOOL).then(|| expression.clone())
         }
-        DefaultExpression::DateLiteral(expression) => {
-            matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
+        DefaultExpression::DateLiteral(expression) if matches!(typ, &Type::DATE) => {
+            bigquery_string_literal(expression).map(|literal| format!("DATE {literal}"))
         }
-        DefaultExpression::TimeLiteral(expression) => {
-            matches!(typ, &Type::TIME).then(|| format!("TIME {expression}"))
+        DefaultExpression::TimeLiteral(expression) if matches!(typ, &Type::TIME) => {
+            bigquery_string_literal(expression).map(|literal| format!("TIME {literal}"))
         }
-        DefaultExpression::TimeTzLiteral(expression) => {
-            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        DefaultExpression::TimeTzLiteral(expression) if matches!(typ, &Type::TIMETZ) => {
+            bigquery_string_literal(expression)
         }
-        DefaultExpression::TimestampLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMP).then(|| format!("DATETIME {expression}"))
+        DefaultExpression::TimestampLiteral(expression) if matches!(typ, &Type::TIMESTAMP) => {
+            bigquery_string_literal(expression).map(|literal| format!("DATETIME {literal}"))
         }
-        DefaultExpression::TimestampTzLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMPTZ).then(|| format!("TIMESTAMP {expression}"))
+        DefaultExpression::TimestampTzLiteral(expression) if matches!(typ, &Type::TIMESTAMPTZ) => {
+            bigquery_string_literal(expression).map(|literal| format!("TIMESTAMP {literal}"))
         }
-        DefaultExpression::IntervalLiteral(expression) => {
-            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
+        DefaultExpression::IntervalLiteral(expression) if matches!(typ, &Type::INTERVAL) => {
+            bigquery_string_literal(expression)
         }
-        DefaultExpression::JsonLiteral(expression) => {
-            is_json_type(typ).then(|| format!("JSON {expression}"))
+        DefaultExpression::JsonLiteral(expression) if is_json_type(typ) => {
+            bigquery_string_literal(expression).map(|literal| format!("JSON {literal}"))
         }
+        _ => None,
     }
+}
+
+/// Re-quotes one parser-validated PostgreSQL string literal with GoogleSQL
+/// escapes.
+fn bigquery_string_literal(expression: &str) -> Option<String> {
+    unquote_postgres_string_literal(expression).map(|value| quote_string_literal(&value))
 }
 
 /// Returns whether this Postgres type is created as a BigQuery string column
@@ -486,6 +501,32 @@ mod tests {
 
         for (typ, expression, expected) in cases {
             assert_eq!(default_expression_sql(expression, &typ).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn default_expression_requotes_postgres_string_literals_for_bigquery() {
+        // PostgreSQL literals double single quotes and keep backslashes as
+        // ordinary characters. GoogleSQL literals use backslash escapes, reject
+        // doubled quotes, and cannot contain a raw newline.
+        let cases = [
+            (Type::TEXT, "'don''t'::text", r"'don\'t'"),
+            (Type::TEXT, r"'C:\temp\new'::text", r"'C:\\temp\\new'"),
+            (Type::TEXT, "'line\nnext'::text", r"'line\nnext'"),
+            (
+                Type::JSONB,
+                r#"'{"path": "C:\\temp", "note": "it''s"}'::jsonb"#,
+                r#"JSON '{"path": "C:\\\\temp", "note": "it\'s"}'"#,
+            ),
+            (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
+        ];
+
+        for (typ, expression, expected) in cases {
+            assert_eq!(
+                default_expression_sql(expression, &typ).as_deref(),
+                Some(expected),
+                "expression: {expression}"
+            );
         }
     }
 
