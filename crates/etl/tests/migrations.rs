@@ -1089,8 +1089,10 @@ async fn split_migrations_can_be_reverted_independently() {
     assert_eq!(applied_migration_versions(&database).await, all_split_migration_versions());
 
     let client = database.client.as_ref().expect("database client should be initialized");
-    let previous_source_version =
-        source_migration_versions().into_iter().rev().nth(1).expect("a previous migration exists");
+    let previous_source_version = source_migration_versions()
+        .into_iter()
+        .rfind(|version| *version < 20260724120000)
+        .expect("a previous migration exists");
     let mut conn = migration_connection(&database.config).await;
     source_migrator().undo(&mut conn, previous_source_version).await.unwrap();
     drop(conn);
