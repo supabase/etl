@@ -79,10 +79,9 @@ The replicator never runs `OPTIMIZE ... FINAL CLEANUP`. Background merges
 collapse older versions but retain tombstones.
 
 Cleanup removes tombstones. A row with an older version inserted afterward
-becomes visible again. Restart replay can cause this: ETL replays every event
-written after the persisted checkpoint, and insert deduplication can drop a
-replayed tombstone whose block hash is still in the deduplication log while
-accepting the live row in a differently batched block.
+becomes visible again. Restart replay can do this: ETL replays every event
+written after the persisted checkpoint, so an older row can land before its
+replayed tombstone does.
 
 Run cleanup only when nothing can replay:
 

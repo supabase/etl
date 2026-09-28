@@ -1297,6 +1297,48 @@ async fn copy_batches_deduplicate_by_batch_id_not_content() {
     assert_eq!(database.query::<u64>("select count() from public_clicks").await, vec![300]);
 }
 
+/// ClickHouse never drops a change-stream insert as a duplicate. Replays can
+/// resend a block the table already saw, and a replay that runs `TRUNCATE`
+/// first must not lose that block.
+#[tokio::test(flavor = "multi_thread")]
+async fn replayed_cdc_inserts_are_not_deduplicated() {
+    // GIVEN: a MergeTree table with block deduplication enabled.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "replayed").await;
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::MergeTree).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    // Replicated and Shared tables deduplicate by default but need Keeper;
+    // this window turns on the same block deduplication for plain MergeTree.
+    database
+        .db_client()
+        .query(
+            "alter table public_replayed modify setting non_replicated_deduplication_window = 100",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: the same change-stream insert is written twice, as a replay does.
+    for _ in 0..2 {
+        destination.write_events(vec![lifecycle_insert(&schema, 1, "a")]).await.unwrap();
+    }
+
+    // THEN: the event log keeps both copies and current state has one row.
+    assert_eq!(database.query::<u64>("select count() from public_replayed").await, vec![2]);
+    let current_query = current_state_query(
+        ClickHouseEngine::MergeTree,
+        "public_replayed",
+        "id, value",
+        &["id"],
+        "id",
+    );
+    assert_eq!(database.query::<(i64, String)>(&current_query).await, vec![(1, "a".to_owned())]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
     init_test_tracing();

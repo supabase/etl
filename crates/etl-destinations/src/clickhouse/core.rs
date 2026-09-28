@@ -899,8 +899,8 @@ where
     /// async completion result.
     ///
     /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing. It passes no [`TableCopyBatchId`], so its inserts
-    /// carry no deduplication token.
+    /// pipeline plumbing. It passes no [`TableCopyBatchId`], so ClickHouse
+    /// never deduplicates its inserts.
     #[cfg(feature = "test-utils")]
     pub async fn write_table_rows(
         &self,
@@ -1379,7 +1379,7 @@ where
                 rows,
                 &nullable_flags,
                 self.inserter_config.max_bytes_per_insert,
-                batch_id.map_or(InsertDeduplication::ServerDefault, InsertDeduplication::CopyBatch),
+                batch_id.map_or(InsertDeduplication::Disabled, InsertDeduplication::CopyBatch),
                 COPY_REPLICATION_PATH,
             )
             .await
@@ -1745,9 +1745,9 @@ where
     ///
     /// Schema changes are applied only after all preceding inserts in the batch
     /// are complete: step 2 awaits every INSERT before step 3 runs any DDL, and
-    /// the client pins `wait_for_async_insert = 1`, so an insert
-    /// acknowledgement implies the rows were flushed into the table and cannot
-    /// be overtaken by a following `ALTER TABLE`.
+    /// the client pins `async_insert = 0`, so an insert acknowledgement implies
+    /// the rows were written into the table and cannot be overtaken by a
+    /// following `ALTER TABLE`.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -1917,7 +1917,7 @@ where
                         rows,
                         &nullable_flags,
                         max_bytes,
-                        InsertDeduplication::ServerDefault,
+                        InsertDeduplication::Disabled,
                         CDC_REPLICATION_PATH,
                     )
                     .await
@@ -2599,7 +2599,7 @@ where
         let fence_guards = self.fences.acquire(&events).await;
 
         // Durability needs no branch: the task completes only after every
-        // INSERT in the batch is acknowledged under `wait_for_async_insert=1`,
+        // INSERT in the batch is acknowledged under `async_insert = 0`,
         // so each result is already `Durable` and `RequireDurable` calls are
         // satisfied by construction. `Accepted` is never reported.
         let writer = self.writer.clone();

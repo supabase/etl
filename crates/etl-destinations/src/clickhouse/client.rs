@@ -13,6 +13,7 @@ use etl::{
 };
 use tracing::debug;
 use url::Url;
+use uuid::Uuid;
 
 use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
@@ -130,8 +131,15 @@ pub(crate) enum InsertDeduplication {
     /// dropped. A redelivered batch splits into the same statements and keeps
     /// its tokens, so it is still dropped as a retry.
     CopyBatch(TableCopyBatchId),
-    /// No token; the server's deduplication settings apply.
-    ServerDefault,
+    /// Every statement sends a fresh random token, so ClickHouse never drops
+    /// it as a duplicate.
+    ///
+    /// Change-stream replays already tolerate duplicate rows. Content
+    /// deduplication could instead drop a replayed block that a replayed
+    /// `TRUNCATE` just removed, if the table remembers the block across the
+    /// truncate. `insert_deduplicate = 0` is not enough: plain `MergeTree`
+    /// with `non_replicated_deduplication_window` ignores it.
+    Disabled,
 }
 
 /// Returns the placement clause for an `ADD COLUMN` statement.
@@ -362,13 +370,13 @@ impl ClickHouseClient {
                     )
                     .with_option("http_send_timeout", floor_secs(config.insert_timeout))
                     .with_option("http_receive_timeout", floor_secs(config.insert_timeout))
-                    // Force synchronous insert acknowledgements: when a server or user profile
-                    // enables `async_insert` with `wait_for_async_insert = 0`, ClickHouse acks
-                    // inserts before flushing the async-insert buffer into the table, letting a
-                    // following schema change overtake acked rows. Pinning the setting makes every
-                    // ack imply the rows were flushed into the table; it is a no-op when async
-                    // inserts are disabled.
-                    .with_option("wait_for_async_insert", "1")
+                    // Pin synchronous inserts. Since ClickHouse 26.2 the server queues inserts by
+                    // default. When the wait for a queued flush times out, the server reports an
+                    // error but keeps the rows queued, so they can land after ETL replays the
+                    // batch, even after a replayed `TRUNCATE`. A synchronous
+                    // insert writes its rows before it reports success, and a
+                    // server-side failure leaves nothing queued.
+                    .with_option("async_insert", "0")
             }),
             config,
         }
@@ -690,12 +698,15 @@ impl ClickHouseClient {
             #[cfg(feature = "test-utils")]
             pause_before_insert_statement_for_tests(statements).await;
 
-            let mut insert = self.inner.insert_formatted_with(sql.clone());
-            if let InsertDeduplication::CopyBatch(batch_id) = deduplication {
-                insert = insert
-                    .with_option("insert_deduplication_token", format!("{batch_id}-{statements}"));
-            }
-            let mut insert = insert.buffered_with_capacity(BUFFERED_CAPACITY);
+            let token = match deduplication {
+                InsertDeduplication::CopyBatch(batch_id) => format!("{batch_id}-{statements}"),
+                InsertDeduplication::Disabled => Uuid::new_v4().to_string(),
+            };
+            let mut insert = self
+                .inner
+                .insert_formatted_with(sql.clone())
+                .with_option("insert_deduplication_token", token)
+                .buffered_with_capacity(BUFFERED_CAPACITY);
             let mut bytes = 0u64;
             let mut rows_in_statement = 0u64;
             let insert_start = Instant::now();
