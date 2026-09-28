@@ -471,7 +471,11 @@ impl ClickHouseClient {
         Ok(rows.into_iter().next())
     }
 
-    /// Returns ClickHouse columns for a table in position order.
+    /// Returns the insertable ClickHouse columns for a table in position order.
+    ///
+    /// `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns are excluded because an
+    /// insert without a column list skips them. Users may add them to derive
+    /// values from ETL columns, and RowBinary inserts never carry them.
     pub(crate) async fn table_columns(
         &self,
         table_name: &str,
@@ -481,7 +485,8 @@ impl ClickHouseClient {
             .inner
             .query(
                 "SELECT name, type AS type_name FROM system.columns WHERE database = \
-                 currentDatabase() AND table = ? ORDER BY position",
+                 currentDatabase() AND table = ? AND default_kind IN ('', 'DEFAULT') ORDER BY \
+                 position",
             )
             .with_option("max_execution_time", &schema_secs)
             .bind(table_name);

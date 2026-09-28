@@ -224,6 +224,9 @@ and resynchronize the table, or revert `engine`.
   `NULL` array elements remain supported.
 - ETL sends any value RowBinary can encode; ClickHouse applies its own
   conversion and rejection rules.
+- You may add `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` columns to a table ETL
+  created; ETL ignores them when writing. A resynchronization recreates the
+  table without them.
 - Dotted nested subcolumns can be renamed only within the same parent, matching
   ClickHouse's documented `RENAME COLUMN` limitation.
 - Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.
