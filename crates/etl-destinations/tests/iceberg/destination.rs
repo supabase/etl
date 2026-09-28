@@ -2,15 +2,16 @@ use std::sync::Arc;
 
 use etl::{
     data::{Cell, TableRow},
-    destination::{DestinationTableMetadata, WriteEventsDurability},
+    destination::{Destination, DestinationTableMetadata, WriteEventsDurability},
     event::{Event, EventType, InsertEvent, TruncateEvent},
     pipeline::PipelineId,
     schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
-    store::{MemoryStore, StateStore},
+    store::{MemoryStore, SchemaStore, StateStore},
     test_utils::{
         database::spawn_source_database,
         destination::{
-            write_events as invoke_write_events, write_table_rows as invoke_write_table_rows,
+            drop_table_for_copy, write_events as invoke_write_events,
+            write_table_rows as invoke_write_table_rows,
         },
         event::EventCondition,
         notifying_store::NotifyingStore,
@@ -31,6 +32,117 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 use crate::support::iceberg::read_all_rows;
+
+/// Concurrent colliding writes have only one owner, and after restart all
+/// conflicting write and recovery paths leave that owner's data intact.
+#[tokio::test(flavor = "multi_thread")]
+async fn namespace_collision_preserves_rows_across_restart_and_recovery() {
+    init_test_tracing();
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+    let store = MemoryStore::new();
+    let destination =
+        IcebergDestination::new(client.clone(), DestinationNamespace::OnePerSchema, store.clone());
+    let schemas: Vec<_> = [(1, "UserSchema"), (2, "userschema")]
+        .into_iter()
+        .map(|(id, name)| {
+            ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+                TableId::new(id),
+                TableName::new(name.to_owned(), "users".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                        .with_primary_key(1),
+                ],
+            )))
+        })
+        .collect();
+    let (first, second) = tokio::join!(
+        invoke_write_table_rows(&destination, &schemas[0], vec![TableRow::new(vec![Cell::I32(1)])]),
+        invoke_write_table_rows(&destination, &schemas[1], vec![TableRow::new(vec![Cell::I32(2)])]),
+    );
+    let (owner, rejected, value, error) = match (first, second) {
+        (Ok(_), Err(error)) => (&schemas[0], &schemas[1], 1, error),
+        (Err(error), Ok(_)) => (&schemas[1], &schemas[0], 2, error),
+        results => panic!("Expected one successful write and one collision: {results:?}"),
+    };
+    assert_eq!(error.description(), Some("Iceberg namespace collision"));
+    destination.shutdown().await.unwrap();
+
+    store.store_table_schema(owner.inner().clone()).await.unwrap();
+    let destination =
+        IcebergDestination::new(client.clone(), DestinationNamespace::OnePerSchema, store.clone());
+    destination.startup().await.unwrap();
+    let namespace = "userschema";
+    let table_name = "users_changelog";
+    let expected_rows = vec![TableRow::new(vec![
+        Cell::I32(value),
+        IcebergOperationType::Insert.into(),
+        Cell::String("0000000000000000/0000000000000000".to_owned()),
+    ])];
+
+    let creating = DestinationTableMetadata::new_creating(
+        table_name.to_owned(),
+        rejected.inner().snapshot_id,
+        rejected.replication_mask().clone(),
+    );
+    for metadata in [None, Some(creating.clone()), Some(creating.to_applied())] {
+        if let Some(metadata) = &metadata {
+            store.store_destination_table_metadata(rejected.id(), metadata.clone()).await.unwrap();
+        }
+        let error = invoke_write_table_rows(&destination, rejected, Vec::new()).await.unwrap_err();
+        assert_eq!(error.description(), Some("Iceberg namespace collision"));
+        for event in [
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(20),
+                tx_ordinal: 1,
+                replicated_table_schema: rejected.clone(),
+                table_row: TableRow::new(vec![Cell::I32(3)]),
+            }),
+            Event::Truncate(TruncateEvent {
+                commit_lsn: PgLsn::from(20),
+                tx_ordinal: 2,
+                options: 0,
+                truncated_tables: vec![rejected.clone()],
+            }),
+        ] {
+            let error = invoke_write_events(
+                &destination,
+                WriteEventsDurability::RequireDurable,
+                vec![event],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.description(), Some("Iceberg namespace collision"));
+        }
+        let error = drop_table_for_copy(&destination, rejected).await.unwrap_err();
+        assert_eq!(error.description(), Some("Iceberg namespace collision"));
+        assert_eq!(store.get_destination_table_metadata(rejected.id()).await.unwrap(), metadata);
+    }
+    destination.shutdown().await.unwrap();
+    let rows = read_all_rows(&client, namespace.to_owned(), table_name.to_owned()).await;
+    assert_table_rows_equal_ignoring_size(&rows, &expected_rows);
+
+    // A legacy pipeline that already recorded both owners must fail startup
+    // before either table can trigger destructive recovery.
+    store.store_table_schema(rejected.inner().clone()).await.unwrap();
+    let destination =
+        IcebergDestination::new(client.clone(), DestinationNamespace::OnePerSchema, store);
+    let error = destination.startup().await.unwrap_err();
+    assert_eq!(error.description(), Some("Iceberg namespace collision"));
+    let rows = read_all_rows(&client, namespace.to_owned(), table_name.to_owned()).await;
+    assert_table_rows_equal_ignoring_size(&rows, &expected_rows);
+
+    client.drop_table_if_exists(namespace, table_name.to_owned()).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn applied_metadata_does_not_recreate_a_missing_table_after_restart() {
