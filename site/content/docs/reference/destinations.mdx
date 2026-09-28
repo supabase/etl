@@ -15,8 +15,8 @@ mature cloud destination.**
 | ------------ | --------------- | ------------- | ----------------------------------------- |
 | `clickhouse` | ClickHouse      | Private alpha | Recommended local getting-started path    |
 | `bigquery`   | Google BigQuery | Stable        | Most mature cloud destination             |
-| `ducklake`   | DuckLake        | In progress   | Evaluate for your workload                |
-| `snowflake`  | Snowflake       | In progress   | Evaluate for your workload                |
+| `ducklake`   | DuckLake        | Private alpha | Evaluate for your workload                |
+| `snowflake`  | Snowflake       | Private alpha | Evaluate for your workload                |
 | `iceberg`    | Apache Iceberg  | Deprecated    | Do not use for new deployments            |
 
 ## Status definitions
@@ -232,6 +232,9 @@ destination. Drop the conflicting object or use another database.
   `NULL` array elements remain supported.
 - ETL sends any value RowBinary can encode; ClickHouse applies its own
   conversion and rejection rules.
+- You may add `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` columns to a table ETL
+  created; ETL ignores them when writing. A resynchronization recreates the
+  table without them.
 - Dotted nested subcolumns can be renamed only within the same parent, matching
   ClickHouse's documented `RENAME COLUMN` limitation.
 - Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.
@@ -240,7 +243,9 @@ destination. Drop the conflicting object or use another database.
 
 ## DuckLake
 
-<DestinationStatus status="in-progress" />
+<DestinationStatus status="private-alpha" />
+
+This status applies to the managed service, not local or self-hosted use.
 
 DuckLake writes through DuckDB to a file or PostgreSQL catalog and local or
 object storage.
@@ -258,7 +263,9 @@ object storage.
 
 ## Snowflake
 
-<DestinationStatus status="in-progress" />
+<DestinationStatus status="private-alpha" />
+
+This status applies to the managed service, not local or self-hosted use.
 
 Snowflake uses direct Snowpipe Streaming and key-pair authentication.
 

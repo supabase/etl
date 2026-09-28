@@ -125,9 +125,12 @@ for versions, measurement methodology, and configuration differences.
 | --- | --- | --- |
 | `clickhouse` | ClickHouse | Private alpha |
 | `bigquery` | Google BigQuery | Stable |
-| `ducklake` | DuckLake | In progress |
-| `snowflake` | Snowflake | In progress |
+| `ducklake` | DuckLake | Private alpha |
+| `snowflake` | Snowflake | Private alpha |
 | `iceberg` | Apache Iceberg | Deprecated |
+
+Private alpha refers to managed-service access and does not restrict local or
+self-hosted use of the open-source destinations.
 
 ClickHouse is the fastest way to start locally: `cargo x init` runs it, and
 `cargo x setup replicator` configures it by default. BigQuery is the most
