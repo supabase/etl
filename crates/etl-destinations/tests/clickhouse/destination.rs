@@ -1232,6 +1232,136 @@ async fn partial_key_change_restart_replay_replacing_merge_tree() {
     partial_key_change_restart_replay_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
+/// Stores one version of the `public.computed` source schema.
+async fn store_computed_schema(
+    store: &MemoryStore,
+    snapshot_id: SnapshotId,
+    value_nullable: bool,
+    with_note: bool,
+) -> ReplicatedTableSchema {
+    let mut columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, value_nullable),
+    ];
+    if with_note {
+        columns.push(ColumnSchema::new("note".to_owned(), Type::TEXT, -1, 3, true));
+    }
+    let schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            TableId::new(4250),
+            TableName::new("public".to_owned(), "computed".to_owned()),
+            columns,
+            snapshot_id,
+        ))
+        .await
+        .unwrap();
+
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Builds one streaming insert for a `public.computed` schema version.
+fn computed_insert(schema: &ReplicatedTableSchema, commit_lsn: u64, cells: Vec<Cell>) -> Event {
+    Event::Insert(InsertEvent {
+        commit_lsn: PgLsn::from(commit_lsn),
+        tx_ordinal: 0,
+        replicated_table_schema: schema.clone(),
+        table_row: TableRow::new(cells),
+    })
+}
+
+/// Users can add computed columns after ETL's trailing CDC columns. Restart,
+/// inserts, and schema changes that add a column or relax nullability still
+/// succeed, and ClickHouse keeps computing the derived values.
+async fn computed_columns_added_outside_etl_do_not_block_writes_inner(engine: ClickHouseEngine) {
+    // GIVEN: a copied table with MATERIALIZED, ALIAS, and EPHEMERAL columns.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let initial = store_computed_schema(&store, test_snapshot_id(100, 100), false, false).await;
+    let destination = database.build_destination_with_engine(store.clone(), engine).await;
+    destination
+        .write_table_rows(
+            &initial,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("a".into())])],
+        )
+        .await
+        .unwrap();
+    drop(destination);
+    database
+        .db_client()
+        .query(
+            "alter table public_computed add column id_times_ten Int64 materialized id * 10, add \
+             column id_plus_one Int64 alias id + 1, add column scratch Int64 ephemeral",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a restarted destination streams a row, adds a source column, makes
+    // `value` nullable, and streams a row using both changes.
+    let with_note = store_computed_schema(&store, test_snapshot_id(200, 200), false, true).await;
+    let nullable = store_computed_schema(&store, test_snapshot_id(300, 300), true, true).await;
+    let restarted = database.build_destination_with_engine(store, engine).await;
+    restarted
+        .write_events(vec![computed_insert(
+            &initial,
+            150,
+            vec![Cell::I64(2), Cell::String("b".into())],
+        )])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: with_note })])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: nullable.clone(),
+        })])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![computed_insert(
+            &nullable,
+            350,
+            vec![Cell::I64(3), Cell::Null, Cell::String("n".into())],
+        )])
+        .await
+        .unwrap();
+    drop(restarted);
+
+    // THEN: every row is stored and ClickHouse computes the derived columns.
+    assert_eq!(
+        database
+            .query::<(i64, Option<String>, Option<String>, i64, i64)>(
+                "select id, value, note, id_times_ten, id_plus_one from public_computed order by \
+                 id"
+            )
+            .await,
+        vec![
+            (1, Some("a".to_owned()), None, 10, 2),
+            (2, Some("b".to_owned()), None, 20, 3),
+            (3, None, Some("n".to_owned()), 30, 4),
+        ]
+    );
+}
+
+/// MergeTree tables accept computed columns after the CDC log columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn computed_columns_added_outside_etl_do_not_block_writes_merge_tree() {
+    computed_columns_added_outside_etl_do_not_block_writes_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree tables accept computed columns after the version columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn computed_columns_added_outside_etl_do_not_block_writes_replacing_merge_tree() {
+    computed_columns_added_outside_etl_do_not_block_writes_inner(
+        ClickHouseEngine::ReplacingMergeTree,
+    )
+    .await;
+}
+
 /// Changing or dropping a source default keeps the value that rows older than
 /// the column got when it was added, as Postgres does.
 #[tokio::test(flavor = "multi_thread")]
