@@ -1251,6 +1251,51 @@ async fn partial_key_change_restart_replay_replacing_merge_tree() {
     partial_key_change_restart_replay_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
+/// Users can add computed columns to an ETL table, and writes still succeed
+/// after a restart refills the table cache from `system.columns`.
+#[tokio::test(flavor = "multi_thread")]
+async fn computed_columns_added_outside_etl_do_not_block_writes() {
+    // GIVEN: a copied table with MATERIALIZED, ALIAS, and EPHEMERAL columns.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "computed").await;
+    let destination = database.build_destination(store.clone()).await;
+    destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("a".into())])],
+        )
+        .await
+        .unwrap();
+    drop(destination);
+    database
+        .db_client()
+        .query(
+            "alter table public_computed add column id_times_ten Int64 materialized id * 10, add \
+             column id_plus_one Int64 alias id + 1, add column scratch Int64 ephemeral",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a restarted destination streams a new row.
+    let restarted = database.build_destination(store).await;
+    restarted.write_events(vec![lifecycle_insert(&schema, 2, "b")]).await.unwrap();
+    drop(restarted);
+
+    // THEN: both rows are stored and ClickHouse computes the derived columns.
+    assert_eq!(
+        database
+            .query::<(i64, String, i64, i64)>(
+                "select id, value, id_times_ten, id_plus_one from public_computed order by id"
+            )
+            .await,
+        vec![(1, "a".to_owned(), 10, 2), (2, "b".to_owned(), 20, 3)]
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
     init_test_tracing();
