@@ -6,7 +6,8 @@ use crate::{
     error_notification::ErrorNotificationClient,
 };
 
-/// Initializes optional error notifications, rejecting incomplete credentials.
+/// Initializes optional error notifications, rejecting incomplete
+/// configuration.
 pub(crate) fn init(
     replicator_config: &ReplicatorConfig,
 ) -> ReplicatorResult<Option<ErrorNotificationClient>> {
@@ -16,6 +17,12 @@ pub(crate) fn init(
     let Some(api_url) = &supabase_config.api_url else {
         return Ok(None);
     };
+    if api_url.trim().is_empty() {
+        return Err(ReplicatorError::config(ValidationError::InvalidFieldValue {
+            field: "supabase.api_url".to_owned(),
+            constraint: "must not be blank".to_owned(),
+        }));
+    }
     let api_key = supabase_config
         .api_key
         .as_ref()
@@ -71,15 +78,22 @@ mod tests {
         config.validate().unwrap();
         assert!(init(&config).unwrap().is_none());
 
-        for (api_url, api_key, valid) in [
-            (None, None, true),
-            (None, Some(""), true),
-            (None, Some(" \t\n"), true),
-            (None, Some("placeholder-token"), true),
-            (Some("https://example.com"), None, false),
-            (Some("https://example.com"), Some(""), false),
-            (Some("https://example.com"), Some(" \t\n"), false),
-            (Some("https://example.com"), Some("placeholder-token"), true),
+        let api_key_error = Some(
+            "Configuration error: Field `supabase.api_key` must not be blank when \
+             supabase.api_url is configured",
+        );
+        let api_url_error = Some("Configuration error: Field `supabase.api_url` must not be blank");
+        for (api_url, api_key, expected_error) in [
+            (None, None, None),
+            (None, Some(""), None),
+            (None, Some(" \t\n"), None),
+            (None, Some("placeholder-token"), None),
+            (Some("https://example.com"), None, api_key_error),
+            (Some("https://example.com"), Some(""), api_key_error),
+            (Some("https://example.com"), Some(" \t\n"), api_key_error),
+            (Some("https://example.com"), Some("placeholder-token"), None),
+            (Some(""), Some("placeholder-token"), api_url_error),
+            (Some(" \t\n"), Some("placeholder-token"), api_url_error),
         ] {
             config.supabase = Some(SupabaseConfig {
                 project_ref: "example-project".to_owned(),
@@ -93,16 +107,12 @@ mod tests {
             config.validate().unwrap();
             ReplicatorConfigWithoutSecrets::from(config.clone()).validate().unwrap();
 
-            if valid {
-                assert_eq!(init(&config).unwrap().is_some(), api_url.is_some());
-            } else {
+            if let Some(expected_error) = expected_error {
                 let error = init(&config).unwrap_err();
                 assert!(matches!(error, ReplicatorError::Config(..)));
-                assert_eq!(
-                    error.to_string(),
-                    "Configuration error: Field `supabase.api_key` must not be blank when \
-                     supabase.api_url is configured"
-                );
+                assert_eq!(error.to_string(), expected_error);
+            } else {
+                assert_eq!(init(&config).unwrap().is_some(), api_url.is_some());
             }
         }
     }
