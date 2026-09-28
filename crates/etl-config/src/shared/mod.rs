@@ -1,6 +1,7 @@
 mod base;
 mod connection;
 mod destination;
+mod health;
 mod pipeline;
 mod replicator;
 mod sentry;
@@ -21,9 +22,11 @@ pub use destination::{
     DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, DuckLakeWriterConfig,
     IcebergConfig, IcebergConfigWithoutSecrets,
 };
+pub use health::ReplicatorHealthConfig;
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,
     PipelineConfigWithoutSecrets, ReplicationSlotConfig, TableSyncCopyConfig,
+    validate_copy_concurrency, validate_source_tls_config, validate_table_error_retry_delay_ms,
 };
 pub use replicator::{ReplicatorConfig, ReplicatorConfigWithoutSecrets};
 pub use sentry::SentryConfig;

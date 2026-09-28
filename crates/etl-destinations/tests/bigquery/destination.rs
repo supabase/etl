@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use etl::{
-    data::{Cell, TableRow},
+    data::{Cell, Date, TableRow},
     destination::WriteEventsDurability,
     event::{Event, InsertEvent, RelationEvent},
     schema::{
@@ -344,8 +344,8 @@ async fn table_options_are_applied_only_when_the_physical_table_is_created() {
         Some(vec!["name".to_owned(), "id".to_owned()])
     );
 
-    // A restarted destination may carry a changed configuration, but an existing
-    // physical table must retain the layout selected at its creation.
+    // A restarted destination may carry a changed configuration, but an
+    // existing physical table must retain the layout selected at its creation.
     let changed_options = table_options(
         table_schema.id,
         Some(BigQueryPartitionBy::TimeColumn {
@@ -519,7 +519,7 @@ async fn table_options_support_time_column_and_ingestion_time_partitioning() {
             &ReplicatedTableSchema::all(Arc::new(time_column_schema.clone())),
             vec![TableRow::new(vec![
                 Cell::I32(1),
-                Cell::Date(chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap()),
+                Cell::Date(Date::Value(chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap())),
             ])],
         )
         .await

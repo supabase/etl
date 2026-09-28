@@ -15,7 +15,7 @@ use std::{
 
 use hotpath::{HotpathGuard, HotpathGuardBuilder};
 use metrics::{describe_gauge, gauge};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusHandle;
 use reqwest::{
     Client, Url,
     header::{AUTHORIZATION, HeaderMap, HeaderValue, InvalidHeaderValue},
@@ -23,8 +23,6 @@ use reqwest::{
 };
 use thiserror::Error;
 use tracing::warn;
-
-use crate::metrics::MetricsError;
 
 /// Whether the latest scrape reached the profiler successfully.
 const EXPORTER_UP: &str = "etl_hotpath_exporter_up";
@@ -156,7 +154,10 @@ pub fn init() -> Result<HotpathGuard, ProfilingError> {
 /// Failure is visible through `etl_hotpath_exporter_up = 0`; profiler counters
 /// are omitted rather than fabricated as zero. Global labels are attached to
 /// profiler samples just as they are to the existing recorder's samples.
-pub async fn render_metrics(handle: &PrometheusHandle, global_labels: &[(&str, String)]) -> String {
+pub async fn render_metrics(
+    handle: &PrometheusHandle,
+    global_labels: &[(&str, String)],
+) -> Result<String, tokio::task::JoinError> {
     render_snapshot(handle, global_labels, BRIDGE.get()).await
 }
 
@@ -165,7 +166,7 @@ async fn render_snapshot(
     handle: &PrometheusHandle,
     global_labels: &[(&str, String)],
     bridge: Option<&PrometheusBridge>,
-) -> String {
+) -> Result<String, tokio::task::JoinError> {
     REGISTER_METRICS.call_once(|| {
         describe_gauge!(EXPORTER_UP, "Whether the latest Hotpath Prometheus scrape succeeded");
     });
@@ -181,11 +182,12 @@ async fn render_snapshot(
         None
     };
     gauge!(EXPORTER_UP).set(if snapshot.is_some() { 1.0 } else { 0.0 });
-    let mut rendered = handle.render();
+    let handle = handle.clone();
+    let mut rendered = tokio::task::spawn_blocking(move || handle.render()).await?;
     if let Some(snapshot) = snapshot {
         append_labeled_snapshot(&mut rendered, &snapshot, global_labels);
     }
-    rendered
+    Ok(rendered)
 }
 
 /// Escapes a Prometheus text label value.
@@ -234,67 +236,6 @@ fn append_labeled_snapshot(output: &mut String, snapshot: &str, global_labels: &
     }
 }
 
-/// Runs the combined scrape handler on the replicator's existing port.
-///
-/// The replicator initializes metrics before it starts Tokio, so the listener
-/// owns a small runtime, matching the normal Prometheus exporter's lifecycle.
-pub(crate) fn install_metrics_listener(
-    builder: PrometheusBuilder,
-    global_labels: Vec<(&'static str, String)>,
-) -> Result<(), MetricsError> {
-    let listener = TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, 9000))?;
-    listener.set_nonblocking(true)?;
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let handle = builder.install_recorder()?;
-    std::thread::Builder::new().name("etl-metrics".to_owned()).spawn(move || {
-        runtime.block_on(async move {
-            let listener = match tokio::net::TcpListener::from_std(listener) {
-                Ok(listener) => listener,
-                Err(error) => {
-                    tracing::error!(error = %error, "failed to initialize metrics listener");
-                    return;
-                }
-            };
-            let upkeep_handle = handle.clone();
-            let upkeep_task = tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    upkeep_handle.run_upkeep();
-                }
-            });
-            let app = metrics_router(handle, global_labels);
-            if let Err(error) = axum::serve(listener, app).await {
-                tracing::error!(error = %error, "metrics listener stopped");
-            }
-            upkeep_task.abort();
-        });
-    })?;
-    Ok(())
-}
-
-/// Builds the standalone metrics endpoint using the shared scrape renderer.
-fn metrics_router(
-    handle: PrometheusHandle,
-    global_labels: Vec<(&'static str, String)>,
-) -> axum::Router {
-    axum::Router::new().route(
-        "/metrics",
-        axum::routing::get(move || {
-            let handle = handle.clone();
-            let labels = global_labels.clone();
-            async move {
-                (
-                    [(
-                        axum::http::header::CONTENT_TYPE,
-                        "text/plain; version=0.0.4; charset=utf-8",
-                    )],
-                    render_metrics(&handle, &labels).await,
-                )
-            }
-        }),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -310,8 +251,9 @@ mod tests {
     use reqwest::Client;
     use tower::ServiceExt;
 
-    use crate::profiling::{
-        PrometheusBridge, append_labeled_snapshot, metrics_router, render_snapshot,
+    use crate::{
+        metrics::metrics_router,
+        profiling::{BRIDGE, PrometheusBridge, append_labeled_snapshot, render_snapshot},
     };
 
     /// Preserves metadata and label syntax while attaching replicator identity.
@@ -363,6 +305,89 @@ mod tests {
         );
     }
 
+    /// Exposes profiler samples through the shared fallback without changing
+    /// health.
+    #[tokio::test]
+    async fn shared_endpoint_exports_profiler_identity_and_preserves_health() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/metrics",
+                    get(|| async {
+                        "# TYPE hotpath_test counter\nhotpath_test{label=\"test_lock\"} 7\n"
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        }));
+        assert!(
+            BRIDGE
+                .set(PrometheusBridge {
+                    client: Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(1))
+                        .build()
+                        .unwrap(),
+                    url: format!("http://{address}/metrics").parse().unwrap(),
+                })
+                .is_ok()
+        );
+        let labels = vec![
+            ("project", "example-project".to_owned()),
+            ("pipeline_id", "42".to_owned()),
+            ("destination", "ducklake".to_owned()),
+        ];
+        let mut builder = PrometheusBuilder::new();
+        for (key, value) in &labels {
+            builder = builder.add_global_label(*key, value.clone());
+        }
+        let router = metrics_router(builder.install_recorder().unwrap(), labels);
+        counter!("etl_profiling_test_events_total").increment(3);
+        for path in ["/metrics", "/"] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = String::from_utf8(
+                to_bytes(response.into_body(), 1024 * 1024).await.unwrap().to_vec(),
+            )
+            .unwrap();
+            for family in
+                ["hotpath_test", "etl_profiling_test_events_total", "etl_hotpath_exporter_up"]
+            {
+                let sample =
+                    body.lines().find(|line| line.starts_with(&format!("{family}{{"))).unwrap();
+                for label in [
+                    "project=\"example-project\"",
+                    "pipeline_id=\"42\"",
+                    "destination=\"ducklake\"",
+                ] {
+                    assert!(sample.contains(label));
+                }
+                let value = match family {
+                    "hotpath_test" => " 7",
+                    "etl_profiling_test_events_total" => " 3",
+                    _ => " 1",
+                };
+                assert!(sample.ends_with(value));
+            }
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+        let response = router
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "OK");
+    }
+
     /// A failed upstream scrape must not discard existing ETL measurements.
     #[tokio::test]
     async fn profiler_failure_preserves_metrics_without_exporting_error_body() {
@@ -387,7 +412,7 @@ mod tests {
         };
         let handle = PrometheusBuilder::new().install_recorder().unwrap();
         counter!("etl_profiling_test_events_total").increment(4);
-        let snapshot = render_snapshot(&handle, &[], Some(&bridge)).await;
+        let snapshot = render_snapshot(&handle, &[], Some(&bridge)).await.unwrap();
         server.abort();
         assert!(snapshot.contains("etl_profiling_test_events_total 4"));
         assert!(snapshot.contains("etl_hotpath_exporter_up 0"));

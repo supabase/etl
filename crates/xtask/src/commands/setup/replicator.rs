@@ -639,8 +639,8 @@ impl ConfigEnvGuard {
 
 impl Drop for ConfigEnvGuard {
     fn drop(&mut self) {
-        // SAFETY: pairs with [`ConfigEnvGuard::set`] in the same single-threaded
-        // command or test process.
+        // SAFETY: pairs with [`ConfigEnvGuard::set`] in the same
+        // single-threaded command or test process.
         unsafe {
             match &self.previous_config_dir {
                 Some(value) => env::set_var("APP_CONFIG_DIR", value),

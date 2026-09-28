@@ -28,6 +28,12 @@
 //! coordinates initial sync and ongoing replication, and handles failures
 //! gracefully.
 //!
+//! [`pipeline::Pipeline::shutdown`] requests shutdown; keep the original
+//! [`pipeline::Pipeline::wait`] future alive to finish cleanup. Failures return
+//! immediately and drop remaining owned tasks to request cancellation.
+//! [`pipeline::Pipeline::shutdown_and_wait`] combines both steps when no wait
+//! is in progress. See [`pipeline::Pipeline::wait`] for teardown guarantees.
+//!
 //! ## Destinations
 //! [`destination::Destination`] trait implementations define where replicated
 //! data should be sent. Destinations are pluggable and can integrate with
@@ -44,19 +50,18 @@
 //! checkpoints, and destination table metadata, providing a single interface
 //! for all state-related storage operations.
 //!
-//! The [`store::SchemaStore`] trait handles versioned table schemas,
-//! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
-//! reset, and deletion operations that must update state, schema, and metadata
-//! consistently.
-//! [`store::SharedStateStore`], [`store::DestinationStore`], and
+//! The [`store::SchemaStore`] trait handles versioned table schemas, and
+//! [`store::TableStateLifecycleStore`] handles table-scoped preparation, reset,
+//! and deletion operations that must update state, schema, and metadata
+//! consistently. [`store::SharedStateStore`], [`store::DestinationStore`], and
 //! [`store::PipelineStore`] are facade traits for code that needs common
 //! combinations of these capabilities.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it
 //! must be able to persist data durably. The crate itself provides no
 //! durability guarantees as it only transfers data between Postgres and the
-//! destination relying on the store traits to provide the required
-//! data when needed.
+//! destination relying on the store traits to provide the required data when
+//! needed.
 //!
 //! ## Error Handling
 //! All operations return [`error::EtlResult<T>`] which provides detailed error
@@ -191,7 +196,9 @@ compile_error!(
     "Either the `tls-rustls-ring` or the `tls-rustls-aws-lc-rs` feature must be enabled."
 );
 
+pub mod activity;
 pub mod config;
+mod constants;
 pub mod data;
 pub mod destination;
 #[cfg(feature = "egress")]
@@ -217,6 +224,7 @@ mod runtime;
 pub mod schema;
 mod source_payload_metadata;
 pub mod store;
+pub mod task;
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

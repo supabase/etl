@@ -1,7 +1,16 @@
 target/
+**/target/
 site/
+dist/
+**/node_modules/
 .git/
+.claude/
+.idea/
+.vscode/
 .gitignore
+.github/
+docs/
+fuzz/
 README.md
 LICENSE
 *.md
@@ -13,3 +22,6 @@ logs/
 Thumbs.db
 venv/
 vendor/duckdb/extensions/
+
+# Runtime configuration can contain credentials.
+**/configuration/

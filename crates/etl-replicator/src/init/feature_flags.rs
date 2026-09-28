@@ -6,8 +6,8 @@ use crate::error::{ReplicatorError, ReplicatorResult};
 /// Initializes the ConfigCat client for feature flag evaluation in the
 /// replicator.
 ///
-/// This must run after the Tokio runtime has started because ConfigCat spins
-/// up its auto-polling task during client construction.
+/// This must run after the Tokio runtime has started because ConfigCat spins up
+/// its auto-polling task during client construction.
 pub(crate) fn init(
     replicator_config: &ReplicatorConfig,
 ) -> ReplicatorResult<Option<configcat::Client>> {

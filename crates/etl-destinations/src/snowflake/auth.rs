@@ -146,8 +146,8 @@ impl AuthManager<HttpExchanger> {
 impl<E: TokenExchanger> AuthManager<E> {
     /// Build an `AuthManager` from Snowflake configuration.
     ///
-    /// The public-key fingerprint is derived and reused for every JWT.
-    /// Accepts PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
+    /// The public-key fingerprint is derived and reused for every JWT. Accepts
+    /// PKCS#8 (encrypted or plain) and PKCS#1 PEM formats.
     pub fn with_exchanger(mut config: Config, exchanger: E) -> Result<Self> {
         let account = config.account_id.to_uppercase();
         let user = config.username.to_uppercase();
@@ -230,15 +230,15 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
 
     /// Invalidate the cached scoped token.
     ///
-    /// The next call to [`TokenProvider::get_token`] will perform a fresh
-    /// token exchange.
+    /// The next call to [`TokenProvider::get_token`] will perform a fresh token
+    /// exchange.
     async fn invalidate_token(&self) {
         *self.cached_token.lock().await = None;
     }
 }
 
-/// Decode a PEM-encoded RSA private key, returning the PKCS#1 DER bytes
-/// (for jsonwebtoken) and a loaded `KeyPair` (for fingerprint derivation).
+/// Decode a PEM-encoded RSA private key, returning the PKCS#1 DER bytes (for
+/// jsonwebtoken) and a loaded `KeyPair` (for fingerprint derivation).
 ///
 /// Supports encrypted PKCS#8, plain PKCS#8, and PKCS#1 PEM formats.
 fn decode_and_load_rsa_key(
@@ -262,7 +262,8 @@ fn decode_and_load_rsa_key(
         doc.as_bytes().to_vec()
     };
 
-    // Try PKCS#8: extract the inner RSA key for jsonwebtoken, load via from_pkcs8.
+    // Try PKCS#8: extract the inner RSA key for jsonwebtoken, load via
+    // from_pkcs8.
     if let Ok(pki) = pkcs8::PrivateKeyInfoRef::from_der(&der_bytes) {
         let key_pair = aws_lc_rs::rsa::KeyPair::from_pkcs8(&der_bytes)
             .map_err(|e| Error::Auth(format!("failed to load RSA key: {e}")))?;
@@ -473,7 +474,8 @@ P23pIjtEtEPNpGkXj0aB1RDq
             assert_eq!(entry.access_token, "fresh-token-from-exchange");
         }
 
-        // Second call should return the cached fresh token without re-exchanging.
+        // Second call should return the cached fresh token without
+        // re-exchanging.
         let token = manager.get_token().await.expect("get_token");
         assert_eq!(token, "fresh-token-from-exchange");
     }

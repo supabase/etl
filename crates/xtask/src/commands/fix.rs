@@ -9,8 +9,7 @@ use crate::utils::{
 
 #[derive(Args)]
 pub(crate) struct FixArgs {
-    /// Enable `sccache`.
-    /// Also enabled via `ETL_SCCACHE=1`.
+    /// Enable `sccache`. Also enabled via `ETL_SCCACHE=1`.
     #[arg(long)]
     sccache: bool,
 

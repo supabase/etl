@@ -55,7 +55,10 @@ impl TestSnowflakeArgs {
             "{GREEN}🧪 running Snowflake destination preset tests (no credentials needed).{RESET}"
         );
         let tests = CargoFeatureSelection::for_destination(Some(DestinationPreset::Snowflake))
-            .apply_to(cmd!(sh, "cargo nextest run --no-fail-fast"), DefaultFeatureBehavior::All)
+            .apply_to(
+                cmd!(sh, "cargo nextest run --locked --no-fail-fast"),
+                DefaultFeatureBehavior::All,
+            )
             .arg("snowflake");
         with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
 
@@ -75,19 +78,6 @@ impl TestSnowflakeArgs {
             return Ok(());
         }
 
-        eprintln!("{GREEN}🔑 running Snowflake API validator integration tests.{RESET}");
-        let tests = CargoFeatureSelection::new(
-            true,
-            vec!["snowflake".to_owned()],
-            vec!["etl-api".to_owned()],
-        )
-        .apply_to(
-            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only"),
-            DefaultFeatureBehavior::CargoDefault,
-        )
-        .arg("snowflake");
-        with_pg_env(maybe_with_sccache(tests, sccache), &pg_env).run()?;
-
         eprintln!("{GREEN}❄️  running Snowflake destination integration tests.{RESET}");
         let tests = CargoFeatureSelection::new(
             true,
@@ -95,7 +85,7 @@ impl TestSnowflakeArgs {
             vec!["etl-destinations".to_owned()],
         )
         .apply_to(
-            cmd!(sh, "cargo nextest run --no-fail-fast --run-ignored only"),
+            cmd!(sh, "cargo nextest run --locked --no-fail-fast --run-ignored only"),
             DefaultFeatureBehavior::CargoDefault,
         )
         .arg("snowflake");

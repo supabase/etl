@@ -5,8 +5,9 @@
 //! replication events. Most destination authors implement [`Destination`]
 //! directly. [`PipelineDestination`] is the blanket-implemented facade used by
 //! the pipeline runtime when it needs cloneable, worker-safe destinations.
-//! [`TaskSet`] is available for destinations that complete accepted writes in
-//! background tasks while keeping shutdown and panic handling explicit.
+//! [`crate::task::TaskRegistry`] is available for destinations that complete
+//! accepted writes in background tasks while keeping shutdown and panic
+//! handling explicit.
 
 mod async_result;
 mod base;
@@ -25,5 +26,3 @@ pub use base::Destination;
 pub use capabilities::PipelineDestination;
 pub use metadata::{DestinationTableMetadata, DestinationTableSchema};
 pub use table_copy::{TableCopyAttemptId, TableCopyBatchId};
-
-pub use crate::runtime::concurrency::{TaskSet, TaskSetDrainGuard};

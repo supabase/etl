@@ -135,8 +135,11 @@ async fn connect_database(config: PgConnectionConfig) -> PgDatabase<Client> {
 
 /// Returns the absolute path to the dedicated Multigres Compose file.
 fn compose_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/docker/docker-compose-multigres.yaml")
+    // Nextest supplies the remapped manifest directory when reusing an archive.
+    PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").unwrap_or_else(|| env!("CARGO_MANIFEST_DIR").into()),
+    )
+    .join("../../scripts/docker/docker-compose-multigres.yaml")
 }
 
 /// Runs a SQL query directly against one internal PostgreSQL cell.

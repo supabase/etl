@@ -15,9 +15,7 @@ cargo x init
 That starts Docker and databases. Then:
 
 ```bash
-cargo x setup api && cargo x run api
-
-# or, ClickHouse by default:
+# ClickHouse by default:
 cargo x setup replicator
 cargo x seed
 cargo x run replicator

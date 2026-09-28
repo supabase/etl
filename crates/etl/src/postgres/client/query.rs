@@ -1,5 +1,5 @@
 use pg_escape::quote_identifier;
-use tokio_postgres::{Client, SimpleQueryMessage, Transaction, error::SqlState, types::PgLsn};
+use tokio_postgres::{SimpleQueryMessage, Transaction, error::SqlState, types::PgLsn};
 
 use super::{
     types::{CreateSlotResult, SnapshotAction},
@@ -15,8 +15,9 @@ use crate::{
 /// Builds a `CREATE_REPLICATION_SLOT` command for a logical `pgoutput` slot.
 fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover: bool) -> String {
     if failover {
-        // PostgreSQL's legacy syntax accepts the snapshot action but has no place
-        // for FAILOVER. The parenthesized PostgreSQL 17+ syntax combines both.
+        // PostgreSQL's legacy syntax accepts the snapshot action but has no
+        // place for FAILOVER. The parenthesized PostgreSQL 17+ syntax combines
+        // both.
         let snapshot_option = match snapshot_action {
             SnapshotAction::Use => "'use'",
             SnapshotAction::NoExport => "'nothing'",
@@ -27,7 +28,8 @@ fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover:
             snapshot_option
         )
     } else {
-        // Retain the legacy form for compatibility with PostgreSQL 14 through 16.
+        // Retain the legacy form for compatibility with PostgreSQL 14 through
+        // 16.
         let snapshot_option = match snapshot_action {
             SnapshotAction::Use => "USE_SNAPSHOT",
             SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
@@ -40,16 +42,19 @@ fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover:
     }
 }
 
-/// Private executor for query helpers shared by clients and open transactions.
+/// Private executor for query helpers shared by replication transactions.
 #[derive(Clone, Copy)]
-pub(super) enum PgReplicationQueryTarget<'a, 'tx> {
-    /// A plain PostgreSQL client connection.
-    Client(&'a Client),
-    /// An open PostgreSQL transaction.
-    Transaction(&'a Transaction<'tx>),
+pub(super) struct PgReplicationQueryTarget<'a, 'tx> {
+    /// The transaction used to execute queries.
+    transaction: &'a Transaction<'tx>,
 }
 
-impl PgReplicationQueryTarget<'_, '_> {
+impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
+    /// Wraps an open replication transaction.
+    pub(super) fn new(transaction: &'a Transaction<'tx>) -> Self {
+        Self { transaction }
+    }
+
     /// Creates a replication slot on this target.
     pub(super) async fn create_slot(
         self,
@@ -57,12 +62,12 @@ impl PgReplicationQueryTarget<'_, '_> {
         snapshot_action: SnapshotAction,
         failover: bool,
     ) -> EtlResult<CreateSlotResult> {
-        // Do not convert the query or the options to lowercase, since the lexer for
-        // replication commands (repl_scanner.l) in Postgres code expects the commands
-        // in uppercase. This probably should be fixed in upstream, but for now we will
-        // keep the commands in uppercase.
+        // Do not convert the query or the options to lowercase, since the lexer
+        // for replication commands (repl_scanner.l) in Postgres code expects
+        // the commands in uppercase. This probably should be fixed in upstream,
+        // but for now we will keep the commands in uppercase.
         let query = create_slot_query(slot_name, snapshot_action, failover);
-        match self.simple_query(&query).await {
+        match self.transaction.simple_query(&query).await {
             Ok(results) => {
                 for result in results {
                     if let SimpleQueryMessage::Row(row) = result {
@@ -108,25 +113,12 @@ impl PgReplicationQueryTarget<'_, '_> {
             "select 1 from pg_class where oid in ({table_oids_list}) and relkind = 'p' limit 1;"
         );
 
-        for msg in self.simple_query(&query).await? {
+        for msg in self.transaction.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(_) = msg {
                 return Ok(true);
             }
         }
 
         Ok(false)
-    }
-
-    /// Executes a simple query on the target.
-    async fn simple_query(
-        self,
-        query: &str,
-    ) -> Result<Vec<SimpleQueryMessage>, tokio_postgres::Error> {
-        match self {
-            PgReplicationQueryTarget::Client(client) => client.simple_query(query).await,
-            PgReplicationQueryTarget::Transaction(transaction) => {
-                transaction.simple_query(query).await
-            }
-        }
     }
 }

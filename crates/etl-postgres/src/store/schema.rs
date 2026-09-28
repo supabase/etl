@@ -262,7 +262,7 @@ pub async fn store_table_schema(
         "#,
     )
     .bind(pipeline_id)
-    .bind(table_schema.id.into_inner() as i64)
+    .bind(i64::from(table_schema.id.into_inner()))
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
     .bind(table_schema.snapshot_id.to_string())

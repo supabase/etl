@@ -28,7 +28,6 @@ pub(crate) enum RetryDecision {
 }
 
 /// Retry metadata emitted before one sleep.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct RetryAttempt<'a, E> {
     /// One-based retry number.
@@ -36,18 +35,23 @@ pub(crate) struct RetryAttempt<'a, E> {
     /// Configured retry limit.
     pub(crate) max_retries: u32,
     /// Exponential backoff delay before caller-specific shaping.
+    #[cfg_attr(not(test), expect(dead_code, reason = "base delay is inspected by retry tests"))]
     pub(crate) base_delay: Duration,
     /// Final delay that will be slept.
+    #[cfg_attr(
+        all(not(test), not(any(feature = "bigquery", feature = "snowflake"))),
+        expect(dead_code, reason = "DuckLake logs its own retry delay")
+    )]
     pub(crate) sleep_delay: Duration,
     /// Error that triggered the retry.
     pub(crate) error: &'a E,
 }
 
 /// Final failure after the retry helper stops.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct RetryFailure<E> {
     /// Total attempts including the initial attempt.
+    #[cfg_attr(not(test), expect(dead_code, reason = "attempt count is inspected by retry tests"))]
     pub(crate) total_attempts: u32,
     /// Last error returned by the operation.
     pub(crate) last_error: E,

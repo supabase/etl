@@ -1,6 +1,6 @@
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
-    data::{ArrayCell, Cell, TableRow},
+    data::{ArrayCell, Cell, Date, PgTime, TableRow, Timestamp},
     schema::{ColumnSchema, Type},
     test_utils::test_schema::assert_table_rows_equal_ignoring_size,
 };
@@ -56,10 +56,11 @@ async fn create_namespace() {
     // namespace still exists
     assert!(client.namespace_exists(namespace).await.unwrap());
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
 }
@@ -91,10 +92,11 @@ async fn create_hierarchical_namespace() {
     // child namespace should exist now
     assert!(client.namespace_exists(child_namespace).await.unwrap());
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_namespace(child_namespace).await.unwrap();
     client.drop_namespace(root_namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -191,8 +193,8 @@ async fn create_table_if_missing() {
     let table = client.load_table(namespace.to_owned(), table_name.clone()).await.unwrap();
     let identifier_field_ids: Vec<i32> =
         table.metadata().current_schema().identifier_field_ids().collect();
-    // The "id" column is the primary key and should be the only identifier field
-    // (field_id = 1).
+    // The "id" column is the primary key and should be the only identifier
+    // field (field_id = 1).
     assert_eq!(identifier_field_ids, vec![1]);
 
     // Creating the same table again should be a no-op (no error)
@@ -201,10 +203,11 @@ async fn create_table_if_missing() {
     // table should still exist
     assert!(client.table_exists(namespace, table_name.clone()).await.unwrap());
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -336,19 +339,19 @@ async fn insert_nullable_scalars() {
             Cell::F64(std::f64::consts::E),  // float8_col
             Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                               * String in Iceberg) */
-            Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-            Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-            Cell::Timestamp(NaiveDateTime::new(
+            Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap())), // date_col
+            Cell::Time(PgTime::Value(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap())),
+            Cell::Timestamp(Timestamp::Value(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                 NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-            )),
-            Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+            ))),
+            Cell::TimestampTz(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                     NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
                 ),
                 Utc,
-            )),
+            ))),
             Cell::Uuid(Uuid::new_v4()),
             Cell::String(r#"{"key": "value"}"#.to_owned()), /* json_col (maps to String in
                                                              * Iceberg) */
@@ -396,10 +399,11 @@ async fn insert_nullable_scalars() {
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -480,19 +484,19 @@ async fn insert_non_nullable_scalars() {
         Cell::F64(std::f64::consts::E),  // float8_col
         Cell::String("123.456".to_owned()), /* numeric_col (maps to
                                           * String in Iceberg) */
-        Cell::Date(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap()), // date_col
-        Cell::Time(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap()),
-        Cell::Timestamp(NaiveDateTime::new(
+        Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 25).unwrap())), // date_col
+        Cell::Time(PgTime::Value(NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap())),
+        Cell::Timestamp(Timestamp::Value(NaiveDateTime::new(
             NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
             NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
-        )),
-        Cell::TimestampTz(DateTime::<Utc>::from_naive_utc_and_offset(
+        ))),
+        Cell::TimestampTz(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
             NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 12, 25).unwrap(),
                 NaiveTime::from_hms_micro_opt(1, 2, 3, 4).unwrap(),
             ),
             Utc,
-        )),
+        ))),
         Cell::Uuid(Uuid::new_v4()),
         Cell::String(r#"{"key": "value"}"#.to_owned()), // json_col (maps to String in Iceberg)
         Cell::String(r#"{"key": "value"}"#.to_owned()), // jsonb_col (maps to String in Iceberg)
@@ -515,10 +519,11 @@ async fn insert_non_nullable_scalars() {
     // Compare the actual values in the read_rows with inserted table_rows
     assert_eq!(read_rows, table_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -607,38 +612,38 @@ async fn insert_nullable_array() {
                 Some("678.90".parse().unwrap()),
             ])), /* numeric_array_col */
             Cell::Array(ArrayCell::Date(vec![
-                Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
-                Some(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()),
+                Some(Date::Value(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap())),
+                Some(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap())),
             ])), /* date_array_col */
             Cell::Array(ArrayCell::Time(vec![
-                Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
-                Some(NaiveTime::from_hms_opt(17, 30, 0).unwrap()),
+                Some(PgTime::Value(NaiveTime::from_hms_opt(9, 0, 0).unwrap())),
+                Some(PgTime::Value(NaiveTime::from_hms_opt(17, 30, 0).unwrap())),
             ])), /* time_array_col */
             Cell::Array(ArrayCell::Timestamp(vec![
-                Some(NaiveDateTime::new(
+                Some(Timestamp::Value(NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                     NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-                )),
-                Some(NaiveDateTime::new(
+                ))),
+                Some(Timestamp::Value(NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                     NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-                )),
+                ))),
             ])), /* timestamp_array_col */
             Cell::Array(ArrayCell::TimestampTz(vec![
-                Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                     NaiveDateTime::new(
                         NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                         NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                     ),
                     Utc,
-                )),
-                Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                ))),
+                Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                     NaiveDateTime::new(
                         NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                         NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
                     ),
                     Utc,
-                )),
+                ))),
             ])), /* timestamptz_array_col */
             Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
             Cell::Array(ArrayCell::Json(vec![
@@ -691,7 +696,7 @@ async fn insert_nullable_array() {
 
     // int2_array_col (index 7): Convert I16 to I32
     if let Cell::Array(ArrayCell::I16(vec)) = &values[7] {
-        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(|v| v as i32)).collect();
+        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(i32::from)).collect();
         values[7] = Cell::Array(ArrayCell::I32(converted));
     }
 
@@ -702,8 +707,8 @@ async fn insert_nullable_array() {
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
-    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
-    // String in Iceberg
+    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map
+    // to String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
@@ -717,7 +722,7 @@ async fn insert_nullable_array() {
 
     // oid_array_col (index 20): Convert U32 to I64
     if let Cell::Array(ArrayCell::U32(vec)) = &values[20] {
-        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(|v| v as i64)).collect();
+        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(i64::from)).collect();
         values[20] = Cell::Array(ArrayCell::I64(converted));
     }
 
@@ -726,10 +731,11 @@ async fn insert_nullable_array() {
     // Compare the actual values in the read_rows with expected table_rows
     assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
@@ -753,8 +759,8 @@ async fn insert_non_nullable_array() {
     let namespace = "test_namespace";
     client.create_namespace_if_missing(namespace).await.unwrap();
 
-    // Create a sample table schema with non-nullable array types for all supported
-    // types
+    // Create a sample table schema with non-nullable array types for all
+    // supported types
     let table_name = "test_non_nullable_array_table".to_owned();
     let column_schemas = vec![
         // Primary key
@@ -812,38 +818,38 @@ async fn insert_non_nullable_array() {
             Some("678.90".parse().unwrap()),
         ])), // numeric_array_col
         Cell::Array(ArrayCell::Date(vec![
-            Some(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap()),
-            Some(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap()),
+            Some(Date::Value(NaiveDate::from_ymd_opt(2023, 1, 1).unwrap())),
+            Some(Date::Value(NaiveDate::from_ymd_opt(2023, 12, 31).unwrap())),
         ])), // date_array_col
         Cell::Array(ArrayCell::Time(vec![
-            Some(NaiveTime::from_hms_opt(9, 0, 0).unwrap()),
-            Some(NaiveTime::from_hms_opt(17, 30, 0).unwrap()),
+            Some(PgTime::Value(NaiveTime::from_hms_opt(9, 0, 0).unwrap())),
+            Some(PgTime::Value(NaiveTime::from_hms_opt(17, 30, 0).unwrap())),
         ])), // time_array_col
         Cell::Array(ArrayCell::Timestamp(vec![
-            Some(NaiveDateTime::new(
+            Some(Timestamp::Value(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                 NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
-            )),
-            Some(NaiveDateTime::new(
+            ))),
+            Some(Timestamp::Value(NaiveDateTime::new(
                 NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                 NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-            )),
+            ))),
         ])), // timestamp_array_col
         Cell::Array(ArrayCell::TimestampTz(vec![
-            Some(DateTime::<Utc>::from_naive_utc_and_offset(
+            Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 15).unwrap(),
                     NaiveTime::from_hms_opt(12, 0, 0).unwrap(),
                 ),
                 Utc,
-            )),
-            Some(DateTime::<Utc>::from_naive_utc_and_offset(
+            ))),
+            Some(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(
                 NaiveDateTime::new(
                     NaiveDate::from_ymd_opt(2023, 6, 16).unwrap(),
                     NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
                 ),
                 Utc,
-            )),
+            ))),
         ])), // timestamptz_array_col
         Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::new_v4()), Some(Uuid::new_v4())])), /* uuid_array_col */
         Cell::Array(ArrayCell::Json(vec![
@@ -871,7 +877,7 @@ async fn insert_non_nullable_array() {
 
     // int2_array_col (index 7): Convert I16 to I32
     if let Cell::Array(ArrayCell::I16(vec)) = &values[7] {
-        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(|v| v as i32)).collect();
+        let converted: Vec<Option<i32>> = vec.iter().map(|&opt| opt.map(i32::from)).collect();
         values[7] = Cell::Array(ArrayCell::I32(converted));
     }
 
@@ -882,8 +888,8 @@ async fn insert_non_nullable_array() {
         values[12] = Cell::Array(ArrayCell::String(converted));
     }
 
-    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map to
-    // String in Iceberg
+    // json_array_col (index 18) and jsonb_array_col (index 19): JSON arrays map
+    // to String in Iceberg
     if let Cell::Array(ArrayCell::Json(vec)) = &values[18] {
         let converted: Vec<Option<String>> =
             vec.iter().map(|opt| opt.as_ref().map(ToString::to_string)).collect();
@@ -897,7 +903,7 @@ async fn insert_non_nullable_array() {
 
     // oid_array_col (index 20): Convert U32 to I64
     if let Cell::Array(ArrayCell::U32(vec)) = &values[20] {
-        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(|v| v as i64)).collect();
+        let converted: Vec<Option<i64>> = vec.iter().map(|&opt| opt.map(i64::from)).collect();
         values[20] = Cell::Array(ArrayCell::I64(converted));
     }
 
@@ -908,10 +914,11 @@ async fn insert_non_nullable_array() {
     // Compare the actual values in the read_rows with expected table_rows
     assert_table_rows_equal_ignoring_size(&read_rows, &expected_rows);
 
-    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at the
-    // warehouse level This feature is planned for future releases. We'll start
-    // to use it when it becomes available. The cleanup is not in a Drop impl
-    // because each test has different number of object specitic to that test.
+    // Manual cleanup for now because lakekeeper doesn't allow cascade delete at
+    // the warehouse level This feature is planned for future releases. We'll
+    // start to use it when it becomes available. The cleanup is not in a Drop
+    // impl because each test has different number of object specitic to that
+    // test.
     client.drop_table_if_exists(namespace, table_name).await.unwrap();
     client.drop_namespace(namespace).await.unwrap();
     lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();

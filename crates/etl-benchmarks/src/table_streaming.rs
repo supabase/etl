@@ -402,6 +402,7 @@ async fn wait_for_table_sync(notifications: Vec<TableSyncNotifications>) -> Resu
             let table_id = notification.table_id;
             tokio::select! {
                 () = notification.sync_complete.inner().notified() => Ok(()),
+
                 () = notification.errored.inner().notified() => {
                     bail!("table {table_id} entered errored state before streaming benchmark could start")
                 }
@@ -410,7 +411,11 @@ async fn wait_for_table_sync(notifications: Vec<TableSyncNotifications>) -> Resu
     }
 
     while let Some(result) = tasks.join_next().await {
-        result.context("table sync wait task panicked")??;
+        if let Err(error) = result.context("table sync wait task panicked").flatten() {
+            tasks.shutdown().await;
+
+            return Err(error);
+        }
     }
 
     Ok(())

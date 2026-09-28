@@ -32,6 +32,39 @@ Destinations: `bigquery`, `clickhouse`, `ducklake`, `iceberg`, `snowflake`.
 See [DEVELOPMENT.md](../../DEVELOPMENT.md). Do not commit
 `crates/etl-replicator/configuration/`.
 
+## Shutdown
+
+SIGINT (Ctrl-C) and SIGTERM cancel pending asynchronous initialization. If a
+signal interrupts startup of a constructed pipeline, its destination is shut
+down. Initialization errors return immediately.
+
+After startup, signals request shutdown and await the existing pipeline
+completion future. WAL apply drains pending writes under its existing retry
+and durability rules; interrupted initial copies restart from a fresh snapshot.
+Workers finish before destination cleanup, then background samplers and the
+health server are stopped and joined. Memory sampling remains active during
+draining; enabled probes report unready while liveness stays healthy.
+
+Requested task cancellations are silently accepted. The first worker or
+teardown failure returns immediately and drops remaining owned handles to
+request abort without awaiting further cleanup. Panics and unexpected
+cancellations remain failures. Existing table-error and retry policies still
+apply; uncheckpointed work is replayed after restart. A process restart does not
+clear persisted table errors, including a timed retry interrupted by shutdown.
+
+There is no internal shutdown grace timer or second-signal force-exit policy.
+Destination or store operations can delay exit; Kubernetes supplies the external
+SIGKILL limit. Aborting tasks cannot undo remote writes or stop native work.
+DuckLake interruption belongs to destination teardown and query deadlines,
+not an independent signal handler. Its watchdogs survive caller cancellation
+but require a running async runtime; runtime teardown still waits for native
+work to return.
+
+Postgres drivers stop through client/observer channel closure without explicit
+joins. Process-wide exporters and SDK workers retain their library lifecycles.
+Failed pipelines skip destination teardown; embedded owners must explicitly
+clean up destinations with ownership cycles.
+
 ## Configuration
 
 ### Configuration Directory

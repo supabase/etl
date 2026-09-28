@@ -112,13 +112,11 @@ pub fn local_pg_read_replica_connection_config(
     replica_config
 }
 
-/// Creates a new test database instance with a unique name and runs
-/// migrations.
+/// Creates a new test database instance with a unique name and runs migrations.
 ///
 /// This function spawns a new Postgres database with a random UUID as its name,
 /// using default credentials and disabled SSL. It automatically creates the
-/// test schema for organizing test tables and runs all ETL
-/// migrations.
+/// test schema for organizing test tables and runs all ETL migrations.
 ///
 /// # Panics
 ///

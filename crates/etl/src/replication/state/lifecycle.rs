@@ -184,8 +184,8 @@ pub enum TableState {
     },
     /// Set by apply worker when it has caught up with the table-sync worker's
     /// catch-up LSN position. Tables with this state have successfully run
-    /// their initial table copy and catch-up work and any changes to them
-    /// will now be applied by the apply worker only.
+    /// their initial table copy and catch-up work and any changes to them will
+    /// now be applied by the apply worker only.
     ///
     /// `Ready` no longer retains the [`StoredTableDecodingState`] from
     /// `SyncDone`. Before persisting `Ready`, the apply worker therefore
@@ -199,8 +199,8 @@ pub enum TableState {
     /// only the current connection, which may not receive another relation
     /// message after handover. Restart safety comes from the durable
     /// checkpoint: the next apply worker starts at the later of its
-    /// replication-slot position and that checkpoint, so its bootstrap is at
-    /// or beyond `SyncDone.lsn`. A fresh pgoutput connection emits relation
+    /// replication-slot position and that checkpoint, so its bootstrap is at or
+    /// beyond `SyncDone.lsn`. A fresh pgoutput connection emits relation
     /// metadata before its first row change, allowing it to resolve the newest
     /// stored schema at or before the restart position.
     Ready,
@@ -216,11 +216,11 @@ pub enum TableState {
         retry_policy: TableRetryPolicy,
         /// Original error that triggered the table error state.
         ///
-        /// This field is **not persisted** — it is skipped during
-        /// serialization and replaced with a generic placeholder on
-        /// deserialization. Code that reads states from the state store should
-        /// not rely on `source_err` containing the original error; it is only
-        /// meaningful for the in-memory lifetime of the state that produced it.
+        /// This field is **not persisted** — it is skipped during serialization
+        /// and replaced with a generic placeholder on deserialization. Code
+        /// that reads states from the state store should not rely on
+        /// `source_err` containing the original error; it is only meaningful
+        /// for the in-memory lifetime of the state that produced it.
         #[serde(skip, default = "default_source_err")]
         source_err: EtlError,
     },
@@ -282,8 +282,7 @@ impl TableState {
         Ok((state_type, metadata))
     }
 
-    /// Deserializes a [`TableState`] from a state store row's
-    /// metadata.
+    /// Deserializes a [`TableState`] from a state store row's metadata.
     pub(crate) fn from_state_row(row: StoredTableStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
@@ -331,8 +330,8 @@ impl From<TableError> for TableState {
     }
 }
 
-/// A variant of [`TableState`] that can be used to determine the
-/// current state of a table without having to pattern match on the data fields.
+/// A variant of [`TableState`] that can be used to determine the current state
+/// of a table without having to pattern match on the data fields.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum TableStateType {
     /// Table has been discovered but no copy work has started.
@@ -762,8 +761,8 @@ mod tests {
             TableState::Init,
             TableState::DataSync,
             TableState::FinishedCopy,
-            // Keep the missing payload covered for rows written before durable
-            // table decoding state was added to SyncDone.
+            // Keep the missing payload covered for rows written before durable table decoding
+            // state was added to SyncDone.
             TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None },
             // New SyncDone rows must preserve the complete compact decoder.
             TableState::SyncDone {

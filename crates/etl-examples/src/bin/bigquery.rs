@@ -90,8 +90,8 @@ struct DbArgs {
     /// Postgres database user name (must have REPLICATION privileges)
     #[arg(long)]
     db_username: String,
-    /// Postgres database user password (optional if using trust authentication)
-    #[arg(long)]
+    /// Postgres database user password (optional with trust authentication).
+    #[arg(long, env = "TESTS_DATABASE_PASSWORD", hide_env_values = true)]
     db_password: Option<String>,
 }
 
@@ -163,8 +163,8 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Parse command line arguments
     let args = AppArgs::parse();
 
-    // Configure Postgres connection settings
-    // Note: TLS is disabled in this example - enable for production use
+    // Configure Postgres connection settings Note: TLS is disabled in this
+    // example - enable for production use
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
         hostaddr: None,
@@ -179,9 +179,9 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    // Create a persistent store for tracking table states and
-    // schemas. This runs the Postgres store migrations; Pipeline::start()
-    // runs the source migrations required by replication.
+    // Create a persistent store for tracking table states and schemas. This
+    // runs the Postgres store migrations; Pipeline::start() runs the source
+    // migrations required by replication.
     let pipeline_id = 1;
     let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
 
@@ -244,16 +244,23 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
-    // Wait for either the pipeline to complete naturally or receive a shutdown
-    // signal The pipeline will run indefinitely unless an error occurs or it's
-    // manually stopped
+    // Keep the same completion future alive through shutdown. Dropping it
+    // would abort apply work and skip asynchronous destination cleanup.
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+
     tokio::select! {
-        result = pipeline.wait() => {
-            info!("pipeline completed normally (this usually indicates an error condition)");
+        result = &mut pipeline_wait => {
             result?;
+
+            info!("pipeline completed");
         }
+
         _ = shutdown_signal => {
             info!("gracefully shutting down pipeline and cleaning up resources");
+
+            pipeline.shutdown();
+            pipeline_wait.await?;
         }
     }
 

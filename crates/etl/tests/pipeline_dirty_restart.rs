@@ -417,9 +417,8 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     // Dropping the pipeline simulates a crash instead of a graceful shutdown:
     // dropping `ApplyWorkerHandle` aborts the apply worker task at an arbitrary
     // await point, without shutdown handling, stream draining, or a final
-    // status update. Auxiliary tasks stop on the closed shutdown channel. The
-    // walsender poll below is the restart barrier: it proves the aborted
-    // worker's replication connection is gone.
+    // status update. The walsender poll below is the restart barrier: it proves
+    // the aborted worker's replication connection is gone.
     drop(first_pipeline);
     wait_for_apply_disconnect(database.client.as_ref().unwrap(), &apply_slot_name).await?;
     drop(first_destination);

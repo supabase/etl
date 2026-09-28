@@ -78,8 +78,8 @@ pub enum LogFlusher {
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
-            // Needed because if no env is set, it defaults to prod, which logs to files
-            // instead of terminal, and we need to log to terminal when
+            // Needed because if no env is set, it defaults to prod, which logs
+            // to files instead of terminal, and we need to log to terminal when
             // `ENABLE_TRACING` env var is set.
             Environment::Dev.set();
             let _log_flusher =
@@ -90,8 +90,8 @@ pub fn init_test_tracing() {
 
 /// Sets the global project reference for all tracing events.
 ///
-/// The project reference will be injected into all structured log entries
-/// for identification and filtering purposes.
+/// The project reference will be injected into all structured log entries for
+/// identification and filtering purposes.
 pub fn set_global_project_ref(project_ref: &str) {
     let _ = PROJECT_REF.set(project_ref.into());
 }
@@ -105,8 +105,8 @@ pub fn get_global_project_ref() -> Option<&'static str> {
 
 /// Sets the global pipeline id for all tracing events.
 ///
-/// The pipeline id will be injected into all structured log entries
-/// as a top-level field named "pipeline_id" for identification and filtering.
+/// The pipeline id will be injected into all structured log entries as a
+/// top-level field named "pipeline_id" for identification and filtering.
 pub fn set_global_pipeline_id(pipeline_id: u64) {
     let _ = PIPELINE_ID.set(pipeline_id);
 }
@@ -247,8 +247,8 @@ impl tracing::field::Visit for JsonFieldVisitor {
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn stdfmt::Debug) {
-        // `tracing-log` forwards log crate metadata as synthetic `log.*` fields.
-        // These are not user event payload, so we skip them here.
+        // `tracing-log` forwards log crate metadata as synthetic `log.*`
+        // fields. These are not user event payload, so we skip them here.
         if field.name().starts_with("log.") {
             return;
         }
@@ -292,9 +292,9 @@ pub fn init_tracing_with_top_level_fields(
         set_global_pipeline_id(pipeline_id);
     }
 
-    // Initialize the log tracer to capture logs from the `log` crate
-    // and send them to the `tracing` subscriber. This captures logs
-    // from libraries that use the `log` crate.
+    // Initialize the log tracer to capture logs from the `log` crate and send
+    // them to the `tracing` subscriber. This captures logs from libraries that
+    // use the `log` crate.
     LogTracer::init()?;
 
     let is_prod = Environment::load()?.is_prod();
@@ -331,8 +331,8 @@ fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlushe
         .max_log_files(5)
         .build(log_dir)?;
 
-    // Create a non-blocking appender to avoid blocking the logging thread
-    // when writing to the file. This is important for performance.
+    // Create a non-blocking appender to avoid blocking the logging thread when
+    // writing to the file. This is important for performance.
     let (file_appender, guard) = tracing_appender::non_blocking(file_appender);
 
     let subscriber = fmt()
@@ -369,8 +369,8 @@ fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> 
 
 /// Sets up custom panic hook for structured panic logging.
 ///
-/// Replaces the default panic hook to ensure panic information is captured
-/// by the tracing system instead of only going to stderr.
+/// Replaces the default panic hook to ensure panic information is captured by
+/// the tracing system instead of only going to stderr.
 fn set_tracing_panic_hook() {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

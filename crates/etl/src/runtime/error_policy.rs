@@ -8,7 +8,7 @@ pub(crate) enum RetryDirective {
     /// The operation should only be retried after manual intervention.
     Manual,
     /// The operation should not be retried.
-    #[cfg_attr(not(feature = "failpoints"), allow(dead_code))]
+    #[cfg_attr(not(feature = "failpoints"), expect(dead_code))]
     NoRetry,
 }
 
@@ -46,9 +46,12 @@ impl ErrorHandlingPolicy {
 pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     match error.kind() {
         // Automatically retriable errors. Keep this list narrow and limited to transient source or
-        // destination connectivity/capacity failures that are expected to recover without
-        // operator intervention.
+        // destination connectivity/capacity failures, source lock contention, and loss of
+        // replication feedback. Retry attempts are bounded; persistent failures still require
+        // intervention.
         ErrorKind::SourceConnectionFailed
+        | ErrorKind::SourceLockTimeout
+        | ErrorKind::ReplicationFeedbackUnavailable
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
         | ErrorKind::DestinationTimeout
@@ -115,9 +118,9 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
             RetryDirective::Manual,
             Some("Inspect the table sync worker panic logs and manually retry the table."),
         ),
-        ErrorKind::TableCopyWorkerPanic => ErrorHandlingPolicy::new(
+        ErrorKind::TaskPanic | ErrorKind::TaskCancelled => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
-            Some("Inspect the table copy worker panic logs and manually retry the table."),
+            Some("Inspect the task failure and resolve its cause before manually retrying."),
         ),
 
         // Special handling for fault injection tests.
@@ -154,6 +157,25 @@ mod tests {
         error::{ErrorKind, EtlError},
         runtime::error_policy::{RetryDirective, build_error_handling_policy},
     };
+
+    /// Protocol and internal failures require intervention; connectivity and
+    /// unavailable feedback use bounded retries.
+    #[test]
+    fn replication_feedback_errors_keep_distinct_retry_policies() {
+        for (kind, retry) in [
+            (ErrorKind::DeserializationError, RetryDirective::Manual),
+            (ErrorKind::InvalidState, RetryDirective::Manual),
+            (ErrorKind::TaskPanic, RetryDirective::Manual),
+            (ErrorKind::TaskCancelled, RetryDirective::Manual),
+            (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
+            (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
+            (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
+            (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
+        ] {
+            let error = EtlError::from((kind, "Test replication failure"));
+            assert_eq!(build_error_handling_policy(&error).retry_directive(), retry);
+        }
+    }
 
     #[test]
     fn source_replica_identity_errors_have_specific_manual_remediation() {

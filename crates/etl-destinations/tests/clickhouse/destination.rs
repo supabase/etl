@@ -4,42 +4,53 @@
 //! production destination path (schema DDL, `cell_to_clickhouse_value`,
 //! RowBinary encoding, HTTP insert), reads them back from ClickHouse, and
 //! asserts the stored value equals the written one. ClickHouse itself is the
-//! storage oracle. Expected values are computed independently of the
-//! production encoder where practical (hex for `bytea`, clock components for
-//! `time`, `Date32` day offsets and raw microsecond ticks for temporals).
-//! For `numeric` and `jsonb` the format pin shares the production
-//! `to_string` path, so those properties additionally parse the stored text
-//! back and compare values, failing on any rendering that changes
-//! information.
+//! storage oracle. Expected values are computed independently of the production
+//! encoder where practical (hex for `bytea`, clock components for `time`,
+//! `Date32` day offsets and raw microsecond ticks for temporals). For `numeric`
+//! and `jsonb` the format pin shares the production `to_string` path, so those
+//! properties additionally parse the stored text back and compare values,
+//! failing on any rendering that changes information.
 //!
 //! Every property runs new random cases until a wall-clock budget elapses,
-//! using the shared runner in `etl::test_utils::property`. See that module
-//! for the `PROPERTY_TEST_BUDGET_SECS` budget knob and the
-//! `PROPERTY_TEST_SEED` failure replay knob.
+//! using the shared runner in `etl::test_utils::property`. See that module for
+//! the `PROPERTY_TEST_BUDGET_SECS` budget knob and the `PROPERTY_TEST_SEED`
+//! failure replay knob.
 //!
 //! The generated envelope mirrors what the Postgres codec can produce (no NUL
 //! bytes in text, microsecond temporal precision) and stays inside the ranges
 //! the destination accepts, e.g. ClickHouse `Date32`'s
-//! `1900-01-01..=2299-12-31`. Out-of-range values are covered separately by
-//! the loud-rejection property.
+//! `1900-01-01..=2299-12-31`. Out-of-range values are covered separately by the
+//! loud-rejection property.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicI64, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
-    data::{ArrayCell, Cell, PgNumeric, TableRow},
-    destination::DestinationTableMetadata,
+    data::{
+        ArrayCell, Cell, Date, OldTableRow, PgNumeric, PgTime, TableRow, Timestamp, UpdatedTableRow,
+    },
+    destination::{
+        Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+    },
     error::{ErrorKind, EtlError, EtlResult},
-    event::{Event, RelationEvent},
+    event::{Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
     },
     store::{MemoryStore, SchemaStore, StateStore},
     test_utils::{
+        destination::{
+            drop_table_for_copy as drop_table_for_copy_via_trait,
+            write_events as write_events_via_trait,
+        },
         notifying_store::NotifyingStore,
         property::{
             any_f32, any_f64, block_on, f32_matches, f64_matches, opt_f32_matches, opt_f64_matches,
@@ -49,19 +60,22 @@ use etl::{
 };
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
-    ClickHouseClientConfig, ClickHouseDestination,
-    client::ClickHouseClient,
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
+    arm_fail_drop_table_for_copy_once_for_tests,
+    client::{ClickHouseClient, arm_pause_before_insert_statement_for_tests},
     test_utils::{
         ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
         setup_clickhouse_database,
     },
 };
 use etl_telemetry::tracing::init_test_tracing;
+use parking_lot::Mutex;
 use proptest::{option, prelude::*};
+use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
 
-use crate::support::crypto::install_crypto_provider;
+use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
 
 /// One ClickHouse table receiving generated rows through the production
 /// destination write path.
@@ -188,12 +202,11 @@ fn expected_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Renders the text expected for a `time` value, computed from clock
-/// components independently of the chrono `Display` path the production
-/// encoder uses.
+/// Renders the text expected for a `time` value, computed from clock components
+/// independently of the chrono `Display` path the production encoder uses.
 ///
-/// Mirrors the stored format's fraction rules: no fractional digits for
-/// whole seconds, three digits for whole milliseconds, six otherwise.
+/// Mirrors the stored format's fraction rules: no fractional digits for whole
+/// seconds, three digits for whole milliseconds, six otherwise.
 fn expected_time_string(time: &NaiveTime) -> String {
     let micros = time.nanosecond() / 1_000;
     let base = format!("{:02}:{:02}:{:02}", time.hour(), time.minute(), time.second());
@@ -222,9 +235,9 @@ fn assert_numeric_reparses(stored: &str, written: &PgNumeric) -> Result<(), Test
 
 /// Asserts stored json text parses back to the document that was written.
 ///
-/// `serde_json`'s parser is an independent inverse of the production
-/// rendering, so a `to_string` that changes a value fails here even though
-/// the format pin cannot see it.
+/// `serde_json`'s parser is an independent inverse of the production rendering,
+/// so a `to_string` that changes a value fails here even though the format pin
+/// cannot see it.
 fn assert_json_parses_back(stored: &str, written: &serde_json::Value) -> Result<(), TestCaseError> {
     let parsed: serde_json::Value = serde_json::from_str(stored)
         .map_err(|err| TestCaseError::fail(format!("stored json does not parse: {err}")))?;
@@ -471,8 +484,8 @@ async fn string_mapped_values_roundtrip_through_destination() {
                         Cell::Numeric(wn.clone()),
                         opt_cell(vj.clone(), Cell::Json),
                         Cell::Json(wj.clone()),
-                        opt_cell(*vtime, Cell::Time),
-                        Cell::Time(*wtime),
+                        opt_cell(*vtime, |value| Cell::Time(PgTime::Value(value))),
+                        Cell::Time(PgTime::Value(*wtime)),
                         opt_cell(vbytes.clone(), Cell::Bytes),
                         Cell::Bytes(wbytes.clone()),
                     ])
@@ -490,9 +503,9 @@ async fn string_mapped_values_roundtrip_through_destination() {
             prop_assert_eq!(&row.vbytes, &vbytes.as_deref().map(expected_hex));
             prop_assert_eq!(&row.wbytes, &expected_hex(wbytes));
 
-            // Value oracles for the columns whose format pins share
-            // production code: the stored text must parse back to the value
-            // that was written.
+            // Value oracles for the columns whose format pins share production
+            // code: the stored text must parse back to the value that was
+            // written.
             if let (Some(stored), Some(written)) = (&row.vn, vn) {
                 assert_numeric_reparses(stored, written)?;
             }
@@ -543,12 +556,12 @@ async fn temporal_values_roundtrip_through_destination() {
             let row: TemporalsRow = block_on(async {
                 let id = table
                     .write(vec![
-                        opt_cell(*vd, Cell::Date),
-                        Cell::Date(*wd),
-                        opt_cell(*vts, Cell::Timestamp),
-                        Cell::Timestamp(*wts),
-                        opt_cell(*vtstz, Cell::TimestampTz),
-                        Cell::TimestampTz(*wtstz),
+                        opt_cell(*vd, |value| Cell::Date(Date::Value(value))),
+                        Cell::Date(Date::Value(*wd)),
+                        opt_cell(*vts, |value| Cell::Timestamp(Timestamp::Value(value))),
+                        Cell::Timestamp(Timestamp::Value(*wts)),
+                        opt_cell(*vtstz, |value| Cell::TimestampTz(Timestamp::Value(value))),
+                        Cell::TimestampTz(Timestamp::Value(*wtstz)),
                     ])
                     .await?;
                 Ok(table.read("vd, wd, vts, wts, vtstz, wtstz", id).await)
@@ -647,7 +660,9 @@ async fn array_values_roundtrip_through_destination() {
                     Cell::Array(ArrayCell::String(at.clone())),
                     Cell::Array(ArrayCell::F64(af.clone())),
                     Cell::Array(ArrayCell::Bytes(ab.clone())),
-                    Cell::Array(ArrayCell::Date(ad.clone())),
+                    Cell::Array(ArrayCell::Date(
+                        ad.iter().map(|value| value.map(Date::Value)).collect(),
+                    )),
                 ])
                 .await?;
             Ok(table.read("ai, at, af, ab, ad", id).await)
@@ -710,11 +725,11 @@ struct TimestampRejectRow {
 /// Out-of-range writes must never silently change values: either the write
 /// fails loudly or the stored value reads back equal to what was written.
 ///
-/// Unlike dates, timestamps outside `DateTime64(6)`'s documented
-/// `1900..=2299` range have no local range check. Empirically ClickHouse
-/// accepts the raw microsecond ticks and reads them back bit-exact, so the
-/// values survive storage unchanged; this property pins that behavior and
-/// fails if either side ever starts mutating such values silently.
+/// Unlike dates, timestamps outside `DateTime64(6)`'s documented `1900..=2299`
+/// range have no local range check. Empirically ClickHouse accepts the raw
+/// microsecond ticks and reads them back bit-exact, so the values survive
+/// storage unchanged; this property pins that behavior and fails if either side
+/// ever starts mutating such values silently.
 #[tokio::test(flavor = "multi_thread")]
 async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     let table = PropertyTable::create(
@@ -731,8 +746,10 @@ async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     );
     run_property("clickhouse timestamp rejection", &strategy, |(ts, tstz)| {
         // Loud rejection is a valid outcome.
-        let Ok(id) = block_on(table.write(vec![Cell::Timestamp(*ts), Cell::TimestampTz(*tstz)]))
-        else {
+        let Ok(id) = block_on(table.write(vec![
+            Cell::Timestamp(Timestamp::Value(*ts)),
+            Cell::TimestampTz(Timestamp::Value(*tstz)),
+        ])) else {
             return Ok(());
         };
 
@@ -828,105 +845,711 @@ async fn store_status_default_schema(
     ReplicatedTableSchema::all(schema)
 }
 
-/// Returns ClickHouse's stored `DEFAULT` expression for `column_name`.
-async fn clickhouse_column_default_expression(
-    database: &ClickHouseTestDatabase,
-    table_name: &str,
-    column_name: &str,
-) -> Option<String> {
+/// Stores the source schema shared by upgrade and replay scenarios.
+async fn store_id_value_schema(store: &MemoryStore, table: &str) -> ReplicatedTableSchema {
+    let schema = store
+        .store_table_schema(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), table.to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        ))
+        .await
+        .unwrap();
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Legacy MergeTree writes fail without repair or data loss, then resume after
+/// the documented manual upgrade while preserving existing metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
+    // GIVEN: a legacy MergeTree table with retained rows and metadata.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+
+    // Use the previous release's DDL, not the current schema generator.
     database
         .db_client()
         .query(
-            "select default_expression from system.columns where database = currentDatabase() and \
-             table = ? and name = ? and default_kind = 'DEFAULT'",
+            "create table retained_rows (id Int64, value String, cdc_operation String, cdc_lsn \
+             UInt64) engine = MergeTree() order by tuple()",
         )
-        .bind(table_name)
-        .bind(column_name)
-        .fetch_optional::<String>()
+        .execute()
         .await
-        .unwrap()
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a new destination attempts to write without upgrading the table.
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let error = destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(2), Cell::String("rejected".to_owned())])],
+        )
+        .await
+        .unwrap_err();
+
+    // THEN: the write fails without changing rows, columns, or metadata.
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+    drop(destination);
+
+    assert_eq!(
+        database.query::<(i64, String)>("select id, value from retained_rows").await,
+        vec![(1, "retained".to_owned())]
+    );
+    assert_eq!(
+        database
+            .query::<String>(
+                "select name from system.columns where database = currentDatabase() and table = \
+                 'retained_rows' order by position",
+            )
+            .await,
+        vec!["id", "value", "cdc_operation", "cdc_lsn"]
+    );
+    assert_eq!(
+        store.get_destination_table_metadata(schema.id()).await.unwrap(),
+        Some(metadata.clone())
+    );
+
+    // WHEN: the ordinal column is added and the destination restarts.
+    database
+        .db_client()
+        .query("alter table retained_rows add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn")
+        .execute()
+        .await
+        .unwrap();
+    let restarted =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    restarted
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 7,
+            replicated_table_schema: schema.clone(),
+            table_row: TableRow::new(vec![Cell::I64(2), Cell::String("resumed".to_owned())]),
+        })])
+        .await
+        .unwrap();
+    drop(restarted);
+
+    // THEN: old rows keep ordinal zero and new rows use their event ordinal.
+    assert_eq!(
+        database
+            .query::<(i64, String, u64, u64)>(
+                "select id, value, cdc_lsn, cdc_tx_ordinal from retained_rows order by id",
+            )
+            .await,
+        vec![(1, "retained".to_owned(), 10, 0), (2, "resumed".to_owned(), 100, 7)]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
 }
 
+/// A live schema change on a legacy MergeTree table is rejected before any
+/// ALTER runs or metadata advances, mirroring the DML and recovery paths.
 #[tokio::test(flavor = "multi_thread")]
-async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
+async fn legacy_merge_tree_rejects_schema_change_before_altering() {
+    // GIVEN: a legacy MergeTree table with retained rows and applied metadata.
     init_test_tracing();
     install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
 
+    // Use the previous release's DDL, not the current schema generator.
+    database
+        .db_client()
+        .query(
+            "create table retained_rows (id Int64, value String, cdc_operation String, cdc_lsn \
+             UInt64) engine = MergeTree() order by tuple()",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a newer source snapshot adds a column before any row is written.
+    let new_schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            schema.id(),
+            schema.name().clone(),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+                ColumnSchema::new("note".to_owned(), Type::TEXT, -1, 3, true),
+            ],
+            test_snapshot_id(1, 1),
+        ))
+        .await
+        .unwrap();
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let error = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: ReplicatedTableSchema::all(new_schema),
+        })])
+        .await
+        .unwrap_err();
+
+    // THEN: the upgrade error surfaces with rows, columns, and metadata
+    // untouched.
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+    assert_eq!(
+        error.description(),
+        Some("ClickHouse MergeTree table requires a transaction ordinal upgrade")
+    );
+    drop(destination);
+
+    assert_eq!(
+        database.query::<(i64, String)>("select id, value from retained_rows").await,
+        vec![(1, "retained".to_owned())]
+    );
+    assert_eq!(
+        database
+            .query::<String>(
+                "select name from system.columns where database = currentDatabase() and table = \
+                 'retained_rows' order by position",
+            )
+            .await,
+        vec!["id", "value", "cdc_operation", "cdc_lsn"]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
+}
+
+/// The previous ReplacingMergeTree layout and current-state view remain usable
+/// without ALTER or recopy when a new destination loads retained metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
+    // GIVEN: an existing ReplacingMergeTree table, view, and retained metadata.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "upgrade").await;
+    let metadata = DestinationTableMetadata::new_applied(
+        "retained_rows".to_owned(),
+        schema.inner().snapshot_id,
+        schema.replication_mask().clone(),
+    );
+    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+
+    database
+        .db_client()
+        .query(
+            "create table retained_rows (id Int64, value String, _etl_version UInt128, \
+             _etl_deleted UInt8) engine = ReplacingMergeTree(_etl_version, _etl_deleted) order by \
+             id",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query(
+            "create view retained_rows__current as select id, value from retained_rows final \
+             where _etl_deleted = 0",
+        )
+        .execute()
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("insert into retained_rows values (1, 'old', 0, 0), (2, 'retained', 0, 0)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a new destination writes an update without changing the layout.
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_events(vec![Event::Update(UpdateEvent {
+            commit_lsn: PgLsn::from(100),
+            tx_ordinal: 7,
+            replicated_table_schema: schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I64(1),
+                Cell::String("updated".to_owned()),
+            ])),
+            old_table_row: None,
+        })])
+        .await
+        .unwrap();
+    drop(destination);
+
+    // THEN: the view shows the update and retained row, and metadata is
+    // unchanged.
+    assert_eq!(
+        database
+            .query::<(i64, String)>("select id, value from retained_rows__current order by id")
+            .await,
+        vec![(1, "updated".to_owned()), (2, "retained".to_owned())]
+    );
+    assert_eq!(store.get_destination_table_metadata(schema.id()).await.unwrap(), Some(metadata));
+}
+
+/// Builds a replayable key change with an ordinal within the same transaction.
+fn replay_key_change(
+    schema: &ReplicatedTableSchema,
+    old_id: i64,
+    new_id: i64,
+    value: &str,
+    tx_ordinal: u64,
+) -> Event {
+    Event::Update(UpdateEvent {
+        commit_lsn: PgLsn::from(100),
+        tx_ordinal,
+        replicated_table_schema: schema.clone(),
+        updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+            Cell::I64(new_id),
+            Cell::String(value.to_owned()),
+        ])),
+        old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I64(old_id)]))),
+    })
+}
+
+/// A partial INSERT failure can persist the old-key tombstone before rejecting
+/// its replacement. Restart and at-least-once replay must converge, including
+/// when a later event in the same transaction reuses the original key.
+async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
+    // GIVEN: copied rows, single-row inserts, and a rejecting constraint.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "replay").await;
+    let config = ClickHouseInserterConfig { engine, max_bytes_per_insert: 1 };
+    let destination = database.build_destination_with_config(store.clone(), config).await;
+    destination
+        .write_table_rows(
+            &schema,
+            vec![
+                TableRow::new(vec![Cell::I64(1), Cell::String("original".to_owned())]),
+                TableRow::new(vec![Cell::I64(9), Cell::String("unaffected".to_owned())]),
+            ],
+        )
+        .await
+        .unwrap();
+    let current_query = current_state_query(engine, "public_replay", "id, value", &["id"], "id");
+
+    // One row per INSERT makes the server accept the tombstone before the
+    // constraint rejects the replacement, without timing or network races.
+    database
+        .db_client()
+        .query("alter table public_replay add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a key change fails after writing its old-key tombstone.
+    let error = destination
+        .write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)])
+        .await
+        .unwrap_err();
+
+    // THEN: the failure is retryable and only the unaffected row remains.
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    drop(destination);
+
+    assert_eq!(
+        database.query::<(i64, String)>(&current_query).await,
+        vec![(9, "unaffected".to_owned())]
+    );
+    let tombstone_query = match engine {
+        ClickHouseEngine::MergeTree => {
+            "select id from public_replay where cdc_operation = 'DELETE'"
+        }
+        ClickHouseEngine::ReplacingMergeTree => {
+            "select id from public_replay where _etl_deleted = 1"
+        }
+    };
+    assert_eq!(database.query::<i64>(tombstone_query).await, vec![1]);
+
+    // WHEN: the constraint is removed and the key change replays on restart.
+    database
+        .db_client()
+        .query("alter table public_replay drop constraint reject_two")
+        .execute()
+        .await
+        .unwrap();
+    let restarted = database.build_destination_with_config(store, config).await;
+    restarted.write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)]).await.unwrap();
+
+    // THEN: replay restores the moved row and preserves the unaffected row.
+    assert_eq!(
+        database.query::<(i64, String)>(&current_query).await,
+        vec![(2, "moved".to_owned()), (9, "unaffected".to_owned())]
+    );
+
+    // WHEN: a later event reuses the original key before stale replay.
+    restarted.write_events(vec![replay_key_change(&schema, 2, 1, "reused", 8)]).await.unwrap();
+    restarted.write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)]).await.unwrap();
+    drop(restarted);
+
+    // THEN: the reused key survives and the stale replacement stays absent.
+    assert_eq!(
+        database.query::<(i64, String)>(&current_query).await,
+        vec![(1, "reused".to_owned()), (9, "unaffected".to_owned())]
+    );
+}
+
+/// MergeTree current state converges despite duplicate replayed log entries.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_key_change_restart_replay_merge_tree() {
+    partial_key_change_restart_replay_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree versions preserve later key reuse across stale replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_key_change_restart_replay_replacing_merge_tree() {
+    partial_key_change_restart_replay_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// Stores one version of the `public.computed` source schema.
+async fn store_computed_schema(
+    store: &MemoryStore,
+    snapshot_id: SnapshotId,
+    value_nullable: bool,
+    with_note: bool,
+) -> ReplicatedTableSchema {
+    let mut columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, value_nullable),
+    ];
+    if with_note {
+        columns.push(ColumnSchema::new("note".to_owned(), Type::TEXT, -1, 3, true));
+    }
+    let schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            TableId::new(4250),
+            TableName::new("public".to_owned(), "computed".to_owned()),
+            columns,
+            snapshot_id,
+        ))
+        .await
+        .unwrap();
+
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Builds one streaming insert for a `public.computed` schema version.
+fn computed_insert(schema: &ReplicatedTableSchema, commit_lsn: u64, cells: Vec<Cell>) -> Event {
+    Event::Insert(InsertEvent {
+        commit_lsn: PgLsn::from(commit_lsn),
+        tx_ordinal: 0,
+        replicated_table_schema: schema.clone(),
+        table_row: TableRow::new(cells),
+    })
+}
+
+/// Users can add computed columns after ETL's trailing CDC columns. Restart,
+/// inserts, and schema changes that add a column or relax nullability still
+/// succeed, and ClickHouse keeps computing the derived values.
+async fn computed_columns_added_outside_etl_do_not_block_writes_inner(engine: ClickHouseEngine) {
+    // GIVEN: a copied table with MATERIALIZED, ALIAS, and EPHEMERAL columns.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let initial = store_computed_schema(&store, test_snapshot_id(100, 100), false, false).await;
+    let destination = database.build_destination_with_engine(store.clone(), engine).await;
+    destination
+        .write_table_rows(
+            &initial,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("a".into())])],
+        )
+        .await
+        .unwrap();
+    drop(destination);
+    database
+        .db_client()
+        .query(
+            "alter table public_computed add column id_times_ten Int64 materialized id * 10, add \
+             column id_plus_one Int64 alias id + 1, add column scratch Int64 ephemeral",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a restarted destination streams a row, adds a source column, makes
+    // `value` nullable, and streams a row using both changes.
+    let with_note = store_computed_schema(&store, test_snapshot_id(200, 200), false, true).await;
+    let nullable = store_computed_schema(&store, test_snapshot_id(300, 300), true, true).await;
+    let restarted = database.build_destination_with_engine(store, engine).await;
+    restarted
+        .write_events(vec![computed_insert(
+            &initial,
+            150,
+            vec![Cell::I64(2), Cell::String("b".into())],
+        )])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: with_note })])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: nullable.clone(),
+        })])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![computed_insert(
+            &nullable,
+            350,
+            vec![Cell::I64(3), Cell::Null, Cell::String("n".into())],
+        )])
+        .await
+        .unwrap();
+    drop(restarted);
+
+    // THEN: every row is stored and ClickHouse computes the derived columns.
+    assert_eq!(
+        database
+            .query::<(i64, Option<String>, Option<String>, i64, i64)>(
+                "select id, value, note, id_times_ten, id_plus_one from public_computed order by \
+                 id"
+            )
+            .await,
+        vec![
+            (1, Some("a".to_owned()), None, 10, 2),
+            (2, Some("b".to_owned()), None, 20, 3),
+            (3, None, Some("n".to_owned()), 30, 4),
+        ]
+    );
+}
+
+/// MergeTree tables accept computed columns after the CDC log columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn computed_columns_added_outside_etl_do_not_block_writes_merge_tree() {
+    computed_columns_added_outside_etl_do_not_block_writes_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree tables accept computed columns after the version columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn computed_columns_added_outside_etl_do_not_block_writes_replacing_merge_tree() {
+    computed_columns_added_outside_etl_do_not_block_writes_inner(
+        ClickHouseEngine::ReplacingMergeTree,
+    )
+    .await;
+}
+
+/// Changing or dropping a source default keeps the value that rows older than
+/// the column got when it was added, as Postgres does.
+#[tokio::test(flavor = "multi_thread")]
+async fn default_changes_keep_values_of_rows_older_than_the_column() {
+    // GIVEN: rows 1 and 2 were copied, then the source added
+    // `status text default 'pending'`, which Postgres returns for both rows.
+    init_test_tracing();
+    install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let table_id = TableId::new(4245);
-    let table_name = TableName::new("public".to_owned(), "default_changes".to_owned());
-    let initial_schema = store_status_default_schema(
-        &store,
-        table_id,
-        &table_name,
-        test_snapshot_id(100, 100),
-        Some("lower('unsupported')"),
-    )
-    .await;
-    let supported_schema = store_status_default_schema(
+    let table_name = TableName::new("public".to_owned(), "tickets".to_owned());
+    let initial = ReplicatedTableSchema::all(
+        store
+            .store_table_schema(TableSchema::with_snapshot_id(
+                table_id,
+                table_name.clone(),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                        .with_primary_key(1),
+                ],
+                test_snapshot_id(100, 100),
+            ))
+            .await
+            .unwrap(),
+    );
+    let added = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(200, 200),
-        Some("'queued'::text"),
+        Some("'pending'::text"),
     )
     .await;
-    let unsupported_schema = store_status_default_schema(
+    let changed = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(300, 300),
-        Some("lower('unsupported')"),
+        Some("'new'::text"),
     )
     .await;
-    let supported_again_schema = store_status_default_schema(
+    let dropped = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(400, 400),
-        Some("'done'::text"),
-    )
-    .await;
-    let dropped_schema = store_status_default_schema(
-        &store,
-        table_id,
-        &table_name,
-        test_snapshot_id(500, 500),
         None,
     )
     .await;
     let destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
+    destination
+        .write_table_rows(
+            &initial,
+            vec![TableRow::new(vec![Cell::I64(1)]), TableRow::new(vec![Cell::I64(2)])],
+        )
+        .await
+        .unwrap();
+    destination
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: added })])
+        .await
+        .unwrap();
 
-    destination.write_table_rows(&initial_schema, vec![]).await.unwrap();
-    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(metadata.is_applied());
-    let destination_table_name = metadata.table_id().to_owned();
+    // WHEN: the source changes the default to 'new', then drops it.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: changed }),
+            Event::Relation(RelationEvent { replicated_table_schema: dropped }),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: rows 1 and 2 still read the value they got when the column was
+    // added.
     assert_eq!(
-        clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
+        clickhouse_db
+            .query::<(i64, Option<String>)>("select id, status from public_tickets order by id")
             .await,
-        None
+        vec![(1, Some("pending".to_owned())), (2, Some("pending".to_owned()))]
     );
+}
 
-    for (schema, expected_default) in [
-        (supported_schema, Some("'queued'")),
-        (unsupported_schema, None),
-        (supported_again_schema, Some("'done'")),
-        (dropped_schema, None),
-    ] {
-        destination
-            .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: schema })])
-            .await
-            .unwrap();
-        assert_eq!(
-            clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
-                .await
-                .as_deref(),
-            expected_default,
-        );
-    }
+/// A source default containing backslashes reaches ClickHouse with the same
+/// characters PostgreSQL stores.
+///
+/// PostgreSQL renders `default 'C:\temp'` as the literal `'C:\temp'::text`,
+/// where the backslash is an ordinary character. ClickHouse reads `\t` inside a
+/// string literal as a tab, so forwarding the PostgreSQL literal verbatim
+/// silently changes the default. The test makes ClickHouse materialise the
+/// stored default by inserting a row without the column, then compares the
+/// value with what PostgreSQL holds.
+#[tokio::test(flavor = "multi_thread")]
+async fn column_default_with_backslashes_keeps_source_value() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: text and json defaults with backslashes, one trailing.
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let table_id = TableId::new(4246);
+    let table_name = TableName::new("public".to_owned(), "escaped".to_owned());
+    let schema = store
+        .store_table_schema(TableSchema::new(
+            table_id,
+            table_name,
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("path".to_owned(), Type::TEXT, -1, 2, false)
+                    .with_default_expression(r"'C:\temp'::text".to_owned()),
+                ColumnSchema::new("trailing".to_owned(), Type::TEXT, -1, 3, false)
+                    .with_default_expression(r"'abc\'::text".to_owned()),
+                ColumnSchema::new("payload".to_owned(), Type::JSONB, -1, 4, false)
+                    .with_default_expression(r#"'{"p":"C:\\dir"}'::jsonb"#.to_owned()),
+            ],
+        ))
+        .await
+        .unwrap();
+    let schema = ReplicatedTableSchema::all(schema);
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+        .await;
+
+    // WHEN: the table is created and ClickHouse fills omitted columns.
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    clickhouse_db
+        .db_client()
+        .query(
+            "insert into \"public_escaped\" (id, cdc_operation, cdc_lsn, cdc_tx_ordinal) values \
+             (1, 'INSERT', 0, 0)",
+        )
+        .execute()
+        .await
+        .unwrap();
+
+    // THEN: every default holds exactly the characters PostgreSQL stores.
+    assert_eq!(
+        clickhouse_db
+            .query::<(String, String, String)>(
+                "select path, trailing, payload from \"public_escaped\""
+            )
+            .await,
+        vec![(r"C:\temp".to_owned(), r"abc\".to_owned(), r#"{"p":"C:\\dir"}"#.to_owned())]
+    );
+}
+
+/// Builds a replicated `public.<table>` schema with one integer primary key.
+fn id_only_schema(table_id: u32, table: &str) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+        TableId::new(table_id),
+        TableName::new("public".to_owned(), table.to_owned()),
+        vec![ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1)],
+    )))
+}
+
+/// A source table whose destination name equals another table's current view
+/// is rejected under ReplacingMergeTree.
+///
+/// Destination names double underscores, so `public.foo_current` encodes to
+/// `public_foo__current`, the name of the current view over `public.foo`. If
+/// that table exists first, ClickHouse's `CREATE VIEW IF NOT EXISTS` for
+/// `public.foo` silently keeps the table, so `public.foo` never gets its view.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_named_like_current_view_is_rejected_under_replacing_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: a ReplacingMergeTree destination.
+    let clickhouse_db = setup_clickhouse_database().await;
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+
+    // WHEN: `public.foo_current` is created, then `public.foo`.
+    let error =
+        destination.write_table_rows(&id_only_schema(1, "foo_current"), vec![]).await.unwrap_err();
+    destination.write_table_rows(&id_only_schema(2, "foo"), vec![]).await.unwrap();
+
+    // THEN: the colliding table is rejected and `public.foo` owns the view
+    // name.
+    assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    assert_eq!(
+        clickhouse_db
+            .query::<String>("select engine from system.tables where name = 'public_foo__current'")
+            .await,
+        vec!["View".to_owned()]
+    );
 }
 
 /// Retained row shape for interrupted publication-mask recovery.
@@ -946,14 +1569,14 @@ struct RecoveryMaskRow {
 ///
 /// # WHEN
 ///
-/// The recovery path runs with a schema carrying snapshot 100 -- a stale
-/// replay arriving before the interrupted change's relation event.
+/// The recovery path runs with a schema carrying snapshot 100 -- a stale replay
+/// arriving before the interrupted change's relation event.
 ///
 /// # THEN
 ///
-/// The write fails with `ErrorKind::DestinationSchemaRewind` instead of
-/// diffing against the stale schema and wrongly marking the interrupted
-/// change as applied.
+/// The write fails with `ErrorKind::DestinationSchemaRewind` instead of diffing
+/// against the stale schema and wrongly marking the interrupted change as
+/// applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
     init_test_tracing();
@@ -1043,8 +1666,8 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 }
 
-/// Tests that interrupted schema-change recovery replays the diff and marks
-/// the change applied when the arriving schema matches the recovery target.
+/// Tests that interrupted schema-change recovery replays the diff and marks the
+/// change applied when the arriving schema matches the recovery target.
 ///
 /// # GIVEN
 ///
@@ -1247,4 +1870,886 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         .query(&format!("SELECT id, name FROM \"{clickhouse_table_name}\" ORDER BY id"))
         .await;
     assert_eq!(rows, vec![RecoveryMaskRow { id: 1, name: Some("Alice".to_owned()) }]);
+}
+
+/// Builds an id/value schema with an explicit table ID for tests that need
+/// several independent tables.
+///
+/// `table` must not contain underscores so the ClickHouse table name stays
+/// the predictable `public_<table>`.
+fn lifecycle_schema_with_id(table: &str, table_id: u32) -> ReplicatedTableSchema {
+    assert!(!table.contains('_'), "table name would change the ClickHouse name mapping");
+    let table_schema = Arc::new(TableSchema::new(
+        TableId::new(table_id),
+        TableName::new("public".to_owned(), table.to_owned()),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+        ],
+    ));
+
+    ReplicatedTableSchema::all(table_schema)
+}
+
+/// Builds the id/value schema used by the dispatch lifecycle tests.
+fn lifecycle_schema(table: &str) -> ReplicatedTableSchema {
+    lifecycle_schema_with_id(table, 7100)
+}
+
+/// Builds one streaming insert event for the lifecycle schema.
+fn lifecycle_insert(schema: &ReplicatedTableSchema, id: i64, value: &str) -> Event {
+    Event::Insert(InsertEvent {
+        commit_lsn: PgLsn::from(1000),
+        tx_ordinal: 0,
+        replicated_table_schema: schema.clone(),
+        table_row: TableRow::new(vec![Cell::I64(id), Cell::String(value.to_owned())]),
+    })
+}
+
+/// Records how long the `write_events` trait dispatch itself takes,
+/// independent of when its asynchronous result completes.
+struct DispatchTimingProbe<D> {
+    inner: D,
+    write_events_dispatch: Mutex<Option<Duration>>,
+}
+
+impl<D> Destination for DispatchTimingProbe<D>
+where
+    D: Destination + Send + Sync,
+{
+    fn name() -> &'static str {
+        D::name()
+    }
+
+    async fn drop_table_for_copy(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        async_result: DropTableForCopyResult<()>,
+    ) -> EtlResult<()> {
+        self.inner.drop_table_for_copy(replicated_table_schema, async_result).await
+    }
+
+    async fn write_table_rows(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
+        table_rows: Vec<TableRow>,
+        async_result: WriteTableRowsResult,
+    ) -> EtlResult<()> {
+        self.inner
+            .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
+            .await
+    }
+
+    async fn write_events(
+        &self,
+        events: Vec<Event>,
+        durability: WriteEventsDurability,
+        async_result: WriteEventsResult,
+    ) -> EtlResult<()> {
+        let started = Instant::now();
+        let result = self.inner.write_events(events, durability, async_result).await;
+        *self.write_events_dispatch.lock() = Some(started.elapsed());
+        result
+    }
+}
+
+/// Yields to the scheduler until `condition` holds.
+///
+/// Cooperative replacement for wall-clock waits; panics when the condition
+/// is not reached within a bounded yield budget so a regression fails
+/// instead of hanging.
+async fn yield_until(condition: impl Fn() -> bool) {
+    for _ in 0..10_000 {
+        if condition() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("condition not reached within the yield budget");
+}
+
+/// Gives the scheduler bounded opportunity to run other tasks.
+///
+/// Used before asserting that a task is still blocked; cooperative yields
+/// let spawned work reach its parked state without wall-clock sleeps.
+async fn yield_rounds() {
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The trait dispatch returns while an in-flight insert is still pending,
+/// and the asynchronous result reports `Durable` only after the insert
+/// lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_dispatch_returns_while_insert_is_pending() {
+    // GIVEN: a destination table and a pause armed before the batch's first
+    // INSERT statement.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("deferred");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+
+    // WHEN: one insert event batch dispatched through the trait parks at
+    // the armed statement.
+    let probe = Arc::new(DispatchTimingProbe {
+        inner: destination,
+        write_events_dispatch: Mutex::new(None),
+    });
+    let write_handle = tokio::spawn({
+        let probe = Arc::clone(&probe);
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                probe.as_ref(),
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "deferred")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+    yield_until(|| probe.write_events_dispatch.lock().is_some()).await;
+
+    // THEN: dispatch returned while the parked write had sent nothing and
+    // its result was pending; releasing the pause completes it durably.
+    assert!(!write_handle.is_finished());
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"public_deferred\"").await,
+        Vec::<i64>::new()
+    );
+    release.send(()).unwrap();
+    assert_eq!(write_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_deferred\"").await, vec![1]);
+}
+
+/// A destructive table reset drains the admitted write before dropping the
+/// table, so the parked insert lands and the drop waits for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_waits_for_admitted_write() {
+    // GIVEN: a destination table and a write parked at its first INSERT
+    // statement.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("resetrace");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "landed")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+
+    // WHEN: a table reset starts while the write is parked, and the write
+    // is released afterwards.
+    let reset_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move { drop_table_for_copy_via_trait(&destination, &schema).await }
+    });
+    yield_rounds().await;
+    // The reset must be draining the parked task rather than finishing.
+    assert!(!reset_handle.is_finished());
+    release.send(()).unwrap();
+    let write_status = write_handle.await.unwrap();
+    let drop_result = reset_handle.await.unwrap();
+
+    // THEN: the released write completed durably instead of racing the
+    // dropped table, and the reset then removed the table.
+    assert_eq!(write_status.unwrap(), DestinationWriteStatus::Durable);
+    drop_result.unwrap();
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() and name = \
+                 'public_resetrace'",
+            )
+            .await,
+        Vec::<String>::new()
+    );
+}
+
+/// A reset after source tables swap names by rename drops the destination
+/// table recorded in metadata, not the table matching the new source name.
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_after_rename_drops_recorded_table() {
+    // GIVEN: `orders` and `ordersnew` were replicated, then swapped names:
+    // `orders` became `ordersold` and `ordersnew` became `orders`.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let public = |table: &str| TableName::new("public".to_owned(), table.to_owned());
+    let archived_id = TableId::new(4247);
+    let replacement_id = TableId::new(4248);
+    let archived = store_status_default_schema(
+        &store,
+        archived_id,
+        &public("orders"),
+        test_snapshot_id(100, 100),
+        None,
+    )
+    .await;
+    let replacement = store_status_default_schema(
+        &store,
+        replacement_id,
+        &public("ordersnew"),
+        test_snapshot_id(100, 101),
+        None,
+    )
+    .await;
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &archived,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("kept".to_owned())])],
+        )
+        .await
+        .unwrap();
+    destination.write_table_rows(&replacement, vec![]).await.unwrap();
+    let archived_renamed = store_status_default_schema(
+        &store,
+        archived_id,
+        &public("ordersold"),
+        test_snapshot_id(200, 200),
+        None,
+    )
+    .await;
+    let replacement_renamed = store_status_default_schema(
+        &store,
+        replacement_id,
+        &public("orders"),
+        test_snapshot_id(200, 201),
+        None,
+    )
+    .await;
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: archived_renamed }),
+            Event::Relation(RelationEvent { replicated_table_schema: replacement_renamed.clone() }),
+        ])
+        .await
+        .unwrap();
+
+    // WHEN: the replacement table, now named `orders`, is reset for a fresh
+    // copy.
+    drop_table_for_copy_via_trait(&destination, &replacement_renamed).await.unwrap();
+
+    // THEN: only the replacement's own table and view are gone; the archived
+    // table, which still writes to `public_orders`, keeps its rows.
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() order by name",
+            )
+            .await,
+        vec!["public_orders".to_owned(), "public_orders__current".to_owned()]
+    );
+    assert_eq!(
+        clickhouse_db.query::<(i64, Option<String>)>("select id, status from public_orders").await,
+        vec![(1, Some("kept".to_owned()))]
+    );
+}
+
+/// Shutdown aborts an admitted write and the pending result reports the
+/// aborted task as an error instead of a silent success.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_aborts_admitted_write_without_silent_success() {
+    // GIVEN: a destination table and a write parked at its first INSERT
+    // statement.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("aborted");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (reached, _release) = arm_pause_before_insert_statement_for_tests(0);
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "aborted")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+
+    // WHEN: shutdown runs while the write is parked.
+    Destination::shutdown(&destination).await.unwrap();
+
+    // THEN: the aborted write surfaced as an error rather than a fabricated
+    // success, and nothing reached the table.
+    let error = write_handle.await.unwrap().unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationError);
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"public_aborted\"").await,
+        Vec::<i64>::new()
+    );
+}
+
+/// An aborted write releases its table fence. The fence guards travel inside
+/// the spawned future, so abort must drop them even though the task never
+/// reaches its explicit release; otherwise every later batch for that table
+/// would wait forever on the same destination.
+async fn aborted_write_releases_fence_for_later_writes_inner(engine: ClickHouseEngine) {
+    // GIVEN: a destination table and a write parked at its first INSERT
+    // statement while holding the table's fence.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("refenced");
+    let destination = clickhouse_db.build_destination_with_engine(MemoryStore::new(), engine).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (reached, _release) = arm_pause_before_insert_statement_for_tests(0);
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "aborted")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+
+    // WHEN: shutdown aborts the parked write and the same table is written
+    // again through the same destination.
+    Destination::shutdown(&destination).await.unwrap();
+    write_handle.await.unwrap().unwrap_err();
+    // A leaked fence would park this call forever; the timeout turns that
+    // into a failure instead of a hung test.
+    let status = tokio::time::timeout(
+        Duration::from_secs(30),
+        write_events_via_trait(
+            &destination,
+            WriteEventsDurability::MayDefer,
+            vec![lifecycle_insert(&schema, 2, "admitted")],
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    // THEN: the later write was admitted past the fence and landed alone.
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_refenced\"").await, vec![2]);
+}
+
+/// MergeTree releases an aborted write's fence for later writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_releases_fence_for_later_writes_merge_tree() {
+    aborted_write_releases_fence_for_later_writes_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree releases an aborted write's fence for later writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_releases_fence_for_later_writes_replacing_merge_tree() {
+    aborted_write_releases_fence_for_later_writes_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// An insert rejected by the server reaches the caller through the async
+/// result channel, and the destination keeps admitting later work.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_events_reports_insert_failure_through_async_result() {
+    // GIVEN: a destination table with a constraint that rejects one key.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("rejected");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    clickhouse_db
+        .db_client()
+        .query("alter table \"public_rejected\" add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: a rejected insert and then an accepted insert are dispatched.
+    let error = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&schema, 2, "rejected")],
+    )
+    .await
+    .unwrap_err();
+    let status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&schema, 1, "accepted")],
+    )
+    .await
+    .unwrap();
+
+    // THEN: the failure carried the typed insert error and later admission
+    // still succeeded.
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_rejected\"").await, vec![1]);
+}
+
+/// A write aborted between INSERT statements replays to a converged current
+/// state after a destination restart.
+async fn aborted_write_replays_to_converged_state_inner(engine: ClickHouseEngine) {
+    // GIVEN: single-row INSERT statements and a pause armed before the
+    // batch's second statement.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("replayed");
+    let store = MemoryStore::new();
+    let config = ClickHouseInserterConfig { engine, max_bytes_per_insert: 1 };
+    let destination = clickhouse_db.build_destination_with_config(store.clone(), config).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let batch = || {
+        vec![
+            lifecycle_insert(&schema, 1, "one"),
+            lifecycle_insert(&schema, 2, "two"),
+            lifecycle_insert(&schema, 3, "three"),
+        ]
+    };
+    let (reached, _release) = arm_pause_before_insert_statement_for_tests(1);
+
+    // WHEN: shutdown aborts the admitted batch exactly between its first and
+    // second statements, and a restarted destination replays the identical
+    // batch.
+    let write_handle = tokio::spawn({
+        let destination = destination.clone();
+        let events = batch();
+        async move {
+            write_events_via_trait(&destination, WriteEventsDurability::MayDefer, events).await
+        }
+    });
+    reached.await.unwrap();
+    Destination::shutdown(&destination).await.unwrap();
+    let error = write_handle.await.unwrap().unwrap_err();
+    let surviving_rows =
+        clickhouse_db.query::<i64>("select id from \"public_replayed\" order by id").await;
+    let restarted = clickhouse_db.build_destination_with_config(store, config).await;
+    let status =
+        write_events_via_trait(&restarted, WriteEventsDurability::MayDefer, batch()).await.unwrap();
+
+    // THEN: the abort surfaced as an error, exactly the first statement
+    // survived it, and the replay converged on the batch contents.
+    assert_eq!(error.kind(), ErrorKind::DestinationError);
+    assert_eq!(surviving_rows, vec![1]);
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    let query = current_state_query(engine, "public_replayed", "id, value", &["id"], "id");
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>(&query).await,
+        vec![(1, "one".to_owned()), (2, "two".to_owned()), (3, "three".to_owned())]
+    );
+}
+
+/// MergeTree event logs converge across an aborted-batch replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_replays_to_converged_state_merge_tree() {
+    aborted_write_replays_to_converged_state_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree versions converge across an aborted-batch replay.
+#[tokio::test(flavor = "multi_thread")]
+async fn aborted_write_replays_to_converged_state_replacing_merge_tree() {
+    aborted_write_replays_to_converged_state_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// A write dispatched during a table reset is admitted only after the reset
+/// completes and publishes its result.
+#[tokio::test(flavor = "multi_thread")]
+async fn write_admission_waits_for_table_reset() {
+    // GIVEN: a write parked at the gated table's first INSERT statement and
+    // an untouched bystander table.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let gated_schema = lifecycle_schema_with_id("gated", 7100);
+    let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&gated_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+    let gated_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = gated_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "landed")],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+
+    // WHEN: a reset starts draining the parked write and a bystander write
+    // is dispatched while the reset holds the task registry.
+    let reset_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = gated_schema.clone();
+        async move { drop_table_for_copy_via_trait(&destination, &schema).await }
+    });
+    yield_rounds().await;
+    assert!(!reset_handle.is_finished());
+    let bystander_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = bystander_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 7, "after")],
+            )
+            .await
+        }
+    });
+    yield_rounds().await;
+    // Admission is closed while the reset holds the registry, so the
+    // bystander write must still be blocked even though its own table is
+    // unaffected.
+    assert!(!bystander_handle.is_finished());
+    release.send(()).unwrap();
+
+    // THEN: every operation completed after the release, and the bystander
+    // row landed in its own table.
+    assert_eq!(gated_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    reset_handle.await.unwrap().unwrap();
+    assert_eq!(bystander_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
+        vec![(7, "after".to_owned())]
+    );
+}
+
+/// Concurrently admitted writes complete independently, and a reset drains
+/// every in-flight task, not only the reset table's.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_writes_complete_independently_and_reset_drains_both() {
+    // GIVEN: writes to two tables, each parked at its first INSERT
+    // statement by one of two armed pauses.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let left_schema = lifecycle_schema_with_id("left", 7100);
+    let right_schema = lifecycle_schema_with_id("right", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&left_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&right_schema, vec![]).await.unwrap();
+    let (first_reached, first_release) = arm_pause_before_insert_statement_for_tests(0);
+    let (second_reached, second_release) = arm_pause_before_insert_statement_for_tests(0);
+    let left_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = left_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 3, "left")],
+            )
+            .await
+        }
+    });
+    let right_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = right_schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 7, "right")],
+            )
+            .await
+        }
+    });
+    first_reached.await.unwrap();
+    second_reached.await.unwrap();
+
+    // WHEN: a reset of the left table starts while both writes are parked,
+    // and both writes are released afterwards.
+    let reset_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = left_schema.clone();
+        async move { drop_table_for_copy_via_trait(&destination, &schema).await }
+    });
+    yield_rounds().await;
+    // The reset must be draining both parked tasks rather than finishing.
+    assert!(!reset_handle.is_finished());
+    first_release.send(()).unwrap();
+    second_release.send(()).unwrap();
+
+    // THEN: each write delivered its own durable result, the reset removed
+    // the left table only after both tasks finished, and the surviving row
+    // landed in its own table.
+    assert_eq!(left_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(right_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    reset_handle.await.unwrap().unwrap();
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_right\"").await,
+        vec![(7, "right".to_owned())]
+    );
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() and name = \
+                 'public_left'",
+            )
+            .await,
+        Vec::<String>::new()
+    );
+}
+
+/// Builds one streaming truncate event for the lifecycle schema.
+fn lifecycle_truncate(schema: &ReplicatedTableSchema) -> Event {
+    Event::Truncate(TruncateEvent {
+        commit_lsn: PgLsn::from(2000),
+        tx_ordinal: 0,
+        options: 0,
+        truncated_tables: vec![schema.clone()],
+    })
+}
+
+/// A retried apply attempt replays the abandoned batch and a later truncate
+/// against the same destination while the abandoned insert is still in
+/// flight. The replay's dispatch must wait at the table's fence until the
+/// abandoned insert is acknowledged. Until then it cannot reach its own
+/// INSERT, let alone the TRUNCATE. Without the fence, the late insert would
+/// restore rows the truncate removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn replayed_truncate_waits_for_abandoned_insert_on_same_table() {
+    // GIVEN: a destination table, one pause for the abandoned insert, and
+    // one pause for the replay's insert so its progress is observable.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("replay");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (abandoned_reached, abandoned_release) = arm_pause_before_insert_statement_for_tests(0);
+    let (mut replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
+
+    // The first attempt's write is admitted and parks before its INSERT. The
+    // apply loop that issued it has already given up on the result.
+    let abandoned_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "restored")],
+            )
+            .await
+        }
+    });
+    abandoned_reached.await.unwrap();
+
+    // WHEN: the retried attempt replays the same insert followed by a
+    // truncate of the table through the same destination.
+    let replay_handle = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_events_via_trait(
+                &destination,
+                WriteEventsDurability::MayDefer,
+                vec![lifecycle_insert(&schema, 1, "restored"), lifecycle_truncate(&schema)],
+            )
+            .await
+        }
+    });
+
+    // THEN: the replay waits at the fence behind the abandoned insert, so it
+    // does not reach its own INSERT statement. An unfenced replay reaches it
+    // within a few polls, so holding across the whole yield budget makes a
+    // regression fail rather than race.
+    for _ in 0..10_000 {
+        assert!(matches!(replay_reached.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        tokio::task::yield_now().await;
+    }
+    assert!(!replay_handle.is_finished());
+
+    // Releasing the abandoned insert lets it land first. Only then does the
+    // replay reach its INSERT, and its TRUNCATE then removes both copies.
+    abandoned_release.send(()).unwrap();
+    assert_eq!(abandoned_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    replay_reached.await.unwrap();
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_replay\"").await, vec![1]);
+    replay_release.send(()).unwrap();
+    assert_eq!(replay_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"public_replay\"").await,
+        Vec::<i64>::new()
+    );
+}
+
+/// RequireDurable writes, including the empty durability barrier, report
+/// Durable rather than Accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn require_durable_writes_report_durable() {
+    // GIVEN: a created destination table.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("barrier");
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+
+    // WHEN: a nonempty RequireDurable write and an empty durability barrier
+    // are dispatched.
+    let write_status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![lifecycle_insert(&schema, 1, "kept")],
+    )
+    .await
+    .unwrap();
+    let barrier_status =
+        write_events_via_trait(&destination, WriteEventsDurability::RequireDurable, vec![])
+            .await
+            .unwrap();
+
+    // THEN: both report Durable, which the apply loop requires for
+    // RequireDurable calls, and the write landed.
+    assert_eq!(write_status, DestinationWriteStatus::Durable);
+    assert_eq!(barrier_status, DestinationWriteStatus::Durable);
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"public_barrier\"").await, vec![1]);
+}
+
+/// A table reset drains cleanly after a failed write, and admission stays
+/// usable afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_reset_succeeds_after_failed_write() {
+    // GIVEN: a write already rejected by a server constraint.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let failing_schema = lifecycle_schema_with_id("failing", 7100);
+    let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&failing_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
+    clickhouse_db
+        .db_client()
+        .query("alter table \"public_failing\" add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+    let error = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&failing_schema, 2, "rejected")],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+
+    // WHEN: the failed table is reset and a bystander write follows.
+    let reset_result = drop_table_for_copy_via_trait(&destination, &failing_schema).await;
+    let bystander_status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&bystander_schema, 7, "after")],
+    )
+    .await;
+
+    // THEN: the reset drained the failed task without resurfacing its error
+    // and later admission completed durably.
+    reset_result.unwrap();
+    assert_eq!(bystander_status.unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
+        vec![(7, "after".to_owned())]
+    );
+}
+
+/// A failed table reset publishes its error through the async result,
+/// releases the registry for later admission, and can be retried.
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_table_reset_publishes_error_and_reopens_admission() {
+    // GIVEN: two created tables and a one-shot injected reset failure.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let failing_schema = lifecycle_schema_with_id("resetfail", 7100);
+    let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
+    let destination = clickhouse_db
+        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .await;
+    destination.write_table_rows(&failing_schema, vec![]).await.unwrap();
+    destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
+    arm_fail_drop_table_for_copy_once_for_tests();
+
+    // WHEN: the reset fails, a bystander write follows, and the reset is
+    // retried.
+    let reset_error =
+        drop_table_for_copy_via_trait(&destination, &failing_schema).await.unwrap_err();
+    let bystander_status = write_events_via_trait(
+        &destination,
+        WriteEventsDurability::MayDefer,
+        vec![lifecycle_insert(&bystander_schema, 7, "after")],
+    )
+    .await
+    .unwrap();
+    let retried_reset = drop_table_for_copy_via_trait(&destination, &failing_schema).await;
+
+    // THEN: the injected failure travelled the async result, admission
+    // stayed usable afterwards, and the one-shot failure did not stick to
+    // the retried reset.
+    assert_eq!(reset_error.kind(), ErrorKind::DestinationError);
+    assert_eq!(bystander_status, DestinationWriteStatus::Durable);
+    retried_reset.unwrap();
+    assert_eq!(
+        clickhouse_db.query::<(i64, String)>("select id, value from \"public_bystander\"").await,
+        vec![(7, "after".to_owned())]
+    );
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() and name = \
+                 'public_resetfail'",
+            )
+            .await,
+        Vec::<String>::new()
+    );
 }

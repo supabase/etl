@@ -60,9 +60,8 @@ async fn pipeline_multigres_failover() {
         destination.clone(),
     )
     .with_replication_slot_failover(true)
-    // Multigres tears down the pinned replication stream during a leader
-    // change. Retrying in place must resume the same failover slot and pipeline
-    // without another initial copy.
+    // Multigres tears down the pinned replication stream during a leader change. Retrying in place
+    // must resume the same failover slot and pipeline without another initial copy.
     .with_retry_config(APPLY_RETRY_DELAY_MS, APPLY_RETRY_MAX_ATTEMPTS)
     .build();
 

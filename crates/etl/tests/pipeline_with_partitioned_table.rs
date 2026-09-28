@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use etl::{
-    data::TableRow,
-    event::EventType,
+    data::{Cell, TableRow},
+    event::{Event, EventType},
     pipeline::PipelineId,
     schema::{TableId, TableName},
     test_utils::{
@@ -290,7 +290,8 @@ async fn assert_nested_partition_pipeline_case(
         assert_eq!(inserts.len(), expected_count);
     }
 
-    // We check the table rows again just to validate that no new ones were added.
+    // We check the table rows again just to validate that no new ones were
+    // added.
     let table_rows = destination.get_table_rows().await;
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
@@ -374,8 +375,117 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     assert_table_row_counts(&table_rows, &expected_copy_counts);
 }
 
-/// Tests that initial COPY replicates all rows from a partitioned table.
-/// Only the parent table is tracked, not individual child partitions.
+/// Checks that COPY and CDC use the filter belonging to the published identity.
+async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    if below_version!(database.server_version(), POSTGRES_15) {
+        return;
+    }
+
+    let table_name = test_table_name("filtered_partitions");
+    let (root_id, leaf_ids) =
+        create_partitioned_table(&database, table_name.clone(), &[("leaf", "from (0) to (100)")])
+            .await
+            .unwrap();
+    let table = table_name.as_quoted_identifier();
+    let leaf = partition_table_name(&table_name, "leaf").as_quoted_identifier();
+    let root_filter = if publish_via_partition_root { " where (id % 2 = 0)" } else { "" };
+    client
+        .batch_execute(&format!(
+            "insert into {table} (data, partition_key) values
+             ('initial', 10), ('initial', 10);
+             create publication filtered_partition_pub for table
+             {table}{root_filter}, {leaf} where (id % 2 = 1)
+             with (publish_via_partition_root = {publish_via_partition_root})"
+        ))
+        .await
+        .unwrap();
+
+    let table_id = if publish_via_partition_root { root_id } else { leaf_ids[0] };
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        "filtered_partition_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let sync_complete = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    sync_complete.notified().await;
+
+    let included_id = if publish_via_partition_root { 4 } else { 3 };
+    let excluded_id = if publish_via_partition_root { 3 } else { 4 };
+    let insert = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    client
+        .batch_execute(&format!(
+            "insert into {table} (id, data, partition_key) values
+             ({excluded_id}, 'excluded', 10), ({included_id}, 'included', 10)"
+        ))
+        .await
+        .unwrap();
+
+    insert.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let copied_rows = destination.get_table_rows().await;
+    assert_eq!(copied_rows.len(), 1);
+    assert_eq!(
+        copied_rows[&table_id],
+        vec![TableRow::new(vec![
+            Cell::I64(if publish_via_partition_root { 2 } else { 1 }),
+            Cell::String("initial".to_owned()),
+            Cell::I32(10),
+        ])]
+    );
+
+    let events = destination.get_events().await;
+    let inserts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) => Some((insert.replicated_table_schema.id(), &insert.table_row)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        inserts,
+        vec![(
+            table_id,
+            &TableRow::new(vec![
+                Cell::I64(included_id),
+                Cell::String("included".to_owned()),
+                Cell::I32(10),
+            ])
+        )]
+    );
+}
+
+/// The parent filter applies to both COPY and CDC when publishing via the root.
+#[tokio::test(flavor = "multi_thread")]
+async fn partition_root_filter_overrides_leaf_filter() {
+    assert_partition_identity_row_filter(true).await;
+}
+
+/// The leaf filter applies to both COPY and CDC when publishing leaf
+/// identities.
+#[tokio::test(flavor = "multi_thread")]
+async fn partition_leaf_filter_applies_with_published_root() {
+    assert_partition_identity_row_filter(false).await;
+}
+
+/// Tests that initial COPY replicates all rows from a partitioned table. Only
+/// the parent table is tracked, not individual child partitions.
 #[tokio::test(flavor = "multi_thread")]
 async fn partitioned_table_copy_replicates_existing_data() {
     init_test_tracing();
@@ -579,8 +689,8 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     assert_eq!(parent_inserts.len(), 1);
 }
 
-/// Tests that a new leaf partition is discovered after restart when changes
-/// are published using leaf identities.
+/// Tests that a new leaf partition is discovered after restart when changes are
+/// published using leaf identities.
 #[tokio::test(flavor = "multi_thread")]
 async fn new_partition_with_leaf_identity_is_discovered_after_restart() {
     init_test_tracing();
@@ -1168,13 +1278,13 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
 
     let _ = pipeline.shutdown_and_wait().await;
 
-    // The pipeline state should still only track the parent table (not the detached
-    // partition) because it hasn't re-scanned for new tables.
+    // The pipeline state should still only track the parent table (not the
+    // detached partition) because it hasn't re-scanned for new tables.
     let table_states_after = state_store.get_table_states().await;
     assert!(table_states_after.contains_key(&parent_table_id));
 
-    // The detached partition insert should NOT be replicated in this pipeline run
-    // because the pipeline hasn't discovered it as a new table.
+    // The detached partition insert should NOT be replicated in this pipeline
+    // run because the pipeline hasn't discovered it as a new table.
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
     let detached_inserts =
@@ -1260,8 +1370,8 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     // Shutdown the pipeline.
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Restart the pipeline. It should now discover the detached partition as a new
-    // table.
+    // Restart the pipeline. It should now discover the detached partition as a
+    // new table.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1302,7 +1412,8 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires 15+).
+    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires
+    // 15+).
     if below_version!(database.server_version(), POSTGRES_15) {
         eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
@@ -1436,7 +1547,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires 15+).
+    // Skip test if PostgreSQL version is < 15 (FOR TABLES IN SCHEMA requires
+    // 15+).
     if below_version!(database.server_version(), POSTGRES_15) {
         eprintln!("Skipping test: PostgreSQL 15+ required for FOR TABLES IN SCHEMA");
         return;
@@ -1511,8 +1623,8 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     // Shutdown the pipeline.
     let _ = pipeline.shutdown_and_wait().await;
 
-    // Restart the pipeline. It should now discover the detached partition as a new
-    // table.
+    // Restart the pipeline. It should now discover the detached partition as a
+    // new table.
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

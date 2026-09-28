@@ -64,8 +64,8 @@ impl<T: TokenProvider> RestStreamClient<T> {
                     return Err(Error::HttpStatus { status, body });
                 }
 
-                // Actual server returns plain text (even with Accept: application/json).
-                // Docs say JSON: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api#get-hostname
+                // Actual server returns plain text (even with Accept:
+                // application/json). Docs say JSON: https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api#get-hostname
                 let body_text = resp.text().await.unwrap_or_default();
                 let hostname = serde_json::from_str::<HostnameResponse>(&body_text)
                     .map_or_else(|_| body_text.trim().to_owned(), |r| r.hostname);
@@ -740,7 +740,8 @@ mod tests {
 
     #[test]
     fn channel_status_parsers_accept_documented_status_fields() {
-        // Open Channel has row errors as `rows_error_count` in Snowflake API docs.
+        // Open Channel has row errors as `rows_error_count` in Snowflake API
+        // docs.
         let detail: ChannelStatusDetail = serde_json::from_value(json!({
             "channel_name": "ch0",
             "channel_status_code": "ACTIVE",

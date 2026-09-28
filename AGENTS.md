@@ -2,8 +2,7 @@
 
 Postgres logical-replication engine. `etl` is the library, `etl-replicator` is
 the standalone binary, and `etl-destinations` holds built-in destinations.
-`etl-api` is an optional Kubernetes control plane; you do not need it to run
-ETL. Product docs: https://supabase.github.io/etl/. Human walkthrough:
+Product docs: https://supabase.github.io/etl/. Human walkthrough:
 [DEVELOPMENT.md](DEVELOPMENT.md).
 
 This file is for agents. Read it before changing code. Use it to **set up** the
@@ -15,10 +14,10 @@ Do this on a fresh clone before tests, examples, or local services.
 
 1. Toolchain: Rust **1.95.0** from `rust-toolchain.toml` (rustup uses it
    automatically), `psql`, Docker Compose, and [cargo-nextest](https://nexte.st).
-2. SQLx CLI (migrations; `cargo x init` and `cargo x setup api` need it):
+2. SQLx CLI (migrations; `cargo x init` needs it):
 
    ```bash
-   cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked
+   cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
    ```
 
 3. Start the local data plane (Postgres, ClickHouse, Iceberg catalog, migrations).
@@ -32,18 +31,15 @@ Do this on a fresh clone before tests, examples, or local services.
 
    ```bash
    cargo x setup replicator && cargo x seed && cargo x run replicator
-   cargo x setup api && cargo x run api
    ```
 
-5. Generated files in `crates/etl-api/configuration/` and
-   `crates/etl-replicator/configuration/` are gitignored. Re-run with `--force`
+5. Generated files in `crates/etl-replicator/configuration/` are gitignored. Re-run with `--force`
    to replace them. Do not commit them or put real secrets in tracked files.
 
 | Need | Do |
 | --- | --- |
-| API / OrbStack k8s | `kubectl` plus [OrbStack](https://orbstack.dev) Kubernetes; `cargo x setup api` applies `scripts/k8s/local/` |
 | Existing Postgres, no Docker | `SKIP_DOCKER=1` and `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` |
-| Test clusters only | `cargo xtask postgres start` (or `create`) |
+| Test clusters only | `cargo xtask postgres start` |
 | Ports and destination env | [DEVELOPMENT.md](DEVELOPMENT.md) |
 
 Default stack: Postgres `localhost:5430` (`postgres`/`postgres`), replica
@@ -78,13 +74,12 @@ what ran. Skip expensive workspace checks for docs-only or YAML-only edits.
 | `crates/etl-postgres/` | Reusable Postgres primitives, source helpers, slots, ETL metadata SQL |
 | `crates/etl-destinations/` | Destination implementations |
 | `crates/etl-config/` | Config types and loading |
-| `crates/etl-api/` | HTTP control plane |
 | `crates/etl-replicator/` | Standalone replicator binary |
 | `crates/etl-telemetry/` | Tracing and Prometheus |
 | `crates/etl-examples/`, `crates/etl-benchmarks/` | Examples and benches |
 | `crates/xtask/` | `cargo x` automation |
 | `site/` | Next.js/Fumadocs site; docs in `site/content/docs/` |
-| `scripts/docker/`, `scripts/k8s/local/` | Compose stack and API k8s manifests |
+| `scripts/docker/` | Local Compose stack |
 | `src/` / `tests/` | Tests next to code; crate integration tests in `tests/main.rs` |
 
 Crate boundaries are for reuse across crates, not for organizing one domain.
@@ -112,11 +107,28 @@ implementation details private.
   filenames). Add a new file. Do not edit a migration that is not yet on `main`
   unless the user asks, including comments.
 
+### Dependency versions
+
+- Specify registry dependencies as full `x.y.z` versions without an operator
+  (Cargo's default caret requirement). Use a minimum that provides the APIs and
+  fixes we need; adding `.0` to an abbreviated version does not tighten its range.
+- Allow SemVer-compatible updates. Use exact pins (`=x.y.z`), tilde requirements,
+  or tighter upper bounds only for a concrete compatibility need, and document
+  the reason next to the dependency.
+- Keep shared dependencies in `[workspace.dependencies]` and inherit them with
+  `workspace = true`. Pin Git dependencies to a commit with `rev`.
+- Keep the workspace `Cargo.lock` tracked and include relevant lockfile changes
+  with intentional dependency updates. Use `--locked` in CI build, lint, and test
+  commands for workspaces with a committed lockfile; do not rely on exact
+  manifest pins for reproducible builds. For task aliases, use `cargo --locked x`
+  or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
+  own `--locked` flag.
+
 ### Destination compatibility
 
 | Situation | Do |
 | --- | --- |
-| Schema *permits* a value/event the destination might not preserve | API preflight **warning** via stable destination capabilities; do not reject the schema |
+| Schema *permits* a value/event the destination might not preserve | Expose stable destination capabilities so callers can warn; do not reject the schema |
 | ETL can faithfully build the destination request/wire form | Send it; rely on the destination’s native behavior and errors |
 | ETL cannot build that form, or a structural/state invariant is broken | Typed local error at the encoding point; same path for copy, insert, and update |
 
@@ -212,8 +224,6 @@ message. Detail fields are owned context (operations, tables, IDs, SQL).
 Preserve the source chain. Error text is sentence case and starts with an
 uppercase letter (`thiserror` included).
 
-- `etl-api` HTTP responses: never leak Postgres/SQLx/database errors; generic
-  customer message, original error in the internal chain and logs.
 - ETL Postgres and DuckDB: keep the chain for debugging, still avoid highly
   critical data.
 - Panics only for programmer errors or broken invariants. `debug_assert!` /
@@ -236,14 +246,49 @@ overflow/underflow, unsupported syntax.
 
 Avoid `unsafe` unless necessary. Every `unsafe` block needs a preceding
 `// SAFETY:` comment. Prefer ownership/borrowing over extra clones or interior
-mutability. Name long-running async work. Dropping a `JoinHandle` detaches:
-`abort()` best-effort background tasks (metrics reporters) when they should
-stop now. Dropping a `JoinSet` aborts its tasks; do not `abort_all()` before
-returning from a scope that owns the set — only while the set is retained.
-Graceful shutdown and join only when tasks own state that must finish (DB
-transactions, destination flushes, retry-sensitive replication). Do not build
-elaborate shutdown channels for timer/poll/telemetry tasks whose state can be
-discarded.
+mutability. Name long-running async work.
+
+### Task ownership and shutdown
+
+Controlled teardown stops work and joins tasks. Silently accept requested
+cancellations; propagate panics, task errors, and unexpected cancellations
+immediately. On failure, drop remaining owned handles without awaiting secondary
+cleanup. Recovery correctness still applies: never checkpoint unfinished work.
+
+- **Ownership:** the spawner owns teardown unless ownership is transferred.
+  Use `AbortOnDropHandle`, `TaskGroup` for fallible children, and `TaskRegistry`
+  for shared destination tasks. Transfer handles into completion futures so
+  early returns drop them even if the outer owner survives. Use
+  `JoinSet::shutdown()` only when task results may be discarded.
+- **Signals and waits:** the pipeline owns the shared cancellation token;
+  destinations do not handle process signals. Use `with_shutdown!` only for
+  cancellation-safe waits. Keep a running pipeline's pinned completion future
+  alive when requesting shutdown, then await it to finish cleanup.
+- **Apply:** stop intake and drain buffered batches and pending write results
+  under existing deadlines, durability, and error policies. Do not force early
+  flushes or cancel in-flight apply writes. Coordination waits must observe
+  shutdown when a stopping worker may never publish the awaited state.
+- **Copy and startup:** initial sync is replayable. Keep copy waits, including
+  the final empty write and its result, cancellable. On controlled shutdown,
+  abort and join copy children before releasing the snapshot. Cancel startup
+  separately from apply draining; clean up constructed destinations when a
+  signal cancels startup. Startup errors return immediately.
+- **Destination calls:** `write_events` should dispatch long-running writes and
+  return promptly. `write_table_rows` may write inline: each copy partition has
+  its own task and waits for the result before reading another batch.
+- **Background work:** use `abort_and_join` for disposable tasks and
+  `abort_and_join_result` for tasks returning `EtlResult<()>`. Keep memory
+  sampling alive until workers and destination cleanup finish. Reap destination
+  tasks during operation; retain table-sync results for the final wait.
+- **Drop and native work:** dropping handles requests abort; it does not undo
+  remote writes or stop started `spawn_blocking` work. Keep native guards and
+  interruption/deadlines alive until that work exits. Avoid ownership cycles;
+  existing destination/registry cycles still require explicit cleanup. Never
+  block or spawn cleanup from `Drop`. Detached tasks need a documented lifetime
+  and termination mechanism, such as client/observer channel closure.
+- **Tests:** use channels or state barriers to test lifecycle boundaries and
+  error propagation, rather than repeating Tokio's handle behavior. Leave a
+  blank line after `biased;` and between `select!` branches.
 
 ## Docs, metrics, logs
 
@@ -265,9 +310,7 @@ counts, lengths, LSNs, IDs, operations). Production errors: `error = %err` or
 `error = %error` (not `err =`, `source =`, or debug for the primary error).
 Prefer `Display` (`%`) over `Debug` (`?`) unless the type is known not to
 contain sensitive values. Table state: `table_state_type` (one) and
-`table_state_types` (list). Sentry: wrap sensitive API route groups with the
-sensitive scope marker and scrub bodies on marked events; do not duplicate path
-matchers in the scrubber.
+`table_state_types` (list).
 
 ## Tests
 
@@ -295,7 +338,7 @@ pipeline.start().await.unwrap();
 ready.notified().await;
 ```
 
-Need Postgres? `cargo xtask postgres create` (or `cargo x init`) and
+Need Postgres? `cargo xtask postgres start` (or `cargo x init`) and
 `TESTS_DATABASE_HOST`. Debug with `ENABLE_TRACING=1` and a focused `RUST_LOG`,
 for example
 `RUST_LOG=etl::replication::apply=debug,etl_destinations::bigquery=debug`.

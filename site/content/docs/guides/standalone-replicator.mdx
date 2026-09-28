@@ -123,7 +123,11 @@ pipeline:
 
 Those host, port, and password values match the published `cargo x init` Docker
 defaults. For a remote ClickHouse, change `url`, `user`, `password`, and
-`database`, and enable TLS on both connections.
+`database`, and enable TLS on both connections. Keep credentials out of `url`:
+a value with embedded credentials, such as
+`https://alice:secret@clickhouse.example:8443`, or with a query string is
+rejected when the configuration is loaded, because the URL is treated as
+non-secret configuration.
 
 Create `/absolute/path/to/etl-config/prod.yaml` for production overrides. It
 may be empty when `base.yaml` contains the complete configuration:
@@ -166,6 +170,67 @@ APP_CONFIG_DIR=/absolute/path/to/etl-config \
 The process runs until it receives a shutdown signal or encounters a terminal
 pipeline error. Run it under a service manager that restarts failed processes,
 preserves logs, and provides resource limits.
+
+## Shutdown
+
+SIGINT (Ctrl+C) and SIGTERM request shutdown. Listeners are installed before
+asynchronous initialization, so pending startup can be cancelled. If a signal
+interrupts startup of a constructed pipeline, its destination is cleaned up.
+Initialization errors return immediately.
+
+Once running, the pipeline stops intake and drains pending apply work under
+existing retry and durability rules. Interrupted initial copies restart from a
+fresh snapshot. Workers finish before destination cleanup and background tasks
+are joined. Enabled probes report stopping while liveness remains healthy.
+
+Requested task cancellations are silently accepted. Panics, task errors, and
+unexpected cancellations return immediately, requesting abort of remaining
+owned tasks without awaiting further cleanup. This does not roll back writes
+or guarantee that native work has stopped. Recovery uses persisted checkpoints;
+uncheckpointed work may be replayed even after a successful exit.
+Persisted table errors remain stopped across process restarts, including when
+shutdown interrupted a timed retry; restarting the process does not clear them.
+
+There is no internal shutdown grace timer or second-signal force-exit behavior.
+Destination or store operations can delay exit. Configure an external termination
+limit, such as Kubernetes' grace period followed by SIGKILL, which cannot run
+cleanup.
+
+## Activity probes
+
+Enable the optional HTTP listener with a top-level configuration block:
+
+```yaml title="base.yaml"
+health:
+  port: 9001
+  stall_timeout_ms: 300000
+```
+
+Omitting `health` disables it; `health: {}` uses these defaults. The listener
+accepts IPv4 and IPv6 connections on all interfaces, falling back to IPv4 when
+IPv6 sockets are unsupported.
+
+Use another port, such as `19001`, when running alongside the local Docker
+stack, which reserves port 9001 for ClickHouse.
+
+- `/livez`: returns 503 when monitored work stalls; otherwise 200, including
+  initialization, intentional waits, and graceful shutdown.
+- `/readyz`: returns 200 once the pipeline is running with monitored activity
+  and no stalls; otherwise 503. Initial sync need not be complete.
+
+Probes observe completed apply-loop iterations and destination copy batches,
+not durable replication progress. Parallel copy workers share one observation
+per table; the observation includes source commit and the final destination
+durability barrier. Slot acquisition and intentional catchup waits are exempt.
+With no observations, the process stays live but unready. Apply loops
+allow the greater of `stall_timeout_ms` and PostgreSQL's `wal_sender_timeout`
+(60-second fallback when disabled or unavailable). Tune the stall timeout above
+expected copy batch and finalization durations.
+
+For Kubernetes, use `/livez` for startup and liveness, and `/readyz` for readiness
+on the configured port. Configure probe timing and failure thresholds in the Pod
+specification. Enable probes only with a replicator image that supports these
+endpoints and has its health listener enabled.
 
 ## Recovery and operations
 

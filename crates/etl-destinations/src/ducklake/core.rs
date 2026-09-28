@@ -11,8 +11,8 @@ use etl::{
     data::{OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, TaskSet, WriteEventsDurability,
-        WriteEventsResult, WriteTableRowsResult,
+        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -22,6 +22,7 @@ use etl::{
         SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
     },
     store::{DestinationStore, TableStateType},
+    task::{TaskGroup, TaskRegistry, abort_and_join},
 };
 use etl_config::{
     ducklake_catalog_metadata_connect_options,
@@ -35,16 +36,11 @@ use metrics::gauge;
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
-#[cfg(unix)]
-use tokio::signal::unix::{SignalKind, signal};
 #[cfg(feature = "test-utils")]
 use tokio::sync::oneshot;
-use tokio::{
-    sync::{
-        OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
-        TryAcquireError,
-    },
-    task::JoinSet,
+use tokio::sync::{
+    OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, Semaphore,
+    TryAcquireError,
 };
 use tracing::{debug, info, warn};
 use url::Url;
@@ -526,10 +522,10 @@ pub struct DuckLakeDestination<S> {
     /// Global gate that excludes external maintenance from foreground and
     /// table-scoped mutations after pinned copy sessions have drained.
     checkpoint_gate: Arc<RwLock<()>>,
-    /// Gate held by connection-pinned copy sessions and acquired exclusively
-    /// by maintenance before it queues on [`Self::checkpoint_gate`].
+    /// Gate held by connection-pinned copy sessions and acquired exclusively by
+    /// maintenance before it queues on [`Self::checkpoint_gate`].
     copy_session_gate: Arc<RwLock<()>>,
-    tasks: TaskSet,
+    tasks: TaskRegistry,
     metrics_sampler: Arc<Option<DuckLakeMetricsSampler>>,
     metadata_schema: Arc<str>,
     expire_snapshots_older_than: Arc<str>,
@@ -779,47 +775,6 @@ fn table_write_slot(
     Arc::clone(slot)
 }
 
-/// Waits for process shutdown signals and interrupts active DuckDB calls.
-#[cfg(unix)]
-async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeConnectionManager>) {
-    let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
-        warn!("ducklake failed to register sigterm interrupt handler");
-        return;
-    };
-    let Ok(mut sigint) = signal(SignalKind::interrupt()) else {
-        warn!("ducklake failed to register sigint interrupt handler");
-        return;
-    };
-
-    let signal_name = tokio::select! {
-        _ = sigterm.recv() => "sigterm",
-        _ = sigint.recv() => "sigint",
-    };
-
-    let interrupted_connections = manager.interrupt_all_connections_for_process_shutdown();
-    info!(
-        interrupted_connections,
-        signal = signal_name,
-        "ducklake process shutdown signal received, interrupted active duckdb connections"
-    );
-}
-
-/// Waits for process shutdown signals and interrupts active DuckDB calls.
-#[cfg(not(unix))]
-async fn interrupt_duckdb_connections_on_process_shutdown(manager: Arc<DuckLakeConnectionManager>) {
-    if tokio::signal::ctrl_c().await.is_err() {
-        warn!("ducklake failed to register ctrl-c interrupt handler");
-        return;
-    }
-
-    let interrupted_connections = manager.interrupt_all_connections_for_process_shutdown();
-    info!(
-        interrupted_connections,
-        signal = "ctrl_c",
-        "ducklake process shutdown signal received, interrupted active duckdb connections"
-    );
-}
-
 impl<S> Destination for DuckLakeDestination<S>
 where
     S: DestinationStore,
@@ -829,6 +784,8 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
+        // The pipeline drains apply writes before requesting destination
+        // teardown.
         let interrupted_connections = self.manager.interrupt_all_connections_for_shutdown();
         info!(
             interrupted_connections,
@@ -837,8 +794,13 @@ where
         self.copy_buffers.lock().clear();
         self.failed_copy_buffers.lock().clear();
         self.copy_direct_to_parquet_tables.lock().clear();
+        // Own the sampler during teardown so an earlier failure aborts it.
+        let sampler =
+            self.metrics_sampler.as_ref().as_ref().and_then(|sampler| sampler.handle.lock().take());
         self.tasks.shutdown().await?;
-        self.shutdown_metrics_sampler().await?;
+        if let Some(sampler) = sampler {
+            abort_and_join(sampler).await?;
+        }
 
         Ok(())
     }
@@ -1131,8 +1093,8 @@ fn tombstone_columns_to_cleanup_ducklake(
         .collect()
 }
 
-/// Rejects recovery plans whose old and target schemas have the same cycle
-/// name set and therefore cannot be distinguished without a durable marker.
+/// Rejects recovery plans whose old and target schemas have the same cycle name
+/// set and therefore cannot be distinguished without a durable marker.
 fn ensure_ducklake_schema_plan_recoverable(
     table_name: &DuckLakeTableName,
     plan: &SchemaPlan,
@@ -1706,7 +1668,7 @@ where
     /// Pool initialization is blocking because DuckDB extensions are loaded and
     /// the lake catalog is attached synchronously. This constructor offloads
     /// that warm-up work to Tokio's blocking pool.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new(
         catalog_url: Url,
         data_path: Url,
@@ -1727,7 +1689,7 @@ where
     }
 
     /// Creates a new DuckLake destination with explicit writer configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_writer_config(
         catalog_url: Url,
         data_path: Url,
@@ -1756,7 +1718,7 @@ where
 
     /// Creates a new DuckLake destination with explicit external maintenance
     /// runtime configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_external_maintenance(
         catalog_url: Url,
         data_path: Url,
@@ -1780,7 +1742,7 @@ where
 
     /// Creates a new DuckLake destination with table sorting and external
     /// maintenance configuration.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub async fn new_with_table_sorting_and_external_maintenance(
         catalog_url: Url,
         data_path: Url,
@@ -1805,7 +1767,7 @@ where
     }
 
     /// Creates a new DuckLake destination from fully resolved runtime policies.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     async fn new_inner(
         catalog_url: Url,
         data_path: Url,
@@ -2017,7 +1979,7 @@ where
             blocking_slots: Arc::clone(&blocking_slots),
             checkpoint_gate: Arc::clone(&checkpoint_gate),
             copy_session_gate,
-            tasks: TaskSet::new(),
+            tasks: TaskRegistry::new(),
             metrics_sampler: Arc::new(None),
             metadata_schema: Arc::clone(&metadata_schema),
             expire_snapshots_older_than: Arc::clone(&expire_snapshots_older_than),
@@ -2044,14 +2006,7 @@ where
             applied_batches_table_created,
             streaming_progress_table_created,
         };
-        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(pool_size as f64);
-        let shutdown_signal_manager = Arc::clone(&manager);
-        destination
-            .tasks
-            .spawn_with(move || async move {
-                interrupt_duckdb_connections_on_process_shutdown(shutdown_signal_manager).await;
-            })
-            .await;
+        gauge!(ETL_DUCKLAKE_POOL_SIZE).set(f64::from(pool_size));
         destination.metrics_sampler = Arc::new(
             spawn_ducklake_metrics_sampler(
                 metadata_schema.to_string(),
@@ -2324,8 +2279,8 @@ where
     /// ambiguous post-commit failure can detect already applied rows.
     ///
     /// Initial-copy rows are written directly to Parquet files. This avoids
-    /// accumulating large snapshot loads in the catalog when source batches
-    /// are smaller than the regular streaming inline threshold.
+    /// accumulating large snapshot loads in the catalog when source batches are
+    /// smaller than the regular streaming inline threshold.
     async fn write_table_rows_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
@@ -2560,8 +2515,8 @@ where
         Ok(())
     }
 
-    /// Reserves process-wide accepted-copy capacity, flushing the current
-    /// table first when its existing staged rows are preventing progress.
+    /// Reserves process-wide accepted-copy capacity, flushing the current table
+    /// first when its existing staged rows are preventing progress.
     #[hotpath::measure]
     async fn reserve_copy_buffer_capacity(
         &self,
@@ -2930,8 +2885,8 @@ where
                 if !active_sort_order_matches(&active, &columns) {
                     statements.push(build_set_sorted_by_sql_ducklake(table_name, &columns));
                 }
-                // Keep foreground insert latency unchanged. Flush and compaction
-                // still use the table's active sort order.
+                // Keep foreground insert latency unchanged. Flush and
+                // compaction still use the table's active sort order.
                 statements.push(build_disable_sort_on_insert_sql_ducklake(table_name));
                 statements.join(";\n")
             }
@@ -3136,7 +3091,8 @@ where
             let mut table_id_to_mutations: HashMap<TableId, Vec<TableMutationSegment>> =
                 HashMap::new();
 
-            // Accumulate row events, stopping at the first DDL or truncate boundary.
+            // Accumulate row events, stopping at the first DDL or truncate
+            // boundary.
             while let Some(event) = event_iter.peek() {
                 if matches!(event, Event::Relation(_) | Event::Truncate(_)) {
                     break;
@@ -3256,7 +3212,7 @@ where
             if !table_id_to_mutations.is_empty() {
                 self.ensure_applied_batches_table_exists().await?;
                 self.ensure_streaming_progress_table_exists().await?;
-                let mut join_set = JoinSet::new();
+                let mut join_set = TaskGroup::new();
 
                 for (_, mutation_segments) in table_id_to_mutations {
                     let destination = self.clone();
@@ -3282,7 +3238,8 @@ where
                                 );
                                 continue;
                             }
-                            // Schema reconciliation also acquires the table write slot.
+                            // Schema reconciliation also acquires the table
+                            // write slot.
                             drop(replay_table_write_permit);
                             let ready_table_name = destination
                                 .ensure_table_ready_for_streaming_schema(
@@ -3335,22 +3292,19 @@ where
                     });
                 }
 
-                while let Some(result) = join_set.join_next().await {
-                    result.map_err(|_| {
-                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake write task panicked")
-                    })??;
-                }
+                join_set.wait().await?;
             }
 
-            // Apply schema changes sequentially before any later row events
-            // are encoded with the new replicated schema.
+            // Apply schema changes sequentially before any later row events are
+            // encoded with the new replicated schema.
             while let Some(Event::Relation(_)) = event_iter.peek() {
                 if let Some(Event::Relation(relation)) = event_iter.next() {
                     self.handle_relation_event(&relation.replicated_table_schema).await?;
                 }
             }
 
-            // Collect contiguous truncate events while preserving table-local order.
+            // Collect contiguous truncate events while preserving table-local
+            // order.
             let mut truncate_table_ids: HashMap<
                 TableId,
                 (ReplicatedTableSchema, Vec<TrackedTruncateEvent>),
@@ -3383,7 +3337,7 @@ where
             if !truncate_table_ids.is_empty() {
                 self.ensure_applied_batches_table_exists().await?;
                 self.ensure_streaming_progress_table_exists().await?;
-                let mut join_set = JoinSet::new();
+                let mut join_set = TaskGroup::new();
 
                 for (_, (replicated_table_schema, truncates)) in truncate_table_ids {
                     let destination = self.clone();
@@ -3403,7 +3357,8 @@ where
                             );
                             return Ok(());
                         }
-                        // Schema reconciliation also acquires the table write slot.
+                        // Schema reconciliation also acquires the table write
+                        // slot.
                         drop(replay_table_write_permit);
                         let ready_table_name = destination
                             .ensure_table_ready_for_streaming_schema(&replicated_table_schema)
@@ -3429,11 +3384,7 @@ where
                     });
                 }
 
-                while let Some(result) = join_set.join_next().await {
-                    result.map_err(|_| {
-                        etl_error!(ErrorKind::ApplyWorkerPanic, "DuckLake truncate task panicked")
-                    })??;
-                }
+                join_set.wait().await?;
             }
         }
 
@@ -4127,26 +4078,6 @@ where
             .await
     }
 
-    /// Stops the background DuckLake metrics sampler.
-    async fn shutdown_metrics_sampler(&self) -> EtlResult<()> {
-        if let Some(metrics_sampler) = &*self.metrics_sampler {
-            let _ = metrics_sampler.shutdown_tx.send(());
-            let handle = metrics_sampler.handle.lock().take();
-            if let Some(handle) = handle {
-                handle.abort();
-                if let Err(err) = handle.await
-                    && !err.is_cancelled()
-                {
-                    return Err(etl_error!(
-                        ErrorKind::ApplyWorkerPanic,
-                        "DuckLake metrics sampler task panicked"
-                    ));
-                }
-            }
-        }
-
-        Ok(())
-    }
     /// Returns how many COPY-pool DuckDB connections have been initialized for
     /// tests.
     #[cfg(feature = "test-utils")]

@@ -1,4 +1,4 @@
-use std::{fmt, num::NonZeroI32, sync::Arc, time::Duration};
+use std::{fmt, future::Future, num::NonZeroI32, sync::Arc, time::Duration};
 
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
@@ -8,7 +8,6 @@ use etl_postgres::{
     version::POSTGRES_17,
 };
 use pg_escape::{quote_identifier, quote_literal};
-use postgres_replication::LogicalReplicationStream;
 use rustls::{
     ClientConfig,
     pki_types::{CertificateDer, pem::PemObject},
@@ -33,6 +32,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
+    postgres::{FeedbackHandle, ReplicationMessageStream},
     schema::{TableId, TableName},
 };
 
@@ -51,13 +51,13 @@ const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replicati
 
 /// Builds connection options for logical replication connections.
 ///
-/// Disables statement, lock, and idle-in-transaction timeouts because
-/// replication streams, slot creation, and initial table synchronization can
-/// legitimately run for a long time.
+/// Leaves statement and idle-in-transaction timeouts disabled for long-running
+/// replication and copy work. Lock waits are bounded except during slot
+/// creation, which temporarily disables the lock timeout in its transaction.
 fn replication_options(application_name: String) -> PgConnectionOptions {
     PgConnectionOptions::builder(application_name)
         .statement_timeout(0)
-        .lock_timeout(0)
+        .lock_timeout(30_000)
         .idle_in_transaction_session_timeout(0)
         .build()
 }
@@ -81,11 +81,17 @@ impl ConnectionKind {
 }
 
 /// Builds a rustls client config from PEM-encoded trusted root certificates.
+///
+/// Rejects bundles with no certificates before constructing the client config.
 fn tls_client_config_from_root_certs(trusted_root_certs: &str) -> EtlResult<ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(trusted_root_certs.as_bytes()) {
         let cert = cert?;
         root_store.add(cert)?;
+    }
+
+    if root_store.is_empty() {
+        bail!(ErrorKind::ConfigError, "Source TLS trust bundle contains no certificates");
     }
 
     Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
@@ -172,13 +178,21 @@ where
     T: MakeTlsConnect<Socket>,
     T::Stream: Send + 'static,
 {
-    // We use this watch channel to send connection updates without relying on the
-    // errors/terminations propagated by the active connection consumers.
+    // We use this watch channel to send connection updates without relying on
+    // the errors/terminations propagated by the active connection consumers.
     let (updates_tx, updates_rx) = watch::channel(PostgresConnectionUpdate::Running);
 
     let span = tracing::Span::current();
     let task = async move {
-        let result = connection.await;
+        let result = tokio::select! {
+            biased;
+
+            // The request channel alone waits for outstanding server replies.
+            // No client or observer remains to use them once this channel closes.
+            _ = updates_tx.closed() => return,
+
+            result = connection => result,
+        };
 
         match result {
             Err(err) => {
@@ -200,10 +214,9 @@ where
     }
     .instrument(span);
 
-    // There is no need to track the connection task via the `JoinHandle` since the
-    // `Client`, which returned the connection, will automatically terminate the
-    // connection when dropped.
-    tokio::spawn(task);
+    // The client and its active observers own the receiver side. Closing it
+    // stops the driver even if PostgreSQL never answers an outstanding query.
+    drop(tokio::spawn(task));
 
     updates_rx
 }
@@ -419,11 +432,10 @@ impl PgReplicationClient {
     /// transaction pinned to the slot's snapshot.
     ///
     /// A `REPEATABLE READ` transaction is begun first, then the slot is created
-    /// with `USE_SNAPSHOT` which pins the transaction to the slot's
-    /// consistent snapshot. The transaction must be kept open for the
-    /// duration of any operations that depend on this snapshot (e.g. schema
-    /// fetches, table copies, or `pg_export_snapshot()` calls
-    /// for child connections).
+    /// with `USE_SNAPSHOT` which pins the transaction to the slot's consistent
+    /// snapshot. The transaction must be kept open for the duration of any
+    /// operations that depend on this snapshot (e.g. schema fetches, table
+    /// copies, or `pg_export_snapshot()` calls for child connections).
     ///
     /// `failover` requests PostgreSQL 17+ standby synchronization for this
     /// slot. The option applies only to this creation operation and is not
@@ -439,10 +451,14 @@ impl PgReplicationClient {
         let server_version = self.server_version;
         let connection_updates_rx = self.connection_updates_rx();
 
-        let transaction = self.begin_tx().await?;
-        let slot = PgReplicationQueryTarget::Transaction(&transaction)
+        let transaction = self.begin_slot_creation_transaction().await?;
+        let slot = PgReplicationQueryTarget::new(&transaction)
             .create_slot(slot_name, SnapshotAction::Use, failover)
             .await?;
+
+        // Only slot creation needs unlimited lock waits; schema and copy
+        // queries do not.
+        transaction.simple_query("set local lock_timeout = default").await?;
 
         Ok((
             PgReplicationTransaction::new(
@@ -462,11 +478,19 @@ impl PgReplicationClient {
     /// slot. The option applies only to this creation operation and is not
     /// retained by the client.
     pub async fn create_slot(
-        &self,
+        &mut self,
         slot_name: &str,
         failover: bool,
     ) -> EtlResult<CreateSlotResult> {
-        self.create_slot_internal(slot_name, SnapshotAction::NoExport, failover).await
+        self.validate_replication_slot_failover_support(failover)?;
+
+        let transaction = self.begin_slot_creation_transaction().await?;
+        let slot = PgReplicationQueryTarget::new(&transaction)
+            .create_slot(slot_name, SnapshotAction::NoExport, failover)
+            .await?;
+        transaction.commit().await?;
+
+        Ok(slot)
     }
 
     /// Gets the state of a replication slot by name.
@@ -486,12 +510,13 @@ impl PgReplicationClient {
         let results = self.client.simple_query(&query).await?;
         for result in results {
             if let SimpleQueryMessage::Row(row) = result {
-                // wal_status can be: 'reserved', 'extended', 'unreserved', or 'lost'
-                // A slot is invalidated when wal_status is 'lost'
+                // wal_status can be: 'reserved', 'extended', 'unreserved', or
+                // 'lost' A slot is invalidated when wal_status is 'lost'
                 let wal_status: Option<String> = row.try_get("wal_status")?.map(String::from);
 
-                // A NULL status means PostgreSQL cannot determine WAL availability from the
-                // slot's restart LSN, for example because the slot has not reserved WAL yet.
+                // A NULL status means PostgreSQL cannot determine WAL
+                // availability from the slot's restart LSN, for example because
+                // the slot has not reserved WAL yet.
                 return match wal_status.as_deref() {
                     Some("lost") => Ok(SlotState::Invalidated),
                     Some(_) | None => Ok(SlotState::NotInvalidated),
@@ -589,8 +614,8 @@ impl PgReplicationClient {
 
     /// Deletes a replication slot with the specified name if it exists.
     ///
-    /// This method returns `Ok(())` when the slot is missing and propagates
-    /// any other error from [`PgReplicationClient::delete_slot`].
+    /// This method returns `Ok(())` when the slot is missing and propagates any
+    /// other error from [`PgReplicationClient::delete_slot`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
         self.delete_slot_internal(slot_name, false).await
     }
@@ -645,8 +670,8 @@ impl PgReplicationClient {
     /// # Errors
     ///
     /// Returns [`ErrorKind::ConfigError`] if the publication contains no
-    /// tables. This typically indicates a misconfigured publication that
-    /// won't replicate any data.
+    /// tables. This typically indicates a misconfigured publication that won't
+    /// replicate any data.
     pub async fn get_publication_table_ids(
         &self,
         publication_name: &str,
@@ -681,16 +706,25 @@ impl PgReplicationClient {
     /// slot.
     ///
     /// The stream will begin reading changes from the provided `start_lsn`.
+    /// Supplying `keep_alive_deadline_duration` enables status feedback and
+    /// returns its independent handle and sender future for the caller to own
+    /// and spawn. The reader does not own or submit feedback. `None` disables
+    /// all feedback, allowing protocol tests to read and replay without
+    /// acknowledging WAL.
     pub async fn start_logical_replication(
         &self,
         publication_name: &str,
         slot_name: &str,
         start_lsn: PgLsn,
-    ) -> EtlResult<LogicalReplicationStream> {
+        keep_alive_deadline_duration: Option<Duration>,
+    ) -> EtlResult<(
+        ReplicationMessageStream,
+        Option<(FeedbackHandle, impl Future<Output = EtlResult<()>> + Send + 'static)>,
+    )> {
         info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 
-        // Do not convert the query or the options to lowercase, see comment in
-        // `create_slot_internal`.
+        // PostgreSQL requires uppercase keywords in replication protocol
+        // commands.
         let options = format!(
             r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
             quote_literal(quote_identifier(publication_name).as_ref()),
@@ -704,16 +738,14 @@ impl PgReplicationClient {
         );
 
         let copy_stream = self.client.copy_both_simple::<bytes::Bytes>(&query).await?;
-        let stream = LogicalReplicationStream::new(copy_stream);
 
-        Ok(stream)
+        Ok(ReplicationMessageStream::create(copy_stream, keep_alive_deadline_duration))
     }
 
     /// Begins a new transaction with repeatable read isolation level.
     ///
     /// The transaction doesn't make any assumptions about the snapshot in use,
-    /// since this is a concern of the statements issued within the
-    /// transaction.
+    /// since this is a concern of the statements issued within the transaction.
     pub(super) async fn begin_tx(&mut self) -> EtlResult<Transaction<'_>> {
         let transaction = self
             .client
@@ -726,24 +758,16 @@ impl PgReplicationClient {
         Ok(transaction)
     }
 
-    /// Returns this client as a query target.
-    fn target(&self) -> PgReplicationQueryTarget<'_, '_> {
-        PgReplicationQueryTarget::Client(&self.client)
-    }
-
-    /// Internal helper method to create a replication slot.
+    /// Begins a transaction that lets slot creation wait for old writers.
     ///
-    /// The `snapshot_action` controls how the slot's snapshot is handled during
-    /// creation.
-    async fn create_slot_internal(
-        &self,
-        slot_name: &str,
-        snapshot_action: SnapshotAction,
-        failover: bool,
-    ) -> EtlResult<CreateSlotResult> {
-        self.validate_replication_slot_failover_support(failover)?;
-
-        self.target().create_slot(slot_name, snapshot_action, failover).await
+    /// The local override is reset when the transaction ends, including when an
+    /// error drops the transaction and queues a rollback. Setting a GUC does
+    /// not acquire a snapshot, so `USE_SNAPSHOT` can still establish it
+    /// afterwards.
+    async fn begin_slot_creation_transaction(&mut self) -> EtlResult<Transaction<'_>> {
+        let transaction = self.begin_tx().await?;
+        transaction.simple_query("set local lock_timeout = 0").await?;
+        Ok(transaction)
     }
 
     /// Rejects a failover-slot request when the server explicitly reports a
@@ -765,8 +789,8 @@ impl PgReplicationClient {
     async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
         debug!(slot_name, "deleting replication slot");
 
-        // Do not convert the query or the options to lowercase, see comment in
-        // `create_slot_internal`.
+        // PostgreSQL requires uppercase keywords in replication protocol
+        // commands.
         let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
 
         let Ok(delete_result) =
@@ -815,19 +839,111 @@ impl PgReplicationClient {
 
 #[cfg(test)]
 mod tests {
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+    };
+
     use super::*;
+
+    /// Certificate-less bundles fail before a crypto provider or connection
+    /// is needed, including nonblank input silently skipped by the PEM parser.
+    #[test]
+    fn tls_client_config_rejects_bundles_without_certificates() {
+        // These PEM payloads contain a dummy byte; their labels are filtered
+        // out before certificate DER parsing.
+        for (case, trusted_root_certs) in [
+            ("empty", ""),
+            ("whitespace", " \t\r\n"),
+            ("plain_text", "placeholder-certificate"),
+            (
+                "trusted_certificate",
+                "-----BEGIN TRUSTED CERTIFICATE-----\nAA==\n-----END TRUSTED CERTIFICATE-----\n",
+            ),
+            ("private_key", "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n"),
+        ] {
+            let err = tls_client_config_from_root_certs(trusted_root_certs).unwrap_err();
+
+            assert_eq!(err.kind(), ErrorKind::ConfigError, "{case}");
+            assert_eq!(
+                err.description(),
+                Some("Source TLS trust bundle contains no certificates"),
+                "{case}"
+            );
+        }
+    }
+
+    /// Closing the owner channel must release a socket even when the server
+    /// never responds to an already-dispatched query.
+    #[tokio::test]
+    async fn dropping_client_and_observers_stops_stalled_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (query_tx, query_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let startup_len = socket.read_u32().await.unwrap();
+            let mut startup = vec![0; usize::try_from(startup_len - 4).unwrap()];
+            socket.read_exact(&mut startup).await.unwrap();
+            // AuthenticationOk followed by ReadyForQuery completes startup.
+            socket.write_all(b"R\0\0\0\x08\0\0\0\0Z\0\0\0\x05I").await.unwrap();
+            assert_eq!(socket.read_u8().await.unwrap(), b'Q');
+            let query_len = socket.read_u32().await.unwrap();
+            let mut query = vec![0; usize::try_from(query_len - 4).unwrap()];
+            socket.read_exact(&mut query).await.unwrap();
+            query_tx.send(()).unwrap();
+            // Deliberately omit a response. Only owner cancellation can close
+            // this connection while its query remains outstanding.
+            let mut remainder = Vec::new();
+            socket.read_to_end(&mut remainder).await.unwrap();
+        });
+        let (client, connection) = Config::new()
+            .host("127.0.0.1")
+            .port(port)
+            .user("unused")
+            .dbname("unused")
+            .ssl_mode(tokio_postgres::config::SslMode::Disable)
+            .connect(NoTls)
+            .await
+            .unwrap();
+        let observer = spawn_postgres_connection::<NoTls>(connection);
+        let mut query = Box::pin(client.simple_query("select 1"));
+        tokio::select! {
+            result = &mut query => panic!("Query completed without a server response: {result:?}"),
+
+            _ = query_rx => {}
+        }
+        drop(query);
+        drop(client);
+        drop(observer);
+
+        tokio::time::timeout(Duration::from_secs(5), server).await.unwrap().unwrap();
+    }
+
+    /// Replication bounds lock waits without limiting copy duration or idle
+    /// snapshots.
+    #[test]
+    fn replication_timeout_defaults() {
+        let options = replication_options(APP_NAME_REPLICATOR_REPLICATION.to_owned());
+        assert_eq!(options.lock_timeout, 30_000);
+        assert_eq!(options.statement_timeout, 0);
+        assert_eq!(options.idle_in_transaction_session_timeout, 0);
+    }
 
     #[test]
     fn replication_base_name_fits_worker_suffix_without_clamping() {
-        // --- GIVEN: a worker suffix with pipeline id and table oid summing to 15
-        // digits, the documented no-clamp bound for the replication base name ---
+        // --- GIVEN: a worker suffix with pipeline id and table oid summing to
+        // 15 digits, the documented no-clamp bound for the replication
+        // base name ---
         let name = table_sync_worker_application_name(
             APP_NAME_REPLICATOR_REPLICATION,
             99_999,
             TableId::new(u32::MAX),
         );
 
-        // --- THEN: the name fits Postgres's 63-byte limit with the base intact ---
+        // --- THEN: the name fits Postgres's 63-byte limit with the base intact
+        // ---
         assert!(name.len() <= 63, "worker application_name '{name}' exceeds Postgres limit");
         assert!(name.starts_with(APP_NAME_REPLICATOR_REPLICATION));
     }

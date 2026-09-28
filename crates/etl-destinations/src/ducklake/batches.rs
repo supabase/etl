@@ -3,9 +3,8 @@
 //! each attempt can replay the same SQL and replay bookkeeping. Copy batches
 //! receive opaque upstream ids and retain them across destination-local
 //! retries. Streaming mutation and truncate batches advance a per-table
-//! progress watermark.
-//! Bounded batch sizes preserve table-local ordering without letting one
-//! transaction grow unbounded.
+//! progress watermark. Bounded batch sizes preserve table-local ordering
+//! without letting one transaction grow unbounded.
 
 #[cfg(feature = "test-utils")]
 use std::sync::LazyLock;
@@ -74,9 +73,9 @@ const SQL_DELETE_BATCH_SIZE: usize = 16;
 /// Maximum number of ordered CDC mutations grouped into one atomic DuckLake
 /// transaction.
 ///
-/// Keeping mixed insert/delete/update streams in the same batch improves
-/// insert throughput on interleaved workloads while still capping transaction
-/// lifetime for DuckLake conflict handling.
+/// Keeping mixed insert/delete/update streams in the same batch improves insert
+/// throughput on interleaved workloads while still capping transaction lifetime
+/// for DuckLake conflict handling.
 const CDC_MUTATION_BATCH_SIZE: usize = 16;
 /// ETL-managed marker table storing per-table applied copy batches.
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
@@ -2560,7 +2559,7 @@ mod tests {
     use std::error::Error as _;
 
     use etl::{
-        data::{OldTableRow, PartialTableRow, UpdatedTableRow},
+        data::{OldTableRow, PartialTableRow, Timestamp, UpdatedTableRow},
         destination::TableCopyAttemptId,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
@@ -2798,12 +2797,12 @@ mod tests {
                 TableRow::new(vec![
                     Cell::I32(1),
                     Cell::String("alice".to_owned()),
-                    Cell::Timestamp(
+                    Cell::Timestamp(Timestamp::Value(
                         chrono::NaiveDate::from_ymd_opt(2026, 1, 2)
                             .unwrap()
                             .and_hms_opt(3, 4, 5)
                             .unwrap(),
-                    ),
+                    )),
                 ]),
                 TableRow::new(vec![Cell::I32(2), Cell::Null, Cell::Null]),
             ],

@@ -115,8 +115,8 @@ pub trait StreamClient: Send + Sync + 'static {
 
     /// Insert a pre-built batch into a channel.
     ///
-    /// The `continuation_token` is the server sequencer from `open_channel`
-    /// or the previous `insert_rows` call.
+    /// The `continuation_token` is the server sequencer from `open_channel` or
+    /// the previous `insert_rows` call.
     fn insert_rows(
         &self,
         database: &str,

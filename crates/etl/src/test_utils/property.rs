@@ -2,15 +2,15 @@
 //!
 //! [`run_property`] runs cheap cases with a default two-second budget.
 //! [`run_expensive_property`] checks the budget after every case and defaults
-//! to 32 seconds. `PROPERTY_TEST_BUDGET_SECS` overrides either budget, so CI
-//! or local deep runs can raise it to minutes.
+//! to 32 seconds. `PROPERTY_TEST_BUDGET_SECS` overrides either budget, so CI or
+//! local deep runs can raise it to minutes.
 //!
 //! On failure the panic names the failing chunk's RNG seed. Set
 //! `PROPERTY_TEST_SEED` to that value to replay the chunk deterministically.
 //!
-//! The module also hosts the small helpers the value roundtrip properties
-//! share across crates: the sync-to-async bridge, bit-level float matchers,
-//! and strategies for values inside the Postgres envelope.
+//! The module also hosts the small helpers the value roundtrip properties share
+//! across crates: the sync-to-async bridge, bit-level float matchers, and
+//! strategies for values inside the Postgres envelope.
 
 use std::time::{Duration, Instant};
 
@@ -36,8 +36,8 @@ const DEFAULT_EXPENSIVE_PROPERTY_BUDGET_SECS: u64 = 32;
 
 /// Returns the wall-clock budget for one property.
 ///
-/// Panics on a malformed value instead of falling back to `default_secs`, so
-/// a deep run with a typoed budget fails loudly.
+/// Panics on a malformed value instead of falling back to `default_secs`, so a
+/// deep run with a typoed budget fails loudly.
 fn property_budget(default_secs: u64) -> Duration {
     let secs = std::env::var("PROPERTY_TEST_BUDGET_SECS").map_or(default_secs, |value| {
         value.parse().expect("PROPERTY_TEST_BUDGET_SECS must be an integer number of seconds")
@@ -103,9 +103,9 @@ fn run_property_with_config<S: Strategy>(
 /// Runs `check` on cheap generated values until the property budget elapses.
 ///
 /// Each chunk runs a fixed number of cases (`CASES_PER_CHUNK`) from a fresh
-/// random seed. On failure the value is shrunk by proptest and reported
-/// through a panic that also names the chunk seed, so the minimal failing
-/// input shows up in the test output and the chunk can be replayed with
+/// random seed. On failure the value is shrunk by proptest and reported through
+/// a panic that also names the chunk seed, so the minimal failing input shows
+/// up in the test output and the chunk can be replayed with
 /// `PROPERTY_TEST_SEED`.
 pub fn run_property<S: Strategy>(
     name: &str,
@@ -145,18 +145,18 @@ pub fn run_expensive_property<S: Strategy>(
 /// Runs an async future to completion from inside a synchronous proptest
 /// closure.
 ///
-/// Properties execute on a multi-threaded Tokio runtime worker, so blocking
-/// in place is safe and keeps background I/O (database connections, HTTP
-/// clients) driven.
+/// Properties execute on a multi-threaded Tokio runtime worker, so blocking in
+/// place is safe and keeps background I/O (database connections, HTTP clients)
+/// driven.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(future))
 }
 
 /// Compares floats bit-for-bit, treating every NaN payload as equal.
 ///
-/// Sign and value bits of non-NaN floats (including signed zeros) must
-/// survive a roundtrip exactly; NaN payloads are only required to stay NaN,
-/// since not every transport preserves them.
+/// Sign and value bits of non-NaN floats (including signed zeros) must survive
+/// a roundtrip exactly; NaN payloads are only required to stay NaN, since not
+/// every transport preserves them.
 pub fn f64_matches(expected: f64, parsed: f64) -> bool {
     if expected.is_nan() { parsed.is_nan() } else { expected.to_bits() == parsed.to_bits() }
 }
@@ -201,16 +201,14 @@ pub fn pg_text() -> impl Strategy<Value = String> {
 
 /// Microsecond-precision times of day, matching Postgres's time resolution.
 ///
-/// Fractional seconds are biased toward the rendering boundaries (whole
-/// seconds and whole milliseconds) so format-dependent consumers exercise
-/// every fraction shape instead of almost always drawing six-digit
-/// fractions.
+/// Fractional seconds are biased toward the rendering boundaries (whole seconds
+/// and whole milliseconds) so format-dependent consumers exercise every
+/// fraction shape instead of almost always drawing six-digit fractions.
 ///
-/// Postgres also accepts and stores `24:00:00`, but `chrono::NaiveTime`
-/// cannot represent it and the codec rejects it (a pinned known gap; see
-/// `time_falls_back_for_non_iso_shapes` in the codec tests). It stays
-/// outside the envelope until the codec and destinations decide how to
-/// carry it.
+/// Postgres also accepts and stores `24:00:00`, but `chrono::NaiveTime` cannot
+/// represent it and the codec rejects it (a pinned known gap; see
+/// `time_falls_back_for_non_iso_shapes` in the codec tests). It stays outside
+/// the envelope until the codec and destinations decide how to carry it.
 pub fn pg_time() -> impl Strategy<Value = NaiveTime> {
     let micros = prop_oneof![
         8 => 0u32..1_000_000,

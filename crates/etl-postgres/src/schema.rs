@@ -74,8 +74,8 @@ impl SnapshotId {
     /// Returns an inclusive snapshot upper bound for a WAL frontier.
     ///
     /// Every schema committed at or before `lsn` sorts at or below this value,
-    /// including every schema message sharing that commit LSN.
-    /// Use this method when an LSN represents a WAL frontier; comparing only
+    /// including every schema message sharing that commit LSN. Use this method
+    /// when an LSN represents a WAL frontier; comparing only
     /// [`SnapshotId::commit_lsn`] discards the within-transaction ordering
     /// component.
     pub fn at_lsn(lsn: PgLsn) -> Self {
@@ -258,9 +258,8 @@ type TypeModifier = i32;
 
 /// The size of the varlena header that Postgres adds to stored type modifiers.
 ///
-/// Postgres encodes type-specific parameters into `atttypmod` with a
-/// `VARHDRSZ` offset so that `-1` (no modifier) never collides with a valid
-/// encoded value.
+/// Postgres encodes type-specific parameters into `atttypmod` with a `VARHDRSZ`
+/// offset so that `-1` (no modifier) never collides with a valid encoded value.
 ///
 /// Postgres reference: `src/include/c.h`.
 const VARHDRSZ: i32 = 4;
@@ -289,8 +288,8 @@ pub struct NumericModifiers {
 /// Returns `None` when `modifier` is `-1`, which Postgres uses for
 /// unconstrained `NUMERIC` columns that have no explicit precision or scale.
 ///
-/// Postgres reference: `src/backend/utils/adt/numeric.c`,
-/// `numerictypmodin` / `numerictypmodout`.
+/// Postgres reference: `src/backend/utils/adt/numeric.c`, `numerictypmodin` /
+/// `numerictypmodout`.
 pub fn numeric_modifiers(modifier: TypeModifier) -> Option<NumericModifiers> {
     if modifier == -1 {
         return None;
@@ -549,8 +548,8 @@ impl ToSql for TableId {
 
 /// Represents the complete schema of a Postgres table.
 ///
-/// This type contains all metadata about a table including its name, OID,
-/// the schemas of all its columns, and a snapshot identifier for versioning.
+/// This type contains all metadata about a table including its name, OID, the
+/// schemas of all its columns, and a snapshot identifier for versioning.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TableSchema {
     /// The Postgres OID of the table.
@@ -650,7 +649,7 @@ mod tests {
     #[test]
     fn numeric_modifiers_negative_scale() {
         // NUMERIC(2, -3): typmod = ((2 << 16) | (-3i16 as u16 as i32)) + 4
-        let typmod = ((2i32 << 16) | ((-3i16 as u16) as i32)) + VARHDRSZ;
+        let typmod = ((2i32 << 16) | i32::from(-3i16 as u16)) + VARHDRSZ;
         let m = numeric_modifiers(typmod).unwrap();
         assert_eq!(m.p, 2);
         assert_eq!(m.s, -3);
@@ -659,7 +658,7 @@ mod tests {
     #[test]
     fn numeric_modifiers_min_negative_scale() {
         // NUMERIC(1000, -1000)
-        let typmod = ((1000i32 << 16) | ((-1000i16 as u16) as i32)) + VARHDRSZ;
+        let typmod = ((1000i32 << 16) | i32::from(-1000i16 as u16)) + VARHDRSZ;
         let m = numeric_modifiers(typmod).unwrap();
         assert_eq!(m.p, 1000);
         assert_eq!(m.s, -1000);
@@ -677,7 +676,7 @@ mod tests {
     #[test]
     fn numeric_modifiers_minimal() {
         // NUMERIC(1, 0)
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((1i32 << 16) | 0) + VARHDRSZ;
         let m = numeric_modifiers(typmod).unwrap();
         assert_eq!(m.p, 1);

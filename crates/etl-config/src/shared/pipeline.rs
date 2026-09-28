@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, Validate, ValidationError,
+    PgConnectionConfig, PgConnectionConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
 };
 
 /// Batch processing configuration for pipelines.
@@ -17,23 +17,22 @@ pub struct BatchConfig {
     /// filled batch.
     ///
     /// This is the latency bound for stream batching: once the first item
-    /// enters a batch, the batch is flushed when this timer elapses, even
-    /// if the byte target was not met.
+    /// enters a batch, the batch is flushed when this timer elapses, even if
+    /// the byte target was not met.
     ///
     /// In practice, flush happens on the first trigger between this timeout and
-    /// the memory-based byte target driven by
-    /// [`Self::memory_budget_ratio`].
+    /// the memory-based byte target driven by [`Self::memory_budget_ratio`].
     #[serde(default = "default_batch_max_fill_ms")]
     #[cfg_attr(feature = "utoipa", schema(example = 0))]
     pub max_fill_ms: u64,
     /// Maximum ratio of memory capacity targeted for decoded source batches.
     ///
-    /// This value is expressed as a ratio in the `(0.0, 1.0]` interval.
-    /// The resulting global target is divided across registered batch slots.
+    /// This value is expressed as a ratio in the `(0.0, 1.0]` interval. The
+    /// resulting global target is divided across registered batch slots.
     ///
     /// Together with [`Self::max_fill_ms`], this controls stream flushes:
-    /// batches flush either when their accumulated size estimate reaches
-    /// the advisory per-batch byte target or when the fill timeout elapses,
+    /// batches flush either when their accumulated size estimate reaches the
+    /// advisory per-batch byte target or when the fill timeout elapses,
     /// whichever happens first.
     ///
     /// This is a batching heuristic, not a memory allocator or a hard bound.
@@ -330,14 +329,15 @@ pub struct PipelineConfig {
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// The connection configuration for the Postgres instance to which the
-    /// pipeline connects for replication.
+    /// pipeline connects for replication. TLS requires a nonblank trusted
+    /// root certificate bundle.
     pub pg_connection: PgConnectionConfig,
     /// Optional Postgres connection configuration for pipeline state storage.
     ///
     /// When `None`, the pipeline state store should use
-    /// [`Self::pg_connection`]. This allows logical replication and table
-    /// copy to read from a standby while keeping the Postgres-backed state
-    /// store on a writable endpoint.
+    /// [`Self::pg_connection`]. This allows logical replication and table copy
+    /// to read from a standby while keeping the Postgres-backed state store on
+    /// a writable endpoint.
     #[serde(default)]
     pub store_pg_connection: Option<PgConnectionConfig>,
     /// Configuration for the pipeline's logical replication slots.
@@ -349,7 +349,9 @@ pub struct PipelineConfig {
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
-    /// This setting is shared by table sync and apply workers.
+    /// This setting is shared by table sync and apply workers. It must be
+    /// between 1,000 and 86,400,000 milliseconds (one second through 24 hours),
+    /// inclusive. The default is 10,000 milliseconds.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic timed retry attempts before failing the
@@ -358,10 +360,17 @@ pub struct PipelineConfig {
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
-    /// Maximum number of table sync workers that can run at a time
+    /// Maximum number of table sync workers that can run at a time.
+    ///
+    /// Must be positive. The product with
+    /// [`Self::max_copy_connections_per_table`] must not exceed
+    /// [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Maximum worker connections per table during initial copy.
+    ///
+    /// Must be positive. The product with [`Self::max_table_sync_workers`]
+    /// must not exceed [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     ///
     /// Initial copy always uses ctid range work items, including when this is
     /// set to 1. ETL may plan more ctid ranges than worker connections so
@@ -384,36 +393,47 @@ pub struct PipelineConfig {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
-    /// Number of milliseconds between periodic table sync monitor checks,
-    /// such as reporting replication lag and checking replication slot
-    /// validity during table copy. Also used by the apply worker's periodic
-    /// replication lag sampling.
+    /// Number of milliseconds between periodic table sync monitor checks, such
+    /// as reporting replication lag and checking replication slot validity
+    /// during table copy. Also used by the apply worker's periodic replication
+    /// lag sampling.
     #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
     pub table_sync_monitor_refresh_interval_ms: u64,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
-    /// Whether `Pipeline::start` should run the source migrations that
-    /// install the schema helper functions and the `ddl_command_end` event
-    /// trigger.
+    /// Whether `Pipeline::start` should run the source migrations that install
+    /// the schema helper functions and the `ddl_command_end` event trigger.
     ///
     /// Defaults to `true`, preserving the existing behavior. Set to `false`
     /// when the replication role is intentionally de-elevated and lacks the
-    /// superuser privilege required to `CREATE EVENT TRIGGER`; in that case
-    /// the source objects must be installed out-of-band by an admin (see
-    /// the source migrations under `crates/etl/migrations/source`).
-    /// Pipelines that do not rely on DDL-change propagation can safely run
-    /// with this disabled.
+    /// superuser privilege required to `CREATE EVENT TRIGGER`; in that case the
+    /// source objects must be installed out-of-band by an admin (see the source
+    /// migrations under `crates/etl/migrations/source`). Pipelines that do not
+    /// rely on DDL-change propagation can safely run with this disabled.
     #[serde(default = "default_run_source_migrations")]
     pub run_source_migrations: bool,
 }
 
 impl PipelineConfig {
+    /// Minimum retry delay in milliseconds, limiting rapid automatic retries.
+    pub const MIN_TABLE_ERROR_RETRY_DELAY_MS: u64 = 1_000;
+
+    /// Maximum retry delay in milliseconds, keeping automatic recovery within
+    /// one day.
+    pub const MAX_TABLE_ERROR_RETRY_DELAY_MS: u64 = 86_400_000;
+
     /// Default retry delay in milliseconds between table error retries.
     pub const DEFAULT_TABLE_ERROR_RETRY_DELAY_MS: u64 = 10000;
 
     /// Default maximum number of retry attempts for table errors.
     pub const DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS: u32 = 5;
+
+    /// Maximum aggregate copy worker connections configured for one pipeline.
+    ///
+    /// Parent replication connections and other database connections are
+    /// additional to this ceiling.
+    pub const MAX_TOTAL_COPY_CONNECTIONS: u32 = 256;
 
     /// Default maximum number of concurrent table sync workers.
     pub const DEFAULT_MAX_TABLE_SYNC_WORKERS: u16 = 4;
@@ -437,6 +457,24 @@ impl PipelineConfig {
     }
 }
 
+/// Rejects a blank trust bundle when source TLS is enabled.
+///
+/// Replication trusts only the certificates supplied in
+/// [`crate::shared::TlsConfig::trusted_root_certs`]. This source-specific check
+/// does not apply to SQLx store connections, which also load default roots.
+/// Certificate parsing and the requirement for at least one trust anchor are
+/// checked when the replication TLS config is built.
+pub fn validate_source_tls_config(tls: &TlsConfig) -> Result<(), ValidationError> {
+    if tls.enabled && tls.trusted_root_certs.trim().is_empty() {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "pg_connection.tls.trusted_root_certs".to_owned(),
+            constraint: "must not be blank when source TLS is enabled".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 impl Validate for PipelineConfig {
     /// Validates pipeline configuration settings.
     fn validate(&self) -> Result<(), ValidationError> {
@@ -449,8 +487,47 @@ impl Validate for PipelineConfig {
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
         )?;
+        validate_source_tls_config(&self.pg_connection.tls)?;
+        validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
         self.table_sync_copy.validate()
     }
+}
+
+/// Validates positive concurrency and the aggregate initial-copy ceiling.
+///
+/// The configured worker count times the per-table copy connection count must
+/// not exceed [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
+pub fn validate_copy_concurrency(
+    max_table_sync_workers: u16,
+    max_copy_connections_per_table: u16,
+) -> Result<(), ValidationError> {
+    if max_table_sync_workers == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_table_sync_workers".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    if max_copy_connections_per_table == 0 {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_copy_connections_per_table".to_owned(),
+            constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    let total_copy_connections =
+        u32::from(max_table_sync_workers) * u32::from(max_copy_connections_per_table);
+    if total_copy_connections > PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "max_copy_connections_per_table".to_owned(),
+            constraint: format!(
+                "multiplied by `max_table_sync_workers` must not exceed {}",
+                PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS,
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Validates pipeline settings shared by secret and without-secret configs.
@@ -465,23 +542,11 @@ fn validate_pipeline_settings(
 ) -> Result<(), ValidationError> {
     batch.validate()?;
 
-    if max_table_sync_workers == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "max_table_sync_workers".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
+    validate_copy_concurrency(max_table_sync_workers, max_copy_connections_per_table)?;
 
     if table_error_retry_max_attempts == 0 {
         return Err(ValidationError::InvalidFieldValue {
             field: "table_error_retry_max_attempts".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
-
-    if max_copy_connections_per_table == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "max_copy_connections_per_table".to_owned(),
             constraint: "must be greater than 0".to_owned(),
         });
     }
@@ -501,6 +566,27 @@ fn validate_pipeline_settings(
         return Err(ValidationError::InvalidFieldValue {
             field: "table_sync_monitor_refresh_interval_ms".to_owned(),
             constraint: "must be greater than 0".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validates the delay shared by automatic table sync and apply retries.
+///
+/// Accepts one second through 24 hours, inclusive.
+pub fn validate_table_error_retry_delay_ms(delay_ms: u64) -> Result<(), ValidationError> {
+    if !(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS
+        ..=PipelineConfig::MAX_TABLE_ERROR_RETRY_DELAY_MS)
+        .contains(&delay_ms)
+    {
+        return Err(ValidationError::InvalidFieldValue {
+            field: "table_error_retry_delay_ms".to_owned(),
+            constraint: format!(
+                "must be between {} and {} milliseconds (inclusive)",
+                PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS,
+                PipelineConfig::MAX_TABLE_ERROR_RETRY_DELAY_MS,
+            ),
         });
     }
 
@@ -539,9 +625,8 @@ const fn default_run_source_migrations() -> bool {
     true
 }
 
-/// Same as [`PipelineConfig`] but without secrets. This type
-/// implements [`Serialize`] because it does not contains secrets
-/// so is safe to serialize.
+/// Same as [`PipelineConfig`] but without secrets. This type implements
+/// [`Serialize`] because it does not contains secrets so is safe to serialize.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineConfigWithoutSecrets {
     /// The unique identifier for this pipeline.
@@ -552,7 +637,8 @@ pub struct PipelineConfigWithoutSecrets {
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// The connection configuration for the Postgres instance to which the
-    /// pipeline connects for replication.
+    /// pipeline connects for replication. TLS requires a nonblank trusted
+    /// root certificate bundle.
     pub pg_connection: PgConnectionConfigWithoutSecrets,
     /// Optional Postgres connection configuration for pipeline state storage.
     ///
@@ -568,7 +654,9 @@ pub struct PipelineConfigWithoutSecrets {
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
-    /// This setting is shared by table sync and apply workers.
+    /// This setting is shared by table sync and apply workers. It must be
+    /// between 1,000 and 86,400,000 milliseconds (one second through 24 hours),
+    /// inclusive. The default is 10,000 milliseconds.
     #[serde(default = "default_table_error_retry_delay_ms")]
     pub table_error_retry_delay_ms: u64,
     /// Maximum number of automatic timed retry attempts before failing the
@@ -577,10 +665,17 @@ pub struct PipelineConfigWithoutSecrets {
     /// This setting is shared by table sync and apply workers.
     #[serde(default = "default_table_error_retry_max_attempts")]
     pub table_error_retry_max_attempts: u32,
-    /// Maximum number of table sync workers that can run at a time
+    /// Maximum number of table sync workers that can run at a time.
+    ///
+    /// Must be positive. The product with
+    /// [`Self::max_copy_connections_per_table`] must not exceed
+    /// [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     #[serde(default = "default_max_table_sync_workers")]
     pub max_table_sync_workers: u16,
     /// Maximum worker connections per table during initial copy.
+    ///
+    /// Must be positive. The product with [`Self::max_table_sync_workers`]
+    /// must not exceed [`PipelineConfig::MAX_TOTAL_COPY_CONNECTIONS`].
     ///
     /// Initial copy always uses ctid range work items, including when this is
     /// set to 1. ETL may plan more ctid ranges than worker connections so
@@ -628,6 +723,8 @@ impl Validate for PipelineConfigWithoutSecrets {
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
         )?;
+        validate_source_tls_config(&self.pg_connection.tls)?;
+        validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
         self.table_sync_copy.validate()
     }
 }
@@ -658,7 +755,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shared::{TcpKeepaliveConfig, TlsConfig};
+    use crate::shared::TcpKeepaliveConfig;
 
     fn pg_connection(host: &str, port: u16) -> PgConnectionConfig {
         PgConnectionConfig {
@@ -671,6 +768,149 @@ mod tests {
             tls: TlsConfig::disabled(),
             keepalive: TcpKeepaliveConfig::default(),
         }
+    }
+
+    /// Builds a pipeline configuration through its external JSON
+    /// representation.
+    fn pipeline_config_json() -> serde_json::Value {
+        serde_json::json!({
+            "id": 1,
+            "publication_name": "publication",
+            "pg_connection": {
+                "host": "127.0.0.1",
+                "port": 5432,
+                "name": "postgres",
+                "username": "postgres",
+                "tls": { "enabled": false, "trusted_root_certs": "" }
+            }
+        })
+    }
+
+    /// Both config representations reject blank source trust bundles when
+    /// TLS is enabled.
+    #[test]
+    fn pipeline_source_tls_rejects_blank_trust_bundle() {
+        for trusted_root_certs in ["", " \t\r\n"] {
+            let mut json = pipeline_config_json();
+            json["pg_connection"]["tls"] = serde_json::json!({
+                "enabled": true,
+                "trusted_root_certs": trusted_root_certs,
+            });
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+            let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
+
+            for result in [config.validate(), without_secrets.validate()] {
+                let ValidationError::InvalidFieldValue { field, constraint } = result.unwrap_err();
+                assert_eq!(field, "pg_connection.tls.trusted_root_certs");
+                assert_eq!(constraint, "must not be blank when source TLS is enabled");
+            }
+        }
+    }
+
+    /// Disabled TLS permits blank roots, and validation leaves certificate
+    /// parsing to connection setup.
+    #[test]
+    fn pipeline_source_tls_accepts_disabled_or_nonblank_trust_bundle() {
+        for (enabled, trusted_root_certs) in
+            [(false, ""), (false, " \t\r\n"), (true, "placeholder-certificate")]
+        {
+            let mut json = pipeline_config_json();
+            json["pg_connection"]["tls"] = serde_json::json!({
+                "enabled": enabled,
+                "trusted_root_certs": trusted_root_certs,
+            });
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+
+            config.validate().unwrap();
+            PipelineConfigWithoutSecrets::from(config).validate().unwrap();
+        }
+    }
+
+    /// SQLx store connections may use default trust roots independently of
+    /// the source's explicit bundle.
+    #[test]
+    fn pipeline_store_tls_accepts_empty_custom_trust_bundle() {
+        let mut config: PipelineConfig = serde_json::from_value(pipeline_config_json()).unwrap();
+        config.pg_connection.tls =
+            TlsConfig { enabled: true, trusted_root_certs: "placeholder-certificate".to_owned() };
+        let mut store_pg_connection = pg_connection("127.0.0.1", 6432);
+        store_pg_connection.tls.enabled = true;
+        config.store_pg_connection = Some(store_pg_connection);
+
+        config.validate().unwrap();
+        PipelineConfigWithoutSecrets::from(config).validate().unwrap();
+    }
+
+    /// Both config representations enforce positive concurrency and the
+    /// aggregate copy connection ceiling.
+    #[test]
+    fn pipeline_copy_concurrency_validation() {
+        for (workers, connections, expected_field) in [
+            (1, 1, None),
+            (4, 4, None),
+            (1, 256, None),
+            (256, 1, None),
+            (8, 32, None),
+            (3, 85, None),
+            (0, 1, Some("max_table_sync_workers")),
+            (1, 0, Some("max_copy_connections_per_table")),
+            (1, 257, Some("max_copy_connections_per_table")),
+            (257, 1, Some("max_copy_connections_per_table")),
+            (3, 86, Some("max_copy_connections_per_table")),
+            (256, 256, Some("max_copy_connections_per_table")),
+            (u16::MAX, u16::MAX, Some("max_copy_connections_per_table")),
+        ] {
+            let mut json = pipeline_config_json();
+            json["max_table_sync_workers"] = workers.into();
+            json["max_copy_connections_per_table"] = connections.into();
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+            let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
+
+            for result in [config.validate(), without_secrets.validate()] {
+                let field =
+                    result.err().map(|ValidationError::InvalidFieldValue { field, .. }| field);
+                assert_eq!(field.as_deref(), expected_field, "{workers} x {connections}");
+            }
+        }
+    }
+
+    /// Both runtime config representations enforce the same inclusive retry
+    /// bounds.
+    #[test]
+    fn pipeline_retry_delay_validation() {
+        for (delay_ms, valid) in [
+            (0, false),
+            (999, false),
+            (1_000, true),
+            (10_000, true),
+            (86_400_000, true),
+            (86_400_001, false),
+            (u64::try_from(i64::MAX).unwrap(), false),
+            (u64::try_from(i64::MAX).unwrap() + 1, false),
+            (u64::MAX, false),
+        ] {
+            let mut json = pipeline_config_json();
+            json["table_error_retry_delay_ms"] = delay_ms.into();
+            // Deserialization remains available so invalid stored values can be
+            // repaired.
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+            let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
+            for result in [config.validate(), without_secrets.validate()] {
+                assert_eq!(result.is_ok(), valid, "delay_ms={delay_ms}");
+                if let Err(ValidationError::InvalidFieldValue { field, .. }) = result {
+                    assert_eq!(field, "table_error_retry_delay_ms");
+                }
+            }
+        }
+    }
+
+    /// Omitting the retry delay retains the valid ten-second default.
+    #[test]
+    fn pipeline_retry_delay_default() {
+        let config: PipelineConfig = serde_json::from_value(pipeline_config_json()).unwrap();
+        assert_eq!(config.table_error_retry_delay_ms, 10_000);
+        config.validate().unwrap();
+        PipelineConfigWithoutSecrets::from(config).validate().unwrap();
     }
 
     #[test]

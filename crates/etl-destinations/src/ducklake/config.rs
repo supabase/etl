@@ -311,9 +311,9 @@ fn vendored_extension_path(extension_dir: &Path, filename: &str) -> EtlResult<St
 
 /// S3-compatible storage credentials for DuckDB's httpfs extension.
 ///
-/// Used when `data_path` points to an S3 or GCS URI. The `endpoint`
-/// field supports an optional path prefix (e.g. `localhost:5000/s3` for
-/// Supabase Storage or other S3-compatible services mounted at a sub-path).
+/// Used when `data_path` points to an S3 or GCS URI. The `endpoint` field
+/// supports an optional path prefix (e.g. `localhost:5000/s3` for Supabase
+/// Storage or other S3-compatible services mounted at a sub-path).
 #[derive(Debug, Clone)]
 pub struct S3Config {
     pub access_key_id: String,
@@ -576,9 +576,9 @@ pub(super) fn validate_data_path(data_path: &Url) -> EtlResult<&str> {
 
 /// Builds the one-time setup SQL executed for each new pool connection.
 ///
-/// On Linux and macOS, required extensions are loaded from vendored local
-/// files when a vendored directory is available. Otherwise, DuckDB falls back
-/// to the legacy `INSTALL` + `LOAD` flow. The vendored root can be forced with
+/// On Linux and macOS, required extensions are loaded from vendored local files
+/// when a vendored directory is available. Otherwise, DuckDB falls back to the
+/// legacy `INSTALL` + `LOAD` flow. The vendored root can be forced with
 /// `ETL_DUCKDB_EXTENSION_ROOT`. On Windows, the legacy `INSTALL` + `LOAD` flow
 /// is always retained for local development.
 #[cfg(test)]

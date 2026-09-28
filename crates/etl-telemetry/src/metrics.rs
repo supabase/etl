@@ -1,28 +1,54 @@
 use std::{
+    io,
     sync::{Mutex, PoisonError},
     time::Duration,
 };
 
+use axum::{
+    Router,
+    extract::State,
+    http::{StatusCode, header},
+    response::IntoResponse,
+    routing::any,
+};
 use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
-use tokio::task::JoinHandle;
-use tracing::trace;
+use thiserror::Error;
+use tokio_util::task::AbortOnDropHandle;
+use tracing::{error, trace};
 
-/// Project identity attached to standalone service metrics.
+use crate::listener::bind_listener;
+
+/// HTTP port for the standalone metrics endpoint.
+const METRICS_PORT: u16 = 9000;
+
+/// Interval for maintaining the recorder's metric storage.
+const UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Global project identity label.
 const PROJECT_LABEL: &str = "project";
-/// Pipeline identity attached to standalone service metrics.
+/// Global pipeline identity label.
 const PIPELINE_ID_LABEL: &str = "pipeline_id";
-/// Destination kind attached to standalone service metrics.
+/// Global destination identity label.
 const DESTINATION_LABEL: &str = "destination";
 
-/// Errors starting the Prometheus recorder or listener.
-#[derive(Debug, thiserror::Error)]
+/// Shared recorder and the identity attached to every exported sample.
+#[derive(Clone)]
+struct MetricsState {
+    /// Recorder for ETL metrics.
+    handle: PrometheusHandle,
+    /// Labels also attached to the profiler's separate exposition.
+    global_labels: Vec<(&'static str, String)>,
+}
+
+/// Errors while initializing the standalone metrics endpoint.
+#[derive(Debug, Error)]
 pub enum MetricsError {
-    /// Prometheus recorder or exporter initialization failed.
-    #[error("Failed to initialize Prometheus metrics")]
-    Prometheus(#[from] BuildError),
-    /// The metrics listener, runtime, or thread could not be created.
-    #[error("Failed to start the metrics listener")]
-    Io(#[from] std::io::Error),
+    /// The HTTP listener could not be bound.
+    #[error("Failed to bind metrics listener")]
+    Listener(#[source] io::Error),
+    /// The recorder or exporter could not be installed.
+    #[error(transparent)]
+    Build(#[from] BuildError),
 }
 
 // Global cache for the Prometheus handle used by [`init_metrics_handle`].
@@ -39,7 +65,7 @@ pub enum MetricsError {
 // this caching mechanism is essential.
 static PROMETHEUS_HANDLE: Mutex<Option<PrometheusHandle>> = Mutex::new(None);
 /// Global handle for the Prometheus upkeep task.
-static PROMETHEUS_UPKEEP_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static PROMETHEUS_UPKEEP_TASK: Mutex<Option<AbortOnDropHandle<()>>> = Mutex::new(None);
 
 /// Initializes metrics with manual endpoint management and returns a handle for
 /// rendering.
@@ -65,8 +91,8 @@ static PROMETHEUS_UPKEEP_TASK: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
     let mut prometheus_handle = PROMETHEUS_HANDLE
         .lock()
-        // We still get the poisoned lock since we assume that a poisoned lock doesn't
-        // invalidate the handle contents.
+        // We still get the poisoned lock since we assume that a poisoned lock doesn't invalidate
+        // the handle contents.
         .unwrap_or_else(PoisonError::into_inner);
 
     if let Some(handle) = &*prometheus_handle {
@@ -80,77 +106,97 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 
     let handle_clone = handle.clone();
 
-    // This task periodically performs upkeep to avoid unbounded memory growth due
-    // to metrics collection.
-    let upkeep_task = tokio::spawn(async move {
+    // This task periodically performs upkeep to avoid unbounded memory growth
+    // due to metrics collection.
+    let upkeep_task = AbortOnDropHandle::new(tokio::spawn(async move {
         loop {
-            // upkeep_timeout hardcoded for now. Will make it configurable later if it
-            // creates a problem
-            let upkeep_timeout = Duration::from_secs(5);
-            tokio::time::sleep(upkeep_timeout).await;
+            tokio::time::sleep(UPKEEP_INTERVAL).await;
             trace!("running metrics upkeep");
             handle_clone.run_upkeep();
         }
-    });
+    }));
     *PROMETHEUS_UPKEEP_TASK.lock().unwrap_or_else(PoisonError::into_inner) = Some(upkeep_task);
 
     Ok(handle)
 }
 
-/// Initializes metrics with an automatic HTTP server on port 9000.
-///
-/// This function is designed for standalone services where metrics should be
-/// exposed automatically without manual endpoint management. It installs a
-/// global metrics recorder and starts an HTTP server that listens on
-/// `[::]:9000/metrics`, making metrics available for Prometheus scraping.
+/// Renders metrics without blocking the async runtime's worker threads.
+async fn render_metrics(
+    State(state): State<MetricsState>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let MetricsState { handle, global_labels } = state;
+    #[cfg(feature = "hotpath")]
+    let result = crate::profiling::render_metrics(&handle, &global_labels).await;
+    #[cfg(not(feature = "hotpath"))]
+    let result = {
+        let _ = global_labels;
+        tokio::task::spawn_blocking(move || handle.render()).await
+    };
+    let body = result.map_err(|error| {
+        error!(error = %error, "metrics rendering failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(([(header::CONTENT_TYPE, "text/plain")], body))
+}
+
+/// Builds the shared metrics endpoint, preserving health and fallback routes.
+pub(crate) fn metrics_router(
+    handle: PrometheusHandle,
+    global_labels: Vec<(&'static str, String)>,
+) -> Router {
+    Router::new()
+        .route("/health", any(|| async { ([(header::CONTENT_TYPE, "text/plain")], "OK") }))
+        .fallback(render_metrics)
+        .with_state(MetricsState { handle, global_labels })
+}
+
+/// Installs the recorder and serves metrics on port 9000 over IPv4 and IPv6.
 ///
 /// When provided, `project_ref`, `pipeline_id`, and `destination` are attached
 /// as global labels to all exported metrics for the current process.
 ///
-/// # Use Case
-///
-/// Use this when you want to:
-/// - Expose metrics from a standalone service (e.g., etl-replicator).
-/// - Automatically start a dedicated metrics endpoint without custom routing.
-/// - Let Prometheus scrape metrics directly from a fixed port.
+/// Must be called inside a Tokio runtime. The caller owns the returned server
+/// task, which also performs recorder upkeep, and must stop it on shutdown.
 pub fn init_metrics(
     project_ref: Option<&str>,
     pipeline_id: Option<u64>,
     destination: Option<&str>,
-) -> Result<(), MetricsError> {
-    let mut builder = PrometheusBuilder::new().with_http_listener(std::net::SocketAddr::new(
-        std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-        9000,
-    ));
-
+) -> Result<AbortOnDropHandle<io::Result<()>>, MetricsError> {
+    let listener = bind_listener(METRICS_PORT).map_err(MetricsError::Listener)?;
+    let mut builder = PrometheusBuilder::new();
+    let mut global_labels = Vec::new();
     if let Some(project_ref) = project_ref {
-        builder = builder.add_global_label(PROJECT_LABEL, project_ref);
+        global_labels.push((PROJECT_LABEL, project_ref.to_owned()));
     }
-
     if let Some(pipeline_id) = pipeline_id {
-        builder = builder.add_global_label(PIPELINE_ID_LABEL, pipeline_id.to_string());
+        global_labels.push((PIPELINE_ID_LABEL, pipeline_id.to_string()));
     }
-
     if let Some(destination) = destination {
-        builder = builder.add_global_label(DESTINATION_LABEL, destination);
+        global_labels.push((DESTINATION_LABEL, destination.to_owned()));
     }
-
-    #[cfg(feature = "hotpath")]
-    {
-        let mut labels = Vec::new();
-        if let Some(project_ref) = project_ref {
-            labels.push((PROJECT_LABEL, project_ref.to_owned()));
-        }
-        if let Some(pipeline_id) = pipeline_id {
-            labels.push((PIPELINE_ID_LABEL, pipeline_id.to_string()));
-        }
-        if let Some(destination) = destination {
-            labels.push((DESTINATION_LABEL, destination.to_owned()));
-        }
-        crate::profiling::install_metrics_listener(builder, labels)?;
+    for (key, value) in &global_labels {
+        builder = builder.add_global_label(*key, value.clone());
     }
-    #[cfg(not(feature = "hotpath"))]
-    builder.install()?;
+    let handle = builder.install_recorder()?;
+    let router = metrics_router(handle.clone(), global_labels);
 
-    Ok(())
+    let metrics_http_listener = AbortOnDropHandle::new(tokio::spawn(async move {
+        let server = axum::serve(listener, router).into_future();
+        tokio::pin!(server);
+
+        loop {
+            tokio::select! {
+                result = &mut server => return result,
+
+                _ = tokio::time::sleep(UPKEEP_INTERVAL) => {
+                    trace!("running metrics upkeep");
+
+                    handle.run_upkeep();
+                }
+            }
+        }
+    }));
+
+    Ok(metrics_http_listener)
 }

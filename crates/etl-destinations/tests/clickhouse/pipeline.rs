@@ -1,6 +1,8 @@
 use etl::{
+    config::BatchConfig,
     error::ErrorKind,
     event::{Event, EventType, RelationEvent},
+    failpoints::APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
     pipeline::PipelineId,
     schema::ReplicatedTableSchema,
     store::{SchemaStore, StateStore},
@@ -8,25 +10,28 @@ use etl::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{PipelineBuilder, create_pipeline},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
-use etl_config::shared::ClickHouseEngine;
+use etl_config::shared::{ClickHouseEngine, PipelineConfig};
 use etl_destinations::clickhouse::{
-    ClickHouseInserterConfig, test_utils::setup_clickhouse_database,
+    ClickHouseInserterConfig, client::arm_pause_before_insert_statement_for_tests,
+    notify_on_fence_wait_for_tests, test_utils::setup_clickhouse_database,
 };
 use etl_postgres::tokio::test_utils::TableModification;
 use etl_telemetry::tracing::init_test_tracing;
+use fail::FailScenario;
 use rand::random;
+use tokio::sync::oneshot;
 
 use crate::support::{
     clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query},
     crypto::install_crypto_provider,
 };
 
-/// User-column projection for the all-types test, with `uuid_col` rendered
-/// as a canonical lowercase UUID string via `toString()`.
+/// User-column projection for the all-types test, with `uuid_col` rendered as a
+/// canonical lowercase UUID string via `toString()`.
 const ALL_TYPES_PROJECTION: &str = concat!(
     "id, smallint_col, integer_col, bigint_col, real_col, double_col, ",
     "numeric_col, boolean_col, text_col, varchar_col, ",
@@ -45,8 +50,8 @@ struct IdValueRow {
     value: String,
 }
 
-/// Projection + table name + ORDER BY that drive `current_state_query` for
-/// each streaming test.
+/// Projection + table name + ORDER BY that drive `current_state_query` for each
+/// streaming test.
 const ID_VALUE_PROJECTION: &str = "id, value";
 const UPDATE_FLOW_TABLE: &str = "test_update__flow";
 const DELETE_FLOW_TABLE: &str = "test_delete__flow";
@@ -63,16 +68,15 @@ const DATE_2024_01_15_DAYS: i32 = 19737;
 /// Microseconds from epoch for `2024-01-15 12:00:00 UTC`.
 const TS_2024_01_15_12_00_US: i64 = 1_705_320_000_000_000;
 
-/// Tests that all supported Postgres column types round-trip
-/// correctly through the ClickHouse RowBinary encoding.
+/// Tests that all supported Postgres column types round-trip correctly through
+/// the ClickHouse RowBinary encoding.
 ///
 /// # GIVEN
 ///
 /// A Postgres table covering every supported column type -- scalars (integers,
 /// floats, numeric, boolean, text, varchar, date, timestamp, timestamptz, time,
-/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and array
-/// columns (`integer[]`, `text[]`). Two rows are inserted before the pipeline
-/// starts:
+/// interval, jsonb, json, bytea, inet, cidr, macaddr, uuid) and array columns
+/// (`integer[]`, `text[]`). Two rows are inserted before the pipeline starts:
 ///
 /// 1. Positive/typical values with **empty** arrays.
 /// 2. Boundary values (min-ints, negative floats) with **non-empty** arrays.
@@ -132,8 +136,8 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
                 ("interval_col", "interval not null"),
                 ("jsonb_col", "jsonb not null"),
                 ("json_col", "json not null"),
-                // Array columns are top-level non-nullable because ClickHouse cannot
-                // distinguish a NULL array from an empty array.
+                // Array columns are top-level non-nullable because ClickHouse cannot distinguish a
+                // NULL array from an empty array.
                 ("integer_array_col", "integer[] not null"),
                 ("text_array_col", "text[] not null"),
                 // Other types
@@ -258,7 +262,8 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     assert_eq!(r1.cidr_col, "192.168.0.0/16");
     assert_eq!(r1.macaddr_col, "aa:bb:cc:dd:ee:ff");
     assert_eq!(r1.uuid_col.to_lowercase(), "f47ac10b-58cc-4372-a567-0e02b2c3d479");
-    // Empty arrays -- the regression case that accidentally worked before the fix.
+    // Empty arrays -- the regression case that accidentally worked before the
+    // fix.
     assert_eq!(
         r1.integer_array_col,
         Vec::<Option<i32>>::new(),
@@ -310,7 +315,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: Postgres source with one row ---
+    // GIVEN: a Postgres source with two rows.
     let database = spawn_source_database().await;
     let table_name = test_table_name("update_flow");
 
@@ -324,13 +329,13 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('before')",
+            "INSERT INTO {} (value) VALUES ('before'), ('mover')",
             table_name.as_quoted_identifier(),
         ))
         .await
         .unwrap();
 
-    // --- WHEN: pipeline copies data and an UPDATE is streamed ---
+    // WHEN: the pipeline copies data and updates are streamed.
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
@@ -352,9 +357,10 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 2)])
         .await;
 
+    // A plain non-key update and a primary-key change cover both update paths.
     database
         .run_sql(&format!(
             "UPDATE {} SET value = 'after' WHERE id = 1",
@@ -362,18 +368,523 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
         ))
         .await
         .unwrap();
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET id = 3, value = 'moved' WHERE id = 2",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
 
     events_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
 
     let query = current_state_query(engine, UPDATE_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
 
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // --- THEN: current state shows the updated value ---
-    assert_eq!(rows.len(), 1, "expected one current-state row after UPDATE");
+    // THEN: current state shows the updated value and the moved key.
+    assert_eq!(rows.len(), 2, "expected two current-state rows after UPDATEs");
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].value, "after");
+    assert_eq!(rows[1].id, 3);
+    assert_eq!(rows[1].value, "moved");
+}
+
+/// Composite key changes use physical tuple positions even when the primary
+/// key definition has reversed order and a non-key column separates the keys.
+async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bool) {
+    // GIVEN: copied rows share key components in reversed tuple order.
+    init_test_tracing();
+    install_crypto_provider();
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("composite_changes");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[
+                ("id", "bigint not null"),
+                ("value", "text not null"),
+                ("tenant_id", "bigint not null"),
+            ],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} add primary key (tenant_id, id)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    if full_identity {
+        database
+            .run_sql(&format!(
+                "alter table {} replica identity full",
+                table_name.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+    }
+    let publication_name = "test_pub_composite_changes";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value, tenant_id) values (1, 'original', 10), (1, \
+             'other_tenant', 20), (2, 'other_id', 10)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+    let copied = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+
+    // WHEN: one transaction changes and reuses composite keys.
+    let updated = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 4)])
+        .await;
+    let tx = database.begin_transaction().await;
+    for change in [
+        "set id = 3, tenant_id = 30, value = 'moved' where id = 1 and tenant_id = 10",
+        "set id = 1, tenant_id = 10, value = 'reused' where id = 3 and tenant_id = 30",
+        "set tenant_id = 21, value = 'tenant_changed' where id = 1 and tenant_id = 20",
+        "set id = 4, value = 'id_changed' where id = 2 and tenant_id = 10",
+    ] {
+        tx.run_sql(&format!("update {} {change}", table_name.as_quoted_identifier()))
+            .await
+            .unwrap();
+    }
+    tx.commit_transaction().await;
+    updated.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // THEN: all rows retain their final keys without stale keys.
+    let query = current_state_query(
+        engine,
+        "test_composite__changes",
+        "tenant_id, id, value",
+        &["tenant_id", "id"],
+        "tenant_id, id",
+    );
+    assert_eq!(
+        clickhouse_db.query::<(i64, i64, String)>(&query).await,
+        vec![
+            (10, 1, "reused".to_owned()),
+            (10, 4, "id_changed".to_owned()),
+            (21, 1, "tenant_changed".to_owned()),
+        ]
+    );
+}
+
+/// DEFAULT identity supplies compact keys in source tuple order.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_default_identity_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::MergeTree, false).await;
+}
+
+/// DEFAULT identity key changes converge under ReplacingMergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_default_identity_replacing_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::ReplacingMergeTree, false).await;
+}
+
+/// FULL identity supplies complete old tuples rather than compact keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_full_identity_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::MergeTree, true).await;
+}
+
+/// FULL identity key changes converge under ReplacingMergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn composite_key_changes_full_identity_replacing_merge_tree() {
+    composite_key_changes_inner(ClickHouseEngine::ReplacingMergeTree, true).await;
+}
+
+/// FULL identity forces comparison of NaN-bearing old keys even when only a
+/// non-key value changes. Other rows change each float key independently or
+/// move away and back within one transaction.
+async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
+    // GIVEN: copied rows have NaN float keys and FULL replica identity.
+    init_test_tracing();
+    install_crypto_provider();
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("nan_changes");
+    let (real_type, double_type, nan_key, finite_key, projection) = if array_keys {
+        (
+            "real[] not null",
+            "double precision[] not null",
+            "'{NaN,NULL,2}'",
+            "'{5.5,NULL,2}'",
+            "bucket, assumeNotNull(real_key[1]), assumeNotNull(double_key[1]), value",
+        )
+    } else {
+        (
+            "real not null",
+            "double precision not null",
+            "'NaN'",
+            "'5.5'",
+            "bucket, real_key, double_key, value",
+        )
+    };
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[
+                ("bucket", "bigint not null"),
+                ("real_key", real_type),
+                ("double_key", double_type),
+                ("value", "text not null"),
+            ],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} add primary key (bucket, real_key, double_key)",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {} replica identity full",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    let publication_name = "test_pub_nan_changes";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (bucket, real_key, double_key, value) values (1, {nan_key}, \
+             {nan_key}, 'original'), (2, {nan_key}, {nan_key}, 'original'), (3, {nan_key}, \
+             {nan_key}, 'original'), (4, {nan_key}, {nan_key}, 'original')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
+    );
+    let copied = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+
+    // WHEN: one transaction preserves, changes, and reuses NaN-bearing keys.
+    let updated = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 5)])
+        .await;
+    let tx = database.begin_transaction().await;
+    for change in [
+        "set value = 'same_key' where bucket = 1".to_owned(),
+        format!("set real_key = {finite_key}, value = 'real_moved' where bucket = 2"),
+        format!("set double_key = {finite_key}, value = 'double_moved' where bucket = 3"),
+        format!(
+            "set real_key = {finite_key}, double_key = {finite_key}, value = 'moved' where bucket \
+             = 4",
+        ),
+        format!(
+            "set real_key = {nan_key}, double_key = {nan_key}, value = 'reused' where bucket = 4",
+        ),
+    ] {
+        tx.run_sql(&format!("update {} {change}", table_name.as_quoted_identifier()))
+            .await
+            .unwrap();
+    }
+    tx.commit_transaction().await;
+    updated.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // THEN: unchanged NaNs and final changed or reused keys survive.
+    let query = current_state_query(
+        engine,
+        "test_nan__changes",
+        projection,
+        &["bucket", "real_key", "double_key"],
+        "bucket",
+    );
+    let rows = clickhouse_db.query::<(i64, f32, f64, String)>(&query).await;
+    let states: Vec<_> = rows
+        .iter()
+        .map(|(bucket, real, double, value)| {
+            (*bucket, real.is_nan(), double.is_nan(), value.as_str())
+        })
+        .collect();
+    assert_eq!(
+        states,
+        vec![
+            (1, true, true, "same_key"),
+            (2, false, true, "real_moved"),
+            (3, true, false, "double_moved"),
+            (4, true, true, "reused"),
+        ]
+    );
+    assert_eq!(rows[1].1, 5.5);
+    assert_eq!(rows[2].2, 5.5);
+
+    // THEN: MergeTree tombstones reflect only actual key changes.
+    if engine == ClickHouseEngine::MergeTree {
+        assert_eq!(
+            clickhouse_db
+                .query::<(i64, u64)>(
+                    "select bucket, count() from test_nan__changes where cdc_operation = 'DELETE' \
+                     group by bucket order by bucket",
+                )
+                .await,
+            vec![(2, 1), (3, 1), (4, 2)]
+        );
+    }
+}
+
+/// Scalar Float32 and Float64 NaN keys retain Postgres equality in MergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn nan_key_changes_merge_tree() {
+    nan_key_changes_inner(ClickHouseEngine::MergeTree, false).await;
+}
+
+/// Scalar NaN key updates converge under ReplacingMergeTree.
+#[tokio::test(flavor = "multi_thread")]
+async fn nan_key_changes_replacing_merge_tree() {
+    nan_key_changes_inner(ClickHouseEngine::ReplacingMergeTree, false).await;
+}
+
+/// NaN arrays also preserve equality and key changes. ReplacingMergeTree
+/// rejects their nullable-element sort keys with default ClickHouse settings.
+#[tokio::test(flavor = "multi_thread")]
+async fn nan_array_key_changes_merge_tree() {
+    nan_key_changes_inner(ClickHouseEngine::MergeTree, true).await;
+}
+
+/// An in-flight destination write must not stall the pipeline: dispatch
+/// returns after admission so streaming continues while the write is
+/// parked, and shutdown drains the pending write to durability.
+#[tokio::test(flavor = "multi_thread")]
+async fn in_flight_write_keeps_streaming_and_shuts_down_cleanly_merge_tree() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: a copied table with a pause armed for its next CDC insert.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("slowsink");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .unwrap();
+    let publication_name = "test_pub_clickhouse_slowsink";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('first')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+
+    // WHEN: two transactions stream while the first CDC batch is parked at
+    // its INSERT statement, then the batch is released.
+    let events_notify = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+        ])
+        .await;
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('second')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "UPDATE {} SET value = 'third' WHERE id = 1",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    reached.await.unwrap();
+    release.send(()).unwrap();
+    events_notify.notified().await;
+
+    // THEN: shutdown drains the pending write and both transactions are
+    // durably visible.
+    pipeline.shutdown_and_wait().await.unwrap();
+    let query = current_state_query(
+        ClickHouseEngine::MergeTree,
+        "test_slowsink",
+        ID_VALUE_PROJECTION,
+        &["id"],
+        "id",
+    );
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].value, "third");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].value, "second");
+}
+
+/// The apply worker fails right after handing a CDC batch to the destination
+/// and retries while that batch is still in flight. The retried attempt
+/// replays the batch and then applies a source TRUNCATE. The replay must wait
+/// for the in-flight insert. Otherwise the truncate runs first and the late
+/// insert restores the truncated row.
+///
+/// Every step is driven by a signal, never by a sleep:
+/// - an armed pause parks the in-flight insert,
+/// - a failpoint fails the apply loop once after dispatch,
+/// - a fence observer reports that the replay is waiting,
+/// - the destination wrapper reports each applied batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree() {
+    let _scenario = FailScenario::setup();
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: an empty table whose initial copy has completed, so the apply
+    // worker owns its CDC events from here on.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("retryfence");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "text not null")])
+        .await
+        .unwrap();
+    let publication_name = "test_pub_clickhouse_retryfence";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
+            .await,
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    // Short batches keep the pipeline moving. The retry waits the smallest
+    // delay the pipeline accepts; every later step is event-driven, so the
+    // delay only adds wall time.
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 10,
+        memory_budget_ratio: 0.2,
+        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+    })
+    .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1)
+    .build();
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    // Two INSERT pauses: the first parks the in-flight insert, the second
+    // makes the replay's own INSERT observable. The fence observer reports
+    // when the replay waits. The failpoint fails the apply worker once, right
+    // after the first CDC batch is dispatched.
+    let (in_flight_reached, in_flight_release) = arm_pause_before_insert_statement_for_tests(0);
+    let (mut replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
+    let fence_wait = notify_on_fence_wait_for_tests();
+    fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(apply)").unwrap();
+
+    // WHEN: one row is inserted, its batch parks at the INSERT, and the apply
+    // worker fails and retries with the batch still in flight.
+    let in_flight_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    database
+        .run_sql(&format!(
+            "INSERT INTO {} (value) VALUES ('restored')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    in_flight_reached.await.unwrap();
+
+    // THEN: the retried attempt's replay waits at the table fence. It must not
+    // reach its own INSERT while the in-flight insert is parked.
+    tokio::select! {
+        biased;
+        result = &mut replay_reached => {
+            result.unwrap();
+            panic!("replayed batch reached its INSERT before the in-flight insert finished");
+        }
+        result = fence_wait => result.unwrap(),
+    }
+    assert!(matches!(replay_reached.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+
+    // Releasing the in-flight insert lets it land, which lets the replay
+    // proceed to its INSERT. The wrapper records the replayed insert as well.
+    in_flight_release.send(()).unwrap();
+    in_flight_applied.notified().await;
+    replay_reached.await.unwrap();
+    assert_eq!(clickhouse_db.query::<i64>("select id from \"test_retryfence\"").await, vec![1]);
+    let replay_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+    replay_release.send(()).unwrap();
+    replay_applied.notified().await;
+
+    // A source TRUNCATE now streams through the retried attempt and lands
+    // after both inserts.
+    let truncate_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
+        .await;
+    database.run_sql(&format!("TRUNCATE {}", table_name.as_quoted_identifier())).await.unwrap();
+    truncate_applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    assert_eq!(
+        clickhouse_db.query::<i64>("select id from \"test_retryfence\"").await,
+        Vec::<i64>::new()
+    );
 }
 
 /// Tests that edge-case values survive the Postgres -> ClickHouse pipeline
@@ -449,8 +960,8 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
         .await
         .unwrap();
 
-    // Row 2: arrays with interior NULL elements -- the element at index 1 is NULL
-    // while surrounding elements are present.
+    // Row 2: arrays with interior NULL elements -- the element at index 1 is
+    // NULL while surrounding elements are present.
     database
         .run_sql(&format!(
             "INSERT INTO {} (nullable_text, nullable_int, int_array_col, text_array_col) VALUES \
@@ -783,20 +1294,19 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].value, "keep_me");
 }
 
-/// Tests that a pipeline restart resumes CDC streaming without re-running
-/// the initial table copy.
+/// Tests that a pipeline restart resumes CDC streaming without re-running the
+/// initial table copy.
 ///
 /// # GIVEN
 ///
-/// A Postgres table with one row (`id=1, value='before_restart'`), copied
-/// to ClickHouse by a first pipeline run that then shuts down cleanly.
+/// A Postgres table with one row (`id=1, value='before_restart'`), copied to
+/// ClickHouse by a first pipeline run that then shuts down cleanly.
 ///
 /// # WHEN
 ///
-/// A new `ClickHouseDestination` and `Pipeline` are built with the same
-/// store and pipeline_id (simulating process restart), the pipeline is
-/// started, and a second row (`id=2, value='after_restart'`) is inserted
-/// into Postgres.
+/// A new `ClickHouseDestination` and `Pipeline` are built with the same store
+/// and pipeline_id (simulating process restart), the pipeline is started, and a
+/// second row (`id=2, value='after_restart'`) is inserted into Postgres.
 ///
 /// # THEN
 ///
@@ -1201,8 +1711,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
 ///
 /// # GIVEN
 ///
-/// Two Postgres tables in the same publication, each with one pre-existing
-/// row:
+/// Two Postgres tables in the same publication, each with one pre-existing row:
 /// - `multi_a` with `(id=1, value='init_a')`
 /// - `multi_b` with `(id=1, value='init_b')`
 ///
@@ -1326,8 +1835,8 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
     assert_eq!((rows_b[1].id, rows_b[1].value.as_str()), (2, "streamed_b"));
 }
 
-/// Current-state row for the wide default-identity delete test (user
-/// columns only).
+/// Current-state row for the wide default-identity delete test (user columns
+/// only).
 #[derive(clickhouse::Row, serde::Deserialize, Debug)]
 struct DefaultIdentityRow {
     id: i64,
@@ -1528,8 +2037,8 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
 /// # THEN
 ///
 /// All 1024 rows arrive in ClickHouse. A sample of rows at known positions
-/// (first, last, powers of two, and a few interior points) are spot-checked
-/// for correct id and value.
+/// (first, last, powers of two, and a few interior points) are spot-checked for
+/// correct id and value.
 #[tokio::test(flavor = "multi_thread")]
 async fn exclusive_large_batch_table_copy_merge_tree() {
     exclusive_large_batch_table_copy_inner(ClickHouseEngine::MergeTree).await;
@@ -1605,8 +2114,8 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
     }
 }
 
-/// Row struct for the ADD COLUMN test after schema change.
-/// Columns: id, name, age, email, score.
+/// Row struct for the ADD COLUMN test after schema change. Columns: id, name,
+/// age, email, score.
 #[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
 struct AddColumnRow {
     id: i64,
@@ -1626,8 +2135,8 @@ struct DefaultedSchemaRow {
     active: Option<bool>,
 }
 
-/// Tests that ALTER TABLE ADD COLUMN in Postgres propagates to ClickHouse
-/// and subsequent inserts include the new column.
+/// Tests that ALTER TABLE ADD COLUMN in Postgres propagates to ClickHouse and
+/// subsequent inserts include the new column.
 ///
 /// # GIVEN
 ///
@@ -1637,8 +2146,8 @@ struct DefaultedSchemaRow {
 /// # WHEN
 ///
 /// A nullable `email text` column and a `score integer NOT NULL DEFAULT 0`
-/// column are added in Postgres, and a row ('Bob', 30, 'bob@example.com', 7)
-/// is inserted with the new schema.
+/// column are added in Postgres, and a row ('Bob', 30, 'bob@example.com', 7) is
+/// inserted with the new schema.
 ///
 /// # THEN
 ///
@@ -1786,8 +2295,8 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 
     assert_eq!(rows.len(), 2);
 
-    // Alice: pre-change row, added columns use the destination's add-time defaults
-    // where supported.
+    // Alice: pre-change row, added columns use the destination's add-time
+    // defaults where supported.
     assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].name, "Alice");
     assert_eq!(rows[0].age, 25);
@@ -2227,7 +2736,8 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     );
     let clickhouse_table_name = applied_metadata.table_id().to_owned();
 
-    // --- WHEN: a fresh destination on the same store replays the old relation ---
+    // --- WHEN: a fresh destination on the same store replays the old relation
+    // ---
     let restarted_destination =
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
     let result = restarted_destination

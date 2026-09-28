@@ -75,8 +75,8 @@ pub fn parse_text_cell(selector: u8, value: &str) -> EtlResult<Cell> {
 /// Parses one COPY text row against a schema derived from the input.
 ///
 /// The first byte picks the column count (1 to 8), the following bytes pick
-/// each column's type from the fuzz type table, and the remaining bytes are
-/// the row payload.
+/// each column's type from the fuzz type table, and the remaining bytes are the
+/// row payload.
 pub fn parse_copy_row(data: &[u8]) -> EtlResult<TableRow> {
     let Some((&first, rest)) = data.split_first() else {
         return codec::parse_table_row_from_postgres_copy_bytes(&[], &[]);

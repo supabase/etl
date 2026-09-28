@@ -30,9 +30,9 @@ pub enum DefaultExpression {
 
 /// Parses a Postgres default expression into a portable representation.
 ///
-/// The parser is intentionally conservative. It recognizes values whose
-/// meaning is stable across destinations and returns `None` for expressions
-/// that need a fuller Postgres evaluator or have destination-specific behavior.
+/// The parser is intentionally conservative. It recognizes values whose meaning
+/// is stable across destinations and returns `None` for expressions that need a
+/// fuller Postgres evaluator or have destination-specific behavior.
 pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
     let expression = normalize_postgres_expression(expression);
     if expression.is_empty() || expression.eq_ignore_ascii_case("null") {
@@ -215,9 +215,9 @@ fn quote_simple_string_literal(expression: &str) -> String {
 
 /// Decodes a PostgreSQL SQL single-quoted string literal.
 ///
-/// The returned value contains semantic string content rather than SQL
-/// quoting, allowing destinations with different escape rules to quote it in
-/// their own dialect.
+/// The returned value contains semantic string content rather than SQL quoting,
+/// allowing destinations with different escape rules to quote it in their own
+/// dialect.
 pub fn unquote_postgres_string_literal(expression: &str) -> Option<String> {
     if !is_string_literal(expression) {
         return None;

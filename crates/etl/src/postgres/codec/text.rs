@@ -21,8 +21,8 @@ use crate::{
 
 /// Converts a Postgres text-format string to a typed [`Cell`] value.
 ///
-/// This method parses Postgres's text representation of various data types
-/// into strongly-typed [`Cell`] variants. It handles all major Postgres types
+/// This method parses Postgres's text representation of various data types into
+/// strongly-typed [`Cell`] variants. It handles all major Postgres types
 /// including arrays, and provides comprehensive error handling for malformed
 /// input.
 ///
@@ -107,11 +107,11 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         ),
         Type::TIMESTAMPTZ => {
             let val = parse_postgres_timestamptz(str)?;
-            Ok(Cell::TimestampTz(val.into()))
+            Ok(Cell::TimestampTz(val))
         }
         Type::TIMESTAMPTZ_ARRAY => parse_cell_from_postgres_text_array(
             str,
-            |str| Ok(Some(parse_postgres_timestamptz(str)?.into())),
+            |str| Ok(Some(parse_postgres_timestamptz(str)?)),
             ArrayCell::TimestampTz,
         ),
         Type::UUID => {
@@ -139,10 +139,9 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
-        // [`Cell`] is only the internal Rust value representation. The source
-        // Postgres type is still available from the corresponding
-        // [`ColumnSchema`], so values that do not need a specialized Rust type
-        // preserve their Postgres text output here.
+        // [`Cell`] is only the internal Rust value representation. The source Postgres type is
+        // still available from the corresponding [`ColumnSchema`], so values that do not need a
+        // specialized Rust type preserve their Postgres text output here.
         _ if is_array_type(typ) => parse_cell_from_postgres_text_array(
             str,
             |str| Ok(Some(str.to_owned())),
@@ -154,15 +153,15 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
 
 /// Strips the explicit dimensions prefix from an array literal, if present.
 ///
-/// Postgres prefixes array output with dimensions whenever a lower bound is
-/// not 1, e.g. `[0:1]={7,8}`. [`ArrayCell`] stores one-dimensional arrays
-/// as ordered elements without subscript bounds, so the prefix syntax is
-/// validated and its bounds are intentionally discarded. More than one
-/// dimension group means a multidimensional value, which [`ArrayCell`]
-/// cannot represent and the codec rejects.
+/// Postgres prefixes array output with dimensions whenever a lower bound is not
+/// 1, e.g. `[0:1]={7,8}`. [`ArrayCell`] stores one-dimensional arrays as
+/// ordered elements without subscript bounds, so the prefix syntax is validated
+/// and its bounds are intentionally discarded. More than one dimension group
+/// means a multidimensional value, which [`ArrayCell`] cannot represent and the
+/// codec rejects.
 fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
-    // Skips an optionally negative ASCII integer, returning the index just
-    // past it, or `None` when no digits are present.
+    // Skips an optionally negative ASCII integer, returning the index just past
+    // it, or `None` when no digits are present.
     fn skip_integer(bytes: &[u8], mut index: usize) -> Option<usize> {
         if bytes.get(index) == Some(&b'-') {
             index += 1;
@@ -218,11 +217,10 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
 /// This function handles Postgres's array format with curly braces, comma
 /// separation, and proper quoting. It supports null values (unquoted "null"),
 /// escaped characters within quoted strings, an explicit dimensions prefix
-/// (e.g. `[0:1]={7,8}`), and delegates element parsing to the provided
-/// closure.
+/// (e.g. `[0:1]={7,8}`), and delegates element parsing to the provided closure.
 ///
-/// The parser correctly handles quote escaping, comma separation within
-/// quotes, and distinguishes between null values and the string "null".
+/// The parser correctly handles quote escaping, comma separation within quotes,
+/// and distinguishes between null values and the string "null".
 /// Multidimensional values are rejected because [`ArrayCell`] is
 /// one-dimensional.
 fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
@@ -264,9 +262,8 @@ where
                         in_quotes = !in_quotes;
                     }
                     '\\' => in_escape = true,
-                    // The outer braces are stripped before the loop, so an
-                    // unquoted brace in the body can only come from a nested
-                    // array, which `ArrayCell` cannot represent.
+                    // The outer braces are stripped before the loop, so an unquoted brace in the
+                    // body can only come from a nested array, which `ArrayCell` cannot represent.
                     '{' | '}' if !in_quotes => {
                         bail!(
                             ErrorKind::ConversionError,
@@ -320,6 +317,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::data::{Date, PgTime, Timestamp};
 
     #[test]
     fn parse_text_array_quoted_null_as_string() {
@@ -345,7 +343,8 @@ mod tests {
 
     #[test]
     fn parse_numeric_array_with_parsing_error() {
-        // This should return an error because "invalid" cannot be parsed as a number
+        // This should return an error because "invalid" cannot be parsed as a
+        // number
         let result = parse_cell_from_postgres_text(&Type::INT4_ARRAY, "{1,invalid,3}");
         assert!(result.is_err());
         // The error should be a parsing error, not related to NULL handling
@@ -664,7 +663,7 @@ mod tests {
     #[test]
     fn try_from_str_dates() {
         let cell = parse_cell_from_postgres_text(&Type::DATE, "2023-12-25").unwrap();
-        if let Cell::Date(date) = cell {
+        if let Cell::Date(Date::Value(date)) = cell {
             assert_eq!(date.year(), 2023);
             assert_eq!(date.month(), 12);
             assert_eq!(date.day(), 25);
@@ -678,7 +677,7 @@ mod tests {
     #[test]
     fn try_from_str_time() {
         let cell = parse_cell_from_postgres_text(&Type::TIME, "14:30:45.123").unwrap();
-        if let Cell::Time(time) = cell {
+        if let Cell::Time(PgTime::Value(time)) = cell {
             assert_eq!(time.hour(), 14);
             assert_eq!(time.minute(), 30);
             assert_eq!(time.second(), 45);
@@ -712,7 +711,7 @@ mod tests {
     fn try_from_str_timestamp() {
         let cell =
             parse_cell_from_postgres_text(&Type::TIMESTAMP, "2023-12-25 14:30:45.123").unwrap();
-        if let Cell::Timestamp(ts) = cell {
+        if let Cell::Timestamp(Timestamp::Value(ts)) = cell {
             assert_eq!(ts.date().year(), 2023);
             assert_eq!(ts.time().hour(), 14);
         } else {
@@ -725,7 +724,7 @@ mod tests {
         let cell =
             parse_cell_from_postgres_text(&Type::TIMESTAMPTZ, "2023-12-25 14:30:45.123+00:00")
                 .unwrap();
-        if let Cell::TimestampTz(ts) = cell {
+        if let Cell::TimestampTz(Timestamp::Value(ts)) = cell {
             assert_eq!(ts.year(), 2023);
         } else {
             panic!("Expected TimeStampTz cell");
@@ -747,16 +746,18 @@ mod tests {
             parse_cell_from_postgres_text(&Type::DATE_ARRAY, "{2023-12-25,NULL,2024-02-29}")
                 .unwrap(),
             Cell::Array(ArrayCell::Date(vec![
-                Some("2023-12-25".parse().unwrap()),
+                Some(Date::Value("2023-12-25".parse().unwrap())),
                 None,
-                Some("2024-02-29".parse().unwrap()),
+                Some(Date::Value("2024-02-29".parse().unwrap())),
             ]))
         );
 
         assert_eq!(
             parse_cell_from_postgres_text(&Type::TIME_ARRAY, r#"{"14:30:45.123",NULL}"#).unwrap(),
             Cell::Array(ArrayCell::Time(vec![
-                Some(NaiveTime::parse_from_str("14:30:45.123", TIME_FORMAT).unwrap()),
+                Some(PgTime::Value(
+                    NaiveTime::parse_from_str("14:30:45.123", TIME_FORMAT).unwrap()
+                )),
                 None,
             ]))
         );
@@ -768,10 +769,10 @@ mod tests {
             )
             .unwrap(),
             Cell::Array(ArrayCell::Timestamp(vec![
-                Some(
+                Some(Timestamp::Value(
                     NaiveDateTime::parse_from_str("2023-12-25 14:30:45.123", TIMESTAMP_FORMAT,)
-                        .unwrap(),
-                ),
+                        .unwrap()
+                )),
                 None,
             ]))
         );
@@ -952,15 +953,16 @@ mod tests {
 
     #[test]
     fn parse_array_escape_sequences() {
-        // The array parser doesn't process escape sequences in the same way as the
-        // table row parser It expects literal characters in the array string
+        // The array parser doesn't process escape sequences in the same way as
+        // the table row parser It expects literal characters in the array
+        // string
         let cell =
             parse_cell_from_postgres_text(&Type::TEXT_ARRAY, r#"{"line1\\nline2","tab\\there"}"#)
                 .unwrap();
         match cell {
             Cell::Array(ArrayCell::String(v)) => {
-                // These should be literal strings since array parser doesn't decode escapes
-                // like table parser
+                // These should be literal strings since array parser doesn't
+                // decode escapes like table parser
                 assert_eq!(
                     v,
                     vec![Some("line1\\nline2".to_owned()), Some("tab\\there".to_owned())]

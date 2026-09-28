@@ -5,7 +5,7 @@ use pg_escape::quote_literal;
 /// Prefix used for publications created by Supabase ETL.
 pub const ETL_PUBLICATION_PREFIX: &str = "supabase_etl_publication";
 
-/// Builds the table-ID query shared by replication startup and API preflight.
+/// Builds the table-ID query used to inspect publication membership.
 ///
 /// PostgreSQL expands explicit tables, schema publications, and all-table
 /// publications according to `publish_via_partition_root`. Deduplication

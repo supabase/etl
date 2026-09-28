@@ -428,10 +428,10 @@ async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
         reloaded_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
     assert_eq!(at_maximum.snapshot_id, SnapshotId::max());
 
-    // This is the original failure relationship: the schema message was
-    // written before the checkpoint, but its schema does not activate until a
-    // later commit LSN. A message-LSN-only identifier would incorrectly make
-    // it eligible at the checkpoint.
+    // This is the original failure relationship: the schema message was written
+    // before the checkpoint, but its schema does not activate until a later
+    // commit LSN. A message-LSN-only identifier would incorrectly make it
+    // eligible at the checkpoint.
     assert!(second_commit_first_snapshot.message_lsn() < checkpoint_lsn);
     assert!(checkpoint_lsn < second_commit_first_snapshot.commit_lsn());
     let legacy_message_lsn = second_commit_first_snapshot.message_lsn();
@@ -503,8 +503,8 @@ async fn schema_store_upsert_replaces_columns() {
     // Upsert the updated schema at the same snapshot ID.
     store.store_table_schema(updated_schema.clone()).await.unwrap();
 
-    // Reload from the database to verify that columns were replaced rather
-    // than accumulated.
+    // Reload from the database to verify that columns were replaced rather than
+    // accumulated.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let schema = new_store.get_table_schema(&table_id, SnapshotId::max()).await.unwrap().unwrap();
 
@@ -833,6 +833,13 @@ async fn multiple_pipelines_isolation() {
             .map(|m| m.table_id().to_owned()),
         Some("pipeline1_table".to_owned())
     );
+
+    // Deleting one pipeline's state must preserve the other pipeline's state.
+    store1.delete_table_state(table_id).await.unwrap();
+
+    let new_store2 = PostgresStore::new(pipeline_id2, database.config.clone()).await.unwrap();
+    new_store2.load_table_states().await.unwrap();
+    assert_eq!(new_store2.get_table_state(table_id).await.unwrap(), Some(TableState::DataSync));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1239,8 +1246,8 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
         .await
         .expect("Failed to connect to source database with sqlx");
 
-    // Manually insert a row with a specific replication mask bytea.
-    // The mask [1, 0, 1, 1, 0] represents columns: replicated, not replicated,
+    // Manually insert a row with a specific replication mask bytea. The mask
+    // [1, 0, 1, 1, 0] represents columns: replicated, not replicated,
     // replicated, replicated, not replicated.
     let expected_mask_bytes: Vec<u8> = vec![1, 0, 1, 1, 0];
 

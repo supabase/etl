@@ -26,12 +26,12 @@ pub async fn create_pg_database(config: &PgConnectionConfig) -> PgPool {
 
 /// Drops a Postgres database and terminates all connections.
 ///
-/// Connects to Postgres server, forcefully terminates active connections
-/// to the target database, and drops it if it exists. Used for test cleanup.
+/// Connects to Postgres server, forcefully terminates active connections to the
+/// target database, and drops it if it exists. Used for test cleanup.
 ///
-/// This function will not panic on errors - it logs them and continues.
-/// This ensures test cleanup doesn't fail when databases are already gone
-/// or connections can't be established.
+/// This function will not panic on errors - it logs them and continues. This
+/// ensures test cleanup doesn't fail when databases are already gone or
+/// connections can't be established.
 pub async fn drop_pg_database(config: &PgConnectionConfig) {
     // Connect to the default database.
     let mut connection = match PgConnection::connect_with(&config.without_db(None)).await {

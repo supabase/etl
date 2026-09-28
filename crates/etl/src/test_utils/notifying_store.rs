@@ -178,8 +178,8 @@ impl NotifyingStore {
     /// the expected table state type.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the expected state is not reached. This
-    /// prevents tests from hanging indefinitely.
+    /// specified timeout if the expected state is not reached. This prevents
+    /// tests from hanging indefinitely.
     pub async fn notify_on_table_state_type(
         &self,
         table_id: TableId,
@@ -230,8 +230,8 @@ impl NotifyingStore {
     /// custom condition.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the condition is not met. This prevents tests
-    /// from hanging indefinitely.
+    /// specified timeout if the condition is not met. This prevents tests from
+    /// hanging indefinitely.
     pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> TimedNotify
     where
         F: Fn(&TableState) -> bool + Send + Sync + 'static,
@@ -270,8 +270,7 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Resets one table to [`TableState::Init`] and clears its state
-    /// history.
+    /// Resets one table to [`TableState::Init`] and clears its state history.
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         inner.table_state_history.remove(&table_id);

@@ -109,9 +109,8 @@ fn sqlx_ssl_mode(
         SslMode::Require => Ok(PgSslMode::Require),
         SslMode::VerifyCa => Ok(PgSslMode::VerifyCa),
         SslMode::VerifyFull if hostaddrs.is_empty() => Ok(PgSslMode::VerifyFull),
-        // sqlx does not expose libpq's separate hostaddr field. When dialing a
-        // numeric address, verify the CA but avoid hostname verification
-        // against the IP literal.
+        // sqlx does not expose libpq's separate hostaddr field. When dialing a numeric address,
+        // verify the CA but avoid hostname verification against the IP literal.
         SslMode::VerifyFull => Ok(PgSslMode::VerifyCa),
         _ => Err(DuckLakeCatalogConnectOptionsError::UnsupportedSslMode),
     }

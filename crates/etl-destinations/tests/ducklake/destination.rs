@@ -32,7 +32,7 @@ use chrono::NaiveDate;
 use chrono::{TimeDelta, Utc};
 use duckdb::Connection;
 use etl::{
-    data::{Cell, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
+    data::{Cell, Date, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
         TableCopyAttemptId, TableCopyBatchId,
@@ -415,7 +415,7 @@ async fn new_test_destination(
 
 /// Creates a destination with the legacy immediate-copy policy used by tests
 /// that do not exercise deferred buffering.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 async fn new_unbuffered_destination<S>(
     catalog_url: Url,
     data_url: Url,
@@ -1124,8 +1124,8 @@ async fn buffered_copy_continues_while_maintenance_waits_for_session() {
         async move { destination.acquire_external_maintenance_pause().await }
     });
 
-    // The existing copy session holds shared session access, so this proves
-    // the exclusive maintenance request is waiting for it to drain.
+    // The existing copy session holds shared session access, so this proves the
+    // exclusive maintenance request is waiting for it to drain.
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut pause_task).await.is_err());
 
     let second_write = tokio::time::timeout(
@@ -5116,7 +5116,7 @@ async fn type_mapping_round_trip() {
                 Cell::String("hello".to_owned()),
                 Cell::F64(PI),
                 Cell::Bool(true),
-                Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
+                Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap())),
             ])],
         )
         .await

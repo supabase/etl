@@ -49,8 +49,8 @@ struct PipelineErrorEmailFields<'a> {
 
 /// Response from the ETL email API.
 ///
-/// Contains information about whether the email was successfully processed
-/// and whether it was deduplicated.
+/// Contains information about whether the email was successfully processed and
+/// whether it was deduplicated.
 #[derive(Debug, Deserialize)]
 struct EtlEmailResponse {
     /// Success message from the API.
@@ -62,8 +62,8 @@ struct EtlEmailResponse {
 /// Client for sending error notifications to Supabase API.
 ///
 /// Provides async methods to notify external systems about errors that occur
-/// during replication. Uses reqwest for HTTP communication and handles
-/// errors gracefully without blocking pipeline operations.
+/// during replication. Uses reqwest for HTTP communication and handles errors
+/// gracefully without blocking pipeline operations.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorNotificationClient {
     /// HTTP client for making requests.
@@ -81,8 +81,8 @@ pub(crate) struct ErrorNotificationClient {
 impl ErrorNotificationClient {
     /// Creates a new error notification client.
     ///
-    /// The client is configured with the necessary credentials and endpoints
-    /// to send error notifications to the Supabase API.
+    /// The client is configured with the necessary credentials and endpoints to
+    /// send error notifications to the Supabase API.
     pub(crate) fn new(
         api_url: String,
         api_key: String,

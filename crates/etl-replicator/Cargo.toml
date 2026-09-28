@@ -25,7 +25,7 @@ egress = ["etl/egress"]
 hotpath = ["etl/hotpath", "etl-destinations/hotpath", "etl-telemetry/hotpath", "hotpath/hotpath", "hotpath/tokio"]
 
 [dependencies]
-
+axum = { workspace = true, features = ["http1", "tokio"] }
 configcat = { workspace = true }
 etl = { workspace = true, features = ["tls-rustls-ring"] }
 etl-config = { workspace = true, features = ["supabase"] }
@@ -44,7 +44,8 @@ serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
-tracing = { workspace = true, default-features = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true, features = ["default"] }
 tracing-subscriber = { workspace = true, features = ["ansi", "env-filter", "fmt"] }
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

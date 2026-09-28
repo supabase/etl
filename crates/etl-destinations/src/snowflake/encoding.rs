@@ -2,8 +2,7 @@ use std::{fmt, io::Write};
 
 use etl::{
     data::{
-        ArrayCell, Cell, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
-        TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+        ArrayCell, Cell, PgNumeric, TableRow, format_date, format_timestamp, format_timestamptz,
     },
     schema::ColumnSchema,
 };
@@ -108,7 +107,7 @@ impl Serialize for CellSerializer<'_> {
             Cell::U32(n) => ser.serialize_u32(*n),
             Cell::I64(n) => ser.serialize_i64(*n),
             Cell::F32(f) => {
-                reject_non_finite(*f as f64)?;
+                reject_non_finite(f64::from(*f))?;
                 ser.serialize_f32(*f)
             }
             Cell::F64(f) => {
@@ -116,13 +115,13 @@ impl Serialize for CellSerializer<'_> {
                 ser.serialize_f64(*f)
             }
             Cell::Numeric(n) => serialize_pg_numeric(n, ser),
-            // collect_str: Display::fmt writes directly into the JSON serializer's
-            // output buffer, avoiding an intermediate String allocation.
-            Cell::Date(d) => ser.collect_str(&d.format(DATE_FORMAT)),
-            Cell::Time(t) => ser.collect_str(&t.format(TIME_FORMAT)),
+            // collect_str: Display::fmt writes directly into the JSON serializer's output buffer,
+            // avoiding an intermediate String allocation.
+            Cell::Date(d) => ser.collect_str(&format_date(d)),
+            Cell::Time(t) => ser.collect_str(t),
             Cell::TimeTz(t) => ser.collect_str(t),
-            Cell::Timestamp(dt) => ser.collect_str(&dt.format(TIMESTAMP_FORMAT)),
-            Cell::TimestampTz(dt) => ser.collect_str(&dt.format(TIMESTAMPTZ_FORMAT_HH_MM)),
+            Cell::Timestamp(dt) => ser.collect_str(&format_timestamp(dt)),
+            Cell::TimestampTz(dt) => ser.collect_str(&format_timestamptz(dt)),
             Cell::Uuid(u) => ser.collect_str(u),
             Cell::Json(v) => v.serialize(ser),
             Cell::Bytes(b) => ser.collect_str(&HexDisplay(b)),
@@ -186,7 +185,7 @@ struct ValidatedF32(f32);
 
 impl Serialize for ValidatedF32 {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
-        reject_non_finite(self.0 as f64)?;
+        reject_non_finite(f64::from(self.0))?;
         ser.serialize_f32(self.0)
     }
 }
@@ -226,18 +225,14 @@ impl Serialize for ArrayCellSerializer<'_> {
             ArrayCell::F64(v) => serialize_array_with(v, ser, |f| ValidatedF64(*f)),
             // Custom formatting via collect_str wrappers.
             ArrayCell::Numeric(v) => serialize_array_with(v, ser, NumericElement),
-            ArrayCell::Date(v) => {
-                serialize_array_with(v, ser, |d| CollectStr(d.format(DATE_FORMAT)))
-            }
-            ArrayCell::Time(v) => {
-                serialize_array_with(v, ser, |t| CollectStr(t.format(TIME_FORMAT)))
-            }
+            ArrayCell::Date(v) => serialize_array_with(v, ser, |d| CollectStr(format_date(d))),
+            ArrayCell::Time(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::TimeTz(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::Timestamp(v) => {
-                serialize_array_with(v, ser, |dt| CollectStr(dt.format(TIMESTAMP_FORMAT)))
+                serialize_array_with(v, ser, |dt| CollectStr(format_timestamp(dt)))
             }
             ArrayCell::TimestampTz(v) => {
-                serialize_array_with(v, ser, |dt| CollectStr(dt.format(TIMESTAMPTZ_FORMAT_HH_MM)))
+                serialize_array_with(v, ser, |dt| CollectStr(format_timestamptz(dt)))
             }
             ArrayCell::Uuid(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::Bytes(v) => serialize_array_with(v, ser, |b| CollectStr(HexDisplay(b))),
@@ -285,7 +280,10 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-    use etl::schema::Type;
+    use etl::{
+        data::{Date, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, Timestamp},
+        schema::Type,
+    };
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -325,14 +323,19 @@ mod tests {
             (Cell::F32(1.5), json!(1.5f64)),
             (Cell::F64(2.5), json!(2.5)),
             (Cell::Numeric(PgNumeric::default()), json!(PgNumeric::default().to_string())),
-            (Cell::Date(d), json!("2026-04-29")),
-            (Cell::Time(t), json!(t.format(TIME_FORMAT).to_string())),
+            (Cell::Date(Date::Value(d)), json!("2026-04-29")),
+            (Cell::Date(Date::PosInfinity), json!("infinity")),
+            (Cell::Timestamp(Timestamp::NegInfinity), json!("-infinity")),
+            (Cell::Time(PgTime::EndOfDay), json!("24:00:00")),
+            (Cell::Time(PgTime::Value(t)), json!(t.format(TIME_FORMAT).to_string())),
             (
-                Cell::Timestamp(NaiveDateTime::new(d, t)),
+                Cell::Timestamp(Timestamp::Value(NaiveDateTime::new(d, t))),
                 json!(NaiveDateTime::new(d, t).format(TIMESTAMP_FORMAT).to_string()),
             ),
             (
-                Cell::TimestampTz(Utc.with_ymd_and_hms(2026, 4, 29, 10, 30, 0).unwrap()),
+                Cell::TimestampTz(Timestamp::Value(
+                    Utc.with_ymd_and_hms(2026, 4, 29, 10, 30, 0).unwrap(),
+                )),
                 json!(
                     Utc.with_ymd_and_hms(2026, 4, 29, 10, 30, 0)
                         .unwrap()
@@ -393,7 +396,7 @@ mod tests {
             ),
             (
                 Cell::Array(ArrayCell::Date(vec![
-                    Some(NaiveDate::from_ymd_opt(2026, 4, 29).unwrap()),
+                    Some(Date::Value(NaiveDate::from_ymd_opt(2026, 4, 29).unwrap())),
                     None,
                 ])),
                 json!(["2026-04-29", null]),

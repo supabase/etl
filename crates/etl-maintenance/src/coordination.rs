@@ -20,7 +20,7 @@ pub struct ExternalMaintenanceState {
     pub exists: bool,
     /// Currently active maintenance run, if any.
     pub active_run: Option<ExternalMaintenanceRun>,
-    /// Controller-owned pause lease observed by the replicator.
+    /// Externally managed pause lease observed by the replicator.
     pub pause_request: Option<ExternalMaintenancePause>,
     /// Replicator-owned operation request sampled from destination state.
     pub operation_request: Option<ExternalMaintenanceOperationRequest>,
@@ -104,7 +104,7 @@ impl ExternalMaintenanceOperations {
     }
 }
 
-/// Controller-owned bounded pause lease.
+/// Externally managed bounded pause lease.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalMaintenancePause {

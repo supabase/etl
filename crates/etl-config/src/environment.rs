@@ -14,8 +14,8 @@ const DEV_ENV_NAME: &str = "dev";
 
 /// Runtime environment for the application.
 ///
-/// Used to distinguish between development, staging, and production modes
-/// for configuration loading and feature toggles.
+/// Used to distinguish between development, staging, and production modes for
+/// configuration loading and feature toggles.
 #[derive(Debug, Clone, Copy)]
 pub enum Environment {
     /// Production environment.

@@ -12,24 +12,27 @@ homepage.workspace = true
 doctest = false
 
 [features]
-hotpath = ["dep:axum", "dep:metrics", "dep:reqwest", "dep:hotpath", "hotpath/hotpath", "hotpath/hotpath-prometheus", "hotpath/threads"]
+hotpath = ["dep:metrics", "dep:reqwest", "dep:hotpath", "hotpath/hotpath", "hotpath/hotpath-prometheus", "hotpath/threads"]
 
 [dependencies]
 etl-config = { workspace = true }
 
-axum = { workspace = true, optional = true, features = ["http1", "tokio"] }
+axum = { workspace = true, features = ["http1", "tokio"] }
 hotpath = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
-metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 reqwest = { workspace = true, optional = true }
+libc = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+socket2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true, default-features = true }
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true, features = ["default"] }
 tracing-appender = { workspace = true }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
-tracing-subscriber = { workspace = true, default-features = true, features = ["json", "env-filter", "ansi"] }
+tracing-subscriber = { workspace = true, features = ["default", "json", "env-filter", "ansi"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

@@ -275,8 +275,8 @@ pub(crate) fn column_schemas_to_table_descriptor(
             ColumnMode::Repeated
         } else if use_cdc_sequence_column {
             // CDC delete rows can omit non-key columns, so the writer schema
-            // must accept missing scalar fields even when the destination
-            // table column is defined as NOT NULL.
+            // must accept missing scalar fields even when the destination table
+            // column is defined as NOT NULL.
             ColumnMode::Nullable
         } else if column_schema.nullable {
             ColumnMode::Nullable

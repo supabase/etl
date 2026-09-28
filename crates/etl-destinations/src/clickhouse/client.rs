@@ -8,7 +8,6 @@ use clickhouse::Client;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    schema::Type,
 };
 use tracing::debug;
 use url::Url;
@@ -25,7 +24,7 @@ use crate::clickhouse::{
         REPLICATION_PATH_LABEL,
     },
     network::new_public_client,
-    schema::{clickhouse_column_type, clickhouse_default_clause, clickhouse_default_expression},
+    schema::{clickhouse_column_type, clickhouse_default_clause},
     sql::quote_identifier,
 };
 
@@ -120,9 +119,9 @@ pub(crate) struct ClickHouseTableColumn {
 
 /// Returns the placement clause for an `ADD COLUMN` statement.
 ///
-/// `None` means the destination table has no user columns to anchor on, so
-/// the new column goes at the front via `FIRST` (which still places it
-/// before the trailing CDC columns).
+/// `None` means the destination table has no user columns to anchor on, so the
+/// new column goes at the front via `FIRST` (which still places it before the
+/// trailing CDC columns).
 fn add_column_placement_clause(after_column: Option<&str>) -> String {
     match after_column {
         Some(anchor) => format!("AFTER {}", quote_identifier(anchor)),
@@ -162,31 +161,6 @@ fn build_rename_column_sql(table_name: &str, old_name: &str, new_name: &str) -> 
     let old_name = quote_identifier(old_name);
     let new_name = quote_identifier(new_name);
     format!("ALTER TABLE {table_name} RENAME COLUMN IF EXISTS {old_name} TO {new_name}")
-}
-
-/// Builds the SQL used to set a supported column default in ClickHouse.
-fn build_set_default_sql(
-    table_name: &str,
-    column_name: &str,
-    typ: &Type,
-    default_expression: &str,
-) -> Option<String> {
-    let rendered_default_expression = clickhouse_default_expression(default_expression, typ)?;
-    let table_name = quote_identifier(table_name);
-    let column_name = quote_identifier(column_name);
-
-    Some(format!(
-        "ALTER TABLE {table_name} MODIFY COLUMN {column_name} DEFAULT \
-         {rendered_default_expression}"
-    ))
-}
-
-/// Builds the SQL used to drop a column default in ClickHouse.
-fn build_drop_default_sql(table_name: &str, column_name: &str) -> String {
-    let table_name = quote_identifier(table_name);
-    let column_name = quote_identifier(column_name);
-
-    format!("ALTER TABLE {table_name} MODIFY COLUMN {column_name} REMOVE DEFAULT")
 }
 
 /// Builds the SQL used to relax a scalar column to `Nullable`.
@@ -296,10 +270,9 @@ impl ClickHouseClient {
     }
 
     /// Variant of [`Self::new`] that does not pin the client to a target
-    /// database. The server falls back to the user's profile default
-    /// database for every query, which lets the validator probe
-    /// connectivity / auth / database existence before the user-supplied
-    /// database is known to exist.
+    /// database. The server falls back to the user's profile default database
+    /// for every query, which lets the validator probe connectivity / auth /
+    /// database existence before the user-supplied database is known to exist.
     pub fn new_without_database(
         url: Url,
         user: impl Into<String>,
@@ -347,14 +320,12 @@ impl ClickHouseClient {
                     )
                     .with_option("http_send_timeout", floor_secs(config.insert_timeout))
                     .with_option("http_receive_timeout", floor_secs(config.insert_timeout))
-                    // Force synchronous insert acknowledgements: when a server
-                    // or user profile enables `async_insert` with
-                    // `wait_for_async_insert = 0`, ClickHouse acks inserts
-                    // before flushing the async-insert buffer into the table,
-                    // letting a following schema change overtake acked rows.
-                    // Pinning the setting makes every ack imply the rows were
-                    // flushed into the table; it is a no-op when async inserts
-                    // are disabled.
+                    // Force synchronous insert acknowledgements: when a server or user profile
+                    // enables `async_insert` with `wait_for_async_insert = 0`, ClickHouse acks
+                    // inserts before flushing the async-insert buffer into the table, letting a
+                    // following schema change overtake acked rows. Pinning the setting makes every
+                    // ack imply the rows were flushed into the table; it is a no-op when async
+                    // inserts are disabled.
                     .with_option("wait_for_async_insert", "1")
             }),
             config,
@@ -363,10 +334,10 @@ impl ClickHouseClient {
 
     /// Verifies that the ClickHouse server is reachable.
     ///
-    /// Issues a `SELECT 1` round-trip; cheaper than any DDL or metadata
-    /// query and exercises the auth/transport path. Mirrors the Iceberg
-    /// destination's `validate_connectivity` so callers (notably the
-    /// `etl-api` validators) can treat the two destinations uniformly.
+    /// Issues a `SELECT 1` round-trip; cheaper than any DDL or metadata query
+    /// and exercises the auth/transport path. Mirrors the Iceberg destination's
+    /// `validate_connectivity` so destination validators
+    /// can treat the two destinations uniformly.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
         let query = self
             .inner
@@ -388,10 +359,9 @@ impl ClickHouseClient {
 
     /// Returns whether `database` exists on the ClickHouse server.
     ///
-    /// Queries `system.databases` directly so the result is independent of
-    /// the client's configured database. Pair with
-    /// [`Self::new_without_database`] to probe existence of a database
-    /// whose presence is unknown.
+    /// Queries `system.databases` directly so the result is independent of the
+    /// client's configured database. Pair with [`Self::new_without_database`]
+    /// to probe existence of a database whose presence is unknown.
     pub async fn database_exists(&self, database: &str) -> EtlResult<bool> {
         let query = self
             .inner
@@ -475,7 +445,11 @@ impl ClickHouseClient {
         Ok(rows.into_iter().next())
     }
 
-    /// Returns ClickHouse columns for a table in position order.
+    /// Returns the insertable ClickHouse columns for a table in position order.
+    ///
+    /// `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns are excluded because an
+    /// insert without a column list skips them. Users may add them to derive
+    /// values from ETL columns, and RowBinary inserts never carry them.
     pub(crate) async fn table_columns(
         &self,
         table_name: &str,
@@ -485,7 +459,8 @@ impl ClickHouseClient {
             .inner
             .query(
                 "SELECT name, type AS type_name FROM system.columns WHERE database = \
-                 currentDatabase() AND table = ? ORDER BY position",
+                 currentDatabase() AND table = ? AND default_kind IN ('', 'DEFAULT') ORDER BY \
+                 position",
             )
             .with_option("max_execution_time", &schema_secs)
             .bind(table_name);
@@ -506,9 +481,8 @@ impl ClickHouseClient {
     ///
     /// `after_column` controls placement: `Some(name)` inserts the new column
     /// immediately AFTER `name`, `None` inserts it FIRST (used when the table
-    /// has no user columns yet). Either way the new column lands before the
-    /// trailing CDC columns (`cdc_operation`, `cdc_lsn`), which is required
-    /// because RowBinary encoding is positional.
+    /// has no user columns yet). Either placement keeps it before the trailing
+    /// CDC columns, which RowBinary encoding requires.
     pub(crate) async fn add_column(
         &self,
         table_name: &str,
@@ -529,8 +503,8 @@ impl ClickHouseClient {
     /// Renames a column in an existing ClickHouse table (idempotent).
     ///
     /// `RENAME COLUMN IF EXISTS` makes the ALTER a server-side noop when the
-    /// old column is already absent, so the check and the rename happen in
-    /// one statement without a racy read-then-write.
+    /// old column is already absent, so the check and the rename happen in one
+    /// statement without a racy read-then-write.
     pub(crate) async fn rename_column(
         &self,
         table_name: &str,
@@ -539,64 +513,6 @@ impl ClickHouseClient {
     ) -> EtlResult<()> {
         let sql = build_rename_column_sql(table_name, old_name, new_name);
         self.execute_ddl(DdlKind::RenameColumn, &sql).await
-    }
-
-    /// Sets a supported default expression on a ClickHouse column.
-    pub(crate) async fn set_column_default(
-        &self,
-        table_name: &str,
-        column_name: &str,
-        typ: &Type,
-        default_expression: &str,
-    ) -> EtlResult<()> {
-        let Some(sql) = build_set_default_sql(table_name, column_name, typ, default_expression)
-        else {
-            return Ok(());
-        };
-
-        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
-    }
-
-    /// Drops a default expression from a ClickHouse column when present.
-    pub(crate) async fn drop_column_default(
-        &self,
-        table_name: &str,
-        column_name: &str,
-    ) -> EtlResult<()> {
-        // ClickHouse returns BAD_ARGUMENTS when REMOVE DEFAULT targets a
-        // column without a default, so make the default-removal step idempotent
-        // with a metadata check while schema DDL is serialized.
-        let schema_secs = floor_secs(self.config.schema_query_timeout);
-        let query = self
-            .inner
-            .query(
-                "select count() from system.columns where database = currentDatabase() and table \
-                 = ? and name = ? and default_kind = 'DEFAULT'",
-            )
-            .with_option("max_execution_time", &schema_secs)
-            .bind(table_name)
-            .bind(column_name);
-        let start = Instant::now();
-        let default_count = timeout_call(
-            ClickHouseOperationKind::SchemaQuery,
-            &self.config,
-            Some(&format!("table: {table_name}, column: {column_name}")),
-            query.fetch_one::<u64>(),
-        )
-        .await?;
-        metrics::histogram!(ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS)
-            .record(start.elapsed().as_secs_f64());
-
-        if default_count == 0 {
-            debug!(
-                table_name,
-                column_name, "clickhouse column has no default; skipping drop default"
-            );
-            return Ok(());
-        }
-
-        let sql = build_drop_default_sql(table_name, column_name);
-        self.execute_ddl(DdlKind::ModifyColumn, &sql).await
     }
 
     /// Relaxes an existing scalar column to nullable when needed.
@@ -654,9 +570,9 @@ impl ClickHouseClient {
     /// `nullable_flags` must have the same length as each row.
     ///
     /// When the accumulated uncompressed byte count reaches
-    /// `max_bytes_per_insert` the current INSERT statement is committed and
-    /// a new one is opened, keeping peak memory usage bounded for large
-    /// initial copies.
+    /// `max_bytes_per_insert` the current INSERT statement is committed and a
+    /// new one is opened, keeping peak memory usage bounded for large initial
+    /// copies.
     ///
     /// The `replication_path` label (`"copy"` or `"cdc"`) is attached to the
     /// `etl_clickhouse_insert_duration_seconds` histogram recorded after each
@@ -675,6 +591,9 @@ impl ClickHouseClient {
         let mut statements = 0u64;
 
         while rows.peek().is_some() {
+            #[cfg(feature = "test-utils")]
+            pause_before_insert_statement_for_tests(statements).await;
+
             let mut insert = self
                 .inner
                 .insert_formatted_with(sql.clone())
@@ -748,6 +667,71 @@ impl ClickHouseClient {
     }
 }
 
+/// One-shot pause armed before an INSERT statement inside
+/// [`ClickHouseClient::insert_rows`].
+#[cfg(feature = "test-utils")]
+struct ArmedInsertStatementPause {
+    /// Zero-based index of the statement to pause before.
+    statement_index: u64,
+    /// Signals that the paused call reached the armed statement boundary.
+    reached: tokio::sync::oneshot::Sender<()>,
+    /// Resumes the paused call when signalled or dropped.
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Currently armed insert-statement pauses; each is consumed once.
+#[cfg(feature = "test-utils")]
+static INSERT_STATEMENT_PAUSES: parking_lot::Mutex<Vec<ArmedInsertStatementPause>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// Arms a one-shot pause before the zero-based `statement_index` INSERT
+/// statement of a `ClickHouseClient::insert_rows` call.
+///
+/// Several pauses may be armed at once; each call crossing an armed
+/// statement boundary consumes the earliest matching pause, so two
+/// concurrent single-statement writes can both be parked by arming the same
+/// index twice.
+///
+/// Returns the `reached` receiver, signalled at the armed statement boundary
+/// after every earlier statement in the call was acknowledged, and the
+/// `release` sender that resumes the paused call. Dropping the sender also
+/// resumes it, so tests must hold the sender while the pause must stay in
+/// force.
+#[cfg(feature = "test-utils")]
+pub fn arm_pause_before_insert_statement_for_tests(
+    statement_index: u64,
+) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    INSERT_STATEMENT_PAUSES.lock().push(ArmedInsertStatementPause {
+        statement_index,
+        reached: reached_tx,
+        release: release_rx,
+    });
+
+    (reached_rx, release_tx)
+}
+
+/// Pauses at an armed statement boundary; no-op when no armed pause matches
+/// the statement index.
+#[cfg(feature = "test-utils")]
+async fn pause_before_insert_statement_for_tests(statement_index: u64) {
+    let armed = {
+        let mut armed_pauses = INSERT_STATEMENT_PAUSES.lock();
+        armed_pauses
+            .iter()
+            .position(|armed| armed.statement_index == statement_index)
+            .map(|index| armed_pauses.remove(index))
+    };
+    let Some(armed) = armed else {
+        return;
+    };
+    let _ = armed.reached.send(());
+    // A test that aborts the paused task never sends; a dropped sender
+    // resumes normally.
+    let _ = armed.release.await;
+}
+
 #[cfg(test)]
 mod tests {
     use etl::schema::{ColumnSchema, Type};
@@ -814,24 +798,6 @@ mod tests {
             sql,
             "ALTER TABLE \"test_table\" ADD COLUMN IF NOT EXISTS \"score\" Int32 DEFAULT 42 AFTER \
              \"id\""
-        );
-    }
-
-    #[test]
-    fn set_default_sql_preserves_existing_column_type() {
-        let sql =
-            build_set_default_sql("test_table", "score", &Type::INT4, "42").expect("default sql");
-
-        assert_eq!(sql, "ALTER TABLE \"test_table\" MODIFY COLUMN \"score\" DEFAULT 42");
-    }
-
-    #[test]
-    fn drop_default_sql_quotes_identifiers() {
-        let sql = build_drop_default_sql("table\"name", "old\"column");
-
-        assert_eq!(
-            sql,
-            "ALTER TABLE \"table\\\"name\" MODIFY COLUMN \"old\\\"column\" REMOVE DEFAULT"
         );
     }
 
@@ -924,8 +890,8 @@ mod tests {
     /// `Display` is invoked.
     ///
     /// # THEN
-    /// It produces the human-readable op name interpolated into error
-    /// messages by `timeout_call`.
+    /// It produces the human-readable op name interpolated into error messages
+    /// by `timeout_call`.
     #[test]
     fn operation_kind_display_matches_error_messages() {
         assert_eq!(ClickHouseOperationKind::ConnectivityCheck.to_string(), "connectivity check");
@@ -941,13 +907,13 @@ mod tests {
     /// `timeout_call` is awaited under paused time.
     ///
     /// # THEN
-    /// It returns an `EtlError` with kind `DestinationTimeout` and a
-    /// detail that mentions the op and "timed out".
+    /// It returns an `EtlError` with kind `DestinationTimeout` and a detail
+    /// that mentions the op and "timed out".
     #[tokio::test(start_paused = true)]
     async fn timeout_call_returns_destination_timeout_on_deadline() {
         // A future that never resolves; tokio's paused clock advances virtual
-        // time when all tasks are stalled, so the timeout fires immediately
-        // in real wall-clock terms.
+        // time when all tasks are stalled, so the timeout fires immediately in
+        // real wall-clock terms.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
         let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, None, never)
@@ -986,15 +952,14 @@ mod tests {
     }
 
     /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` before the
-    /// deadline.
+    /// A future that returns a `clickhouse::error::Error` before the deadline.
     ///
     /// # WHEN
     /// `timeout_call` is awaited with no context.
     ///
     /// # THEN
-    /// It returns an `EtlError` with the op's `failed_kind` and a detail
-    /// that mentions the op and "failed".
+    /// It returns an `EtlError` with the op's `failed_kind` and a detail that
+    /// mentions the op and "failed".
     #[tokio::test(start_paused = true)]
     async fn timeout_call_propagates_inner_error() {
         let config = ClickHouseClientConfig::default();
@@ -1028,15 +993,14 @@ mod tests {
     }
 
     /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` and
-    /// `Some(context)`.
+    /// A future that returns a `clickhouse::error::Error` and `Some(context)`.
     ///
     /// # WHEN
     /// `timeout_call` is awaited.
     ///
     /// # THEN
-    /// The error has the op's `failed_kind`, the detail contains the
-    /// context, and the inner clickhouse error is attached as `source`.
+    /// The error has the op's `failed_kind`, the detail contains the context,
+    /// and the inner clickhouse error is attached as `source`.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_inner_error_includes_context() {
         use std::error::Error as _;
@@ -1087,8 +1051,8 @@ mod tests {
     /// `failed_kind` is queried.
     ///
     /// # THEN
-    /// Each variant maps to the `ErrorKind` that drives the appropriate
-    /// retry policy for that bucket.
+    /// Each variant maps to the `ErrorKind` that drives the appropriate retry
+    /// policy for that bucket.
     #[test]
     fn operation_kind_failed_kind_per_bucket() {
         assert_eq!(
@@ -1127,7 +1091,8 @@ mod tests {
         assert_eq!(floor_secs(Duration::from_nanos(1)), "1");
         assert_eq!(floor_secs(Duration::from_millis(500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(999)), "1");
-        // Fractional seconds beyond 1s truncate to whole seconds (Duration::as_secs).
+        // Fractional seconds beyond 1s truncate to whole seconds
+        // (Duration::as_secs).
         assert_eq!(floor_secs(Duration::from_millis(1500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(2999)), "2");
     }

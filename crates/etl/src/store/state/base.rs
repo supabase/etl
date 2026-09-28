@@ -40,9 +40,9 @@ pub trait StateStore {
     ///
     /// This should be called once at program start to load the state into the
     /// cache and then use only the `get_X` methods to access the states.
-    /// Updating the state by calling the `update_table_state`
-    /// updates in both the cache and the persistent store, so no need to
-    /// ever load the states again.
+    /// Updating the state by calling the `update_table_state` updates in both
+    /// the cache and the persistent store, so no need to ever load the states
+    /// again.
     fn load_table_states(&self) -> impl Future<Output = EtlResult<usize>> + Send;
 
     /// Updates multiple table states atomically in both the cache and the

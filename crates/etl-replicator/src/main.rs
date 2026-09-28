@@ -4,6 +4,22 @@
 //! replication and routes data to configured destinations. Includes telemetry,
 //! error handling, and graceful shutdown capabilities.
 
+use std::process::ExitCode;
+
+use ::tracing::{debug, error, info};
+use etl::task::abort_and_join;
+use etl_config::shared::ReplicatorConfig;
+
+use crate::{
+    core::start_replicator_with_config,
+    error::{ReplicatorError, ReplicatorResult},
+    error_notification::ErrorNotificationClient,
+};
+
+/// The name of the environment variable which contains version information for
+/// this replicator.
+const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
+
 /// Jemalloc allocator for better memory management in high-throughput async
 /// workloads.
 #[cfg(not(target_env = "msvc"))]
@@ -26,10 +42,10 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 ///   memory efficiency.
 /// - `abort_conf:true`: Aborts on invalid configuration for fail-fast behavior.
 ///
-/// On Linux, this can be overridden via `MALLOC_CONF` env var.
-/// On macOS, use `_RJEM_MALLOC_CONF` (unprefixed symbols not supported).
+/// On Linux, this can be overridden via `MALLOC_CONF` env var. On macOS, use
+/// `_RJEM_MALLOC_CONF` (unprefixed symbols not supported).
 #[cfg(all(target_os = "linux", not(target_env = "msvc")))]
-#[allow(non_upper_case_globals)]
+#[expect(non_upper_case_globals)]
 #[unsafe(export_name = "malloc_conf")]
 static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
@@ -37,35 +53,110 @@ static malloc_conf: &[u8] =
 /// Jemalloc configuration for macOS (uses prefixed symbol since unprefixed not
 /// supported).
 #[cfg(all(target_os = "macos", not(target_env = "msvc")))]
-#[allow(non_upper_case_globals)]
+#[expect(non_upper_case_globals)]
 #[unsafe(export_name = "_rjem_malloc_conf")]
 static malloc_conf: &[u8] =
     b"narenas:8,background_thread:true,metadata_thp:auto,dirty_decay_ms:10000,muzzy_decay_ms:10000,tcache_max:8192,abort_conf:true\0";
-
-use std::process::ExitCode;
-
-use ::tracing::{debug, error};
-use etl_config::shared::ReplicatorConfig;
-use tracing::info;
-
-use crate::{
-    core::start_replicator_with_config,
-    error::{ReplicatorError, ReplicatorResult},
-    error_notification::ErrorNotificationClient,
-};
 
 mod core;
 mod error;
 mod error_notification;
 mod error_reporting;
+mod health;
 mod init;
 #[cfg(feature = "any-destination")]
 mod metrics;
 mod sentry;
 
-/// The name of the environment variable which contains version information for
-/// this replicator.
-const APP_VERSION_ENV_NAME: &str = "APP_VERSION";
+/// Main async entry point that starts the replicator pipeline.
+///
+/// Launches the replicator with the provided configuration and captures any
+/// errors to Sentry and optionally sends notifications to the Supabase API.
+async fn async_main(
+    replicator_config: ReplicatorConfig,
+    notification_client: Option<ErrorNotificationClient>,
+) -> ReplicatorResult<()> {
+    hotpath::tokio_runtime!();
+
+    let metrics_http_listener = init::init_metrics(&replicator_config)?;
+
+    // Keep the feature flags client alive for the full async runtime lifetime.
+    let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
+
+    info!("replicator bootstrap completed");
+
+    let Err(error) =
+        start_replicator_with_config(replicator_config, notification_client.clone()).await
+    else {
+        if let Some(result) = abort_and_join(metrics_http_listener).await? {
+            result?;
+        }
+
+        return Ok(());
+    };
+
+    sentry::capture_error(&error);
+    error!(error = %error, "replicator failed");
+
+    let Some(notification_client) = notification_client else {
+        return Err(error);
+    };
+
+    let error_message = error.to_string();
+    match &error {
+        ReplicatorError::Etl(etl_error) => {
+            notification_client.notify_error(error_message, etl_error).await;
+        }
+        _ => {
+            notification_client.notify_error(error_message.clone(), error_message).await;
+        }
+    }
+
+    Err(error)
+}
+
+/// Builds the Tokio runtime and runs the async replicator entry point.
+fn run_async_runtime(
+    replicator_config: ReplicatorConfig,
+    notification_client: Option<ErrorNotificationClient>,
+) -> ReplicatorResult<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(replicator_config, notification_client))
+}
+
+/// Runs the replicator service and propagates typed errors.
+fn try_main() -> ReplicatorResult<()> {
+    // Phase 1: synchronous bootstrap before starting Tokio.
+    //
+    // Keep all fallible synchronous setup here so we fail fast without paying
+    // the cost of building the async runtime unless startup can actually
+    // proceed.
+
+    // Install rustls crypto provider before any TLS operations.
+    init::init_crypto();
+
+    // Load the replicator config.
+    let replicator_config = init::init_config()?;
+
+    // Keep the tracing and sentry guards alive until process shutdown.
+    let _log_flusher = init::init_tracing(&replicator_config)?;
+    let _sentry_guard = init::init_sentry(&replicator_config)?;
+
+    #[cfg(feature = "hotpath")]
+    let _hotpath = etl_telemetry::profiling::init().map_err(ReplicatorError::config)?;
+
+    debug!("replicator bootstrap initialized");
+
+    // We prepare the notification client used to send errors.
+    let notification_client = init::init_error_notification(&replicator_config);
+
+    debug!("starting tokio runtime");
+
+    // Phase 2: start Tokio only once synchronous bootstrap has succeeded.
+    run_async_runtime(replicator_config, notification_client)
+}
 
 /// Entry point for the replicator service.
 ///
@@ -80,91 +171,4 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// Runs the replicator service and propagates typed errors.
-fn try_main() -> ReplicatorResult<()> {
-    // Phase 1: synchronous bootstrap before starting Tokio.
-    //
-    // Keep all fallible synchronous setup here so we fail fast without paying
-    // the cost of building the async runtime unless startup can actually proceed.
-
-    // Install rustls crypto provider before any TLS operations.
-    init::init_crypto();
-
-    // Load the replicator config.
-    let replicator_config = init::init_config()?;
-
-    // Keep the tracing and sentry guards alive until process shutdown.
-    let _log_flusher = init::init_tracing(&replicator_config)?;
-    let _sentry_guard = init::init_sentry(&replicator_config)?;
-
-    info!("replicator bootstrap initialized");
-
-    // We prepare the notification client used to send errors.
-    let notification_client = init::init_error_notification(&replicator_config);
-
-    // We initialize the Prometheus recorder.
-    init::init_metrics(&replicator_config)?;
-
-    #[cfg(feature = "hotpath")]
-    let _hotpath = etl_telemetry::profiling::init().map_err(ReplicatorError::config)?;
-
-    debug!("starting tokio runtime");
-
-    // Phase 2: start Tokio only once synchronous bootstrap has succeeded.
-    run_async_runtime(replicator_config, notification_client)
-}
-
-/// Builds the Tokio runtime and runs the async replicator entry point.
-fn run_async_runtime(
-    replicator_config: ReplicatorConfig,
-    notification_client: Option<ErrorNotificationClient>,
-) -> ReplicatorResult<()> {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(async_main(replicator_config, notification_client))
-}
-
-/// Main async entry point that starts the replicator pipeline.
-///
-/// Launches the replicator with the provided configuration and captures any
-/// errors to Sentry and optionally sends notifications to the Supabase API.
-async fn async_main(
-    replicator_config: ReplicatorConfig,
-    notification_client: Option<ErrorNotificationClient>,
-) -> ReplicatorResult<()> {
-    hotpath::tokio_runtime!();
-    // Keep the feature flags client alive for the full async runtime lifetime.
-    let _feature_flags_client = init::init_feature_flags(&replicator_config)?;
-
-    info!("replicator bootstrap completed");
-
-    if let Err(err) =
-        Box::pin(start_replicator_with_config(replicator_config, notification_client.clone())).await
-    {
-        // We send the error to Sentry.
-        sentry::capture_error(&err);
-
-        // We log the error.
-        error!("{err}");
-
-        // We send an error notification if a client is available.
-        if let Some(client) = notification_client {
-            let error_message = err.to_string();
-            match &err {
-                ReplicatorError::Etl(etl_err) => {
-                    client.notify_error(error_message.clone(), etl_err).await;
-                }
-                _ => {
-                    client.notify_error(error_message.clone(), error_message).await;
-                }
-            }
-        }
-
-        return Err(err);
-    }
-
-    Ok(())
 }

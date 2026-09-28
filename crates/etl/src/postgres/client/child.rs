@@ -6,13 +6,13 @@ use crate::error::EtlResult;
 /// A non-replication child connection for snapshot-sharing copy work.
 ///
 /// Child connections are created from a parent
-/// [`crate::postgres::client::PgReplicationTransaction`] and import
-/// snapshots exported by that transaction. The exporting parent transaction
-/// must stay open for at least as long as child transactions depend on its
-/// snapshot. The table-copy orchestration upholds this by joining child copy
-/// tasks before committing the parent transaction, but this parent-child
-/// lifetime relationship is not encoded statically because the child
-/// connections are moved into spawned async tasks.
+/// [`crate::postgres::client::PgReplicationTransaction`] and import snapshots
+/// exported by that transaction. The exporting parent transaction must stay
+/// open for at least as long as child transactions depend on its snapshot. The
+/// table-copy orchestration upholds this by joining child copy tasks before
+/// committing the parent transaction, but this parent-child lifetime
+/// relationship is not encoded statically because the child connections are
+/// moved into spawned async tasks.
 #[derive(Debug)]
 pub struct ChildPgReplicationClient {
     /// The actual child connection used for queries.

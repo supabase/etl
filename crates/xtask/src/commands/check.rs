@@ -9,8 +9,7 @@ use crate::utils::{
 
 #[derive(Args)]
 pub(crate) struct CheckArgs {
-    /// Enable `sccache`.
-    /// Also enabled via `ETL_SCCACHE=1`.
+    /// Enable `sccache`. Also enabled via `ETL_SCCACHE=1`.
     #[arg(long)]
     sccache: bool,
 
@@ -35,8 +34,8 @@ impl CheckArgs {
         println!("[clippy]");
         let CheckArgs { sccache, destination } = self;
         let clippy = CargoFeatureSelection::for_destination(destination)
-            .apply_to(cmd!(sh, "cargo clippy --all-targets"), DefaultFeatureBehavior::All)
-            .arg("--no-deps");
+            .apply_to(cmd!(sh, "cargo clippy --locked --all-targets"), DefaultFeatureBehavior::All)
+            .args(["--no-deps", "--", "-D", "warnings"]);
         maybe_with_sccache(clippy, sccache).run()?;
 
         Ok(())

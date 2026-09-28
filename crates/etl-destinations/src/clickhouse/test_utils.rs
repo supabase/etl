@@ -143,8 +143,8 @@ impl ClickHouseTestDatabase {
         .await
     }
 
-    /// Builds a [`ClickHouseDestination`] scoped to this test database with
-    /// a caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
+    /// Builds a [`ClickHouseDestination`] scoped to this test database with a
+    /// caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
     /// eagerly so tests fail fast on engine/version mismatch.
     pub async fn build_destination_with_config<S>(
         &self,
@@ -196,7 +196,7 @@ impl ClickHouseTestDatabase {
 
     /// Returns the column names and ClickHouse type strings in position order,
     /// excluding both engines' trailing CDC columns (`cdc_operation`,
-    /// `cdc_lsn`, `_etl_version`, `_etl_deleted`).
+    /// `cdc_lsn`, `cdc_tx_ordinal`, `_etl_version`, `_etl_deleted`).
     pub async fn column_types(&self, table_name: &str) -> Vec<(String, String)> {
         #[derive(clickhouse::Row, serde::Deserialize)]
         struct Col {
@@ -206,8 +206,8 @@ impl ClickHouseTestDatabase {
         self.db_client
             .query(
                 "SELECT name, type AS type_name FROM system.columns WHERE database = ? AND table \
-                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', '_etl_version', '_etl_deleted') \
-                 ORDER BY position",
+                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', 'cdc_tx_ordinal', \
+                 '_etl_version', '_etl_deleted') ORDER BY position",
             )
             .bind(&self.database)
             .bind(table_name)
