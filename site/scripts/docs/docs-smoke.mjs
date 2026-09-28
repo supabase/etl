@@ -303,8 +303,8 @@ async function checkSeoEndpoints() {
   const destinationsText = markdownTexts[markdownPaths.indexOf('/reference/destinations.md')];
   assert(
     destinationsText.includes('**Status: Stable**') &&
-      destinationsText.includes('**Status: Private alpha**') &&
-      destinationsText.match(/\*\*Status: In progress\*\*/g)?.length === 2 &&
+      destinationsText.match(/\*\*Status: Private alpha\*\*/g)?.length === 3 &&
+      !destinationsText.includes('**Status: In progress**') &&
       destinationsText.includes('**Status: Deprecated**') &&
       !destinationsText.includes('<DestinationStatus'),
     'The Destinations Markdown does not expose consistent plain-text statuses.',
@@ -758,8 +758,8 @@ async function checkDesktop(page) {
   await assertNoHorizontalOverflow(page);
   assert(
     (await page.locator('.etl-destination-status[data-status="stable"] svg').count()) === 1 &&
-      (await page.locator('.etl-destination-status[data-status="private-alpha"] svg').count()) === 1 &&
-      (await page.locator('.etl-destination-status[data-status="in-progress"] svg').count()) === 2 &&
+      (await page.locator('.etl-destination-status[data-status="private-alpha"] svg').count()) === 3 &&
+      (await page.locator('.etl-destination-status[data-status="in-progress"] svg').count()) === 0 &&
       (await page.locator('.etl-destination-status[data-status="deprecated"] svg').count()) === 1,
     'Destination maturity badges are missing their status icons.',
   );
