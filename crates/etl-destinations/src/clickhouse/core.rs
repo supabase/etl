@@ -996,6 +996,33 @@ where
         ))
     }
 
+    /// Rejects creating a table when ClickHouse already has an object with its
+    /// name, or with its `__current` view name under ReplacingMergeTree.
+    ///
+    /// Without destination metadata ETL cannot prove it owns such an object.
+    /// `CREATE ... IF NOT EXISTS` would keep it, and the copy would land on top
+    /// of rows that outrank copy rows.
+    async fn ensure_table_absent(&self, clickhouse_table_name: &str) -> EtlResult<()> {
+        let mut names = vec![clickhouse_table_name.to_owned()];
+        if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
+            names.push(format!("{clickhouse_table_name}{CURRENT_VIEW_SUFFIX}"));
+        }
+        for name in names {
+            if self.client.table_engine(&name).await?.is_some() {
+                return Err(etl_error!(
+                    ErrorKind::DestinationTableAlreadyExists,
+                    "ClickHouse destination table already exists",
+                    format!(
+                        "Table '{name}' exists, but this pipeline has no destination metadata \
+                         proving ownership. Drop the table or use another database before \
+                         retrying."
+                    )
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Issues the engine-correct `CREATE TABLE`, and under ReplacingMergeTree
     /// also the companion `CREATE VIEW "<table>__current"`. Both statements are
     /// `IF NOT EXISTS`, so retries on the recovery path are idempotent.
@@ -1106,9 +1133,8 @@ where
                     schema.name(),
                     self.inserter_config.engine,
                 )?;
-                // Detect an unmanaged pre-existing table with an incompatible
-                // engine before recording ownership or issuing creation DDL.
-                self.ensure_engine_matches(&clickhouse_table_name).await?;
+                // An existing object without metadata is not ETL's to reuse.
+                self.ensure_table_absent(&clickhouse_table_name).await?;
                 self.create_table_with_metadata(
                     table_id,
                     &clickhouse_table_name,
