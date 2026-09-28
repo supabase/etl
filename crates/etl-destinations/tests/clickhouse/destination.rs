@@ -37,7 +37,8 @@ use etl::{
     },
     destination::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
-        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
+        TableCopyAttemptId, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
+        WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     event::{Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
@@ -49,7 +50,8 @@ use etl::{
     test_utils::{
         destination::{
             drop_table_for_copy as drop_table_for_copy_via_trait,
-            write_events as write_events_via_trait,
+            write_events as write_events_via_trait, write_table_rows as write_table_rows_via_trait,
+            write_table_rows_with_batch_id,
         },
         notifying_store::NotifyingStore,
         property::{
@@ -1249,6 +1251,50 @@ async fn partial_key_change_restart_replay_merge_tree() {
 #[tokio::test(flavor = "multi_thread")]
 async fn partial_key_change_restart_replay_replacing_merge_tree() {
     partial_key_change_restart_replay_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// Copy inserts deduplicate by batch ID, not by content: distinct batches
+/// with identical rows are all stored, and a redelivered batch is stored once.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_batches_deduplicate_by_batch_id_not_content() {
+    // GIVEN: a keyless MergeTree table with block deduplication enabled.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store
+        .store_table_schema(TableSchema::new(
+            TableId::new(4260),
+            TableName::new("public".to_owned(), "clicks".to_owned()),
+            vec![ColumnSchema::new("url".to_owned(), Type::TEXT, -1, 1, false)],
+        ))
+        .await
+        .unwrap();
+    let schema = ReplicatedTableSchema::all(schema);
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::MergeTree).await;
+    write_table_rows_via_trait(&destination, &schema, vec![]).await.unwrap();
+    // Replicated and Shared tables deduplicate by default but need Keeper;
+    // this window turns on the same block deduplication for plain MergeTree.
+    database
+        .db_client()
+        .query("alter table public_clicks modify setting non_replicated_deduplication_window = 100")
+        .execute()
+        .await
+        .unwrap();
+    let batch =
+        || (0..100).map(|_| TableRow::new(vec![Cell::String("/home".to_owned())])).collect();
+    let attempt_id = TableCopyAttemptId::from_u128(4260);
+
+    // WHEN: three distinct batches with identical rows are copied, then the
+    // first one is redelivered.
+    for sequence in [0, 1, 2, 0] {
+        let batch_id = TableCopyBatchId::new(attempt_id, sequence);
+        write_table_rows_with_batch_id(&destination, &schema, batch_id, batch()).await.unwrap();
+    }
+
+    // THEN: each distinct batch is stored exactly once.
+    assert_eq!(database.query::<u64>("select count() from public_clicks").await, vec![300]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

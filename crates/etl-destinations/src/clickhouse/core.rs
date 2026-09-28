@@ -31,7 +31,7 @@ use url::Url;
 use crate::{
     clickhouse::{
         CLICKHOUSE_COLUMN_NAME_MAPPING,
-        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
+        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind, InsertDeduplication},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
@@ -899,14 +899,15 @@ where
     /// async completion result.
     ///
     /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing.
+    /// pipeline plumbing. It passes no [`TableCopyBatchId`], so its inserts
+    /// carry no deduplication token.
     #[cfg(feature = "test-utils")]
     pub async fn write_table_rows(
         &self,
         schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.writer.write_table_rows_inner(schema, table_rows).await
+        self.writer.write_table_rows_inner(schema, None, table_rows).await
     }
 
     /// Dispatches a streaming event batch through the [`Destination`] trait
@@ -1343,6 +1344,7 @@ where
     async fn write_table_rows_inner(
         &self,
         schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let (clickhouse_table_name, nullable_flags) = self.prepare_table_for_writes(schema).await?;
@@ -1377,6 +1379,7 @@ where
                 rows,
                 &nullable_flags,
                 self.inserter_config.max_bytes_per_insert,
+                batch_id.map_or(InsertDeduplication::ServerDefault, InsertDeduplication::CopyBatch),
                 COPY_REPLICATION_PATH,
             )
             .await
@@ -1914,6 +1917,7 @@ where
                         rows,
                         &nullable_flags,
                         max_bytes,
+                        InsertDeduplication::ServerDefault,
                         CDC_REPLICATION_PATH,
                     )
                     .await
@@ -2568,11 +2572,12 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        _batch_id: Option<TableCopyBatchId>,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = self.writer.write_table_rows_inner(replicated_table_schema, table_rows).await;
+        let result =
+            self.writer.write_table_rows_inner(replicated_table_schema, batch_id, table_rows).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
