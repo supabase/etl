@@ -1693,32 +1693,17 @@ where
                             }
                         }
                         ColumnAlterationKind::Default => {
-                            if before.default_expression.is_some() {
-                                self.client
-                                    .drop_column_default(clickhouse_table_name, &before.name)
-                                    .await?;
-                            }
-
-                            if let Some(after_default_expression) =
-                                after.default_expression.as_deref()
-                            {
-                                if supports_column_default(after_default_expression, &after.typ) {
-                                    self.client
-                                        .set_column_default(
-                                            clickhouse_table_name,
-                                            &before.name,
-                                            &after.typ,
-                                            after_default_expression,
-                                        )
-                                        .await?;
-                                } else {
-                                    warn!(
-                                        table_name = %clickhouse_table_name,
-                                        column_name = %before.name,
-                                        "skipping unsupported source column default for clickhouse"
-                                    );
-                                }
-                            }
+                            // ETL writes every column on every insert, so a
+                            // ClickHouse default only fills rows stored before
+                            // the column was added. Changing it would change
+                            // those rows, while Postgres keeps their add-time
+                            // value.
+                            warn!(
+                                table_name = %clickhouse_table_name,
+                                column_name = %before.name,
+                                "skipping source column default change for clickhouse because it \
+                                 would change rows stored before the column was added"
+                            );
                         }
                     }
                 }
