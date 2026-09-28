@@ -657,25 +657,23 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
     }
 }
 
-/// Engine mismatch (MergeTree -> ReplacingMergeTree): a table already created
-/// under MergeTree must hard-fail when a second pipeline tries to write to it
-/// under ReplacingMergeTree.
+/// A second pipeline with no metadata for an existing MergeTree table must
+/// hard-fail instead of adopting it under ReplacingMergeTree.
 #[tokio::test(flavor = "multi_thread")]
-async fn engine_mismatch_existing_merge_tree_then_replacing_merge_tree_pipeline() {
-    engine_mismatch_runs(ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree).await;
+async fn existing_merge_tree_table_rejected_by_replacing_merge_tree_pipeline() {
+    unowned_table_runs(ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-/// Engine mismatch (ReplacingMergeTree -> MergeTree): the reverse direction
-/// must also hard-fail.
+/// The reverse direction must also hard-fail.
 #[tokio::test(flavor = "multi_thread")]
-async fn engine_mismatch_existing_replacing_merge_tree_then_merge_tree_pipeline() {
-    engine_mismatch_runs(ClickHouseEngine::ReplacingMergeTree, ClickHouseEngine::MergeTree).await;
+async fn existing_replacing_merge_tree_table_rejected_by_merge_tree_pipeline() {
+    unowned_table_runs(ClickHouseEngine::ReplacingMergeTree, ClickHouseEngine::MergeTree).await;
 }
 
-/// Drives the engine-mismatch flow: pipeline A creates the table under `first`,
-/// shuts down; pipeline B tries to use the same ClickHouse database under
-/// `second` and the table goes Errored with an engine-mismatch reason.
-async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine) {
+/// Pipeline A creates the table under `first` and shuts down; pipeline B has
+/// no destination metadata for it, so under `second` the table goes Errored
+/// because ETL cannot prove it owns the existing table.
+async fn unowned_table_runs(first: ClickHouseEngine, second: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
@@ -741,7 +739,7 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
     table_errored_notify.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: the Errored state reason names the engine mismatch ---
+    // --- THEN: the Errored state reason names the ownership conflict ---
     let state = store
         .get_table_state(table_id)
         .await
@@ -751,18 +749,5 @@ async fn engine_mismatch_runs(first: ClickHouseEngine, second: ClickHouseEngine)
         TableState::Errored { reason, .. } => reason,
         other => panic!("expected Errored state, got {other:?}"),
     };
-    assert!(
-        reason.contains("engine mismatch") || reason.contains("engine"),
-        "Errored reason should mention the engine mismatch, got: {reason}"
-    );
-    let first_name = first.as_clickhouse_str();
-    let second_name = second.as_clickhouse_str();
-    assert!(
-        reason.contains(first_name),
-        "Errored reason should name the existing engine `{first_name}`: {reason}"
-    );
-    assert!(
-        reason.contains(second_name),
-        "Errored reason should name the configured engine `{second_name}`: {reason}"
-    );
+    assert!(reason.contains("ClickHouse destination table already exists"), "{reason}");
 }

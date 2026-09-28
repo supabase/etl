@@ -201,6 +201,14 @@ change a table's engine, so if the configured `engine` differs from an existing
 table, ETL fails the write rather than silently keeping the old layout. Drop
 and resynchronize the table, or revert `engine`.
 
+When ETL has no destination metadata for a source table, it creates the
+ClickHouse table and, for `ReplacingMergeTree`, its `__current` view. If either
+name already exists, ETL fails the table instead of reusing an object it cannot
+prove it owns. This happens when a table is re-added to the publication, when
+ETL state is reset against the same database, when two pipelines share a
+database, or when a resync after a rename would copy into another table's
+destination. Drop the conflicting object or use another database.
+
 ### Limitations
 
 - The default `ReplacingMergeTree` layout requires a source primary key and
