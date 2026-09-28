@@ -3308,3 +3308,33 @@ async fn pipeline_source_tls_is_validated_before_startup() {
         );
     }
 }
+
+/// Direct library callers receive a typed concurrency error before migrations
+/// or source connections can start.
+#[tokio::test]
+async fn pipeline_copy_concurrency_is_validated_before_startup() {
+    for (workers, connections) in [(1, 257), (257, 1), (17, 16), (u16::MAX, u16::MAX)] {
+        let config: PipelineConfig = serde_json::from_value(serde_json::json!({
+            "id": 1,
+            "publication_name": "publication",
+            "max_table_sync_workers": workers,
+            "max_copy_connections_per_table": connections,
+            "pg_connection": {
+                "host": "127.0.0.1", "port": 0, "name": "postgres", "username": "postgres",
+                "tls": { "enabled": false, "trusted_root_certs": "" }
+            }
+        }))
+        .unwrap();
+        let store = NotifyingStore::new();
+        let destination = MemoryDestination::new(store.clone());
+        let mut pipeline = Pipeline::new(config, store, destination);
+
+        let err = pipeline.start().await.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConfigError);
+        assert_eq!(
+            err.source().unwrap().to_string(),
+            "Field `max_copy_connections_per_table` multiplied by `max_table_sync_workers` must \
+             not exceed 256"
+        );
+    }
+}

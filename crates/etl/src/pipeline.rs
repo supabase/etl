@@ -6,7 +6,9 @@
 
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-use etl_config::shared::{validate_source_tls_config, validate_table_error_retry_delay_ms};
+use etl_config::shared::{
+    validate_copy_concurrency, validate_source_tls_config, validate_table_error_retry_delay_ms,
+};
 use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
@@ -131,8 +133,9 @@ where
     /// synchronization, and starts the apply worker for processing replication
     /// stream events.
     ///
-    /// An unsupported retry delay or a blank trust bundle with source TLS
-    /// enabled returns [`ErrorKind::ConfigError`] before any startup work.
+    /// Invalid copy concurrency, an unsupported retry delay, or a blank trust
+    /// bundle with source TLS enabled returns [`ErrorKind::ConfigError`] before
+    /// any startup work.
     /// After this method succeeds, subsequent calls return
     /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
@@ -140,6 +143,13 @@ where
             bail!(ErrorKind::InvalidState, "Pipeline has already been started");
         }
 
+        validate_copy_concurrency(
+            self.config.max_table_sync_workers,
+            self.config.max_copy_connections_per_table,
+        )
+        .map_err(
+            |err| etl_error!(ErrorKind::ConfigError, "Invalid copy concurrency", source: err),
+        )?;
         validate_source_tls_config(&self.config.pg_connection.tls).map_err(|err| {
             etl_error!(ErrorKind::ConfigError, "Invalid source TLS configuration", source: err)
         })?;

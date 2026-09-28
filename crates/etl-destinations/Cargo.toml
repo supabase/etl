@@ -146,7 +146,7 @@ tokio-postgres = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true, optional = true }
 tower-service = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true, default-features = true }
+tracing = { workspace = true, optional = true, features = ["default"] }
 url = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true, features = ["v4"] }
 zstd = { workspace = true, optional = true }

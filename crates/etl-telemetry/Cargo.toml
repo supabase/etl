@@ -24,10 +24,10 @@ socket2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 tokio-util = { workspace = true }
-tracing = { workspace = true, default-features = true }
+tracing = { workspace = true, features = ["default"] }
 tracing-appender = { workspace = true }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
-tracing-subscriber = { workspace = true, default-features = true, features = ["json", "env-filter", "ansi"] }
+tracing-subscriber = { workspace = true, features = ["default", "json", "env-filter", "ansi"] }
 
 [lints]
 workspace = true

@@ -32,7 +32,9 @@ use std::{
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use etl::{
-    data::{ArrayCell, Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
+    data::{
+        ArrayCell, Cell, Date, OldTableRow, PgNumeric, PgTime, TableRow, Timestamp, UpdatedTableRow,
+    },
     destination::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
         TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
@@ -482,8 +484,8 @@ async fn string_mapped_values_roundtrip_through_destination() {
                         Cell::Numeric(wn.clone()),
                         opt_cell(vj.clone(), Cell::Json),
                         Cell::Json(wj.clone()),
-                        opt_cell(*vtime, Cell::Time),
-                        Cell::Time(*wtime),
+                        opt_cell(*vtime, |value| Cell::Time(PgTime::Value(value))),
+                        Cell::Time(PgTime::Value(*wtime)),
                         opt_cell(vbytes.clone(), Cell::Bytes),
                         Cell::Bytes(wbytes.clone()),
                     ])
@@ -554,12 +556,12 @@ async fn temporal_values_roundtrip_through_destination() {
             let row: TemporalsRow = block_on(async {
                 let id = table
                     .write(vec![
-                        opt_cell(*vd, Cell::Date),
-                        Cell::Date(*wd),
-                        opt_cell(*vts, Cell::Timestamp),
-                        Cell::Timestamp(*wts),
-                        opt_cell(*vtstz, Cell::TimestampTz),
-                        Cell::TimestampTz(*wtstz),
+                        opt_cell(*vd, |value| Cell::Date(Date::Value(value))),
+                        Cell::Date(Date::Value(*wd)),
+                        opt_cell(*vts, |value| Cell::Timestamp(Timestamp::Value(value))),
+                        Cell::Timestamp(Timestamp::Value(*wts)),
+                        opt_cell(*vtstz, |value| Cell::TimestampTz(Timestamp::Value(value))),
+                        Cell::TimestampTz(Timestamp::Value(*wtstz)),
                     ])
                     .await?;
                 Ok(table.read("vd, wd, vts, wts, vtstz, wtstz", id).await)
@@ -658,7 +660,9 @@ async fn array_values_roundtrip_through_destination() {
                     Cell::Array(ArrayCell::String(at.clone())),
                     Cell::Array(ArrayCell::F64(af.clone())),
                     Cell::Array(ArrayCell::Bytes(ab.clone())),
-                    Cell::Array(ArrayCell::Date(ad.clone())),
+                    Cell::Array(ArrayCell::Date(
+                        ad.iter().map(|value| value.map(Date::Value)).collect(),
+                    )),
                 ])
                 .await?;
             Ok(table.read("ai, at, af, ab, ad", id).await)
@@ -742,8 +746,10 @@ async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     );
     run_property("clickhouse timestamp rejection", &strategy, |(ts, tstz)| {
         // Loud rejection is a valid outcome.
-        let Ok(id) = block_on(table.write(vec![Cell::Timestamp(*ts), Cell::TimestampTz(*tstz)]))
-        else {
+        let Ok(id) = block_on(table.write(vec![
+            Cell::Timestamp(Timestamp::Value(*ts)),
+            Cell::TimestampTz(Timestamp::Value(*tstz)),
+        ])) else {
             return Ok(());
         };
 
@@ -1948,6 +1954,90 @@ async fn drop_table_for_copy_waits_for_admitted_write() {
             )
             .await,
         Vec::<String>::new()
+    );
+}
+
+/// A reset after source tables swap names by rename drops the destination
+/// table recorded in metadata, not the table matching the new source name.
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_after_rename_drops_recorded_table() {
+    // GIVEN: `orders` and `ordersnew` were replicated, then swapped names:
+    // `orders` became `ordersold` and `ordersnew` became `orders`.
+    init_test_tracing();
+    install_crypto_provider();
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let public = |table: &str| TableName::new("public".to_owned(), table.to_owned());
+    let archived_id = TableId::new(4247);
+    let replacement_id = TableId::new(4248);
+    let archived = store_status_default_schema(
+        &store,
+        archived_id,
+        &public("orders"),
+        test_snapshot_id(100, 100),
+        None,
+    )
+    .await;
+    let replacement = store_status_default_schema(
+        &store,
+        replacement_id,
+        &public("ordersnew"),
+        test_snapshot_id(100, 101),
+        None,
+    )
+    .await;
+    let destination = clickhouse_db
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &archived,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("kept".to_owned())])],
+        )
+        .await
+        .unwrap();
+    destination.write_table_rows(&replacement, vec![]).await.unwrap();
+    let archived_renamed = store_status_default_schema(
+        &store,
+        archived_id,
+        &public("ordersold"),
+        test_snapshot_id(200, 200),
+        None,
+    )
+    .await;
+    let replacement_renamed = store_status_default_schema(
+        &store,
+        replacement_id,
+        &public("orders"),
+        test_snapshot_id(200, 201),
+        None,
+    )
+    .await;
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: archived_renamed }),
+            Event::Relation(RelationEvent { replicated_table_schema: replacement_renamed.clone() }),
+        ])
+        .await
+        .unwrap();
+
+    // WHEN: the replacement table, now named `orders`, is reset for a fresh
+    // copy.
+    drop_table_for_copy_via_trait(&destination, &replacement_renamed).await.unwrap();
+
+    // THEN: only the replacement's own table and view are gone; the archived
+    // table, which still writes to `public_orders`, keeps its rows.
+    assert_eq!(
+        clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() order by name",
+            )
+            .await,
+        vec!["public_orders".to_owned(), "public_orders__current".to_owned()]
+    );
+    assert_eq!(
+        clickhouse_db.query::<(i64, Option<String>)>("select id, status from public_orders").await,
+        vec![(1, Some("kept".to_owned()))]
     );
 }
 

@@ -1,12 +1,77 @@
 //! Date and time conversion helpers for Postgres text output.
 
+use std::borrow::Cow;
+
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use etl_postgres::time::{
-    DATE_FORMAT, ParseTimeError, PgTimeTz, TIME_FORMAT, TIMESTAMP_FORMAT, parse_postgres_utc_offset,
+    DATE_FORMAT, Date, ParseTimeError, PgTime, PgTimeTz, TIME_FORMAT, TIMESTAMP_FORMAT, Timestamp,
+    parse_postgres_utc_offset,
 };
 
 /// Minimum byte index after `YYYY-MM-DD` where a UTC offset sign can appear.
 const MIN_TIMESTAMP_OFFSET_INDEX: usize = 10;
+
+/// Converts Postgres era notation to chrono's astronomical year syntax.
+///
+/// Finite values remain limited to chrono's calendar range.
+fn normalize_year(value: &str) -> Result<Cow<'_, str>, ParseTimeError> {
+    let (value, bc) = value.strip_suffix(" BC").map_or((value, false), |value| (value, true));
+    let (year, rest) = value.split_once('-').ok_or(ParseTimeError::InvalidSyntax)?;
+    if !bc && year.len() == 4 && year != "0000" {
+        return Ok(Cow::Borrowed(value));
+    }
+    if year.is_empty() || !year.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ParseTimeError::InvalidSyntax);
+    }
+    let year: i32 = year.parse().map_err(|_| ParseTimeError::InvalidSyntax)?;
+    if year == 0 {
+        return Err(ParseTimeError::InvalidSyntax);
+    }
+    let year = if bc { 1 - year } else { year };
+    let year =
+        if (0..10_000).contains(&year) { format!("{year:04}") } else { format!("{year:+05}") };
+    Ok(Cow::Owned(format!("{year}-{rest}")))
+}
+
+/// Parses a finite or infinite Postgres date.
+pub(crate) fn parse_postgres_date(value: &str) -> Result<Date<NaiveDate>, ParseTimeError> {
+    match value {
+        "infinity" => Ok(Date::PosInfinity),
+        "-infinity" => Ok(Date::NegInfinity),
+        _ => Ok(Date::Value(parse_finite_date(&normalize_year(value)?)?)),
+    }
+}
+
+/// Parses a Postgres time, preserving the distinct end-of-day value.
+pub(crate) fn parse_postgres_time(value: &str) -> Result<PgTime, ParseTimeError> {
+    if value.starts_with("24:") {
+        return value.parse();
+    }
+    Ok(PgTime::Value(parse_finite_time(value)?))
+}
+
+/// Parses a finite or infinite Postgres timestamp.
+pub(crate) fn parse_postgres_timestamp(
+    value: &str,
+) -> Result<Timestamp<NaiveDateTime>, ParseTimeError> {
+    match value {
+        "infinity" => Ok(Timestamp::PosInfinity),
+        "-infinity" => Ok(Timestamp::NegInfinity),
+        _ => Ok(Timestamp::Value(parse_finite_timestamp(&normalize_year(value)?)?)),
+    }
+}
+
+/// Parses a Postgres timestamp with time zone and normalizes finite values to
+/// UTC.
+pub(crate) fn parse_postgres_timestamptz(
+    value: &str,
+) -> Result<Timestamp<chrono::DateTime<chrono::Utc>>, ParseTimeError> {
+    match value {
+        "infinity" => Ok(Timestamp::PosInfinity),
+        "-infinity" => Ok(Timestamp::NegInfinity),
+        _ => Ok(Timestamp::Value(parse_finite_timestamptz(&normalize_year(value)?)?.into())),
+    }
+}
 
 /// Parses a Postgres `time with time zone` text value.
 pub(crate) fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeError> {
@@ -18,7 +83,7 @@ pub(crate) fn parse_postgres_timetz(value: &str) -> Result<PgTimeTz, ParseTimeEr
 /// Postgres emits ISO dates as `YYYY-MM-DD` on replication connections. That
 /// shape is decoded with a fixed-layout byte parser; anything else falls back
 /// to chrono's format machinery so accepted and rejected inputs stay identical.
-pub(crate) fn parse_postgres_date(value: &str) -> Result<NaiveDate, chrono::ParseError> {
+fn parse_finite_date(value: &str) -> Result<NaiveDate, chrono::ParseError> {
     if let Some(date) = parse_iso_date_fast(value.as_bytes()) {
         return Ok(date);
     }
@@ -32,7 +97,7 @@ pub(crate) fn parse_postgres_date(value: &str) -> Result<NaiveDate, chrono::Pars
 /// That shape is decoded with a fixed-layout byte parser; anything else falls
 /// back to chrono's format machinery so accepted and rejected inputs stay
 /// identical.
-pub(crate) fn parse_postgres_time(value: &str) -> Result<NaiveTime, chrono::ParseError> {
+fn parse_finite_time(value: &str) -> Result<NaiveTime, chrono::ParseError> {
     if let Some(time) = parse_iso_time_fast(value.as_bytes()) {
         return Ok(time);
     }
@@ -46,7 +111,7 @@ pub(crate) fn parse_postgres_time(value: &str) -> Result<NaiveTime, chrono::Pars
 /// replication connections. That shape is decoded with a fixed-layout byte
 /// parser; anything else falls back to chrono's format machinery so accepted
 /// and rejected inputs stay identical.
-pub(crate) fn parse_postgres_timestamp(value: &str) -> Result<NaiveDateTime, chrono::ParseError> {
+fn parse_finite_timestamp(value: &str) -> Result<NaiveDateTime, chrono::ParseError> {
     if let Some(timestamp) = parse_iso_timestamp_fast(value.as_bytes()) {
         return Ok(timestamp);
     }
@@ -59,11 +124,9 @@ pub(crate) fn parse_postgres_timestamp(value: &str) -> Result<NaiveDateTime, chr
 /// Replication connections set the Postgres session timezone to UTC. This
 /// parser accepts numeric offsets, but UTC session output keeps `timestamptz`
 /// values deterministic before they are normalized into [`chrono::Utc`].
-pub(crate) fn parse_postgres_timestamptz(
-    value: &str,
-) -> Result<DateTime<FixedOffset>, ParseTimeError> {
+fn parse_finite_timestamptz(value: &str) -> Result<DateTime<FixedOffset>, ParseTimeError> {
     let (timestamp, offset) = split_timestamp_offset(value).ok_or(ParseTimeError::InvalidSyntax)?;
-    let timestamp = parse_postgres_timestamp(timestamp.trim_end())?;
+    let timestamp = parse_finite_timestamp(timestamp.trim_end())?;
     let offset = parse_postgres_utc_offset(offset).ok_or(ParseTimeError::InvalidSyntax)?;
 
     offset.from_local_datetime(&timestamp).single().ok_or(ParseTimeError::InvalidSyntax)
@@ -164,12 +227,13 @@ mod tests {
     use chrono::{NaiveTime, Timelike};
 
     use super::*;
+    use crate::data::PgTime;
 
     #[test]
     fn date_fast_path_matches_chrono_for_iso_dates() {
         for value in ["2023-12-25", "0001-01-01", "9999-12-31", "2024-02-29"] {
             assert_eq!(
-                parse_postgres_date(value).unwrap(),
+                parse_finite_date(value).unwrap(),
                 NaiveDate::parse_from_str(value, DATE_FORMAT).unwrap(),
                 "value: {value}"
             );
@@ -180,19 +244,19 @@ mod tests {
     fn date_falls_back_for_non_iso_shapes() {
         // Single-digit components are chrono-only shapes.
         assert_eq!(
-            parse_postgres_date("2023-1-01").unwrap(),
+            parse_finite_date("2023-1-01").unwrap(),
             NaiveDate::parse_from_str("2023-1-01", DATE_FORMAT).unwrap()
         );
 
         // Chrono's `%Y` requires a `+` prefix for years above 4 digits, so the
         // fallback rejects this exactly like the previous direct parse did.
-        assert!(parse_postgres_date("12023-01-01").is_err());
-        assert!(parse_postgres_date("2023-13-01").is_err());
-        assert!(parse_postgres_date("2023-02-30").is_err());
-        assert!(parse_postgres_date("2023-12-25 BC").is_err());
-        assert!(parse_postgres_date("2023-1é-01").is_err());
-        assert!(parse_postgres_date("not-a-date").is_err());
-        assert!(parse_postgres_date("").is_err());
+        assert!(parse_finite_date("12023-01-01").is_err());
+        assert!(parse_finite_date("2023-13-01").is_err());
+        assert!(parse_finite_date("2023-02-30").is_err());
+        assert!(parse_finite_date("2023-12-25 BC").is_err());
+        assert!(parse_finite_date("2023-1é-01").is_err());
+        assert!(parse_finite_date("not-a-date").is_err());
+        assert!(parse_finite_date("").is_err());
     }
 
     #[test]
@@ -201,7 +265,7 @@ mod tests {
             ["00:00:00", "23:59:59", "14:30:45.1", "14:30:45.123", "14:30:45.123456", "12:00:00.5"]
         {
             assert_eq!(
-                parse_postgres_time(value).unwrap(),
+                parse_finite_time(value).unwrap(),
                 NaiveTime::parse_from_str(value, TIME_FORMAT).unwrap(),
                 "value: {value}"
             );
@@ -212,7 +276,7 @@ mod tests {
     fn time_falls_back_for_non_iso_shapes() {
         // Leap seconds only parse through chrono.
         assert_eq!(
-            parse_postgres_time("23:59:60").unwrap(),
+            parse_finite_time("23:59:60").unwrap(),
             NaiveTime::parse_from_str("23:59:60", TIME_FORMAT).unwrap()
         );
 
@@ -220,16 +284,16 @@ mod tests {
         // fallback keeps accepting them exactly like the previous direct parse
         // did.
         assert_eq!(
-            parse_postgres_time("12:30:45.1234567890").unwrap(),
+            parse_finite_time("12:30:45.1234567890").unwrap(),
             NaiveTime::parse_from_str("12:30:45.1234567890", TIME_FORMAT).unwrap()
         );
 
-        assert!(parse_postgres_time("24:00:00").is_err());
-        assert!(parse_postgres_time("12:61:00").is_err());
-        assert!(parse_postgres_time("12:30:45.").is_err());
-        assert!(parse_postgres_time("12:30:45extra").is_err());
-        assert!(parse_postgres_time("12:30:4é").is_err());
-        assert!(parse_postgres_time("invalid").is_err());
+        assert!(parse_finite_time("24:00:00").is_err());
+        assert!(parse_finite_time("12:61:00").is_err());
+        assert!(parse_finite_time("12:30:45.").is_err());
+        assert!(parse_finite_time("12:30:45extra").is_err());
+        assert!(parse_finite_time("12:30:4é").is_err());
+        assert!(parse_finite_time("invalid").is_err());
     }
 
     #[test]
@@ -241,7 +305,7 @@ mod tests {
             "1970-01-01 00:00:00",
         ] {
             assert_eq!(
-                parse_postgres_timestamp(value).unwrap(),
+                parse_finite_timestamp(value).unwrap(),
                 NaiveDateTime::parse_from_str(value, TIMESTAMP_FORMAT).unwrap(),
                 "value: {value}"
             );
@@ -251,58 +315,61 @@ mod tests {
     #[test]
     fn timestamp_falls_back_for_non_iso_shapes() {
         assert_eq!(
-            parse_postgres_timestamp("2023-12-25 23:59:60").unwrap(),
+            parse_finite_timestamp("2023-12-25 23:59:60").unwrap(),
             NaiveDateTime::parse_from_str("2023-12-25 23:59:60", TIMESTAMP_FORMAT).unwrap()
         );
         assert_eq!(
-            parse_postgres_timestamp("2023-12-25 12:30:45.1234567890").unwrap(),
+            parse_finite_timestamp("2023-12-25 12:30:45.1234567890").unwrap(),
             NaiveDateTime::parse_from_str("2023-12-25 12:30:45.1234567890", TIMESTAMP_FORMAT)
                 .unwrap()
         );
 
-        assert!(parse_postgres_timestamp("2023-12-25T14:30:45").is_err());
-        assert!(parse_postgres_timestamp("2023-12-25 14:30").is_err());
-        assert!(parse_postgres_timestamp("2023-12-25 14:30:45 tail").is_err());
-        assert!(parse_postgres_timestamp("2023-12-25 12:30:4é").is_err());
-        assert!(parse_postgres_timestamp("").is_err());
+        assert!(parse_finite_timestamp("2023-12-25T14:30:45").is_err());
+        assert!(parse_finite_timestamp("2023-12-25 14:30").is_err());
+        assert!(parse_finite_timestamp("2023-12-25 14:30:45 tail").is_err());
+        assert!(parse_finite_timestamp("2023-12-25 12:30:4é").is_err());
+        assert!(parse_finite_timestamp("").is_err());
     }
 
     #[test]
     fn timetz_parses_via_shared_type() {
         let value = parse_postgres_timetz("12:30:00.123456+02:30").unwrap();
 
-        assert_eq!(value.time(), NaiveTime::from_hms_micro_opt(12, 30, 0, 123_456).unwrap());
+        assert_eq!(
+            value.time(),
+            PgTime::Value(NaiveTime::from_hms_micro_opt(12, 30, 0, 123_456).unwrap())
+        );
         assert_eq!(value.offset().local_minus_utc(), 9_000);
     }
 
     #[test]
     fn timetz_rejects_invalid_values() {
         assert!(parse_postgres_timetz("12:30:00").is_err());
-        assert!(parse_postgres_timetz("24:00:00+00").is_err());
+        assert!(parse_postgres_timetz("24:00:00.000001+00").is_err());
         assert!(parse_postgres_timetz("12:30:00+16").is_err());
     }
 
     #[test]
     fn timestamptz_parses_supported_offset_forms() {
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00+02").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00+02").unwrap();
         assert_eq!(datetime.offset().local_minus_utc(), 7_200);
 
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00+0230").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00+0230").unwrap();
         assert_eq!(datetime.offset().local_minus_utc(), 9_000);
 
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00+023015").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00+023015").unwrap();
         assert_eq!(datetime.offset().local_minus_utc(), 9_015);
 
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00+02:30").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00+02:30").unwrap();
         assert_eq!(datetime.offset().local_minus_utc(), 9_000);
 
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00+02:30:15").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00+02:30:15").unwrap();
         assert_eq!(datetime.offset().local_minus_utc(), 9_015);
     }
 
     #[test]
     fn timestamptz_preserves_local_time_before_utc_normalization() {
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00.123456-07:30").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00.123456-07:30").unwrap();
 
         assert_eq!(datetime.time().hour(), 12);
         assert_eq!(datetime.time().minute(), 30);
@@ -313,33 +380,97 @@ mod tests {
 
     #[test]
     fn timestamptz_parses_postgres_offset_boundary() {
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00+15:59:59").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00+15:59:59").unwrap();
         assert_eq!(datetime.offset().local_minus_utc(), 57_599);
 
-        let datetime = parse_postgres_timestamptz("2026-01-01 12:30:00-15:59:59").unwrap();
+        let datetime = parse_finite_timestamptz("2026-01-01 12:30:00-15:59:59").unwrap();
         assert_eq!(datetime.offset().local_minus_utc(), -57_599);
     }
 
     #[test]
     fn timestamptz_rejects_invalid_values() {
-        assert!(parse_postgres_timestamptz("2026-01-01 12:30:00").is_err());
-        assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+16").is_err());
-        assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+16:00").is_err());
-        assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+15:60").is_err());
-        assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+15:59:60").is_err());
-        assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+1").is_err());
-        assert!(parse_postgres_timestamptz("2026-01-01 12:30:00+01:02:03:04").is_err());
+        assert!(parse_finite_timestamptz("2026-01-01 12:30:00").is_err());
+        assert!(parse_finite_timestamptz("2026-01-01 12:30:00+16").is_err());
+        assert!(parse_finite_timestamptz("2026-01-01 12:30:00+16:00").is_err());
+        assert!(parse_finite_timestamptz("2026-01-01 12:30:00+15:60").is_err());
+        assert!(parse_finite_timestamptz("2026-01-01 12:30:00+15:59:60").is_err());
+        assert!(parse_finite_timestamptz("2026-01-01 12:30:00+1").is_err());
+        assert!(parse_finite_timestamptz("2026-01-01 12:30:00+01:02:03:04").is_err());
     }
 
     #[test]
     fn timestamptz_distinguishes_chrono_and_offset_errors() {
         assert!(matches!(
-            parse_postgres_timestamptz("2026-99-01 12:30:00+00").unwrap_err(),
+            parse_finite_timestamptz("2026-99-01 12:30:00+00").unwrap_err(),
             ParseTimeError::Chrono(_)
         ));
         assert_eq!(
-            parse_postgres_timestamptz("2026-01-01 12:30:00+16").unwrap_err(),
+            parse_finite_timestamptz("2026-01-01 12:30:00+16").unwrap_err(),
             ParseTimeError::InvalidSyntax
         );
+    }
+    #[test]
+    fn special_temporal_values_preserve_meaning() {
+        for (text, date, timestamp) in [
+            ("infinity", Date::PosInfinity, Timestamp::PosInfinity),
+            ("-infinity", Date::NegInfinity, Timestamp::NegInfinity),
+        ] {
+            assert_eq!(parse_postgres_date(text).unwrap(), date);
+            assert_eq!(parse_postgres_timestamp(text).unwrap(), timestamp);
+            assert!(matches!(
+                parse_postgres_timestamptz(text).unwrap(),
+                Timestamp::PosInfinity | Timestamp::NegInfinity
+            ));
+        }
+        for (text, year) in [("0001-02-29 BC", 0), ("0044-02-01 BC", -43), ("12023-02-01", 12023)] {
+            let day = if year == 0 { 29 } else { 1 };
+            assert_eq!(
+                parse_postgres_date(text).unwrap(),
+                Date::Value(NaiveDate::from_ymd_opt(year, 2, day).unwrap())
+            );
+        }
+        assert_eq!(
+            parse_postgres_timestamptz("0001-01-01 00:30:00+01 BC").unwrap(),
+            Timestamp::Value(
+                NaiveDate::from_ymd_opt(-1, 12, 31)
+                    .unwrap()
+                    .and_hms_opt(23, 30, 0)
+                    .unwrap()
+                    .and_utc()
+            )
+        );
+        assert_eq!(parse_postgres_time("24:00:00.000000").unwrap(), PgTime::EndOfDay);
+        assert_ne!(
+            parse_postgres_time("24:00:00").unwrap(),
+            parse_postgres_time("00:00:00").unwrap()
+        );
+        let time = parse_postgres_timetz("24:00:00+02:30:15").unwrap();
+        assert_eq!(time.time(), PgTime::EndOfDay);
+        assert_eq!(time.to_string(), "24:00:00+02:30:15");
+    }
+
+    #[test]
+    fn special_temporal_parsers_reject_malformed_and_out_of_range_values() {
+        for value in [
+            "",
+            "é",
+            "infinityx",
+            "0000-01-01",
+            "0000-01-01 BC",
+            "999999999999-01-01 BC",
+            "300000-01-01",
+            "0001-02-29",
+            "0001-0é-01 BC",
+        ] {
+            assert!(parse_postgres_date(value).is_err());
+        }
+        for value in
+            ["24:00:00.000001", "24:00:01", "24:01:00", "24:00:00.", "24:00:00.é", "25:00:00"]
+        {
+            assert!(parse_postgres_time(value).is_err());
+        }
+        assert!(parse_postgres_timestamp("270000-01-01 00:00:00").is_err());
+        assert!(parse_postgres_timestamptz("270000-01-01 00:00:00+00").is_err());
+        assert!(parse_postgres_timestamptz("0001-01-01 00:00:00+16 BC").is_err());
     }
 }

@@ -1,7 +1,7 @@
 #![cfg(feature = "test-utils")]
 
 use etl::{
-    data::{ArrayCell, Cell},
+    data::{ArrayCell, Cell, Date},
     event::{Event, EventType},
     pipeline::PipelineId,
     schema::{ColumnSchema, SnapshotId, TableId, TableSchema},
@@ -793,7 +793,9 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
     assert_eq!(values[3], Cell::I32(15));
     assert_eq!(values[4], Cell::Bool(true));
     assert!(matches!(values[5], Cell::TimestampTz(_)));
-    assert!(matches!(&values[6], Cell::Date(date) if date.to_string() == "2026-01-01"));
+    assert!(
+        matches!(&values[6], Cell::Date(Date::Value(date)) if date.to_string() == "2026-01-01")
+    );
     assert_eq!(values[7], Cell::Json(serde_json::json!({ "source": "api" })));
     assert_eq!(values[8], Cell::String("user".to_owned()));
     assert_eq!(values[9], Cell::String("fallback".to_owned()));

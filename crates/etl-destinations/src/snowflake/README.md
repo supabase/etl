@@ -16,9 +16,15 @@ cargo x test-snowflake
 
 This requires local Postgres to already be running. Run `cargo x init` first if the local development stack is not up. The command first runs the non-credentialed Snowflake destination preset, then runs the credentialed integration tiers when `TESTS_SNOWFLAKE_CONNECTION` is set. Use `--credentials skip` to run only the non-credentialed tier, or `--credentials required` to fail when credentials are missing.
 
-GitHub Actions runs the credential-free tier for relevant pull request and `main` changes, retaining the `Snowflake Gate` check. Routine CI does not receive Snowflake credentials. The separate `Snowflake Daily Tests` workflow runs the credentialed destination integration tests once daily at 04:17 UTC on the default branch, using the `TESTS_SNOWFLAKE_CONNECTION` repository secret. Scheduled runs begin after the workflow is merged and can be delayed by GitHub.
+The `CI` workflow runs credential-free Snowflake tests in the shared test suite
+and checks the Snowflake-only feature configuration in `Features (Snowflake
+only)`. Both contribute to the `CI passed` check. Routine CI does not
+receive Snowflake credentials.
 
-Failures appear in the repository's Actions tab under `Snowflake Daily Tests`.
+The separate `Snowflake tests` workflow runs credentialed destination integration
+tests daily at 04:17 UTC on the default branch, or manually from the Actions tab.
+It requires the `TESTS_SNOWFLAKE_CONNECTION` repository secret. GitHub may delay
+scheduled runs. Failures appear in the Actions tab under `Snowflake tests`.
 
 To run a specific destination test directly:
 
@@ -63,7 +69,7 @@ on the command line.
 
 GitHub Actions uses the same one-var contract:
 
-- `TESTS_SNOWFLAKE_CONNECTION` for `.github/workflows/snowflake-daily.yml`.
+- `TESTS_SNOWFLAKE_CONNECTION` for `.github/workflows/snowflake-tests.yml`.
 - `BENCH_SNOWFLAKE_CONNECTION` for manual Snowflake benchmark workflow runs.
 
 Both repository secrets use the same JSON shape shown above. The workflows pass the JSON only

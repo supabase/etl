@@ -56,7 +56,7 @@ struct HeldPause {
     _pause: DuckLakeExternalMaintenancePause,
 }
 
-/// Suppresses duplicate expire-snapshots requests inside the daily controller
+/// Suppresses duplicate expire-snapshots requests inside the daily maintenance
 /// interval.
 #[derive(Default)]
 struct ExpireSnapshotsRequestGate {

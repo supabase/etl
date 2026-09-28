@@ -2,11 +2,13 @@ use std::collections::HashSet;
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use url::Url;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
-use crate::shared::{Validate, ValidationError};
+use crate::{
+    clickhouse::ClickHouseUrl,
+    shared::{Validate, ValidationError},
+};
 
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
@@ -545,8 +547,9 @@ pub enum DestinationConfig {
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint URL.
-        url: Url,
+        /// ClickHouse HTTP(S) endpoint URL. Credentials must not be embedded
+        /// in it; use `user` and `password`.
+        url: ClickHouseUrl,
         /// ClickHouse user name
         user: String,
         /// ClickHouse password (omit for passwordless access)
@@ -807,8 +810,8 @@ pub enum DestinationConfigWithoutSecrets {
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint URL.
-        url: Url,
+        /// ClickHouse HTTP(S) endpoint URL, guaranteed free of credentials.
+        url: ClickHouseUrl,
         /// ClickHouse user name
         user: String,
         /// ClickHouse target database
@@ -1025,6 +1028,43 @@ mod tests {
             json["ducklake"]["table_sorting"]["tables"][0]["sort_by"]["kind"],
             "primary_key"
         );
+    }
+
+    #[test]
+    fn clickhouse_config_rejects_credentials_embedded_in_url() {
+        let json = serde_json::json!({
+            "clickhouse": {
+                "url": "https://alice:s3cr3t@clickhouse.example:8443",
+                "user": "alice",
+                "password": "s3cr3t",
+                "database": "default"
+            }
+        });
+
+        let err = serde_json::from_value::<DestinationConfig>(json).unwrap_err().to_string();
+        assert!(err.contains("must not embed credentials"));
+        assert!(!err.contains("s3cr3t"));
+    }
+
+    #[test]
+    fn clickhouse_without_secrets_serializes_only_the_credential_free_url() {
+        let config: DestinationConfig = serde_json::from_value(serde_json::json!({
+            "clickhouse": {
+                "url": "https://clickhouse.example:8443/proxy",
+                "user": "alice",
+                "password": "s3cr3t",
+                "database": "default"
+            }
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(DestinationConfigWithoutSecrets::from(config))
+            .unwrap()
+            .to_string();
+
+        assert!(serialized.contains("https://clickhouse.example:8443/proxy"));
+        assert!(!serialized.contains("s3cr3t"));
+        assert!(!serialized.contains("password"));
     }
 
     #[test]
