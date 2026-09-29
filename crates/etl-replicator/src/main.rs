@@ -76,6 +76,8 @@ async fn async_main(
     replicator_config: ReplicatorConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<()> {
+    hotpath::tokio_runtime!();
+
     let metrics_http_listener = init::init_metrics(&replicator_config)?;
 
     // Keep the feature flags client alive for the full async runtime lifetime.
@@ -141,6 +143,9 @@ fn try_main() -> ReplicatorResult<()> {
     // Keep the tracing and sentry guards alive until process shutdown.
     let _log_flusher = init::init_tracing(&replicator_config)?;
     let _sentry_guard = init::init_sentry(&replicator_config)?;
+
+    #[cfg(feature = "hotpath")]
+    let _hotpath = etl_telemetry::profiling::init().map_err(ReplicatorError::config)?;
 
     debug!("replicator bootstrap initialized");
 

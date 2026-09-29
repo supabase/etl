@@ -6,4 +6,6 @@
 
 pub mod listener;
 pub mod metrics;
+#[cfg(feature = "hotpath")]
+pub mod profiling;
 pub mod tracing;

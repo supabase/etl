@@ -41,6 +41,7 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 # Select the same package, binaries, features, and flags in both build stages.
 ARG ENABLE_EGRESS="false"
+ARG ENABLE_HOTPATH="false"
 ENV RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld"
 RUN test "$BUILDPLATFORM" = "$TARGETPLATFORM"
 
@@ -66,6 +67,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       false) features="" ;; \
       *) echo "ENABLE_EGRESS must be true or false" >&2; exit 1 ;; \
     esac && \
+    case "$ENABLE_HOTPATH" in \
+      true) features="$features hotpath" ;; \
+      false) ;; \
+      *) echo "ENABLE_HOTPATH must be true or false" >&2; exit 1 ;; \
+    esac && \
     cargo chef cook --locked --release --package etl-replicator --bins \
       --features "$features" --recipe-path recipe.json
 
@@ -76,6 +82,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       true) features="egress" ;; \
       false) features="" ;; \
       *) echo "ENABLE_EGRESS must be true or false" >&2; exit 1 ;; \
+    esac && \
+    case "$ENABLE_HOTPATH" in \
+      true) features="$features hotpath" ;; \
+      false) ;; \
+      *) echo "ENABLE_HOTPATH must be true or false" >&2; exit 1 ;; \
     esac && \
     cargo build --locked --release --package etl-replicator --bins --features "$features" && \
     strip target/release/etl-replicator target/release/etl-ducklake-maintenance

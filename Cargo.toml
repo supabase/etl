@@ -89,6 +89,8 @@ etl-telemetry = { path = "crates/etl-telemetry", default-features = false }
 fail = { version = "0.5.1", default-features = false }
 futures = { version = "0.3.31", default-features = false }
 gcp-bigquery-client = { git = "https://github.com/supabase/gcp-bigquery-client", rev = "8035bcd1a7c3f08f8679326c40200b11901e38ed", default-features = false }
+# Hotpath wrappers and Prometheus exposition are integrated against the 0.25.1 API.
+hotpath = { version = "=0.25.1", default-features = false }
 humantime = { version = "2.3.0", default-features = false }
 hyper-rustls = { version = "0.27.9", default-features = false }
 hyper-util = { version = "0.1.20", default-features = false }
@@ -137,6 +139,7 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
 tonic = { version = "0.14.2", default-features = false }
+tower = { version = "0.5.3", default-features = false }
 tower-service = { version = "0.3.3", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }

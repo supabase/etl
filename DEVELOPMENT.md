@@ -73,6 +73,11 @@ Stop the replicator with Ctrl+C.
 
 ## Everyday commands
 
+Build `etl-replicator` with `--features hotpath` to expose replication, lock,
+and channel profiling through its existing Prometheus endpoint. For experimental
+images, enable the `hotpath` input in the `Publish image` workflow. Profiling is
+disabled by default.
+
 `cargo x` is the task runner. `cargo x --help` lists every command.
 
 ```bash

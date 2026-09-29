@@ -9,13 +9,18 @@ repository.workspace = true
 homepage.workspace = true
 
 [lib]
-test = false
 doctest = false
+
+[features]
+hotpath = ["dep:metrics", "dep:reqwest", "dep:hotpath", "hotpath/hotpath", "hotpath/hotpath-prometheus", "hotpath/threads"]
 
 [dependencies]
 etl-config = { workspace = true }
 
 axum = { workspace = true, features = ["http1", "tokio"] }
+hotpath = { workspace = true, optional = true }
+metrics = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
 libc = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 serde = { workspace = true }
@@ -28,6 +33,10 @@ tracing = { workspace = true, features = ["default"] }
 tracing-appender = { workspace = true }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-subscriber = { workspace = true, features = ["default", "json", "env-filter", "ansi"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

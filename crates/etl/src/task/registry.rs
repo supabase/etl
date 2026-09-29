@@ -2,7 +2,7 @@
 
 use std::{future::Future, sync::Arc};
 
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 
 use crate::{error::EtlResult, task::TaskGroup};
 
@@ -55,7 +55,7 @@ impl TaskRegistry {
     where
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
 
         inner.spawn(async move {
             task.await;
@@ -79,12 +79,13 @@ impl TaskRegistry {
     /// # Panics
     ///
     /// Panics when polled outside a Tokio runtime or if the factory panics.
+    #[hotpath::measure]
     pub async fn spawn_with<F, Fut>(&self, task_factory: F)
     where
         F: FnOnce() -> Fut + Send,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
         let task = task_factory();
 
         inner.spawn(async move {
@@ -97,7 +98,7 @@ impl TaskRegistry {
     /// Reaps completed tasks once enough of them may have accumulated to
     /// justify the lock.
     pub async fn try_reap(&self) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
         if inner.len() <= TASK_REAP_THRESHOLD {
             return Ok(());
         }
@@ -116,8 +117,9 @@ impl TaskRegistry {
     /// drops remaining tasks to request abort without waiting. No timeout is
     /// imposed. Cancelling this method releases the lock but leaves unfinished
     /// tasks tracked, including any cancellation already requested.
+    #[hotpath::measure]
     pub async fn drain(&self) -> EtlResult<TaskRegistryDrainGuard> {
-        let mut inner = Arc::clone(&self.inner).lock_owned().await;
+        let mut inner = self.lock_registry_owned().await;
 
         inner.wait().await?;
 
@@ -131,9 +133,22 @@ impl TaskRegistry {
     /// again. Requested cancellations are silently accepted. A panic returns
     /// immediately and drops the remaining tasks without awaiting them.
     pub async fn shutdown(&self) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let mut inner = self.lock_registry().await;
 
         inner.shutdown().await
+    }
+
+    /// Measures registry contention while preserving borrowed guard semantics.
+    #[hotpath::measure(label = "task_registry_lock_wait")]
+    async fn lock_registry(&self) -> MutexGuard<'_, TaskGroup<()>> {
+        self.inner.lock().await
+    }
+
+    /// Measures drain admission without shortening the returned guard's
+    /// lifetime.
+    #[hotpath::measure(label = "task_registry_owned_lock_wait")]
+    async fn lock_registry_owned(&self) -> OwnedMutexGuard<TaskGroup<()>> {
+        Arc::clone(&self.inner).lock_owned().await
     }
 }
 

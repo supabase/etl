@@ -179,6 +179,7 @@ impl<T> AsyncResult<T> {
 
     /// Sends the final result to the waiting receiver and records its
     /// completion instant.
+    #[hotpath::measure(label = "async_result_send")]
     pub fn send(self, result: EtlResult<T>) {
         let completed_at = Instant::now();
         if self.tx.send((completed_at, result)).is_err() {

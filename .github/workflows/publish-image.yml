@@ -6,6 +6,11 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
+      hotpath:
+        description: Enable Hotpath profiling in the experimental image
+        type: boolean
+        required: false
+        default: false
       commit:
         description: "Optional full commit SHA to build; defaults to the selected workflow ref"
         type: string
@@ -26,6 +31,7 @@ jobs:
       )
     uses: ./.github/workflows/reusable-publish-image.yml
     with:
+      hotpath: ${{ github.event_name == 'workflow_dispatch' && inputs.hotpath || false }}
       commit: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || '' }}
     secrets:
       PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}

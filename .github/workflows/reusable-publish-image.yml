@@ -3,6 +3,10 @@ name: Publish image (reusable)
 on:
   workflow_call:
     inputs:
+      hotpath:
+        description: Enable Hotpath profiling in the image.
+        type: boolean
+        default: false
       commit:
         description: Optional full source commit SHA, independent of the workflow revision.
         type: string
@@ -145,6 +149,7 @@ jobs:
         id: build
         uses: ./.github/actions/build-image
         with:
+          hotpath: ${{ inputs.hotpath }}
           context: .image-source
           platform: ${{ matrix.platform }}
           image: ${{ steps.registry.outputs.image }}

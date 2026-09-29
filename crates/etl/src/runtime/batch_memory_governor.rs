@@ -10,10 +10,11 @@
 //! boundary.
 
 use std::sync::{
-    Arc, Mutex, PoisonError, TryLockError,
+    Arc, PoisonError, TryLockError,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
+use hotpath::wrap::std::sync::Mutex;
 use metrics::gauge;
 use tracing::debug;
 
@@ -67,7 +68,6 @@ struct BatchMemoryUpdateState {
 }
 
 /// Mutable batch-governor state shared by batch producers.
-#[derive(Debug)]
 struct BatchMemoryState {
     /// Snapshot target and slot count protected by one update lock.
     update_state: Mutex<BatchMemoryUpdateState>,
@@ -91,10 +91,13 @@ impl BatchMemoryState {
             calculate_per_slot_batch_size_target(snapshot_batch_target_bytes, 1, max_batch_bytes);
 
         Self {
-            update_state: Mutex::new(BatchMemoryUpdateState {
-                registered_batch_slots: 0,
-                snapshot_batch_target_bytes,
-            }),
+            update_state: hotpath::mutex!(
+                std::sync::Mutex::new(BatchMemoryUpdateState {
+                    registered_batch_slots: 0,
+                    snapshot_batch_target_bytes,
+                }),
+                label = "batch_memory_update"
+            ),
             memory_snapshot_revision: AtomicU64::new(memory_snapshot_revision),
             batch_size_target_bytes: AtomicUsize::new(batch_size_target_bytes),
             max_batch_bytes,
@@ -133,6 +136,16 @@ impl BatchMemoryState {
             .expect("registered batch slot count should not underflow");
         gauge!(ETL_BATCH_REGISTERED_SLOTS).set(update.registered_batch_slots as f64);
         self.recalculate_batch_size_target(&update);
+    }
+}
+
+impl std::fmt::Debug for BatchMemoryState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BatchMemoryState")
+            .field("memory_snapshot_revision", &self.memory_snapshot_revision)
+            .field("batch_size_target_bytes", &self.batch_size_target_bytes)
+            .field("max_batch_bytes", &self.max_batch_bytes)
+            .finish_non_exhaustive()
     }
 }
 

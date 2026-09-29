@@ -223,6 +223,7 @@ async fn stop_table_copy_tasks(
 /// Copies a table by assigning physical ctid ranges to child-connection
 /// workers.
 #[expect(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     activity_handle: &ActivityHandle,
     replication_transaction: &PgReplicationTransaction<'_>,
@@ -395,6 +396,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
 }
 
 /// Plans ctid work items for every physical table that backs `table_id`.
+#[hotpath::measure]
 async fn plan_table_copy_partitions(
     replication_transaction: &PgReplicationTransaction<'_>,
     table_id: TableId,
@@ -487,6 +489,14 @@ async fn plan_table_copy_partitions(
     Ok(copy_partitions)
 }
 
+/// Claims the next partition, including the wait for the shared work queue.
+#[hotpath::measure]
+async fn pop_copy_partition(
+    work_queue: &Mutex<VecDeque<TableCopyPartition>>,
+) -> Option<TableCopyPartition> {
+    work_queue.lock().await.pop_front()
+}
+
 /// Runs one child connection until there is no more copy work to claim.
 #[expect(clippy::too_many_arguments)]
 async fn table_copy_worker<D>(
@@ -511,7 +521,7 @@ where
     let mut total_progress = TableCopyProgress::default();
 
     loop {
-        let copy_partition = work_queue.lock().await.pop_front();
+        let copy_partition = pop_copy_partition(&work_queue).await;
         let Some(copy_partition) = copy_partition else {
             // The queue is fully populated before workers start; an empty queue
             // means all CTID work has been claimed.
@@ -540,6 +550,7 @@ where
 
 /// Copies a single physical ctid range into the destination.
 #[expect(clippy::too_many_arguments)]
+#[hotpath::measure]
 async fn table_copy_partition_rows<D>(
     activity_handle: &ActivityHandle,
     child_replication_transaction: &PgChildReplicationTransaction<'_>,

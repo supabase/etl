@@ -24,6 +24,22 @@ const METRICS_PORT: u16 = 9000;
 /// Interval for maintaining the recorder's metric storage.
 const UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Global project identity label.
+const PROJECT_LABEL: &str = "project";
+/// Global pipeline identity label.
+const PIPELINE_ID_LABEL: &str = "pipeline_id";
+/// Global destination identity label.
+const DESTINATION_LABEL: &str = "destination";
+
+/// Shared recorder and the identity attached to every exported sample.
+#[derive(Clone)]
+struct MetricsState {
+    /// Recorder for ETL metrics.
+    handle: PrometheusHandle,
+    /// Labels also attached to the profiler's separate exposition.
+    global_labels: Vec<(&'static str, String)>,
+}
+
 /// Errors while initializing the standalone metrics endpoint.
 #[derive(Debug, Error)]
 pub enum MetricsError {
@@ -106,14 +122,33 @@ pub fn init_metrics_handle() -> Result<PrometheusHandle, BuildError> {
 
 /// Renders metrics without blocking the async runtime's worker threads.
 async fn render_metrics(
-    State(handle): State<PrometheusHandle>,
+    State(state): State<MetricsState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let body = tokio::task::spawn_blocking(move || handle.render()).await.map_err(|error| {
+    let MetricsState { handle, global_labels } = state;
+    #[cfg(feature = "hotpath")]
+    let result = crate::profiling::render_metrics(&handle, &global_labels).await;
+    #[cfg(not(feature = "hotpath"))]
+    let result = {
+        let _ = global_labels;
+        tokio::task::spawn_blocking(move || handle.render()).await
+    };
+    let body = result.map_err(|error| {
         error!(error = %error, "metrics rendering failed");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     Ok(([(header::CONTENT_TYPE, "text/plain")], body))
+}
+
+/// Builds the shared metrics endpoint, preserving health and fallback routes.
+pub(crate) fn metrics_router(
+    handle: PrometheusHandle,
+    global_labels: Vec<(&'static str, String)>,
+) -> Router {
+    Router::new()
+        .route("/health", any(|| async { ([(header::CONTENT_TYPE, "text/plain")], "OK") }))
+        .fallback(render_metrics)
+        .with_state(MetricsState { handle, global_labels })
 }
 
 /// Installs the recorder and serves metrics on port 9000 over IPv4 and IPv6.
@@ -130,25 +165,21 @@ pub fn init_metrics(
 ) -> Result<AbortOnDropHandle<io::Result<()>>, MetricsError> {
     let listener = bind_listener(METRICS_PORT).map_err(MetricsError::Listener)?;
     let mut builder = PrometheusBuilder::new();
-
+    let mut global_labels = Vec::new();
     if let Some(project_ref) = project_ref {
-        builder = builder.add_global_label("project", project_ref);
+        global_labels.push((PROJECT_LABEL, project_ref.to_owned()));
     }
-
     if let Some(pipeline_id) = pipeline_id {
-        builder = builder.add_global_label("pipeline_id", pipeline_id.to_string());
+        global_labels.push((PIPELINE_ID_LABEL, pipeline_id.to_string()));
     }
-
     if let Some(destination) = destination {
-        builder = builder.add_global_label("destination", destination);
+        global_labels.push((DESTINATION_LABEL, destination.to_owned()));
     }
-
+    for (key, value) in &global_labels {
+        builder = builder.add_global_label(*key, value.clone());
+    }
     let handle = builder.install_recorder()?;
-    // Preserve the exporter's health route and metrics on every other path.
-    let router = Router::new()
-        .route("/health", any(|| async { ([(header::CONTENT_TYPE, "text/plain")], "OK") }))
-        .fallback(render_metrics)
-        .with_state(handle.clone());
+    let router = metrics_router(handle.clone(), global_labels);
 
     let metrics_http_listener = AbortOnDropHandle::new(tokio::spawn(async move {
         let server = axum::serve(listener, router).into_future();

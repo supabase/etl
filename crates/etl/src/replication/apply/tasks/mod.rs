@@ -2,7 +2,7 @@
 
 use std::{future::Future, time::Duration};
 
-use tokio::sync::mpsc;
+use hotpath::wrap::tokio::sync::mpsc::Sender;
 use tokio_postgres::types::PgLsn;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -26,7 +26,7 @@ pub(super) struct ApplyLoopTasks {
     /// Independent channel handle for submitting safe replication progress.
     feedback_handle: FeedbackHandle,
     /// Sender for serialized background schema cleanup requests.
-    schema_cleanup_tx: mpsc::Sender<SchemaCleanupRequest>,
+    schema_cleanup_tx: Sender<SchemaCleanupRequest>,
     /// Background worker that serially processes schema cleanup requests.
     schema_cleanup_worker_task: AbortOnDropHandle<()>,
     /// Background replication lag sampler task owned by this apply loop.
@@ -145,7 +145,8 @@ mod tests {
         feedback_handle: FeedbackHandle,
         feedback_sender_task: JoinHandle<EtlResult<()>>,
     ) -> ApplyLoopTasks {
-        let (cleanup_tx, mut cleanup_rx) = mpsc::channel(1);
+        let (cleanup_tx, mut cleanup_rx) =
+            hotpath::channel!(mpsc::channel(1), label = "schema_cleanup_test");
         ApplyLoopTasks {
             feedback_handle,
             schema_cleanup_tx: cleanup_tx,
@@ -175,7 +176,8 @@ mod tests {
     async fn apply_loop_teardown_joins_background_tasks() {
         let (feedback_sender_task, feedback_lifetime_rx) = pending_background_task();
         let (replication_lag_metrics_task, sampler_lifetime_rx) = pending_background_task();
-        let (cleanup_tx, mut cleanup_rx) = mpsc::channel(1);
+        let (cleanup_tx, mut cleanup_rx) =
+            hotpath::channel!(mpsc::channel(1), label = "schema_cleanup_test");
         let (release_tx, release_rx) = oneshot::channel();
         let schema_cleanup_worker_task = tokio::spawn(async move {
             // Accepted cleanup must finish even when teardown closes the queue.
@@ -218,7 +220,7 @@ mod tests {
         let (schema_cleanup_worker_task, cleanup_lifetime_rx) = pending_background_task();
         let tasks = ApplyLoopTasks {
             feedback_handle: closed_feedback_handle(),
-            schema_cleanup_tx: mpsc::channel(1).0,
+            schema_cleanup_tx: hotpath::channel!(mpsc::channel(1), label = "schema_cleanup_test").0,
             schema_cleanup_worker_task: AbortOnDropHandle::new(schema_cleanup_worker_task),
             replication_lag_metrics_task: AbortOnDropHandle::new(replication_lag_metrics_task),
             feedback_sender_task: AbortOnDropHandle::new(feedback_sender_task),

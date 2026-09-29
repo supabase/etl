@@ -1,6 +1,9 @@
 name: Build image
 description: Build one native platform with a persistent Blacksmith cache.
 inputs:
+  hotpath:
+    description: Enable Hotpath profiling in the image.
+    default: 'false'
   context:
     description: Checked-out source directory used as the Docker build context.
     default: '.'
@@ -42,5 +45,7 @@ runs:
         context: ${{ inputs.context }}
         file: ${{ inputs.context }}/crates/etl-replicator/Dockerfile
         platforms: ${{ inputs.platform }}
-        build-args: ENABLE_EGRESS=true
+        build-args: |
+          ENABLE_EGRESS=true
+          ENABLE_HOTPATH=${{ inputs.hotpath }}
         outputs: ${{ inputs.push == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', inputs.image) || 'type=cacheonly' }}
