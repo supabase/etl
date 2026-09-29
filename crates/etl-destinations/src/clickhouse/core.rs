@@ -31,7 +31,7 @@ use url::Url;
 use crate::{
     clickhouse::{
         CLICKHOUSE_COLUMN_NAME_MAPPING,
-        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind, InsertDeduplication},
+        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
@@ -899,8 +899,8 @@ where
     /// async completion result.
     ///
     /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing. It passes no [`TableCopyBatchId`], so ClickHouse
-    /// never deduplicates its inserts.
+    /// pipeline plumbing. It passes no [`TableCopyBatchId`], so its inserts
+    /// send no deduplication token.
     #[cfg(feature = "test-utils")]
     pub async fn write_table_rows(
         &self,
@@ -1379,7 +1379,7 @@ where
                 rows,
                 &nullable_flags,
                 self.inserter_config.max_bytes_per_insert,
-                batch_id.map_or(InsertDeduplication::Disabled, InsertDeduplication::CopyBatch),
+                batch_id,
                 COPY_REPLICATION_PATH,
             )
             .await
@@ -1917,7 +1917,7 @@ where
                         rows,
                         &nullable_flags,
                         max_bytes,
-                        InsertDeduplication::Disabled,
+                        None,
                         CDC_REPLICATION_PATH,
                     )
                     .await

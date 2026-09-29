@@ -13,7 +13,6 @@ use etl::{
 };
 use tracing::debug;
 use url::Url;
-use uuid::Uuid;
 
 use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
@@ -118,28 +117,6 @@ pub(crate) struct ClickHouseTableColumn {
     pub(crate) name: String,
     /// ClickHouse type string, for example `Int32` or `Nullable(String)`.
     pub(crate) type_name: String,
-}
-
-/// How ClickHouse block deduplication treats the statements of one
-/// [`ClickHouseClient::insert_rows`] call.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum InsertDeduplication {
-    /// Statement `n` sends `insert_deduplication_token = "<batch id>-<n>"`.
-    ///
-    /// Without a token, ClickHouse compares block contents, so distinct copy
-    /// batches with identical rows look like retries and all but one are
-    /// dropped. A redelivered batch splits into the same statements and keeps
-    /// its tokens, so it is still dropped as a retry.
-    CopyBatch(TableCopyBatchId),
-    /// Every statement sends a fresh random token, so ClickHouse never drops
-    /// it as a duplicate.
-    ///
-    /// Change-stream replays already tolerate duplicate rows. Content
-    /// deduplication could instead drop a replayed block that a replayed
-    /// `TRUNCATE` just removed, if the table remembers the block across the
-    /// truncate. `insert_deduplicate = 0` is not enough: plain `MergeTree`
-    /// with `non_replicated_deduplication_window` ignores it.
-    Disabled,
 }
 
 /// Returns the placement clause for an `ADD COLUMN` statement.
@@ -675,7 +652,16 @@ impl ClickHouseClient {
     /// When the accumulated uncompressed byte count reaches
     /// `max_bytes_per_insert` the current INSERT statement is committed and a
     /// new one is opened, keeping peak memory usage bounded for large initial
-    /// copies. `deduplication` decides the token each statement sends.
+    /// copies.
+    ///
+    /// With `copy_batch_id`, statement `n` sends
+    /// `insert_deduplication_token = "<batch id>-<n>"`. Without a token,
+    /// ClickHouse compares block contents, so distinct copy batches with
+    /// identical rows look like retries and all but one are dropped. A
+    /// redelivered batch splits into the same statements and keeps its tokens,
+    /// so it is still dropped as a retry. Without `copy_batch_id`, statements
+    /// send no token and ClickHouse deduplicates by content, which only drops
+    /// exact replays of change-stream blocks.
     ///
     /// The `replication_path` label (`"copy"` or `"cdc"`) is attached to the
     /// `etl_clickhouse_insert_duration_seconds` histogram recorded after each
@@ -686,7 +672,7 @@ impl ClickHouseClient {
         rows: Vec<Vec<ClickHouseValue>>,
         nullable_flags: &[bool],
         max_bytes_per_insert: u64,
-        deduplication: InsertDeduplication,
+        copy_batch_id: Option<TableCopyBatchId>,
         replication_path: &'static str,
     ) -> EtlResult<()> {
         let sql = build_insert_rows_sql(table_name);
@@ -698,15 +684,12 @@ impl ClickHouseClient {
             #[cfg(feature = "test-utils")]
             pause_before_insert_statement_for_tests(statements).await;
 
-            let token = match deduplication {
-                InsertDeduplication::CopyBatch(batch_id) => format!("{batch_id}-{statements}"),
-                InsertDeduplication::Disabled => Uuid::new_v4().to_string(),
-            };
-            let mut insert = self
-                .inner
-                .insert_formatted_with(sql.clone())
-                .with_option("insert_deduplication_token", token)
-                .buffered_with_capacity(BUFFERED_CAPACITY);
+            let mut insert = self.inner.insert_formatted_with(sql.clone());
+            if let Some(batch_id) = copy_batch_id {
+                insert = insert
+                    .with_option("insert_deduplication_token", format!("{batch_id}-{statements}"));
+            }
+            let mut insert = insert.buffered_with_capacity(BUFFERED_CAPACITY);
             let mut bytes = 0u64;
             let mut rows_in_statement = 0u64;
             let insert_start = Instant::now();
