@@ -9,12 +9,13 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
+use futures::TryFutureExt;
 use tracing::debug;
 use url::Url;
 
 use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
-    encoding::{ClickHouseValue, encode_to_row_binary},
+    encoding::{ClickHouseValue, encode_to_row_binary, rb_varint},
     metrics::{
         ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
         ETL_CLICKHOUSE_DDL_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_BYTES,
@@ -101,6 +102,69 @@ where
     }
 }
 
+/// ClickHouse error codes for an insert whose column list or header no longer
+/// matches the table: a listed column is missing (`NO_SUCH_COLUMN_IN_TABLE`)
+/// or a header type differs from the column (`INCORRECT_DATA`).
+const INSERT_LAYOUT_REJECTION_CODES: [u32; 2] = [16, 117];
+
+/// Returns whether ClickHouse rejected an insert because its column list or
+/// header no longer matches the table.
+///
+/// Network errors and timeouts return `false`: they say nothing about the
+/// table's columns.
+fn is_insert_layout_rejection(error: &clickhouse::error::Error) -> bool {
+    let clickhouse::error::Error::BadResponse(message) = error else {
+        return false;
+    };
+    clickhouse_error_code(message).is_some_and(|code| INSERT_LAYOUT_REJECTION_CODES.contains(&code))
+}
+
+/// Parses the code from a ClickHouse server message.
+///
+/// The server body reads `Code: 117. DB::Exception: ...`. When the body cannot
+/// be read, the `clickhouse` crate falls back to the bare `Code: 117` from the
+/// `X-ClickHouse-Exception-Code` header. The digits must end the message or be
+/// followed by `.`.
+fn clickhouse_error_code(message: &str) -> Option<u32> {
+    let rest = message.trim_start().strip_prefix("Code: ")?;
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let (digits, tail) = rest.split_at(end);
+    if !tail.is_empty() && !tail.starts_with('.') {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Failure of a [`ClickHouseClient::insert_rows`] call.
+#[derive(Debug)]
+pub(crate) struct InsertRowsError {
+    /// Error reported to the caller.
+    error: EtlError,
+    /// Whether ClickHouse rejected the insert because its column list or
+    /// header no longer matches the table.
+    layout_rejected: bool,
+}
+
+impl InsertRowsError {
+    /// Returns whether the insert's layout no longer matches the table, so the
+    /// cached layout must be reloaded.
+    pub(crate) fn is_layout_rejection(&self) -> bool {
+        self.layout_rejected
+    }
+}
+
+impl From<InsertRowsError> for EtlError {
+    fn from(failure: InsertRowsError) -> Self {
+        failure.error
+    }
+}
+
+impl From<EtlError> for InsertRowsError {
+    fn from(error: EtlError) -> Self {
+        Self { error, layout_rejected: false }
+    }
+}
+
 /// Capacity of the internal write buffer used per INSERT statement.
 ///
 /// When this many bytes have been written to the buffer it is flushed to the
@@ -115,6 +179,56 @@ pub(crate) struct ClickHouseTableColumn {
     pub(crate) name: String,
     /// ClickHouse type string, for example `Int32` or `Nullable(String)`.
     pub(crate) type_name: String,
+}
+
+/// Column layout sent with every `RowBinaryWithNamesAndTypes` insert into one
+/// table.
+///
+/// The explicit column list makes ClickHouse reject unknown column names, and
+/// the header makes it reject any column whose type differs from the table.
+/// A stale or externally altered table therefore fails the insert instead of
+/// reinterpreting positional RowBinary bytes.
+#[derive(Debug)]
+pub(crate) struct RowBinaryLayout {
+    /// Quoted, comma-separated column list for the `INSERT` statement.
+    column_list: String,
+    /// Encoded header: column count, column names, then column types.
+    header: Vec<u8>,
+    /// Per-column `Nullable(T)` markers, including the trailing CDC columns.
+    nullable_flags: Box<[bool]>,
+}
+
+impl RowBinaryLayout {
+    /// Builds the layout for `columns` in table position order.
+    pub(crate) fn new(columns: &[ClickHouseTableColumn]) -> Self {
+        let column_list =
+            columns.iter().map(|column| quote_identifier(&column.name)).collect::<Vec<_>>();
+        let mut header = Vec::new();
+        rb_varint(columns.len(), &mut header);
+        for value in columns
+            .iter()
+            .map(|column| &column.name)
+            .chain(columns.iter().map(|column| &column.type_name))
+        {
+            rb_varint(value.len(), &mut header);
+            header.extend_from_slice(value.as_bytes());
+        }
+
+        Self {
+            column_list: column_list.join(", "),
+            header,
+            nullable_flags: columns
+                .iter()
+                .map(|column| column.type_name.starts_with("Nullable("))
+                .collect(),
+        }
+    }
+
+    /// Returns the per-column `Nullable(T)` markers.
+    #[cfg(test)]
+    pub(crate) fn nullable_flags(&self) -> &[bool] {
+        &self.nullable_flags
+    }
 }
 
 /// Returns the placement clause for an `ADD COLUMN` statement.
@@ -193,10 +307,11 @@ fn build_drop_table_sql(table_name: &str) -> String {
     format!("DROP TABLE IF EXISTS {table_name}")
 }
 
-/// Builds the SQL used to insert RowBinary rows into a ClickHouse table.
-fn build_insert_rows_sql(table_name: &str) -> String {
+/// Builds the SQL used to insert `RowBinaryWithNamesAndTypes` rows into a
+/// ClickHouse table.
+fn build_insert_rows_sql(table_name: &str, layout: &RowBinaryLayout) -> String {
     let table_name = quote_identifier(table_name);
-    format!("INSERT INTO {table_name} FORMAT RowBinary")
+    format!("INSERT INTO {table_name} ({}) FORMAT RowBinaryWithNamesAndTypes", layout.column_list)
 }
 
 /// Kind of DDL being executed; surfaces as a `kind` label on the
@@ -563,11 +678,14 @@ impl ClickHouseClient {
         self.execute_ddl(DdlKind::DropTable, &sql).await
     }
 
-    /// Inserts `rows` into `table_name` using the RowBinary format.
+    /// Inserts `rows` into `table_name` using the `RowBinaryWithNamesAndTypes`
+    /// format.
     ///
     /// Each element of `rows` is a complete, already-encoded row of
-    /// [`ClickHouseValue`]s in column order (user columns + CDC columns).
-    /// `nullable_flags` must have the same length as each row.
+    /// [`ClickHouseValue`]s in `layout` column order (user columns + CDC
+    /// columns). Every INSERT statement starts with the layout header, so
+    /// ClickHouse checks column names and types before reading any row. The
+    /// error reports whether ClickHouse rejected that layout.
     ///
     /// When the accumulated uncompressed byte count reaches
     /// `max_bytes_per_insert` the current INSERT statement is committed and a
@@ -581,11 +699,11 @@ impl ClickHouseClient {
         &self,
         table_name: &str,
         rows: Vec<Vec<ClickHouseValue>>,
-        nullable_flags: &[bool],
+        layout: &RowBinaryLayout,
         max_bytes_per_insert: u64,
         replication_path: &'static str,
-    ) -> EtlResult<()> {
-        let sql = build_insert_rows_sql(table_name);
+    ) -> Result<(), InsertRowsError> {
+        let sql = build_insert_rows_sql(table_name, layout);
         let mut rows = rows.into_iter().peekable();
         let mut row_buf = Vec::new();
         let mut statements = 0u64;
@@ -597,7 +715,13 @@ impl ClickHouseClient {
             let mut insert = self
                 .inner
                 .insert_formatted_with(sql.clone())
+                // A profile can disable the header type check, which would read
+                // the row bytes as the table's types again.
+                .with_option("input_format_with_types_use_header", "1")
                 .buffered_with_capacity(BUFFERED_CAPACITY);
+            insert.write_buffered(&layout.header);
+            // Only row bytes count toward the budget, so every statement
+            // carries at least one row even when the budget is tiny.
             let mut bytes = 0u64;
             let mut rows_in_statement = 0u64;
             let insert_start = Instant::now();
@@ -605,23 +729,28 @@ impl ClickHouseClient {
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                encode_to_row_binary(row, nullable_flags, &mut row_buf).inspect_err(|_| {
-                    metrics::counter!(
-                        ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
-                        REPLICATION_PATH_LABEL => replication_path,
-                    )
-                    .increment(1);
-                })?;
+                encode_to_row_binary(row, &layout.nullable_flags, &mut row_buf).inspect_err(
+                    |_| {
+                        metrics::counter!(
+                            ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+                            REPLICATION_PATH_LABEL => replication_path,
+                        )
+                        .increment(1);
+                    },
+                )?;
                 insert.write_buffered(&row_buf);
                 bytes += row_buf.len() as u64;
                 rows_in_statement += 1;
             }
 
+            let mut layout_rejected = false;
             let result = timeout_call(
                 ClickHouseOperationKind::Insert,
                 &self.config,
                 Some(&format!("table: {table_name}")),
-                insert.end(),
+                insert.end().inspect_err(|error| {
+                    layout_rejected = is_insert_layout_rejection(error);
+                }),
             )
             .await;
             match result.as_ref() {
@@ -651,7 +780,7 @@ impl ClickHouseClient {
                     .increment(1);
                 }
             }
-            result?;
+            result.map_err(|error| InsertRowsError { error, layout_rejected })?;
             statements += 1;
         }
 
@@ -845,80 +974,96 @@ mod tests {
         assert_eq!(sql, "DROP TABLE IF EXISTS \"table\\\"name\"");
     }
 
+    /// The insert header lists every column name, then every type, matching
+    /// the quoted column list.
     #[test]
-    fn insert_rows_sql_quotes_identifiers() {
-        let sql = build_insert_rows_sql("table\"name");
+    fn row_binary_layout_lists_names_before_types() {
+        // GIVEN: an identifier that needs quoting and a nullable column.
+        let columns = [
+            ClickHouseTableColumn { name: "id".to_owned(), type_name: "Int64".to_owned() },
+            ClickHouseTableColumn {
+                name: "na\"me".to_owned(),
+                type_name: "Nullable(String)".to_owned(),
+            },
+        ];
 
-        assert_eq!(sql, "INSERT INTO \"table\\\"name\" FORMAT RowBinary");
+        // WHEN: the layout is built.
+        let layout = RowBinaryLayout::new(&columns);
+
+        // THEN: the SQL, header bytes, and null markers follow column order.
+        assert_eq!(
+            build_insert_rows_sql("table\"name", &layout),
+            "INSERT INTO \"table\\\"name\" (\"id\", \"na\\\"me\") FORMAT \
+             RowBinaryWithNamesAndTypes"
+        );
+        assert_eq!(
+            layout.header,
+            [&[2, 2][..], b"id", &[5], b"na\"me", &[5], b"Int64", &[16], b"Nullable(String)",]
+                .concat()
+        );
+        assert_eq!(layout.nullable_flags(), [false, true]);
     }
 
-    /// # GIVEN
-    /// A config with a custom server timeout and epsilon.
-    ///
-    /// # WHEN
-    /// `client_timeout_for(op)` is queried.
-    ///
-    /// # THEN
-    /// It returns `server_timeout_for(op) + client_timeout_epsilon`.
+    /// The client timeout is the server timeout plus the configured epsilon.
     #[test]
     fn client_timeout_adds_epsilon_to_server_timeout() {
+        // GIVEN: a config with a custom server timeout and epsilon.
         let config = ClickHouseClientConfig {
             connectivity_check_timeout: Duration::from_secs(10),
             client_timeout_epsilon: Duration::from_secs(3),
             ..Default::default()
         };
+
+        // WHEN: the client timeout is queried.
+        // THEN: it adds the epsilon to the server timeout.
         assert_eq!(
             config.client_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(13)
         );
 
+        // GIVEN: a zero server timeout.
         let config = ClickHouseClientConfig {
             connectivity_check_timeout: Duration::ZERO,
             client_timeout_epsilon: Duration::from_secs(3),
             ..Default::default()
         };
+
+        // THEN: the client timeout is the epsilon alone.
         assert_eq!(
             config.client_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(3)
         );
     }
 
-    /// # GIVEN
-    /// Each `ClickHouseOperationKind` variant.
-    ///
-    /// # WHEN
-    /// `Display` is invoked.
-    ///
-    /// # THEN
-    /// It produces the human-readable op name interpolated into error messages
-    /// by `timeout_call`.
+    /// Operation kinds display the names interpolated into error messages by
+    /// `timeout_call`.
     #[test]
     fn operation_kind_display_matches_error_messages() {
+        // GIVEN: each operation kind.
+        // WHEN: it is displayed.
+        // THEN: it renders the human-readable operation name.
         assert_eq!(ClickHouseOperationKind::ConnectivityCheck.to_string(), "connectivity check");
         assert_eq!(ClickHouseOperationKind::SchemaQuery.to_string(), "schema query");
         assert_eq!(ClickHouseOperationKind::Ddl.to_string(), "DDL");
         assert_eq!(ClickHouseOperationKind::Insert.to_string(), "insert");
     }
 
-    /// # GIVEN
-    /// A future that never resolves and a config with a finite budget.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited under paused time.
-    ///
-    /// # THEN
-    /// It returns an `EtlError` with kind `DestinationTimeout` and a detail
-    /// that mentions the op and "timed out".
+    /// A missed deadline returns `DestinationTimeout` with the operation in the
+    /// detail.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_returns_destination_timeout_on_deadline() {
-        // A future that never resolves; tokio's paused clock advances virtual
-        // time when all tasks are stalled, so the timeout fires immediately in
-        // real wall-clock terms.
+        // GIVEN: a future that never resolves. Tokio's paused clock advances
+        // virtual time when all tasks are stalled, so the timeout fires
+        // immediately in wall-clock terms.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
+
+        // WHEN: the call is awaited.
         let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, None, never)
             .await
             .unwrap_err();
+
+        // THEN: the error is a timeout that names the operation.
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert!(
             err.detail()
@@ -928,22 +1073,20 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// A never-resolving future and `Some(context)`.
-    ///
-    /// # WHEN
-    /// `timeout_call`'s deadline fires.
-    ///
-    /// # THEN
-    /// The error detail contains the context string.
+    /// A missed deadline keeps the caller's context in the error detail.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_appends_context_to_detail() {
+        // GIVEN: a never-resolving future and a context string.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
+
+        // WHEN: the deadline fires.
         let err =
             timeout_call(ClickHouseOperationKind::Insert, &config, Some("table: users"), never)
                 .await
                 .unwrap_err();
+
+        // THEN: the detail contains the context.
         assert!(
             err.detail().is_some_and(|d| d.contains("table: users")),
             "unexpected detail: {:?}",
@@ -951,22 +1094,19 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` before the deadline.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited with no context.
-    ///
-    /// # THEN
-    /// It returns an `EtlError` with the op's `failed_kind` and a detail that
-    /// mentions the op and "failed".
+    /// An inner ClickHouse error maps to the operation's failed kind.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_propagates_inner_error() {
+        // GIVEN: a future that fails before the deadline.
         let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
+
+        // WHEN: the call is awaited without context.
         let err = timeout_call(ClickHouseOperationKind::SchemaQuery, &config, None, fut)
             .await
             .unwrap_err();
+
+        // THEN: the error has the failed kind and names the operation.
         assert_eq!(err.kind(), ErrorKind::DestinationQueryFailed);
         assert!(
             err.detail().is_some_and(|d| d.contains("schema query") && d.contains("failed")),
@@ -975,40 +1115,36 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// A future that resolves to `Ok` before the deadline.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited.
-    ///
-    /// # THEN
-    /// It returns the inner `Ok` value unchanged.
+    /// A successful future passes its value through unchanged.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_passes_through_success() {
+        // GIVEN: a future that resolves before the deadline.
         let config = ClickHouseClientConfig::default();
         let fut = async { Ok::<u32, clickhouse::error::Error>(42) };
+
+        // WHEN: the call is awaited.
         let value =
             timeout_call(ClickHouseOperationKind::Insert, &config, None, fut).await.unwrap();
+
+        // THEN: the inner value is returned.
         assert_eq!(value, 42);
     }
 
-    /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` and `Some(context)`.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited.
-    ///
-    /// # THEN
-    /// The error has the op's `failed_kind`, the detail contains the context,
-    /// and the inner clickhouse error is attached as `source`.
+    /// An inner ClickHouse error keeps the context and its source.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_inner_error_includes_context() {
         use std::error::Error as _;
+
+        // GIVEN: a failing future and a context string.
         let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
+
+        // WHEN: the call is awaited.
         let err = timeout_call(ClickHouseOperationKind::Insert, &config, Some("table: users"), fut)
             .await
             .unwrap_err();
+
+        // THEN: the error has the failed kind, the context, and the source.
         assert_eq!(err.kind(), ErrorKind::DestinationAtomicBatchRetryable);
         assert!(
             err.detail().is_some_and(|d| d.contains("insert failed") && d.contains("table: users")),
@@ -1018,17 +1154,14 @@ mod tests {
         assert!(err.source().is_some(), "expected inner clickhouse error to be attached");
     }
 
-    /// # GIVEN
-    /// A default `ClickHouseClientConfig`.
-    ///
-    /// # WHEN
-    /// `server_timeout_for(op)` is queried for each variant.
-    ///
-    /// # THEN
-    /// Each variant returns the corresponding config field.
+    /// Each operation kind reads its own server timeout from the config.
     #[test]
     fn server_timeout_per_operation_kind() {
+        // GIVEN: a default config.
         let config = ClickHouseClientConfig::default();
+
+        // WHEN: each operation kind's server timeout is queried.
+        // THEN: it returns the matching config field.
         assert_eq!(
             config.server_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             config.connectivity_check_timeout
@@ -1044,17 +1177,12 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// Each `ClickHouseOperationKind` variant.
-    ///
-    /// # WHEN
-    /// `failed_kind` is queried.
-    ///
-    /// # THEN
-    /// Each variant maps to the `ErrorKind` that drives the appropriate retry
-    /// policy for that bucket.
+    /// Each operation kind maps to the error kind that drives its retry policy.
     #[test]
     fn operation_kind_failed_kind_per_bucket() {
+        // GIVEN: each operation kind.
+        // WHEN: its failed kind is queried.
+        // THEN: it maps to the retry bucket for that operation.
         assert_eq!(
             ClickHouseOperationKind::ConnectivityCheck.failed_kind(),
             ErrorKind::DestinationConnectionFailed
@@ -1070,18 +1198,13 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// Various `Duration` values: whole, sub-second, zero, fractional.
-    ///
-    /// # WHEN
-    /// `floor_secs` is called.
-    ///
-    /// # THEN
-    /// It returns a whole-seconds string with a floor of `"1"` (so
-    /// `Duration::ZERO` and sub-second values do not collapse to `"0"`).
+    /// `floor_secs` renders whole seconds with a floor of `"1"`, so zero and
+    /// sub-second durations do not disable server-side timeouts.
     #[test]
     fn floor_secs_floors_at_one_second() {
-        // Whole seconds at or above 1 pass through unchanged.
+        // GIVEN: whole, zero, sub-second, and fractional durations.
+        // WHEN: each is formatted.
+        // THEN: whole seconds at or above 1 pass through unchanged.
         assert_eq!(floor_secs(Duration::from_secs(1)), "1");
         assert_eq!(floor_secs(Duration::from_secs(5)), "5");
         assert_eq!(floor_secs(Duration::from_secs(60)), "60");
@@ -1095,5 +1218,64 @@ mod tests {
         // (Duration::as_secs).
         assert_eq!(floor_secs(Duration::from_millis(1500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(2999)), "2");
+    }
+
+    /// Only a column-list or header rejection counts as a stale insert layout.
+    #[test]
+    fn insert_layout_rejection_matches_only_layout_errors() {
+        // GIVEN: server rejections of the column list and header.
+        let rejections = [
+            "Code: 117. DB::Exception: Type of 'id' must be Int64, not Int32: (while reading \
+             header). (INCORRECT_DATA)",
+            "Code: 16. DB::Exception: No such column nn in table default.t. \
+             (NO_SUCH_COLUMN_IN_TABLE)",
+            // The crate's fallback when the error body cannot be read.
+            "Code: 117",
+        ];
+        // GIVEN: transient server failures.
+        let transient = [
+            "Code: 159. DB::Exception: Timeout exceeded: elapsed 1.2 seconds. (TIMEOUT_EXCEEDED)",
+            "Code: 210. DB::NetException: I/O error: Broken pipe. (NETWORK_ERROR)",
+        ];
+
+        // WHEN: each failure is classified.
+        // THEN: only the rejections count.
+        let bad_response = |message: &str| clickhouse::error::Error::BadResponse(message.into());
+        for message in rejections {
+            assert!(is_insert_layout_rejection(&bad_response(message)), "{message}");
+        }
+        for message in transient {
+            assert!(!is_insert_layout_rejection(&bad_response(message)), "{message}");
+        }
+
+        // GIVEN: a client-side timeout, which carries no server response.
+        // THEN: it does not count.
+        assert!(!is_insert_layout_rejection(&clickhouse::error::Error::TimedOut));
+    }
+
+    /// Malformed server messages yield no error code instead of panicking.
+    #[test]
+    fn clickhouse_error_code_rejects_malformed_messages() {
+        // GIVEN: a server body and the crate's bare header fallback.
+        // THEN: both codes are parsed.
+        assert_eq!(clickhouse_error_code("Code: 117. DB::Exception: x"), Some(117));
+        assert_eq!(clickhouse_error_code("Code: 117"), Some(117));
+
+        // GIVEN: empty, truncated, non-numeric, overflowing, trailing-text, and
+        // non-ASCII input.
+        // THEN: no code is returned.
+        for message in [
+            "",
+            "Code: ",
+            "Code: .",
+            "Code: 117 x",
+            "Code: abc. x",
+            "Code: -1. x",
+            "Code: 99999999999. x",
+            "Code: 1é7. x",
+            "DB::Exception: Code: 117. x",
+        ] {
+            assert_eq!(clickhouse_error_code(message), None, "{message:?}");
+        }
     }
 }
