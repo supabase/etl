@@ -34,8 +34,5 @@ tracing-subscriber = { workspace = true, features = ["default", "json", "env-fil
 name = "main"
 path = "tests/main.rs"
 
-[dev-dependencies]
-tempfile = { workspace = true }
-
 [lints]
 workspace = true
