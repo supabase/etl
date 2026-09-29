@@ -11,7 +11,7 @@ use etl::{
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
@@ -31,7 +31,9 @@ use url::Url;
 use crate::{
     clickhouse::{
         CLICKHOUSE_COLUMN_NAME_MAPPING,
-        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind, RowBinaryLayout},
+        client::{
+            ClickHouseClient, ClickHouseTableColumn, DdlKind, InsertRowsError, RowBinaryLayout,
+        },
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
@@ -734,23 +736,31 @@ struct ClickHouseTableCacheEntry {
     layout: Arc<RowBinaryLayout>,
 }
 
-/// Drops `table_id`'s cached layout after an insert that used `layout` failed.
+/// Drops `table_id`'s cached layout when ClickHouse rejected an insert that
+/// used `layout` because its column list or header no longer matches the
+/// table, then returns the insert's error.
 ///
-/// A rejected insert can mean the ClickHouse table changed after the layout
-/// was loaded, for example through an external `ALTER`. Evicting makes the
-/// next write reload and check the table, which reports the drift as
-/// `CorruptedTableSchema` instead of retrying the same rejected header. The
-/// entry is removed only while it still holds `layout`, so a failed insert
-/// cannot evict a layout that a concurrent writer already reloaded.
-fn evict_layout_after_failed_insert(
+/// That happens when the table changed after the layout was loaded, for
+/// example through an external `ALTER`. Evicting makes the next write reload
+/// and check the table, which reports the drift as `CorruptedTableSchema`
+/// instead of retrying the same rejected header. Other failures, such as
+/// timeouts and network errors, keep the layout so a retry needs no extra
+/// schema query. The entry is removed only while it still holds `layout`, so a
+/// failed insert cannot evict a layout that a concurrent writer already
+/// reloaded.
+fn evict_layout_after_rejected_insert(
     table_cache: &RwLock<HashMap<TableId, Arc<ClickHouseTableCacheEntry>>>,
     table_id: TableId,
     layout: &Arc<RowBinaryLayout>,
-) {
-    let mut guard = table_cache.write();
-    if guard.get(&table_id).is_some_and(|entry| Arc::ptr_eq(&entry.layout, layout)) {
-        guard.remove(&table_id);
+    failure: InsertRowsError,
+) -> EtlError {
+    if failure.is_layout_rejection() {
+        let mut guard = table_cache.write();
+        if guard.get(&table_id).is_some_and(|entry| Arc::ptr_eq(&entry.layout, layout)) {
+            guard.remove(&table_id);
+        }
     }
+    failure.into()
 }
 
 /// Execution context captured by ClickHouse background event tasks.
@@ -1489,8 +1499,8 @@ where
                 COPY_REPLICATION_PATH,
             )
             .await
-            .inspect_err(|_| {
-                evict_layout_after_failed_insert(&self.table_cache, schema.id(), &layout);
+            .map_err(|failure| {
+                evict_layout_after_rejected_insert(&self.table_cache, schema.id(), &layout, failure)
             })
     }
 
@@ -2014,8 +2024,8 @@ where
                         CDC_REPLICATION_PATH,
                     )
                     .await
-                    .inspect_err(|_| {
-                        evict_layout_after_failed_insert(&table_cache, table_id, &layout);
+                    .map_err(|failure| {
+                        evict_layout_after_rejected_insert(&table_cache, table_id, &layout, failure)
                     })
             });
         }

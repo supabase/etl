@@ -1750,6 +1750,54 @@ async fn clickhouse_column_type_drift_fails_writes() {
     );
 }
 
+/// An insert failure that is not a layout rejection keeps the cached layout,
+/// so a transient failure costs no extra schema query on the next write.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_layout_insert_failure_keeps_cached_layout() {
+    // GIVEN: one copied row, a cached layout, and a constraint rejecting id 2.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_amount_schema(
+        &store,
+        TableId::new(4306),
+        "amountkeep",
+        test_snapshot_id(100, 100),
+        Type::INT8,
+        -1,
+    )
+    .await;
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::ReplacingMergeTree).await;
+    destination
+        .write_table_rows(&schema, vec![TableRow::new(vec![Cell::I64(1), Cell::I64(12)])])
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("alter table public_amountkeep add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: the constraint rejects an insert, and the column type then changes
+    // outside ETL.
+    destination.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
+    database
+        .db_client()
+        .query("alter table public_amountkeep modify column amount Float64")
+        .execute()
+        .await
+        .unwrap();
+
+    // THEN: the next write still uses the cached layout, so ClickHouse rejects
+    // its header instead of a reload reporting the drift.
+    let error =
+        destination.write_events(vec![amount_insert(&schema, 3, Cell::I64(14))]).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+}
+
 /// Builds a replicated `public.<table>` schema with one integer primary key.
 fn id_only_schema(table_id: u32, table: &str) -> ReplicatedTableSchema {
     ReplicatedTableSchema::all(Arc::new(TableSchema::new(

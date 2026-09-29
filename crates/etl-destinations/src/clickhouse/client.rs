@@ -9,6 +9,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
+use futures::TryFutureExt;
 use tracing::debug;
 use url::Url;
 
@@ -98,6 +99,60 @@ where
             "ClickHouse call timed out",
             detail(op, &format!("timed out after {client_timeout:?}"), context)
         )),
+    }
+}
+
+/// ClickHouse error codes for an insert whose column list or header no longer
+/// matches the table: a listed column is missing (`NO_SUCH_COLUMN_IN_TABLE`)
+/// or a header type differs from the column (`INCORRECT_DATA`).
+const INSERT_LAYOUT_REJECTION_CODES: [u32; 2] = [16, 117];
+
+/// Returns whether ClickHouse rejected an insert because its column list or
+/// header no longer matches the table.
+///
+/// Network errors and timeouts return `false`: they say nothing about the
+/// table's columns.
+fn is_insert_layout_rejection(error: &clickhouse::error::Error) -> bool {
+    let clickhouse::error::Error::BadResponse(message) = error else {
+        return false;
+    };
+    clickhouse_error_code(message).is_some_and(|code| INSERT_LAYOUT_REJECTION_CODES.contains(&code))
+}
+
+/// Parses the code from a ClickHouse server message such as
+/// `Code: 117. DB::Exception: ...`.
+fn clickhouse_error_code(message: &str) -> Option<u32> {
+    let (code, _) = message.trim_start().strip_prefix("Code: ")?.split_once('.')?;
+    code.parse().ok()
+}
+
+/// Failure of a [`ClickHouseClient::insert_rows`] call.
+#[derive(Debug)]
+pub(crate) struct InsertRowsError {
+    /// Error reported to the caller.
+    error: EtlError,
+    /// Whether ClickHouse rejected the insert because its column list or
+    /// header no longer matches the table.
+    layout_rejected: bool,
+}
+
+impl InsertRowsError {
+    /// Returns whether the insert's layout no longer matches the table, so the
+    /// cached layout must be reloaded.
+    pub(crate) fn is_layout_rejection(&self) -> bool {
+        self.layout_rejected
+    }
+}
+
+impl From<InsertRowsError> for EtlError {
+    fn from(failure: InsertRowsError) -> Self {
+        failure.error
+    }
+}
+
+impl From<EtlError> for InsertRowsError {
+    fn from(error: EtlError) -> Self {
+        Self { error, layout_rejected: false }
     }
 }
 
@@ -620,7 +675,8 @@ impl ClickHouseClient {
     /// Each element of `rows` is a complete, already-encoded row of
     /// [`ClickHouseValue`]s in `layout` column order (user columns + CDC
     /// columns). Every INSERT statement starts with the layout header, so
-    /// ClickHouse checks column names and types before reading any row.
+    /// ClickHouse checks column names and types before reading any row. The
+    /// error reports whether ClickHouse rejected that layout.
     ///
     /// When the accumulated uncompressed byte count reaches
     /// `max_bytes_per_insert` the current INSERT statement is committed and a
@@ -637,7 +693,7 @@ impl ClickHouseClient {
         layout: &RowBinaryLayout,
         max_bytes_per_insert: u64,
         replication_path: &'static str,
-    ) -> EtlResult<()> {
+    ) -> Result<(), InsertRowsError> {
         let sql = build_insert_rows_sql(table_name, layout);
         let mut rows = rows.into_iter().peekable();
         let mut row_buf = Vec::new();
@@ -678,11 +734,14 @@ impl ClickHouseClient {
                 rows_in_statement += 1;
             }
 
+            let mut layout_rejected = false;
             let result = timeout_call(
                 ClickHouseOperationKind::Insert,
                 &self.config,
                 Some(&format!("table: {table_name}")),
-                insert.end(),
+                insert.end().inspect_err(|error| {
+                    layout_rejected = is_insert_layout_rejection(error);
+                }),
             )
             .await;
             match result.as_ref() {
@@ -712,7 +771,7 @@ impl ClickHouseClient {
                     .increment(1);
                 }
             }
-            result?;
+            result.map_err(|error| InsertRowsError { error, layout_rejected })?;
             statements += 1;
         }
 
@@ -1150,5 +1209,60 @@ mod tests {
         // (Duration::as_secs).
         assert_eq!(floor_secs(Duration::from_millis(1500)), "1");
         assert_eq!(floor_secs(Duration::from_millis(2999)), "2");
+    }
+
+    /// Only a column-list or header rejection counts as a stale insert layout.
+    #[test]
+    fn insert_layout_rejection_matches_only_layout_errors() {
+        // GIVEN: server rejections of the column list and header.
+        let rejections = [
+            "Code: 117. DB::Exception: Type of 'id' must be Int64, not Int32: (while reading \
+             header). (INCORRECT_DATA)",
+            "Code: 16. DB::Exception: No such column nn in table default.t. \
+             (NO_SUCH_COLUMN_IN_TABLE)",
+        ];
+        // GIVEN: transient server failures.
+        let transient = [
+            "Code: 159. DB::Exception: Timeout exceeded: elapsed 1.2 seconds. (TIMEOUT_EXCEEDED)",
+            "Code: 210. DB::NetException: I/O error: Broken pipe. (NETWORK_ERROR)",
+        ];
+
+        // WHEN: each failure is classified.
+        // THEN: only the rejections count.
+        let bad_response = |message: &str| clickhouse::error::Error::BadResponse(message.into());
+        for message in rejections {
+            assert!(is_insert_layout_rejection(&bad_response(message)), "{message}");
+        }
+        for message in transient {
+            assert!(!is_insert_layout_rejection(&bad_response(message)), "{message}");
+        }
+
+        // GIVEN: a client-side timeout, which carries no server response.
+        // THEN: it does not count.
+        assert!(!is_insert_layout_rejection(&clickhouse::error::Error::TimedOut));
+    }
+
+    /// Malformed server messages yield no error code instead of panicking.
+    #[test]
+    fn clickhouse_error_code_rejects_malformed_messages() {
+        // GIVEN: a well-formed message.
+        // THEN: its code is parsed.
+        assert_eq!(clickhouse_error_code("Code: 117. DB::Exception: x"), Some(117));
+
+        // GIVEN: empty, truncated, non-numeric, overflowing, and non-ASCII
+        // input.
+        // THEN: no code is returned.
+        for message in [
+            "",
+            "Code: ",
+            "Code: 117",
+            "Code: abc. x",
+            "Code: -1. x",
+            "Code: 99999999999. x",
+            "Code: 1é7. x",
+            "DB::Exception: Code: 117. x",
+        ] {
+            assert_eq!(clickhouse_error_code(message), None, "{message:?}");
+        }
     }
 }
