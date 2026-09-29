@@ -43,7 +43,7 @@ use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
     Destination as SnowflakeDestination,
 };
-use etl_telemetry::tracing::{LogFlusher, init_tracing};
+use etl_telemetry::tracing::{LogFlusher, init_tracing_for_environment};
 use serde::Serialize;
 use sqlx::{
     Connection, Executor, PgConnection, PgPool,
@@ -844,9 +844,7 @@ impl Destination for BenchDestination {
 
 /// Initializes benchmark logging.
 pub fn init_benchmark_tracing(log_target: LogTarget, name: &str) -> Result<LogFlusher> {
-    let environment: Environment = log_target.into();
-    environment.set();
-    Ok(init_tracing(name)?)
+    Ok(init_tracing_for_environment(name, log_target.into())?)
 }
 
 /// Builds Postgres connection options for benchmark helpers.
