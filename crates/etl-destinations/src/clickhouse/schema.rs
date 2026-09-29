@@ -34,9 +34,13 @@ pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 /// The returned string does not include `Nullable(...)` wrapping — callers are
 /// responsible for applying that when the column is nullable. Arrays always use
 /// `Array(Nullable(T))` since Postgres array elements are nullable.
+///
+/// Names are ClickHouse's canonical spellings (`Bool`, not the `Boolean`
+/// alias), because `system.columns` reports them and the
+/// `RowBinaryWithNamesAndTypes` header check compares them literally.
 fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
     match *typ {
-        Type::BOOL => "Boolean",
+        Type::BOOL => "Bool",
         Type::INT2 => "Int16",
         Type::INT4 => "Int32",
         Type::INT8 => "Int64",
@@ -54,7 +58,7 @@ fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
 /// Returns the ClickHouse array element type for a Postgres array type.
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     match *typ {
-        Type::BOOL_ARRAY => "Boolean",
+        Type::BOOL_ARRAY => "Bool",
         Type::INT2_ARRAY => "Int16",
         Type::INT4_ARRAY => "Int32",
         Type::INT8_ARRAY => "Int64",
@@ -222,13 +226,20 @@ fn is_json_type(typ: &Type) -> bool {
     matches!(typ, &Type::JSON | &Type::JSONB)
 }
 
-/// Trailing CDC column names appended to each replicated row, by engine.
-pub(super) fn trailing_cdc_column_names(engine: ClickHouseEngine) -> &'static [&'static str] {
+/// Trailing CDC columns appended to each replicated row, by engine, as
+/// `(name, ClickHouse type)` pairs.
+pub(super) fn trailing_cdc_columns(
+    engine: ClickHouseEngine,
+) -> &'static [(&'static str, &'static str)] {
     match engine {
-        ClickHouseEngine::MergeTree => {
-            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME]
+        ClickHouseEngine::MergeTree => &[
+            (CDC_OPERATION_COLUMN_NAME, "String"),
+            (CDC_LSN_COLUMN_NAME, "UInt64"),
+            (CDC_TX_ORDINAL_COLUMN_NAME, "UInt64"),
+        ],
+        ClickHouseEngine::ReplacingMergeTree => {
+            &[(ETL_VERSION_COLUMN_NAME, "UInt128"), (ETL_DELETED_COLUMN_NAME, "UInt8")]
         }
-        ClickHouseEngine::ReplacingMergeTree => &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME],
     }
 }
 
@@ -266,9 +277,9 @@ where
         cols.push(format!("  {} {}{}", quote_identifier(&col.name), col_type, default_clause));
     }
 
-    cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
-    cols.push(format!("  {} UInt64", quote_identifier(CDC_LSN_COLUMN_NAME)));
-    cols.push(format!("  {} UInt64", quote_identifier(CDC_TX_ORDINAL_COLUMN_NAME)));
+    for (name, type_name) in trailing_cdc_columns(ClickHouseEngine::MergeTree) {
+        cols.push(format!("  {} {type_name}", quote_identifier(name)));
+    }
 
     let col_defs = cols.join(",\n");
     let quoted_table_name = quote_identifier(table_name);
@@ -309,8 +320,9 @@ where
             )
         })
         .collect();
-    col_defs.push(format!("  {} UInt128", quote_identifier(ETL_VERSION_COLUMN_NAME)));
-    col_defs.push(format!("  {} UInt8", quote_identifier(ETL_DELETED_COLUMN_NAME)));
+    for (name, type_name) in trailing_cdc_columns(ClickHouseEngine::ReplacingMergeTree) {
+        col_defs.push(format!("  {} {type_name}", quote_identifier(name)));
+    }
 
     let order_by =
         pk_columns.iter().map(|c| quote_identifier(&c.name)).collect::<Vec<_>>().join(", ");
@@ -412,7 +424,7 @@ mod tests {
 
     #[test]
     fn scalar_type_mapping() {
-        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Boolean");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Bool");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::CHAR), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BPCHAR), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::VARCHAR), "String");
@@ -443,7 +455,7 @@ mod tests {
 
     #[test]
     fn array_type_mapping() {
-        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Bool");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::MONEY_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TIMETZ_ARRAY), "String");
@@ -778,17 +790,5 @@ mod tests {
         let sql = drop_current_view_sql("public_us\"ers");
 
         assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\\\"ers__current\"");
-    }
-
-    #[test]
-    fn trailing_cdc_column_names_by_engine() {
-        assert_eq!(
-            trailing_cdc_column_names(ClickHouseEngine::MergeTree),
-            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,]
-        );
-        assert_eq!(
-            trailing_cdc_column_names(ClickHouseEngine::ReplacingMergeTree),
-            &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME]
-        );
     }
 }

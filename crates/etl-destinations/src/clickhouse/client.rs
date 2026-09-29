@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
-    encoding::{ClickHouseValue, encode_to_row_binary},
+    encoding::{ClickHouseValue, encode_to_row_binary, rb_varint},
     metrics::{
         ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
         ETL_CLICKHOUSE_DDL_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_BYTES,
@@ -117,6 +117,56 @@ pub(crate) struct ClickHouseTableColumn {
     pub(crate) type_name: String,
 }
 
+/// Column layout sent with every `RowBinaryWithNamesAndTypes` insert into one
+/// table.
+///
+/// The explicit column list makes ClickHouse reject unknown column names, and
+/// the header makes it reject any column whose type differs from the table.
+/// A stale or externally altered table therefore fails the insert instead of
+/// reinterpreting positional RowBinary bytes.
+#[derive(Debug)]
+pub(crate) struct RowBinaryLayout {
+    /// Quoted, comma-separated column list for the `INSERT` statement.
+    column_list: String,
+    /// Encoded header: column count, column names, then column types.
+    header: Vec<u8>,
+    /// Per-column `Nullable(T)` markers, including the trailing CDC columns.
+    nullable_flags: Box<[bool]>,
+}
+
+impl RowBinaryLayout {
+    /// Builds the layout for `columns` in table position order.
+    pub(crate) fn new(columns: &[ClickHouseTableColumn]) -> Self {
+        let column_list =
+            columns.iter().map(|column| quote_identifier(&column.name)).collect::<Vec<_>>();
+        let mut header = Vec::new();
+        rb_varint(columns.len(), &mut header);
+        for value in columns
+            .iter()
+            .map(|column| &column.name)
+            .chain(columns.iter().map(|column| &column.type_name))
+        {
+            rb_varint(value.len(), &mut header);
+            header.extend_from_slice(value.as_bytes());
+        }
+
+        Self {
+            column_list: column_list.join(", "),
+            header,
+            nullable_flags: columns
+                .iter()
+                .map(|column| column.type_name.starts_with("Nullable("))
+                .collect(),
+        }
+    }
+
+    /// Returns the per-column `Nullable(T)` markers.
+    #[cfg(test)]
+    pub(crate) fn nullable_flags(&self) -> &[bool] {
+        &self.nullable_flags
+    }
+}
+
 /// Returns the placement clause for an `ADD COLUMN` statement.
 ///
 /// `None` means the destination table has no user columns to anchor on, so the
@@ -193,10 +243,11 @@ fn build_drop_table_sql(table_name: &str) -> String {
     format!("DROP TABLE IF EXISTS {table_name}")
 }
 
-/// Builds the SQL used to insert RowBinary rows into a ClickHouse table.
-fn build_insert_rows_sql(table_name: &str) -> String {
+/// Builds the SQL used to insert `RowBinaryWithNamesAndTypes` rows into a
+/// ClickHouse table.
+fn build_insert_rows_sql(table_name: &str, layout: &RowBinaryLayout) -> String {
     let table_name = quote_identifier(table_name);
-    format!("INSERT INTO {table_name} FORMAT RowBinary")
+    format!("INSERT INTO {table_name} ({}) FORMAT RowBinaryWithNamesAndTypes", layout.column_list)
 }
 
 /// Kind of DDL being executed; surfaces as a `kind` label on the
@@ -563,11 +614,13 @@ impl ClickHouseClient {
         self.execute_ddl(DdlKind::DropTable, &sql).await
     }
 
-    /// Inserts `rows` into `table_name` using the RowBinary format.
+    /// Inserts `rows` into `table_name` using the `RowBinaryWithNamesAndTypes`
+    /// format.
     ///
     /// Each element of `rows` is a complete, already-encoded row of
-    /// [`ClickHouseValue`]s in column order (user columns + CDC columns).
-    /// `nullable_flags` must have the same length as each row.
+    /// [`ClickHouseValue`]s in `layout` column order (user columns + CDC
+    /// columns). Every INSERT statement starts with the layout header, so
+    /// ClickHouse checks column names and types before reading any row.
     ///
     /// When the accumulated uncompressed byte count reaches
     /// `max_bytes_per_insert` the current INSERT statement is committed and a
@@ -581,11 +634,11 @@ impl ClickHouseClient {
         &self,
         table_name: &str,
         rows: Vec<Vec<ClickHouseValue>>,
-        nullable_flags: &[bool],
+        layout: &RowBinaryLayout,
         max_bytes_per_insert: u64,
         replication_path: &'static str,
     ) -> EtlResult<()> {
-        let sql = build_insert_rows_sql(table_name);
+        let sql = build_insert_rows_sql(table_name, layout);
         let mut rows = rows.into_iter().peekable();
         let mut row_buf = Vec::new();
         let mut statements = 0u64;
@@ -597,7 +650,13 @@ impl ClickHouseClient {
             let mut insert = self
                 .inner
                 .insert_formatted_with(sql.clone())
+                // A profile can disable the header type check, which would read
+                // the row bytes as the table's types again.
+                .with_option("input_format_with_types_use_header", "1")
                 .buffered_with_capacity(BUFFERED_CAPACITY);
+            insert.write_buffered(&layout.header);
+            // Only row bytes count toward the budget, so every statement
+            // carries at least one row even when the budget is tiny.
             let mut bytes = 0u64;
             let mut rows_in_statement = 0u64;
             let insert_start = Instant::now();
@@ -605,13 +664,15 @@ impl ClickHouseClient {
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                encode_to_row_binary(row, nullable_flags, &mut row_buf).inspect_err(|_| {
-                    metrics::counter!(
-                        ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
-                        REPLICATION_PATH_LABEL => replication_path,
-                    )
-                    .increment(1);
-                })?;
+                encode_to_row_binary(row, &layout.nullable_flags, &mut row_buf).inspect_err(
+                    |_| {
+                        metrics::counter!(
+                            ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
+                            REPLICATION_PATH_LABEL => replication_path,
+                        )
+                        .increment(1);
+                    },
+                )?;
                 insert.write_buffered(&row_buf);
                 bytes += row_buf.len() as u64;
                 rows_in_statement += 1;
@@ -845,11 +906,34 @@ mod tests {
         assert_eq!(sql, "DROP TABLE IF EXISTS \"table\\\"name\"");
     }
 
+    /// The insert header lists every column name, then every type, matching
+    /// the quoted column list.
     #[test]
-    fn insert_rows_sql_quotes_identifiers() {
-        let sql = build_insert_rows_sql("table\"name");
+    fn row_binary_layout_lists_names_before_types() {
+        // GIVEN: an identifier that needs quoting and a nullable column.
+        let columns = [
+            ClickHouseTableColumn { name: "id".to_owned(), type_name: "Int64".to_owned() },
+            ClickHouseTableColumn {
+                name: "na\"me".to_owned(),
+                type_name: "Nullable(String)".to_owned(),
+            },
+        ];
 
-        assert_eq!(sql, "INSERT INTO \"table\\\"name\" FORMAT RowBinary");
+        // WHEN: the layout is built.
+        let layout = RowBinaryLayout::new(&columns);
+
+        // THEN: the SQL, header bytes, and null markers follow column order.
+        assert_eq!(
+            build_insert_rows_sql("table\"name", &layout),
+            "INSERT INTO \"table\\\"name\" (\"id\", \"na\\\"me\") FORMAT \
+             RowBinaryWithNamesAndTypes"
+        );
+        assert_eq!(
+            layout.header,
+            [&[2, 2][..], b"id", &[5], b"na\"me", &[5], b"Int64", &[16], b"Nullable(String)",]
+                .concat()
+        );
+        assert_eq!(layout.nullable_flags(), [false, true]);
     }
 
     /// # GIVEN

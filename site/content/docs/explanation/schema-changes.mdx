@@ -30,9 +30,10 @@ Iceberg is deprecated and rejects every newer schema instead of applying
 schema-change DDL.
 
 <Callout className="etl-callout" type="warn" title="Type changes require a resync">
-  BigQuery, ClickHouse, DuckLake, and Snowflake currently leave the destination
-  type unchanged after a PostgreSQL type change. Later schema changes or row
-  writes may fail because the logical and physical schemas have diverged.
+  BigQuery, DuckLake, and Snowflake currently leave the destination type
+  unchanged after a PostgreSQL type change. Later schema changes or row writes
+  may fail because the logical and physical schemas have diverged. ClickHouse
+  fails the schema change instead when the mapped ClickHouse type changes.
   Resynchronize the table after changing a replicated column type.
 </Callout>
 

@@ -1,24 +1,22 @@
 //! Shared helpers for destination schema-transition safety and recovery.
 
-use std::fmt::Display;
-
 use etl::{
     destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     etl_error,
-    schema::{ColumnAlteration, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
+    schema::{ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
 };
-use tracing::warn;
 
 /// Warns that a destination is intentionally skipping a column type change.
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
 pub(crate) fn warn_unsupported_column_type_change(
     destination_name: &str,
-    destination_table_id: impl Display,
-    alteration: &ColumnAlteration,
+    destination_table_id: impl std::fmt::Display,
+    alteration: &etl::schema::ColumnAlteration,
 ) {
     let before = alteration.before_column_schema();
     let after = alteration.after_column_schema();
-    warn!(
+    tracing::warn!(
         destination_name,
         destination_table_id = %destination_table_id,
         column_name = %before.name,
