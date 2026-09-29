@@ -1750,6 +1750,61 @@ async fn clickhouse_column_type_drift_fails_writes() {
     );
 }
 
+/// A multi-MiB copy insert rejected for its stale header still reloads the
+/// layout, even though ClickHouse rejects the header while the client is still
+/// streaming rows past its write buffer.
+#[tokio::test(flavor = "multi_thread")]
+async fn clickhouse_column_type_drift_reloads_layout_after_large_insert() {
+    // GIVEN: one copied text row and a destination whose layout is cached.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_amount_schema(
+        &store,
+        TableId::new(4307),
+        "amountlarge",
+        test_snapshot_id(100, 100),
+        Type::TEXT,
+        -1,
+    )
+    .await;
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::ReplacingMergeTree).await;
+    destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("a".into())])],
+        )
+        .await
+        .unwrap();
+
+    // GIVEN: the ClickHouse column type changed outside ETL.
+    database
+        .db_client()
+        .query("alter table public_amountlarge modify column amount LowCardinality(String)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: about 4 MiB of rows is copied in one insert statement, far past the
+    // client's 256 KiB write buffer.
+    let large_rows = (2..1026)
+        .map(|id| TableRow::new(vec![Cell::I64(id), Cell::String("x".repeat(4096))]))
+        .collect();
+    destination.write_table_rows(&schema, large_rows).await.unwrap_err();
+
+    // THEN: the retried write reloads the layout and reports the drift.
+    let error = destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(2), Cell::String("b".into())])],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+}
+
 /// An insert failure that is not a layout rejection keeps the cached layout,
 /// so a transient failure costs no extra schema query on the next write.
 #[tokio::test(flavor = "multi_thread")]
