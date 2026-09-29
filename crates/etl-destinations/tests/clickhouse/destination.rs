@@ -1339,6 +1339,39 @@ async fn replayed_cdc_inserts_are_not_deduplicated() {
     assert_eq!(database.query::<(i64, String)>(&current_query).await, vec![(1, "a".to_owned())]);
 }
 
+/// A change-stream insert never lands after a later `TRUNCATE`, even when the
+/// server queues inserts and the wait for a queued flush times out.
+/// ClickHouse 26.2 and newer queue inserts by default and keep a timed-out
+/// insert queued, so it can restore rows the `TRUNCATE` removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn timed_out_queued_insert_does_not_land_after_truncate() {
+    // GIVEN: a destination whose user profile queues inserts, waits one second
+    // for a flush, and flushes the queue only after a minute.
+    init_test_tracing();
+    install_crypto_provider();
+    let mut database = setup_clickhouse_database().await;
+    database
+        .use_user_with_settings(
+            "async_insert = 1, wait_for_async_insert = 1, wait_for_async_insert_timeout = 1, \
+             async_insert_use_adaptive_busy_timeout = 0, async_insert_busy_timeout_max_ms = 60000",
+        )
+        .await;
+    let store = MemoryStore::new();
+    let schema = store_id_value_schema(&store, "queued").await;
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::MergeTree).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+
+    // WHEN: an insert is written, then the table is truncated. A queued insert
+    // reports a timeout here, and replay then moves on to the truncate.
+    let _ = destination.write_events(vec![lifecycle_insert(&schema, 1, "restored")]).await;
+    destination.write_events(vec![lifecycle_truncate(&schema)]).await.unwrap();
+    database.db_client().query("system flush async insert queue").execute().await.unwrap();
+
+    // THEN: the truncate leaves the table empty.
+    assert_eq!(database.query::<u64>("select count() from public_queued").await, vec![0]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
     init_test_tracing();
