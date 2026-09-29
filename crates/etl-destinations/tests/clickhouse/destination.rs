@@ -1697,8 +1697,8 @@ async fn type_changes_that_keep_the_clickhouse_type_continue_replicating() {
 }
 
 /// A ClickHouse column whose type no longer matches ETL's schema fails writes
-/// instead of receiving reinterpreted RowBinary bytes, whether the table
-/// changes before the destination loads its layout or after.
+/// instead of receiving reinterpreted RowBinary bytes, and the same
+/// destination then reports the drift instead of retrying a stale layout.
 #[tokio::test(flavor = "multi_thread")]
 async fn clickhouse_column_type_drift_fails_writes() {
     // GIVEN: one copied `bigint` row, and a destination whose layout is
@@ -1733,14 +1733,14 @@ async fn clickhouse_column_type_drift_fails_writes() {
         .await
         .unwrap();
 
-    // THEN: the cached layout's insert header is rejected by ClickHouse.
-    cached.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
-
-    // THEN: a restarted destination rejects the table when loading its layout.
-    let restarted =
-        database.build_destination_with_engine(store, ClickHouseEngine::ReplacingMergeTree).await;
+    // THEN: ClickHouse rejects the cached layout's insert header.
     let error =
-        restarted.write_events(vec![amount_insert(&schema, 3, Cell::I64(14))]).await.unwrap_err();
+        cached.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+
+    // THEN: the retried write reloads the layout and reports the drift.
+    let error =
+        cached.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
 
     // THEN: only the copied row is stored.

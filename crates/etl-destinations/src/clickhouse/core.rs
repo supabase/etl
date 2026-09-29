@@ -734,6 +734,25 @@ struct ClickHouseTableCacheEntry {
     layout: Arc<RowBinaryLayout>,
 }
 
+/// Drops `table_id`'s cached layout after an insert that used `layout` failed.
+///
+/// A rejected insert can mean the ClickHouse table changed after the layout
+/// was loaded, for example through an external `ALTER`. Evicting makes the
+/// next write reload and check the table, which reports the drift as
+/// `CorruptedTableSchema` instead of retrying the same rejected header. The
+/// entry is removed only while it still holds `layout`, so a failed insert
+/// cannot evict a layout that a concurrent writer already reloaded.
+fn evict_layout_after_failed_insert(
+    table_cache: &RwLock<HashMap<TableId, Arc<ClickHouseTableCacheEntry>>>,
+    table_id: TableId,
+    layout: &Arc<RowBinaryLayout>,
+) {
+    let mut guard = table_cache.write();
+    if guard.get(&table_id).is_some_and(|entry| Arc::ptr_eq(&entry.layout, layout)) {
+        guard.remove(&table_id);
+    }
+}
+
 /// Execution context captured by ClickHouse background event tasks.
 ///
 /// Before resetting a table, [`ClickHouseDestination`] retains exclusive
@@ -1470,6 +1489,9 @@ where
                 COPY_REPLICATION_PATH,
             )
             .await
+            .inspect_err(|_| {
+                evict_layout_after_failed_insert(&self.table_cache, schema.id(), &layout);
+            })
     }
 
     /// Handles a schema change event (Relation) by computing the diff and
@@ -1956,17 +1978,18 @@ where
             return Ok(());
         }
 
-        let mut prepared: Vec<(String, Arc<RowBinaryLayout>, Vec<PendingRow>)> =
+        let mut prepared: Vec<(TableId, String, Arc<RowBinaryLayout>, Vec<PendingRow>)> =
             Vec::with_capacity(pending.len());
-        for (_, (schema, rows)) in pending {
+        for (table_id, (schema, rows)) in pending {
             let (clickhouse_table_name, layout) = self.prepare_table_for_writes(&schema).await?;
-            prepared.push((clickhouse_table_name, layout, rows));
+            prepared.push((table_id, clickhouse_table_name, layout, rows));
         }
 
         let mut tasks: TaskGroup<()> = TaskGroup::new();
         let engine = self.inserter_config.engine;
-        for (clickhouse_table_name, layout, rows) in prepared {
+        for (table_id, clickhouse_table_name, layout, rows) in prepared {
             let client = self.client.clone();
+            let table_cache = Arc::clone(&self.table_cache);
             let max_bytes = self.inserter_config.max_bytes_per_insert;
 
             tasks.spawn(async move {
@@ -1991,6 +2014,9 @@ where
                         CDC_REPLICATION_PATH,
                     )
                     .await
+                    .inspect_err(|_| {
+                        evict_layout_after_failed_insert(&table_cache, table_id, &layout);
+                    })
             });
         }
 
