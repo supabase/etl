@@ -119,11 +119,20 @@ fn is_insert_layout_rejection(error: &clickhouse::error::Error) -> bool {
     clickhouse_error_code(message).is_some_and(|code| INSERT_LAYOUT_REJECTION_CODES.contains(&code))
 }
 
-/// Parses the code from a ClickHouse server message such as
-/// `Code: 117. DB::Exception: ...`.
+/// Parses the code from a ClickHouse server message.
+///
+/// The server body reads `Code: 117. DB::Exception: ...`. When the body cannot
+/// be read, the `clickhouse` crate falls back to the bare `Code: 117` from the
+/// `X-ClickHouse-Exception-Code` header. The digits must end the message or be
+/// followed by `.`.
 fn clickhouse_error_code(message: &str) -> Option<u32> {
-    let (code, _) = message.trim_start().strip_prefix("Code: ")?.split_once('.')?;
-    code.parse().ok()
+    let rest = message.trim_start().strip_prefix("Code: ")?;
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let (digits, tail) = rest.split_at(end);
+    if !tail.is_empty() && !tail.starts_with('.') {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// Failure of a [`ClickHouseClient::insert_rows`] call.
@@ -1220,6 +1229,8 @@ mod tests {
              header). (INCORRECT_DATA)",
             "Code: 16. DB::Exception: No such column nn in table default.t. \
              (NO_SUCH_COLUMN_IN_TABLE)",
+            // The crate's fallback when the error body cannot be read.
+            "Code: 117",
         ];
         // GIVEN: transient server failures.
         let transient = [
@@ -1245,17 +1256,19 @@ mod tests {
     /// Malformed server messages yield no error code instead of panicking.
     #[test]
     fn clickhouse_error_code_rejects_malformed_messages() {
-        // GIVEN: a well-formed message.
-        // THEN: its code is parsed.
+        // GIVEN: a server body and the crate's bare header fallback.
+        // THEN: both codes are parsed.
         assert_eq!(clickhouse_error_code("Code: 117. DB::Exception: x"), Some(117));
+        assert_eq!(clickhouse_error_code("Code: 117"), Some(117));
 
-        // GIVEN: empty, truncated, non-numeric, overflowing, and non-ASCII
-        // input.
+        // GIVEN: empty, truncated, non-numeric, overflowing, trailing-text, and
+        // non-ASCII input.
         // THEN: no code is returned.
         for message in [
             "",
             "Code: ",
-            "Code: 117",
+            "Code: .",
+            "Code: 117 x",
             "Code: abc. x",
             "Code: -1. x",
             "Code: 99999999999. x",
