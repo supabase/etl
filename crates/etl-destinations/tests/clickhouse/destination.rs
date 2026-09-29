@@ -775,16 +775,10 @@ async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     });
 }
 
-/// # GIVEN
-/// A ClickHouseClient pointed at the running test ClickHouse instance.
-///
-/// # WHEN
-/// `validate_connectivity()` is called.
-///
-/// # THEN
-/// It returns Ok(()).
+/// Connectivity validation succeeds against the running test ClickHouse.
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_connectivity_succeeds_against_running_clickhouse() {
+    // GIVEN: a client pointed at the running test ClickHouse instance.
     let client = ClickHouseClient::new(
         get_clickhouse_url(),
         get_clickhouse_user(),
@@ -792,19 +786,16 @@ async fn validate_connectivity_succeeds_against_running_clickhouse() {
         "default",
         ClickHouseClientConfig::default(),
     );
+
+    // WHEN: connectivity is validated.
+    // THEN: it succeeds.
     assert!(client.validate_connectivity().await.is_ok());
 }
 
-/// # GIVEN
-/// A ClickHouseClient pointed at a URL where nothing is listening.
-///
-/// # WHEN
-/// `validate_connectivity()` is called.
-///
-/// # THEN
-/// It returns Err.
+/// Connectivity validation fails when nothing listens at the URL.
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_connectivity_fails_against_unreachable_clickhouse() {
+    // GIVEN: a client pointed at a URL where nothing is listening.
     let client = ClickHouseClient::new(
         Url::parse("http://localhost:1").unwrap(),
         "nobody",
@@ -812,6 +803,9 @@ async fn validate_connectivity_fails_against_unreachable_clickhouse() {
         "default",
         ClickHouseClientConfig::default(),
     );
+
+    // WHEN: connectivity is validated.
+    // THEN: it fails.
     assert!(client.validate_connectivity().await.is_err());
 }
 
@@ -1808,24 +1802,10 @@ struct RecoveryMaskRow {
 
 /// Tests that interrupted schema-change recovery rejects a stale schema
 /// snapshot instead of replaying DDL against it.
-///
-/// # GIVEN
-///
-/// Destination metadata in `Applying` state targeting snapshot 200 with
-/// previous snapshot 100 (an interrupted schema change).
-///
-/// # WHEN
-///
-/// The recovery path runs with a schema carrying snapshot 100 -- a stale replay
-/// arriving before the interrupted change's relation event.
-///
-/// # THEN
-///
-/// The write fails with `ErrorKind::DestinationSchemaRewind` instead of diffing
-/// against the stale schema and wrongly marking the interrupted change as
-/// applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
+    // GIVEN: destination metadata in `Applying` state targeting snapshot 200
+    // with previous snapshot 100, an interrupted schema change.
     init_test_tracing();
     install_crypto_provider();
 
@@ -1860,12 +1840,17 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
 
+    // WHEN: recovery runs with a schema carrying snapshot 100, a stale replay
+    // arriving before the interrupted change's relation event.
     let err = destination
         .write_events(vec![Event::Relation(RelationEvent {
             replicated_table_schema: stale_schema,
         })])
         .await
         .expect_err("recovery with a stale schema snapshot should be rejected");
+
+    // THEN: the write fails instead of diffing against the stale schema and
+    // wrongly marking the interrupted change as applied.
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 }
 
@@ -1915,26 +1900,12 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
 
 /// Tests that interrupted schema-change recovery replays the diff and marks the
 /// change applied when the arriving schema matches the recovery target.
-///
-/// # GIVEN
-///
-/// A destination table physically created at snapshot 100 (id, name) whose
-/// metadata was then flipped to `Applying` targeting snapshot 200 (id, name,
-/// email) with previous snapshot 100 -- the state a crash leaves behind after
-/// `handle_relation_event` recorded the change but before the DDL completed.
-///
-/// # WHEN
-///
-/// A relation event arrives carrying the target snapshot 200 and its exact
-/// replication mask.
-///
-/// # THEN
-///
-/// Recovery replays the interrupted diff (adds `email`), transitions the
-/// metadata to `Applied` at snapshot 200, and the relation succeeds without a
-/// synthetic DML event sequence key.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
+    // GIVEN: a table physically created at snapshot 100 (id, name) whose
+    // metadata was then flipped to `Applying` targeting snapshot 200 (id, name,
+    // email), the state a crash leaves after `handle_relation_event` recorded
+    // the change but before the DDL completed.
     init_test_tracing();
     install_crypto_provider();
 
@@ -1997,8 +1968,9 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     .unwrap();
     store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
 
-    // A restarted destination has an empty process-local cache and must replay
-    // the interrupted diff from durable metadata.
+    // WHEN: a restarted destination, with an empty process-local cache,
+    // receives the target relation and must replay the interrupted diff from
+    // durable metadata.
     let restarted_destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
@@ -2007,6 +1979,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .await
         .unwrap();
 
+    // THEN: recovery adds `email` and marks snapshot 200 applied.
     let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
 

@@ -936,73 +936,66 @@ mod tests {
         assert_eq!(layout.nullable_flags(), [false, true]);
     }
 
-    /// # GIVEN
-    /// A config with a custom server timeout and epsilon.
-    ///
-    /// # WHEN
-    /// `client_timeout_for(op)` is queried.
-    ///
-    /// # THEN
-    /// It returns `server_timeout_for(op) + client_timeout_epsilon`.
+    /// The client timeout is the server timeout plus the configured epsilon.
     #[test]
     fn client_timeout_adds_epsilon_to_server_timeout() {
+        // GIVEN: a config with a custom server timeout and epsilon.
         let config = ClickHouseClientConfig {
             connectivity_check_timeout: Duration::from_secs(10),
             client_timeout_epsilon: Duration::from_secs(3),
             ..Default::default()
         };
+
+        // WHEN: the client timeout is queried.
+        // THEN: it adds the epsilon to the server timeout.
         assert_eq!(
             config.client_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(13)
         );
 
+        // GIVEN: a zero server timeout.
         let config = ClickHouseClientConfig {
             connectivity_check_timeout: Duration::ZERO,
             client_timeout_epsilon: Duration::from_secs(3),
             ..Default::default()
         };
+
+        // THEN: the client timeout is the epsilon alone.
         assert_eq!(
             config.client_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             Duration::from_secs(3)
         );
     }
 
-    /// # GIVEN
-    /// Each `ClickHouseOperationKind` variant.
-    ///
-    /// # WHEN
-    /// `Display` is invoked.
-    ///
-    /// # THEN
-    /// It produces the human-readable op name interpolated into error messages
-    /// by `timeout_call`.
+    /// Operation kinds display the names interpolated into error messages by
+    /// `timeout_call`.
     #[test]
     fn operation_kind_display_matches_error_messages() {
+        // GIVEN: each operation kind.
+        // WHEN: it is displayed.
+        // THEN: it renders the human-readable operation name.
         assert_eq!(ClickHouseOperationKind::ConnectivityCheck.to_string(), "connectivity check");
         assert_eq!(ClickHouseOperationKind::SchemaQuery.to_string(), "schema query");
         assert_eq!(ClickHouseOperationKind::Ddl.to_string(), "DDL");
         assert_eq!(ClickHouseOperationKind::Insert.to_string(), "insert");
     }
 
-    /// # GIVEN
-    /// A future that never resolves and a config with a finite budget.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited under paused time.
-    ///
-    /// # THEN
-    /// It returns an `EtlError` with kind `DestinationTimeout` and a detail
-    /// that mentions the op and "timed out".
+    /// A missed deadline returns `DestinationTimeout` with the operation in the
+    /// detail.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_returns_destination_timeout_on_deadline() {
-        // A future that never resolves; tokio's paused clock advances virtual
-        // time when all tasks are stalled, so the timeout fires immediately in
-        // real wall-clock terms.
+        // GIVEN: a future that never resolves. Tokio's paused clock advances
+        // virtual time when all tasks are stalled, so the timeout fires
+        // immediately in wall-clock terms.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
+
+        // WHEN: the call is awaited.
         let err = timeout_call(ClickHouseOperationKind::ConnectivityCheck, &config, None, never)
             .await
             .unwrap_err();
+
+        // THEN: the error is a timeout that names the operation.
         assert_eq!(err.kind(), ErrorKind::DestinationTimeout);
         assert!(
             err.detail()
@@ -1012,22 +1005,20 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// A never-resolving future and `Some(context)`.
-    ///
-    /// # WHEN
-    /// `timeout_call`'s deadline fires.
-    ///
-    /// # THEN
-    /// The error detail contains the context string.
+    /// A missed deadline keeps the caller's context in the error detail.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_appends_context_to_detail() {
+        // GIVEN: a never-resolving future and a context string.
         let config = ClickHouseClientConfig::default();
         let never = std::future::pending::<Result<(), clickhouse::error::Error>>();
+
+        // WHEN: the deadline fires.
         let err =
             timeout_call(ClickHouseOperationKind::Insert, &config, Some("table: users"), never)
                 .await
                 .unwrap_err();
+
+        // THEN: the detail contains the context.
         assert!(
             err.detail().is_some_and(|d| d.contains("table: users")),
             "unexpected detail: {:?}",
@@ -1035,22 +1026,19 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` before the deadline.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited with no context.
-    ///
-    /// # THEN
-    /// It returns an `EtlError` with the op's `failed_kind` and a detail that
-    /// mentions the op and "failed".
+    /// An inner ClickHouse error maps to the operation's failed kind.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_propagates_inner_error() {
+        // GIVEN: a future that fails before the deadline.
         let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
+
+        // WHEN: the call is awaited without context.
         let err = timeout_call(ClickHouseOperationKind::SchemaQuery, &config, None, fut)
             .await
             .unwrap_err();
+
+        // THEN: the error has the failed kind and names the operation.
         assert_eq!(err.kind(), ErrorKind::DestinationQueryFailed);
         assert!(
             err.detail().is_some_and(|d| d.contains("schema query") && d.contains("failed")),
@@ -1059,40 +1047,36 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// A future that resolves to `Ok` before the deadline.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited.
-    ///
-    /// # THEN
-    /// It returns the inner `Ok` value unchanged.
+    /// A successful future passes its value through unchanged.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_passes_through_success() {
+        // GIVEN: a future that resolves before the deadline.
         let config = ClickHouseClientConfig::default();
         let fut = async { Ok::<u32, clickhouse::error::Error>(42) };
+
+        // WHEN: the call is awaited.
         let value =
             timeout_call(ClickHouseOperationKind::Insert, &config, None, fut).await.unwrap();
+
+        // THEN: the inner value is returned.
         assert_eq!(value, 42);
     }
 
-    /// # GIVEN
-    /// A future that returns a `clickhouse::error::Error` and `Some(context)`.
-    ///
-    /// # WHEN
-    /// `timeout_call` is awaited.
-    ///
-    /// # THEN
-    /// The error has the op's `failed_kind`, the detail contains the context,
-    /// and the inner clickhouse error is attached as `source`.
+    /// An inner ClickHouse error keeps the context and its source.
     #[tokio::test(start_paused = true)]
     async fn timeout_call_inner_error_includes_context() {
         use std::error::Error as _;
+
+        // GIVEN: a failing future and a context string.
         let config = ClickHouseClientConfig::default();
         let fut = async { Err::<(), _>(clickhouse::error::Error::NotEnoughData) };
+
+        // WHEN: the call is awaited.
         let err = timeout_call(ClickHouseOperationKind::Insert, &config, Some("table: users"), fut)
             .await
             .unwrap_err();
+
+        // THEN: the error has the failed kind, the context, and the source.
         assert_eq!(err.kind(), ErrorKind::DestinationAtomicBatchRetryable);
         assert!(
             err.detail().is_some_and(|d| d.contains("insert failed") && d.contains("table: users")),
@@ -1102,17 +1086,14 @@ mod tests {
         assert!(err.source().is_some(), "expected inner clickhouse error to be attached");
     }
 
-    /// # GIVEN
-    /// A default `ClickHouseClientConfig`.
-    ///
-    /// # WHEN
-    /// `server_timeout_for(op)` is queried for each variant.
-    ///
-    /// # THEN
-    /// Each variant returns the corresponding config field.
+    /// Each operation kind reads its own server timeout from the config.
     #[test]
     fn server_timeout_per_operation_kind() {
+        // GIVEN: a default config.
         let config = ClickHouseClientConfig::default();
+
+        // WHEN: each operation kind's server timeout is queried.
+        // THEN: it returns the matching config field.
         assert_eq!(
             config.server_timeout_for(ClickHouseOperationKind::ConnectivityCheck),
             config.connectivity_check_timeout
@@ -1128,17 +1109,12 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// Each `ClickHouseOperationKind` variant.
-    ///
-    /// # WHEN
-    /// `failed_kind` is queried.
-    ///
-    /// # THEN
-    /// Each variant maps to the `ErrorKind` that drives the appropriate retry
-    /// policy for that bucket.
+    /// Each operation kind maps to the error kind that drives its retry policy.
     #[test]
     fn operation_kind_failed_kind_per_bucket() {
+        // GIVEN: each operation kind.
+        // WHEN: its failed kind is queried.
+        // THEN: it maps to the retry bucket for that operation.
         assert_eq!(
             ClickHouseOperationKind::ConnectivityCheck.failed_kind(),
             ErrorKind::DestinationConnectionFailed
@@ -1154,18 +1130,13 @@ mod tests {
         );
     }
 
-    /// # GIVEN
-    /// Various `Duration` values: whole, sub-second, zero, fractional.
-    ///
-    /// # WHEN
-    /// `floor_secs` is called.
-    ///
-    /// # THEN
-    /// It returns a whole-seconds string with a floor of `"1"` (so
-    /// `Duration::ZERO` and sub-second values do not collapse to `"0"`).
+    /// `floor_secs` renders whole seconds with a floor of `"1"`, so zero and
+    /// sub-second durations do not disable server-side timeouts.
     #[test]
     fn floor_secs_floors_at_one_second() {
-        // Whole seconds at or above 1 pass through unchanged.
+        // GIVEN: whole, zero, sub-second, and fractional durations.
+        // WHEN: each is formatted.
+        // THEN: whole seconds at or above 1 pass through unchanged.
         assert_eq!(floor_secs(Duration::from_secs(1)), "1");
         assert_eq!(floor_secs(Duration::from_secs(5)), "5");
         assert_eq!(floor_secs(Duration::from_secs(60)), "60");

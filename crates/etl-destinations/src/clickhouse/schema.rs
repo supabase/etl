@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_single_pk() {
-        // --- GIVEN: single-column PK with a nullable non-PK column ---
+        // GIVEN: a single-column PK with a nullable non-PK column.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -659,9 +659,11 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
-        // --- THEN: trailing etl columns, engine, and ORDER BY are correct ---
+
+        // THEN: the trailing ETL columns, engine, and ORDER BY are correct.
         assert!(sql.contains("\"id\" Int32"));
         assert!(sql.contains("\"name\" Nullable(String)"));
         assert!(sql.contains("\"_etl_version\" UInt128"));
@@ -672,8 +674,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_composite_pk_orders_by_ordinal() {
-        // --- GIVEN: composite PK whose ordinal order differs from table order
-        // ---
+        // GIVEN: a composite PK whose ordinal order differs from table order.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -703,9 +704,11 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
-        // --- THEN: ORDER BY follows PK ordinal, not table ordinal ---
+
+        // THEN: ORDER BY follows the PK ordinal, not the table ordinal.
         assert!(
             sql.contains("ORDER BY (\"tenant_id\", \"id\")"),
             "ORDER BY must follow PK ordinal: {sql}"
@@ -714,7 +717,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_rejects_pkless_schema() {
-        // --- GIVEN: schema with no PK columns ---
+        // GIVEN: a schema with no PK columns.
         let schemas = vec![ColumnSchema {
             name: "value".to_owned(),
             typ: Type::TEXT,
@@ -724,15 +727,17 @@ mod tests {
             nullable: true,
             default_expression: None,
         }];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let err = create_replacing_merge_tree_sql("public_events", &schemas).unwrap_err();
-        // --- THEN: builder rejects with SourceSchemaError ---
+
+        // THEN: the builder rejects it with SourceSchemaError.
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
     }
 
     #[test]
     fn create_table_sql_dispatches_on_engine() {
-        // --- GIVEN: a schema with a single PK column ---
+        // GIVEN: a schema with a single PK column.
         let schemas = vec![ColumnSchema {
             name: "id".to_owned(),
             typ: Type::INT4,
@@ -742,7 +747,9 @@ mod tests {
             nullable: false,
             default_expression: None,
         }];
-        // --- WHEN/THEN: dispatcher selects the matching engine branch ---
+
+        // WHEN: the DDL is built for each engine.
+        // THEN: the dispatcher selects the matching engine branch.
         let merge_tree =
             create_table_sql(ClickHouseEngine::MergeTree, "public_t", &schemas).unwrap();
         assert!(merge_tree.contains("ENGINE = MergeTree()"));
@@ -753,7 +760,7 @@ mod tests {
 
     #[test]
     fn create_current_view_sql_selects_user_columns_only() {
-        // --- GIVEN: a two-column schema ---
+        // GIVEN: a two-column schema.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -774,10 +781,12 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the current-state view DDL ---
+
+        // WHEN: the current-state view DDL is built.
         let sql = create_current_view_sql("public_users", &schemas);
-        // --- THEN: __current suffix, FINAL read, tombstone filter, no etl cols
-        // ---
+
+        // THEN: the view uses the __current suffix, reads FINAL, filters
+        // tombstones, and omits ETL columns.
         assert!(sql.contains("CREATE VIEW IF NOT EXISTS \"public_users__current\""));
         assert!(sql.contains("SELECT \"id\", \"name\""));
         assert!(sql.contains("FROM \"public_users\" FINAL"));
