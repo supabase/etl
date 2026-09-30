@@ -21,10 +21,10 @@ use crate::{
     schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
-/// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
+/// Builds a `COPY ... TO STDOUT` query for a physical table's ctid range.
 ///
-/// The query applies an optional publication row filter in addition to the ctid
-/// bounds.
+/// The query excludes inherited descendants because each ctid range belongs to
+/// one physical table. It also applies an optional publication row filter.
 fn build_ctid_copy_query(
     table_name: &TableName,
     column_list: &str,
@@ -50,12 +50,12 @@ fn build_ctid_copy_query(
 
     if let Some(row_filter) = row_filter {
         format!(
-            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and \
+            "copy (select {column_list} from only {quoted_table_name} where {ctid_predicate} and \
              ({row_filter})) to stdout with (format text);",
         )
     } else {
         format!(
-            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to \
+            "copy (select {column_list} from only {quoted_table_name} where {ctid_predicate}) to \
              stdout with (format text);",
         )
     }
@@ -912,8 +912,8 @@ mod tests {
             &CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() },
         );
 
-        assert!(query.contains("from public.\"User\""));
-        assert!(!query.contains("from public.User"));
+        assert!(query.contains("from only public.\"User\""));
+        assert!(!query.contains("from only public.User"));
     }
 
     #[test]
@@ -925,9 +925,9 @@ mod tests {
             &CtidPartition::OpenStart { end_tid: "(10,1)".to_owned() },
         );
 
-        assert!(query.contains("from public.\"CommentReadStatus\""));
+        assert!(query.contains("from only public.\"CommentReadStatus\""));
         assert!(query.contains("and (\"tenantId\" is not null)"));
-        assert!(!query.contains("from public.CommentReadStatus"));
+        assert!(!query.contains("from only public.CommentReadStatus"));
     }
 
     #[test]

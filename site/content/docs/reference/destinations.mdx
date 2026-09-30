@@ -15,8 +15,8 @@ mature cloud destination.**
 | ------------ | --------------- | ------------- | ----------------------------------------- |
 | `clickhouse` | ClickHouse      | Private alpha | Recommended local getting-started path    |
 | `bigquery`   | Google BigQuery | Stable        | Most mature cloud destination             |
-| `ducklake`   | DuckLake        | In progress   | Evaluate for your workload                |
-| `snowflake`  | Snowflake       | In progress   | Evaluate for your workload                |
+| `ducklake`   | DuckLake        | Private alpha | Evaluate for your workload                |
+| `snowflake`  | Snowflake       | Private alpha | Evaluate for your workload                |
 | `iceberg`    | Apache Iceberg  | Deprecated    | Do not use for new deployments            |
 
 ## Status definitions
@@ -201,6 +201,14 @@ change a table's engine, so if the configured `engine` differs from an existing
 table, ETL fails the write rather than silently keeping the old layout. Drop
 and resynchronize the table, or revert `engine`.
 
+When ETL has no destination metadata for a source table, it creates the
+ClickHouse table and, for `ReplacingMergeTree`, its `__current` view. If either
+name already exists, ETL fails the table instead of reusing an object it cannot
+prove it owns. This happens when a table is re-added to the publication, when
+ETL state is reset against the same database, when two pipelines share a
+database, or when a resync after a rename would copy into another table's
+destination. Drop the conflicting object or use another database.
+
 ### Limitations
 
 - The default `ReplacingMergeTree` layout requires a source primary key and
@@ -216,14 +224,20 @@ and resynchronize the table, or revert `engine`.
   query over `cdc_lsn` and `cdc_tx_ordinal`.
 - A replicated `TRUNCATE` clears the destination table in either engine,
   including `MergeTree` event history.
-- ETL warns on source type changes but does not alter or validate the
-  ClickHouse column type. Later RowBinary writes may fail; resynchronize the
-  table after a type change.
+- A source type change that changes the mapped ClickHouse type, such as
+  `integer` to `bigint` or `timestamp` to `timestamptz`, fails the schema change
+  before ETL alters anything. Replication stops until you resynchronize the
+  table. Changes that keep the ClickHouse type, such as a longer `varchar`,
+  continue without DDL. Every insert names its columns and types, so ClickHouse
+  also rejects writes to a column whose type changed outside ETL.
 - ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
   array cannot be encoded in RowBinary and fails the write; empty arrays and
   `NULL` array elements remain supported.
 - ETL sends any value RowBinary can encode; ClickHouse applies its own
   conversion and rejection rules.
+- You may add `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` columns to a table ETL
+  created; ETL ignores them when writing. A resynchronization recreates the
+  table without them.
 - Dotted nested subcolumns can be renamed only within the same parent, matching
   ClickHouse's documented `RENAME COLUMN` limitation.
 - Tombstone cleanup and `OPTIMIZE ... FINAL CLEANUP` are operator-managed.
@@ -232,7 +246,9 @@ and resynchronize the table, or revert `engine`.
 
 ## DuckLake
 
-<DestinationStatus status="in-progress" />
+<DestinationStatus status="private-alpha" />
+
+This status applies to the managed service, not local or self-hosted use.
 
 DuckLake writes through DuckDB to a file or PostgreSQL catalog and local or
 object storage.
@@ -250,7 +266,9 @@ object storage.
 
 ## Snowflake
 
-<DestinationStatus status="in-progress" />
+<DestinationStatus status="private-alpha" />
+
+This status applies to the managed service, not local or self-hosted use.
 
 Snowflake uses direct Snowpipe Streaming and key-pair authentication.
 

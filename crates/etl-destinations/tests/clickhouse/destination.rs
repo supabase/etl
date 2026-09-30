@@ -46,7 +46,7 @@ use etl::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
     },
-    store::{MemoryStore, SchemaStore, StateStore},
+    store::{MemoryStore, SchemaStore, StateStore, TableStateLifecycleStore},
     test_utils::{
         destination::{
             drop_table_for_copy as drop_table_for_copy_via_trait,
@@ -777,16 +777,10 @@ async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     });
 }
 
-/// # GIVEN
-/// A ClickHouseClient pointed at the running test ClickHouse instance.
-///
-/// # WHEN
-/// `validate_connectivity()` is called.
-///
-/// # THEN
-/// It returns Ok(()).
+/// Connectivity validation succeeds against the running test ClickHouse.
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_connectivity_succeeds_against_running_clickhouse() {
+    // GIVEN: a client pointed at the running test ClickHouse instance.
     let client = ClickHouseClient::new(
         get_clickhouse_url(),
         get_clickhouse_user(),
@@ -794,19 +788,16 @@ async fn validate_connectivity_succeeds_against_running_clickhouse() {
         "default",
         ClickHouseClientConfig::default(),
     );
+
+    // WHEN: connectivity is validated.
+    // THEN: it succeeds.
     assert!(client.validate_connectivity().await.is_ok());
 }
 
-/// # GIVEN
-/// A ClickHouseClient pointed at a URL where nothing is listening.
-///
-/// # WHEN
-/// `validate_connectivity()` is called.
-///
-/// # THEN
-/// It returns Err.
+/// Connectivity validation fails when nothing listens at the URL.
 #[tokio::test(flavor = "multi_thread")]
 async fn validate_connectivity_fails_against_unreachable_clickhouse() {
+    // GIVEN: a client pointed at a URL where nothing is listening.
     let client = ClickHouseClient::new(
         Url::parse("http://localhost:1").unwrap(),
         "nobody",
@@ -814,6 +805,9 @@ async fn validate_connectivity_fails_against_unreachable_clickhouse() {
         "default",
         ClickHouseClientConfig::default(),
     );
+
+    // WHEN: connectivity is validated.
+    // THEN: it fails.
     assert!(client.validate_connectivity().await.is_err());
 }
 
@@ -845,25 +839,6 @@ async fn store_status_default_schema(
         .unwrap();
 
     ReplicatedTableSchema::all(schema)
-}
-
-/// Returns ClickHouse's stored `DEFAULT` expression for `column_name`.
-async fn clickhouse_column_default_expression(
-    database: &ClickHouseTestDatabase,
-    table_name: &str,
-    column_name: &str,
-) -> Option<String> {
-    database
-        .db_client()
-        .query(
-            "select default_expression from system.columns where database = currentDatabase() and \
-             table = ? and name = ? and default_kind = 'DEFAULT'",
-        )
-        .bind(table_name)
-        .bind(column_name)
-        .fetch_optional::<String>()
-        .await
-        .unwrap()
 }
 
 /// Stores the source schema shared by upgrade and replay scenarios.
@@ -1330,86 +1305,218 @@ async fn timed_out_queued_insert_does_not_land_after_truncate() {
     assert_eq!(database.query::<u64>("select count() from public_queued").await, vec![0]);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn existing_column_default_changes_drop_before_setting_supported_replacement() {
+/// Stores one version of the `public.computed` source schema.
+async fn store_computed_schema(
+    store: &MemoryStore,
+    snapshot_id: SnapshotId,
+    value_nullable: bool,
+    with_note: bool,
+) -> ReplicatedTableSchema {
+    let mut columns = vec![
+        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
+        ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, value_nullable),
+    ];
+    if with_note {
+        columns.push(ColumnSchema::new("note".to_owned(), Type::TEXT, -1, 3, true));
+    }
+    let schema = store
+        .store_table_schema(TableSchema::with_snapshot_id(
+            TableId::new(4250),
+            TableName::new("public".to_owned(), "computed".to_owned()),
+            columns,
+            snapshot_id,
+        ))
+        .await
+        .unwrap();
+
+    ReplicatedTableSchema::all(schema)
+}
+
+/// Builds one streaming insert for a `public.computed` schema version.
+fn computed_insert(schema: &ReplicatedTableSchema, commit_lsn: u64, cells: Vec<Cell>) -> Event {
+    Event::Insert(InsertEvent {
+        commit_lsn: PgLsn::from(commit_lsn),
+        tx_ordinal: 0,
+        replicated_table_schema: schema.clone(),
+        table_row: TableRow::new(cells),
+    })
+}
+
+/// Users can add computed columns after ETL's trailing CDC columns. Restart,
+/// inserts, and schema changes that add a column or relax nullability still
+/// succeed, and ClickHouse keeps computing the derived values.
+async fn computed_columns_added_outside_etl_do_not_block_writes_inner(engine: ClickHouseEngine) {
+    // GIVEN: a copied table with MATERIALIZED, ALIAS, and EPHEMERAL columns.
     init_test_tracing();
     install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let initial = store_computed_schema(&store, test_snapshot_id(100, 100), false, false).await;
+    let destination = database.build_destination_with_engine(store.clone(), engine).await;
+    destination
+        .write_table_rows(
+            &initial,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("a".into())])],
+        )
+        .await
+        .unwrap();
+    drop(destination);
+    database
+        .db_client()
+        .query(
+            "alter table public_computed add column id_times_ten Int64 materialized id * 10, add \
+             column id_plus_one Int64 alias id + 1, add column scratch Int64 ephemeral",
+        )
+        .execute()
+        .await
+        .unwrap();
 
+    // WHEN: a restarted destination streams a row, adds a source column, makes
+    // `value` nullable, and streams a row using both changes.
+    let with_note = store_computed_schema(&store, test_snapshot_id(200, 200), false, true).await;
+    let nullable = store_computed_schema(&store, test_snapshot_id(300, 300), true, true).await;
+    let restarted = database.build_destination_with_engine(store, engine).await;
+    restarted
+        .write_events(vec![computed_insert(
+            &initial,
+            150,
+            vec![Cell::I64(2), Cell::String("b".into())],
+        )])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: with_note })])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: nullable.clone(),
+        })])
+        .await
+        .unwrap();
+    restarted
+        .write_events(vec![computed_insert(
+            &nullable,
+            350,
+            vec![Cell::I64(3), Cell::Null, Cell::String("n".into())],
+        )])
+        .await
+        .unwrap();
+    drop(restarted);
+
+    // THEN: every row is stored and ClickHouse computes the derived columns.
+    assert_eq!(
+        database
+            .query::<(i64, Option<String>, Option<String>, i64, i64)>(
+                "select id, value, note, id_times_ten, id_plus_one from public_computed order by \
+                 id"
+            )
+            .await,
+        vec![
+            (1, Some("a".to_owned()), None, 10, 2),
+            (2, Some("b".to_owned()), None, 20, 3),
+            (3, None, Some("n".to_owned()), 30, 4),
+        ]
+    );
+}
+
+/// MergeTree tables accept computed columns after the CDC log columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn computed_columns_added_outside_etl_do_not_block_writes_merge_tree() {
+    computed_columns_added_outside_etl_do_not_block_writes_inner(ClickHouseEngine::MergeTree).await;
+}
+
+/// ReplacingMergeTree tables accept computed columns after the version columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn computed_columns_added_outside_etl_do_not_block_writes_replacing_merge_tree() {
+    computed_columns_added_outside_etl_do_not_block_writes_inner(
+        ClickHouseEngine::ReplacingMergeTree,
+    )
+    .await;
+}
+
+/// Changing or dropping a source default keeps the value that rows older than
+/// the column got when it was added, as Postgres does.
+#[tokio::test(flavor = "multi_thread")]
+async fn default_changes_keep_values_of_rows_older_than_the_column() {
+    // GIVEN: rows 1 and 2 were copied, then the source added
+    // `status text default 'pending'`, which Postgres returns for both rows.
+    init_test_tracing();
+    install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
     let table_id = TableId::new(4245);
-    let table_name = TableName::new("public".to_owned(), "default_changes".to_owned());
-    let initial_schema = store_status_default_schema(
-        &store,
-        table_id,
-        &table_name,
-        test_snapshot_id(100, 100),
-        Some("lower('unsupported')"),
-    )
-    .await;
-    let supported_schema = store_status_default_schema(
+    let table_name = TableName::new("public".to_owned(), "tickets".to_owned());
+    let initial = ReplicatedTableSchema::all(
+        store
+            .store_table_schema(TableSchema::with_snapshot_id(
+                table_id,
+                table_name.clone(),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                        .with_primary_key(1),
+                ],
+                test_snapshot_id(100, 100),
+            ))
+            .await
+            .unwrap(),
+    );
+    let added = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(200, 200),
-        Some("'queued'::text"),
+        Some("'pending'::text"),
     )
     .await;
-    let unsupported_schema = store_status_default_schema(
+    let changed = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(300, 300),
-        Some("lower('unsupported')"),
+        Some("'new'::text"),
     )
     .await;
-    let supported_again_schema = store_status_default_schema(
+    let dropped = store_status_default_schema(
         &store,
         table_id,
         &table_name,
         test_snapshot_id(400, 400),
-        Some("'done'::text"),
-    )
-    .await;
-    let dropped_schema = store_status_default_schema(
-        &store,
-        table_id,
-        &table_name,
-        test_snapshot_id(500, 500),
         None,
     )
     .await;
     let destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
+    destination
+        .write_table_rows(
+            &initial,
+            vec![TableRow::new(vec![Cell::I64(1)]), TableRow::new(vec![Cell::I64(2)])],
+        )
+        .await
+        .unwrap();
+    destination
+        .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: added })])
+        .await
+        .unwrap();
 
-    destination.write_table_rows(&initial_schema, vec![]).await.unwrap();
-    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(metadata.is_applied());
-    let destination_table_name = metadata.table_id().to_owned();
+    // WHEN: the source changes the default to 'new', then drops it.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: changed }),
+            Event::Relation(RelationEvent { replicated_table_schema: dropped }),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: rows 1 and 2 still read the value they got when the column was
+    // added.
     assert_eq!(
-        clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
+        clickhouse_db
+            .query::<(i64, Option<String>)>("select id, status from public_tickets order by id")
             .await,
-        None
+        vec![(1, Some("pending".to_owned())), (2, Some("pending".to_owned()))]
     );
-
-    for (schema, expected_default) in [
-        (supported_schema, Some("'queued'")),
-        (unsupported_schema, None),
-        (supported_again_schema, Some("'done'")),
-        (dropped_schema, None),
-    ] {
-        destination
-            .write_events(vec![Event::Relation(RelationEvent { replicated_table_schema: schema })])
-            .await
-            .unwrap();
-        assert_eq!(
-            clickhouse_column_default_expression(&clickhouse_db, &destination_table_name, "status")
-                .await
-                .as_deref(),
-            expected_default,
-        );
-    }
 }
 
 /// A source default containing backslashes reaches ClickHouse with the same
@@ -1475,6 +1582,356 @@ async fn column_default_with_backslashes_keeps_source_value() {
     );
 }
 
+/// Stores one version of `public.<table>` whose `amount` column has `typ`.
+async fn store_amount_schema(
+    store: &MemoryStore,
+    table_id: TableId,
+    table: &str,
+    snapshot_id: SnapshotId,
+    typ: Type,
+    modifier: i32,
+) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(
+        store
+            .store_table_schema(TableSchema::with_snapshot_id(
+                table_id,
+                TableName::new("public".to_owned(), table.to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("amount".to_owned(), typ, modifier, 2, false),
+                ],
+                snapshot_id,
+            ))
+            .await
+            .unwrap(),
+    )
+}
+
+/// Builds one streaming insert of `(id, amount)`.
+fn amount_insert(schema: &ReplicatedTableSchema, id: i64, amount: Cell) -> Event {
+    Event::Insert(InsertEvent {
+        commit_lsn: PgLsn::from(500),
+        tx_ordinal: 1,
+        replicated_table_schema: schema.clone(),
+        table_row: TableRow::new(vec![Cell::I64(id), amount]),
+    })
+}
+
+/// A source type change that changes the ClickHouse column type fails before
+/// ETL records or applies it, so no row is written in the new encoding.
+async fn type_changes_that_change_the_clickhouse_type_fail_before_applying_inner(
+    engine: ClickHouseEngine,
+) {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let timestamp = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_hms_opt(12, 0, 0).unwrap();
+    // Same byte width, a wider type, and the same bytes with another meaning.
+    let cases = [
+        (4301, "amountfloat", Type::INT8, Cell::I64(12), Type::FLOAT8, Cell::F64(12.5)),
+        (4302, "amountwide", Type::INT4, Cell::I32(12), Type::INT8, Cell::I64(12)),
+        (
+            4303,
+            "amounttz",
+            Type::TIMESTAMP,
+            Cell::Timestamp(Timestamp::Value(timestamp)),
+            Type::TIMESTAMPTZ,
+            Cell::TimestampTz(Timestamp::Value(timestamp.and_utc())),
+        ),
+    ];
+
+    for (table_id, table, before_type, before_value, after_type, after_value) in cases {
+        // GIVEN: one copied row under the original column type.
+        let store = MemoryStore::new();
+        let table_id = TableId::new(table_id);
+        let before = store_amount_schema(
+            &store,
+            table_id,
+            table,
+            test_snapshot_id(100, 100),
+            before_type,
+            -1,
+        )
+        .await;
+        let after = store_amount_schema(
+            &store,
+            table_id,
+            table,
+            test_snapshot_id(400, 400),
+            after_type,
+            -1,
+        )
+        .await;
+        let destination = database.build_destination_with_engine(store.clone(), engine).await;
+        destination
+            .write_table_rows(&before, vec![TableRow::new(vec![Cell::I64(1), before_value])])
+            .await
+            .unwrap();
+        let column_types = database.column_types(&format!("public_{table}")).await;
+
+        // WHEN: the source changes the column type and inserts a row.
+        let error = destination
+            .write_events(vec![
+                Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+                amount_insert(&after, 2, after_value),
+            ])
+            .await
+            .unwrap_err();
+
+        // THEN: the schema change is rejected, and the table, its metadata,
+        // and its rows are untouched.
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError, "{table}");
+        let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+        assert!(!metadata.is_pending(), "{table}");
+        assert_eq!(metadata.snapshot_id(), test_snapshot_id(100, 100), "{table}");
+        assert_eq!(database.column_types(&format!("public_{table}")).await, column_types);
+        assert_eq!(
+            database.query::<u64>(&format!("select count() from public_{table}")).await,
+            vec![1],
+            "{table}"
+        );
+    }
+}
+
+/// MergeTree tables reject type changes that change the ClickHouse type.
+#[tokio::test(flavor = "multi_thread")]
+async fn type_changes_that_change_the_clickhouse_type_fail_before_applying_merge_tree() {
+    type_changes_that_change_the_clickhouse_type_fail_before_applying_inner(
+        ClickHouseEngine::MergeTree,
+    )
+    .await;
+}
+
+/// ReplacingMergeTree tables reject type changes that change the ClickHouse
+/// type.
+#[tokio::test(flavor = "multi_thread")]
+async fn type_changes_that_change_the_clickhouse_type_fail_before_applying_replacing_merge_tree() {
+    type_changes_that_change_the_clickhouse_type_fail_before_applying_inner(
+        ClickHouseEngine::ReplacingMergeTree,
+    )
+    .await;
+}
+
+/// A source type change that keeps the ClickHouse column type, such as a
+/// longer `varchar`, is applied without DDL and replication continues.
+#[tokio::test(flavor = "multi_thread")]
+async fn type_changes_that_keep_the_clickhouse_type_continue_replicating() {
+    // GIVEN: one copied `varchar(50)` row.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let table_id = TableId::new(4304);
+    // Postgres stores `varchar(n)` with type modifier `n + 4`.
+    let before = store_amount_schema(
+        &store,
+        table_id,
+        "amountlabel",
+        test_snapshot_id(100, 100),
+        Type::VARCHAR,
+        54,
+    )
+    .await;
+    let after = store_amount_schema(
+        &store,
+        table_id,
+        "amountlabel",
+        test_snapshot_id(400, 400),
+        Type::VARCHAR,
+        104,
+    )
+    .await;
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &before,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("a".into())])],
+        )
+        .await
+        .unwrap();
+
+    // WHEN: the source widens the column to `varchar(100)` and inserts a row.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+            amount_insert(&after, 2, Cell::String("b".into())),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: both rows are stored and the metadata reached the new snapshot.
+    assert_eq!(
+        database
+            .query::<(i64, String)>(
+                "select id, amount from public_amountlabel__current order by id"
+            )
+            .await,
+        vec![(1, "a".to_owned()), (2, "b".to_owned())]
+    );
+    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert_eq!(metadata.snapshot_id(), test_snapshot_id(400, 400));
+}
+
+/// A ClickHouse column whose type no longer matches ETL's schema fails writes
+/// instead of receiving reinterpreted RowBinary bytes, and the same
+/// destination then reports the drift instead of retrying a stale layout.
+#[tokio::test(flavor = "multi_thread")]
+async fn clickhouse_column_type_drift_fails_writes() {
+    // GIVEN: one copied `bigint` row, and a destination whose layout is
+    // already cached.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let table_id = TableId::new(4305);
+    let schema = store_amount_schema(
+        &store,
+        table_id,
+        "amountdrift",
+        test_snapshot_id(100, 100),
+        Type::INT8,
+        -1,
+    )
+    .await;
+    let cached = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    cached
+        .write_table_rows(&schema, vec![TableRow::new(vec![Cell::I64(1), Cell::I64(12)])])
+        .await
+        .unwrap();
+
+    // WHEN: the ClickHouse column changes to a type with the same byte width.
+    database
+        .db_client()
+        .query("alter table public_amountdrift modify column amount Float64")
+        .execute()
+        .await
+        .unwrap();
+
+    // THEN: ClickHouse rejects the cached layout's insert header.
+    let error =
+        cached.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+
+    // THEN: the retried write reloads the layout and reports the drift.
+    let error =
+        cached.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+
+    // THEN: only the copied row is stored.
+    assert_eq!(
+        database.query::<(i64, f64)>("select id, amount from public_amountdrift").await,
+        vec![(1, 12.0)]
+    );
+}
+
+/// A multi-MiB copy insert rejected for its stale header still reloads the
+/// layout, even though ClickHouse rejects the header while the client is still
+/// streaming rows past its write buffer.
+#[tokio::test(flavor = "multi_thread")]
+async fn clickhouse_column_type_drift_reloads_layout_after_large_insert() {
+    // GIVEN: one copied text row and a destination whose layout is cached.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_amount_schema(
+        &store,
+        TableId::new(4307),
+        "amountlarge",
+        test_snapshot_id(100, 100),
+        Type::TEXT,
+        -1,
+    )
+    .await;
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::ReplacingMergeTree).await;
+    destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("a".into())])],
+        )
+        .await
+        .unwrap();
+
+    // GIVEN: the ClickHouse column type changed outside ETL.
+    database
+        .db_client()
+        .query("alter table public_amountlarge modify column amount LowCardinality(String)")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: about 4 MiB of rows is copied in one insert statement, far past the
+    // client's 256 KiB write buffer.
+    let large_rows = (2..1026)
+        .map(|id| TableRow::new(vec![Cell::I64(id), Cell::String("x".repeat(4096))]))
+        .collect();
+    destination.write_table_rows(&schema, large_rows).await.unwrap_err();
+
+    // THEN: the retried write reloads the layout and reports the drift.
+    let error = destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(2), Cell::String("b".into())])],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
+}
+
+/// An insert failure that is not a layout rejection keeps the cached layout,
+/// so a transient failure costs no extra schema query on the next write.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_layout_insert_failure_keeps_cached_layout() {
+    // GIVEN: one copied row, a cached layout, and a constraint rejecting id 2.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_amount_schema(
+        &store,
+        TableId::new(4306),
+        "amountkeep",
+        test_snapshot_id(100, 100),
+        Type::INT8,
+        -1,
+    )
+    .await;
+    let destination =
+        database.build_destination_with_engine(store, ClickHouseEngine::ReplacingMergeTree).await;
+    destination
+        .write_table_rows(&schema, vec![TableRow::new(vec![Cell::I64(1), Cell::I64(12)])])
+        .await
+        .unwrap();
+    database
+        .db_client()
+        .query("alter table public_amountkeep add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .unwrap();
+
+    // WHEN: the constraint rejects an insert, and the column type then changes
+    // outside ETL.
+    destination.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
+    database
+        .db_client()
+        .query("alter table public_amountkeep modify column amount Float64")
+        .execute()
+        .await
+        .unwrap();
+
+    // THEN: the next write still uses the cached layout, so ClickHouse rejects
+    // its header instead of a reload reporting the drift.
+    let error =
+        destination.write_events(vec![amount_insert(&schema, 3, Cell::I64(14))]).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+}
+
 /// Builds a replicated `public.<table>` schema with one integer primary key.
 fn id_only_schema(table_id: u32, table: &str) -> ReplicatedTableSchema {
     ReplicatedTableSchema::all(Arc::new(TableSchema::new(
@@ -1527,24 +1984,10 @@ struct RecoveryMaskRow {
 
 /// Tests that interrupted schema-change recovery rejects a stale schema
 /// snapshot instead of replaying DDL against it.
-///
-/// # GIVEN
-///
-/// Destination metadata in `Applying` state targeting snapshot 200 with
-/// previous snapshot 100 (an interrupted schema change).
-///
-/// # WHEN
-///
-/// The recovery path runs with a schema carrying snapshot 100 -- a stale replay
-/// arriving before the interrupted change's relation event.
-///
-/// # THEN
-///
-/// The write fails with `ErrorKind::DestinationSchemaRewind` instead of diffing
-/// against the stale schema and wrongly marking the interrupted change as
-/// applied.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
+    // GIVEN: destination metadata in `Applying` state targeting snapshot 200
+    // with previous snapshot 100, an interrupted schema change.
     init_test_tracing();
     install_crypto_provider();
 
@@ -1579,12 +2022,17 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
 
+    // WHEN: recovery runs with a schema carrying snapshot 100, a stale replay
+    // arriving before the interrupted change's relation event.
     let err = destination
         .write_events(vec![Event::Relation(RelationEvent {
             replicated_table_schema: stale_schema,
         })])
         .await
         .expect_err("recovery with a stale schema snapshot should be rejected");
+
+    // THEN: the write fails instead of diffing against the stale schema and
+    // wrongly marking the interrupted change as applied.
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 }
 
@@ -1634,26 +2082,12 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
 
 /// Tests that interrupted schema-change recovery replays the diff and marks the
 /// change applied when the arriving schema matches the recovery target.
-///
-/// # GIVEN
-///
-/// A destination table physically created at snapshot 100 (id, name) whose
-/// metadata was then flipped to `Applying` targeting snapshot 200 (id, name,
-/// email) with previous snapshot 100 -- the state a crash leaves behind after
-/// `handle_relation_event` recorded the change but before the DDL completed.
-///
-/// # WHEN
-///
-/// A relation event arrives carrying the target snapshot 200 and its exact
-/// replication mask.
-///
-/// # THEN
-///
-/// Recovery replays the interrupted diff (adds `email`), transitions the
-/// metadata to `Applied` at snapshot 200, and the relation succeeds without a
-/// synthetic DML event sequence key.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
+    // GIVEN: a table physically created at snapshot 100 (id, name) whose
+    // metadata was then flipped to `Applying` targeting snapshot 200 (id, name,
+    // email), the state a crash leaves after `handle_relation_event` recorded
+    // the change but before the DDL completed.
     init_test_tracing();
     install_crypto_provider();
 
@@ -1716,8 +2150,9 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
     .unwrap();
     store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
 
-    // A restarted destination has an empty process-local cache and must replay
-    // the interrupted diff from durable metadata.
+    // WHEN: a restarted destination, with an empty process-local cache,
+    // receives the target relation and must replay the interrupted diff from
+    // durable metadata.
     let restarted_destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
         .await;
@@ -1726,6 +2161,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .await
         .unwrap();
 
+    // THEN: recovery adds `email` and marks snapshot 200 applied.
     let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
 
@@ -2053,12 +2489,22 @@ async fn drop_table_for_copy_waits_for_admitted_write() {
     );
 }
 
-/// A reset after source tables swap names by rename drops the destination
-/// table recorded in metadata, not the table matching the new source name.
-#[tokio::test(flavor = "multi_thread")]
-async fn drop_table_for_copy_after_rename_drops_recorded_table() {
-    // GIVEN: `orders` and `ordersnew` were replicated, then swapped names:
-    // `orders` became `ordersold` and `ordersnew` became `orders`.
+/// Two replicated source tables after swapping names by rename.
+struct RenameSwap {
+    clickhouse_db: ClickHouseTestDatabase,
+    store: NotifyingStore,
+    destination: ClickHouseDestination<NotifyingStore>,
+    replacement_id: TableId,
+    /// The replacement's schema under its new name, `orders`.
+    replacement_renamed: ReplicatedTableSchema,
+}
+
+/// Replicates `orders` (row `(1, "kept")`) and `ordersnew`, then renames
+/// `orders` to `ordersold` and `ordersnew` to `orders`.
+///
+/// Afterwards the archived table still writes to `public_orders`, while the
+/// replacement writes to `public_ordersnew` but is named `orders`.
+async fn replicate_and_swap_orders_by_rename() -> RenameSwap {
     init_test_tracing();
     install_crypto_provider();
     let clickhouse_db = setup_clickhouse_database().await;
@@ -2117,14 +2563,24 @@ async fn drop_table_for_copy_after_rename_drops_recorded_table() {
         .await
         .unwrap();
 
+    RenameSwap { clickhouse_db, store, destination, replacement_id, replacement_renamed }
+}
+
+/// A reset after source tables swap names by rename drops the destination
+/// table recorded in metadata, not the table matching the new source name.
+#[tokio::test(flavor = "multi_thread")]
+async fn drop_table_for_copy_after_rename_drops_recorded_table() {
+    // GIVEN: `orders` and `ordersnew` were replicated, then swapped names.
+    let swap = replicate_and_swap_orders_by_rename().await;
+
     // WHEN: the replacement table, now named `orders`, is reset for a fresh
     // copy.
-    drop_table_for_copy_via_trait(&destination, &replacement_renamed).await.unwrap();
+    drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
 
     // THEN: only the replacement's own table and view are gone; the archived
     // table, which still writes to `public_orders`, keeps its rows.
     assert_eq!(
-        clickhouse_db
+        swap.clickhouse_db
             .query::<String>(
                 "select name from system.tables where database = currentDatabase() order by name",
             )
@@ -2132,7 +2588,51 @@ async fn drop_table_for_copy_after_rename_drops_recorded_table() {
         vec!["public_orders".to_owned(), "public_orders__current".to_owned()]
     );
     assert_eq!(
-        clickhouse_db.query::<(i64, Option<String>)>("select id, status from public_orders").await,
+        swap.clickhouse_db
+            .query::<(i64, Option<String>)>("select id, status from public_orders")
+            .await,
+        vec![(1, Some("kept".to_owned()))]
+    );
+}
+
+/// The copy after a rename-swap reset refuses the table matching the new
+/// source name, because it belongs to another source table.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_after_rename_reset_rejects_other_tables_destination() {
+    // GIVEN: after the swap, the replacement was reset the way table sync
+    // does it: drop its table, clear its ETL state, store the copy schema.
+    let swap = replicate_and_swap_orders_by_rename().await;
+    drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
+    swap.store.prepare_table_state_for_copy(swap.replacement_id).await.unwrap();
+    let replacement_copy = store_status_default_schema(
+        &swap.store,
+        swap.replacement_id,
+        swap.replacement_renamed.name(),
+        test_snapshot_id(0, 0),
+        None,
+    )
+    .await;
+
+    // WHEN: the fresh copy writes under the current name `orders`.
+    let error = swap
+        .destination
+        .write_table_rows(
+            &replacement_copy,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::String("recopied".to_owned())])],
+        )
+        .await
+        .unwrap_err();
+
+    // THEN: the copy fails without claiming the table, and the archived
+    // table's rows are untouched.
+    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+    assert!(
+        swap.store.get_destination_table_metadata(swap.replacement_id).await.unwrap().is_none()
+    );
+    assert_eq!(
+        swap.clickhouse_db
+            .query::<(i64, Option<String>)>("select id, status from public_orders")
+            .await,
         vec![(1, Some("kept".to_owned()))]
     );
 }
