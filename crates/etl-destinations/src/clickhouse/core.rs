@@ -1000,14 +1000,15 @@ where
     /// async completion result.
     ///
     /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing.
+    /// pipeline plumbing. It passes no [`TableCopyBatchId`], so its inserts
+    /// send no deduplication token.
     #[cfg(feature = "test-utils")]
     pub async fn write_table_rows(
         &self,
         schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.writer.write_table_rows_inner(schema, table_rows).await
+        self.writer.write_table_rows_inner(schema, None, table_rows).await
     }
 
     /// Dispatches a streaming event batch through the [`Destination`] trait
@@ -1462,6 +1463,7 @@ where
     async fn write_table_rows_inner(
         &self,
         schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         let (clickhouse_table_name, layout) = self.prepare_table_for_writes(schema).await?;
@@ -1496,6 +1498,7 @@ where
                 rows,
                 &layout,
                 self.inserter_config.max_bytes_per_insert,
+                batch_id,
                 COPY_REPLICATION_PATH,
             )
             .await
@@ -1849,9 +1852,9 @@ where
     ///
     /// Schema changes are applied only after all preceding inserts in the batch
     /// are complete: step 2 awaits every INSERT before step 3 runs any DDL, and
-    /// the client pins `wait_for_async_insert = 1`, so an insert
-    /// acknowledgement implies the rows were flushed into the table and cannot
-    /// be overtaken by a following `ALTER TABLE`.
+    /// the client pins `async_insert = 0`, so an insert acknowledgement implies
+    /// the rows were written into the table and cannot be overtaken by a
+    /// following `ALTER TABLE`.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -2021,6 +2024,7 @@ where
                         rows,
                         &layout,
                         max_bytes,
+                        None,
                         CDC_REPLICATION_PATH,
                     )
                     .await
@@ -2678,11 +2682,12 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        _batch_id: Option<TableCopyBatchId>,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = self.writer.write_table_rows_inner(replicated_table_schema, table_rows).await;
+        let result =
+            self.writer.write_table_rows_inner(replicated_table_schema, batch_id, table_rows).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
@@ -2704,7 +2709,7 @@ where
         let fence_guards = self.fences.acquire(&events).await;
 
         // Durability needs no branch: the task completes only after every
-        // INSERT in the batch is acknowledged under `wait_for_async_insert=1`,
+        // INSERT in the batch is acknowledged under `async_insert = 0`,
         // so each result is already `Durable` and `RequireDurable` calls are
         // satisfied by construction. `Accepted` is never reported.
         let writer = self.writer.clone();

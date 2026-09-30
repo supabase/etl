@@ -6,6 +6,7 @@ use std::{
 
 use clickhouse::Client;
 use etl::{
+    destination::TableCopyBatchId,
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
 };
@@ -435,13 +436,13 @@ impl ClickHouseClient {
                     )
                     .with_option("http_send_timeout", floor_secs(config.insert_timeout))
                     .with_option("http_receive_timeout", floor_secs(config.insert_timeout))
-                    // Force synchronous insert acknowledgements: when a server or user profile
-                    // enables `async_insert` with `wait_for_async_insert = 0`, ClickHouse acks
-                    // inserts before flushing the async-insert buffer into the table, letting a
-                    // following schema change overtake acked rows. Pinning the setting makes every
-                    // ack imply the rows were flushed into the table; it is a no-op when async
-                    // inserts are disabled.
-                    .with_option("wait_for_async_insert", "1")
+                    // Pin synchronous inserts. Since ClickHouse 26.2 the server queues inserts by
+                    // default. When the wait for a queued flush times out, the server reports an
+                    // error but keeps the rows queued, so they can land after ETL replays the
+                    // batch, even after a replayed `TRUNCATE`. A synchronous
+                    // insert writes its rows before it reports success, and a
+                    // server-side failure leaves nothing queued.
+                    .with_option("async_insert", "0")
             }),
             config,
         }
@@ -692,6 +693,15 @@ impl ClickHouseClient {
     /// new one is opened, keeping peak memory usage bounded for large initial
     /// copies.
     ///
+    /// With `copy_batch_id`, statement `n` sends
+    /// `insert_deduplication_token = "<batch id>-<n>"`. Without a token,
+    /// ClickHouse compares block contents, so distinct copy batches with
+    /// identical rows look like retries and all but one are dropped. A
+    /// redelivered batch splits into the same statements and keeps its tokens,
+    /// so it is still dropped as a retry. Without `copy_batch_id`, statements
+    /// send no token and ClickHouse deduplicates by content, which only drops
+    /// exact replays of change-stream blocks.
+    ///
     /// The `replication_path` label (`"copy"` or `"cdc"`) is attached to the
     /// `etl_clickhouse_insert_duration_seconds` histogram recorded after each
     /// committed INSERT statement.
@@ -701,6 +711,7 @@ impl ClickHouseClient {
         rows: Vec<Vec<ClickHouseValue>>,
         layout: &RowBinaryLayout,
         max_bytes_per_insert: u64,
+        copy_batch_id: Option<TableCopyBatchId>,
         replication_path: &'static str,
     ) -> Result<(), InsertRowsError> {
         let sql = build_insert_rows_sql(table_name, layout);
@@ -717,8 +728,12 @@ impl ClickHouseClient {
                 .insert_formatted_with(sql.clone())
                 // A profile can disable the header type check, which would read
                 // the row bytes as the table's types again.
-                .with_option("input_format_with_types_use_header", "1")
-                .buffered_with_capacity(BUFFERED_CAPACITY);
+                .with_option("input_format_with_types_use_header", "1");
+            if let Some(batch_id) = copy_batch_id {
+                insert = insert
+                    .with_option("insert_deduplication_token", format!("{batch_id}-{statements}"));
+            }
+            let mut insert = insert.buffered_with_capacity(BUFFERED_CAPACITY);
             insert.write_buffered(&layout.header);
             // Only row bytes count toward the budget, so every statement
             // carries at least one row even when the budget is tiny.
