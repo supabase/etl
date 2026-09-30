@@ -257,7 +257,9 @@ pub(crate) fn column_schemas_to_table_descriptor(
             Type::FLOAT4 => ColumnType::Float,
             Type::FLOAT8 => ColumnType::Double,
             Type::TIMESTAMPTZ => ColumnType::Int64,
-            Type::OID => ColumnType::Int32,
+            // OIDs are unsigned 32-bit values, so values above `i32::MAX` need a
+            // 64-bit field to keep their sign.
+            Type::OID => ColumnType::Int64,
             Type::BYTEA => ColumnType::Bytes,
             Type::BOOL_ARRAY => ColumnType::Bool,
             Type::INT2_ARRAY => ColumnType::Int32,
@@ -266,7 +268,7 @@ pub(crate) fn column_schemas_to_table_descriptor(
             Type::FLOAT4_ARRAY => ColumnType::Float,
             Type::FLOAT8_ARRAY => ColumnType::Double,
             Type::TIMESTAMPTZ_ARRAY => ColumnType::Int64,
-            Type::OID_ARRAY => ColumnType::Int32,
+            Type::OID_ARRAY => ColumnType::Int64,
             Type::BYTEA_ARRAY => ColumnType::Bytes,
             _ => ColumnType::String,
         };
@@ -317,13 +319,18 @@ pub(crate) fn column_schemas_to_table_descriptor(
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use etl::schema::{
-        ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
-        TableSchema, Type,
+    use etl::{
+        data::{ArrayCell, Cell, TableRow},
+        schema::{
+            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
+            TableSchema, Type,
+        },
     };
     use gcp_bigquery_client::storage::{ColumnMode, ColumnType};
+    use prost::Message;
 
     use super::*;
+    use crate::bigquery::encoding::BigQueryTableRow;
 
     /// Creates a test column schema with common defaults.
     fn test_column(
@@ -690,5 +697,57 @@ mod tests {
         assert!(matches!(descriptor.field_descriptors[8].mode, ColumnMode::Repeated));
         assert!(matches!(descriptor.field_descriptors[9].typ, ColumnType::Int64));
         assert!(matches!(descriptor.field_descriptors[9].mode, ColumnMode::Repeated));
+    }
+
+    /// Decodes integer fields the way BigQuery reads them: with the proto type
+    /// declared in the writer descriptor, not the type used to encode them.
+    fn decode_integers_as(typ: &ColumnType, mut buf: &[u8]) -> Vec<i64> {
+        let mut values = Vec::new();
+        while !buf.is_empty() {
+            let (_, wire_type) = prost::encoding::decode_key(&mut buf).unwrap();
+            let ctx = prost::encoding::DecodeContext::default();
+            match typ {
+                ColumnType::Int32 => {
+                    let mut decoded: Vec<i32> = Vec::new();
+                    prost::encoding::int32::merge_repeated(wire_type, &mut decoded, &mut buf, ctx)
+                        .unwrap();
+                    values.extend(decoded.into_iter().map(i64::from));
+                }
+                ColumnType::Int64 => {
+                    prost::encoding::int64::merge_repeated(wire_type, &mut values, &mut buf, ctx)
+                        .unwrap();
+                }
+                _ => panic!("unexpected integer column type"),
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn column_schemas_to_table_descriptor_keeps_oid_values_above_i32_max() {
+        let schema = test_replicated_schema(vec![
+            test_column("oid_col", Type::OID, 1, true, None),
+            test_column("oid_array_col", Type::OID_ARRAY, 2, true, None),
+        ]);
+        let descriptor = column_schemas_to_table_descriptor(&schema, false);
+
+        // OIDs are unsigned 32-bit values, so a large cluster hands out values
+        // above `i32::MAX`.
+        let oid = u32::MAX;
+        let oid_array = vec![Some(3_000_000_000), Some(7)];
+
+        let scalar_row = BigQueryTableRow::try_from(TableRow::new(vec![Cell::U32(oid)])).unwrap();
+        assert_eq!(
+            decode_integers_as(&descriptor.field_descriptors[0].typ, &scalar_row.encode_to_vec()),
+            vec![i64::from(oid)]
+        );
+
+        let array_row =
+            BigQueryTableRow::try_from(TableRow::new(vec![Cell::Array(ArrayCell::U32(oid_array))]))
+                .unwrap();
+        assert_eq!(
+            decode_integers_as(&descriptor.field_descriptors[1].typ, &array_row.encode_to_vec()),
+            vec![3_000_000_000, 7]
+        );
     }
 }
