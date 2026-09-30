@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use etl::{error::EtlResult, store::DestinationStore};
@@ -53,7 +53,7 @@ struct HeldPause {
     quiesced_reported: bool,
     /// Whether fresh pools must be installed before releasing this pause.
     pool_refresh_required: bool,
-    _pause: DuckLakeExternalMaintenancePause,
+    pause: Arc<DuckLakeExternalMaintenancePause>,
 }
 
 /// Suppresses duplicate expire-snapshots requests inside the daily maintenance
@@ -251,7 +251,7 @@ where
         run_id = %held.run_id,
         "recreating ducklake connection pools before resuming foreground mutations"
     );
-    destination.recreate_pools_after_external_maintenance().await?;
+    destination.recreate_pools_after_external_maintenance(Arc::clone(&held.pause)).await?;
     held.pool_refresh_required = false;
 
     Ok(())
@@ -358,7 +358,7 @@ where
                 quiesced_at: Utc::now(),
                 quiesced_reported: false,
                 pool_refresh_required: false,
-                _pause: external_pause,
+                pause: Arc::new(external_pause),
             },
             "expired",
         );
@@ -392,7 +392,7 @@ where
         quiesced_at,
         quiesced_reported,
         pool_refresh_required,
-        _pause: external_pause,
+        pause: Arc::new(external_pause),
     });
 
     Ok(())

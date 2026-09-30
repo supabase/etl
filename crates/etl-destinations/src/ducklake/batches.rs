@@ -44,7 +44,7 @@ use crate::{
             is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_blocking_with_context,
         },
-        core::is_create_table_conflict,
+        core::{DuckLakeWriteGuard, is_create_table_conflict},
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_copy_rows, prepare_rows,
             table_row_to_sql_literal_ref,
@@ -430,12 +430,13 @@ pub(super) async fn ensure_applied_batches_table_exists(
     blocking_slots: Arc<Semaphore>,
     table_creation_slots: Arc<Semaphore>,
     applied_batches_table_created: Arc<AtomicBool>,
+    guard: impl Send + 'static,
 ) -> EtlResult<()> {
     if applied_batches_table_created.load(Ordering::Relaxed) {
         return Ok(());
     }
 
-    let _table_creation_permit = table_creation_slots.acquire_owned().await.map_err(|_| {
+    let table_creation_permit = table_creation_slots.acquire_owned().await.map_err(|_| {
         etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
     })?;
 
@@ -458,6 +459,8 @@ pub(super) async fn ensure_applied_batches_table_exists(
     let table_name = APPLIED_BATCHES_TABLE.to_owned();
 
     run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
+        let _guard = guard;
+        let _table_creation_permit = table_creation_permit;
         match conn.execute_batch(&ddl) {
             Ok(()) => {}
             Err(error) if is_create_table_conflict(&error, &table_name) => {}
@@ -498,12 +501,13 @@ pub(super) async fn ensure_streaming_progress_table_exists(
     blocking_slots: Arc<Semaphore>,
     table_creation_slots: Arc<Semaphore>,
     streaming_progress_table_created: Arc<AtomicBool>,
+    guard: impl Send + 'static,
 ) -> EtlResult<()> {
     if streaming_progress_table_created.load(Ordering::Relaxed) {
         return Ok(());
     }
 
-    let _table_creation_permit = table_creation_slots.acquire_owned().await.map_err(|_| {
+    let table_creation_permit = table_creation_slots.acquire_owned().await.map_err(|_| {
         etl_error!(ErrorKind::InvalidState, "DuckLake table creation semaphore closed")
     })?;
 
@@ -524,6 +528,8 @@ pub(super) async fn ensure_streaming_progress_table_exists(
     let table_name = STREAMING_PROGRESS_TABLE.to_owned();
 
     run_duckdb_blocking(pool, blocking_slots, move |conn| -> EtlResult<()> {
+        let _guard = guard;
+        let _table_creation_permit = table_creation_permit;
         match conn.execute_batch(&ddl) {
             Ok(()) => {}
             Err(err) if is_create_table_conflict(&err, &table_name) => {}
@@ -627,6 +633,7 @@ pub(super) async fn apply_table_batches_with_retry(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     batches: Vec<PreparedDuckLakeTableBatch>,
+    write_guard: DuckLakeWriteGuard,
 ) -> EtlResult<()> {
     if batches.is_empty() {
         return Ok(());
@@ -664,8 +671,10 @@ pub(super) async fn apply_table_batches_with_retry(
             let attempt_batches = Arc::clone(&batches);
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
+            let write_guard = write_guard.clone();
             async move {
                 run_duckdb_blocking_with_context(pool, blocking_slots, move |conn, context| {
+                    let _write_guard = write_guard;
                     apply_table_batches(conn, attempt_batches.as_ref(), context)?;
                     Ok(())
                 })
@@ -699,6 +708,7 @@ pub(super) async fn apply_table_batch_with_retry(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     batch: PreparedDuckLakeTableBatch,
+    write_guard: DuckLakeWriteGuard,
 ) -> EtlResult<()> {
     let table_name = batch.table_name.clone();
     let batch_id = batch.batch_id.clone();
@@ -735,9 +745,13 @@ pub(super) async fn apply_table_batch_with_retry(
             let attempt_batch = Arc::clone(&batch);
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
+            let write_guard = write_guard.clone();
             async move {
                 run_duckdb_blocking_with_context(pool, blocking_slots, move |conn, context| {
+                    let _write_guard = write_guard;
                     if batch_kind == DuckLakeTableBatchKind::Copy {
+                        #[cfg(feature = "test-utils")]
+                        crate::ducklake::core::wait_if_copy_append_paused_for_tests();
                         if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
                             record_replayed_batch_skip(attempt_batch.as_ref());
                             return Ok(());

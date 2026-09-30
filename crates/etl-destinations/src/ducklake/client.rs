@@ -18,7 +18,7 @@ use etl::{
 use metrics::histogram;
 use regex::Regex;
 use tokio::{
-    sync::{Semaphore, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time::Instant,
 };
 use tokio_util::task::AbortOnDropHandle;
@@ -42,7 +42,7 @@ static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         .expect("postgres password redaction regex should compile")
 });
 
-/// Timeout applied to each foreground DuckLake blocking operation.
+/// Timeout applied to foreground DuckLake work and shared-instance refresh.
 pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 /// Stable log and error label for DuckDB blocking operations.
 const DUCKDB_BLOCKING_OPERATION_KIND: &str = "foreground";
@@ -348,6 +348,13 @@ impl DuckLakeInterruptRegistry {
     }
 }
 
+/// Pauses native instance recreation at an acknowledged lifecycle boundary.
+#[cfg(test)]
+struct NativeRefreshPause {
+    started: oneshot::Sender<(Arc<RegisteredDuckLakeInterrupt>, duckdb::Connection)>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
 /// Custom r2d2 connection manager for one DuckLake pool.
 ///
 /// Every managed connection is cloned from one initialized database instance
@@ -367,6 +374,9 @@ pub(super) struct DuckLakeConnectionManager {
     pub(super) shutdown_requested: Arc<AtomicBool>,
     /// Anchor connection used to clone pooled connections from one database.
     shared_instance: Arc<Mutex<duckdb::Connection>>,
+    /// Per-manager native refresh barrier for cancellation tests.
+    #[cfg(test)]
+    refresh_pause: Arc<Mutex<Option<NativeRefreshPause>>>,
     /// Counts successfully initialized DuckDB connections for tests.
     #[cfg(feature = "test-utils")]
     pub(super) open_count: Arc<AtomicUsize>,
@@ -589,6 +599,8 @@ impl DuckLakeConnectionManager {
             interrupt_registry,
             shutdown_requested,
             shared_instance: Arc::new(Mutex::new(instance)),
+            #[cfg(test)]
+            refresh_pause: Arc::default(),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         })
@@ -602,6 +614,8 @@ impl DuckLakeConnectionManager {
             interrupt_registry: Arc::clone(&self.interrupt_registry),
             shutdown_requested: Arc::clone(&self.shutdown_requested),
             shared_instance: Arc::clone(&self.shared_instance),
+            #[cfg(test)]
+            refresh_pause: Arc::clone(&self.refresh_pause),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -620,22 +634,29 @@ impl DuckLakeConnectionManager {
         self.interrupt_registry.interrupt_all()
     }
 
+    /// Opens one new in-memory DuckDB database without executing setup SQL.
+    fn open_duckdb_instance(
+        disable_extension_autoload: bool,
+    ) -> Result<duckdb::Connection, DuckLakeConnectionError> {
+        if disable_extension_autoload {
+            duckdb::Connection::open_in_memory_with_flags(
+                Config::default()
+                    .enable_autoload_extension(false)
+                    .map_err(DuckLakeConnectionError::validation)?,
+            )
+            .map_err(DuckLakeConnectionError::validation)
+        } else {
+            duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)
+        }
+    }
+
     /// Opens and configures one new in-memory DuckDB database.
     fn open_initialized_duckdb_instance(
         setup_plan: &DuckLakeSetupPlan,
         disable_extension_autoload: bool,
     ) -> Result<duckdb::Connection, DuckLakeConnectionError> {
         let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
-        let conn = if disable_extension_autoload {
-            duckdb::Connection::open_in_memory_with_flags(
-                Config::default()
-                    .enable_autoload_extension(false)
-                    .map_err(DuckLakeConnectionError::validation)?,
-            )
-            .map_err(DuckLakeConnectionError::validation)?
-        } else {
-            duckdb::Connection::open_in_memory().map_err(DuckLakeConnectionError::validation)?
-        };
+        let conn = Self::open_duckdb_instance(disable_extension_autoload)?;
         Self::run_setup_steps(connection_init_id, &conn, setup_plan.steps())?;
         Ok(conn)
     }
@@ -688,26 +709,72 @@ impl DuckLakeConnectionManager {
         Ok(OpenDuckLakeConnection { conn, interrupt_handle })
     }
 
-    /// Replaces the shared database used by future pooled connections.
-    pub(super) async fn recreate_shared_instance(&self) -> EtlResult<()> {
-        let setup_plan = Arc::clone(&self.setup_plan);
-        let disable_extension_autoload = self.disable_extension_autoload;
-        let instance = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
-            let instance = Self::open_initialized_duckdb_instance(
-                setup_plan.as_ref(),
-                disable_extension_autoload,
-            )
-            .map_err(|error| {
-                etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
-                    "Failed to recreate shared DuckLake DuckDB instance",
-                    source: error
-                )
-            })?;
-            Ok::<_, EtlError>(instance)
-        }))
-        .await
-        .map_err(EtlError::from)??;
+    /// Replaces the shared database used by future pooled connections,
+    /// retaining the caller's lifecycle guard until native initialization
+    /// finishes. Setup uses the foreground query deadline and hard-abort grace.
+    pub(super) async fn recreate_shared_instance(
+        &self,
+        guard: impl Send + 'static,
+    ) -> EtlResult<()> {
+        self.recreate_shared_instance_with_timeout(guard, FOREGROUND_QUERY_TIMEOUT).await
+    }
+
+    /// Recreates the shared database within one native-operation deadline.
+    async fn recreate_shared_instance_with_timeout(
+        &self,
+        guard: impl Send + 'static,
+        timeout: Duration,
+    ) -> EtlResult<()> {
+        #[cfg(test)]
+        let refresh_pause = self.refresh_pause.lock().unwrap().take();
+        let manager = self.clone();
+        let instance =
+            run_supervised_duckdb_blocking(Instant::now() + timeout, timeout, move |watchdog| {
+                let _guard = guard;
+                // Recheck between setup phases because a DuckDB interrupt only
+                // stops the current query, not later queries on the connection.
+                let check_admission = |watchdog: &DuckDbQueryWatchdog| {
+                    if manager.shutdown_requested.load(Ordering::Relaxed) {
+                        return Err(ducklake_shutdown_requested_error());
+                    }
+                    if watchdog.timed_out() {
+                        return Err(duckdb_blocking_timeout_error(timeout, "instance_setup"));
+                    }
+                    Ok(())
+                };
+                let setup_error = |error| {
+                    etl_error!(
+                        ErrorKind::DestinationConnectionFailed,
+                        "Failed to recreate shared DuckLake DuckDB instance",
+                        source: error
+                    )
+                };
+                check_admission(watchdog)?;
+                let conn = Self::open_duckdb_instance(manager.disable_extension_autoload)
+                    .map_err(setup_error)?;
+                let interrupt_handle =
+                    Arc::new(RegisteredDuckLakeInterrupt::new(conn.interrupt_handle()));
+                manager.interrupt_registry.register(&interrupt_handle);
+                #[cfg(test)]
+                let refresh_interrupt_handle = Arc::clone(&interrupt_handle);
+                watchdog.publish_interrupt_handle(interrupt_handle);
+                #[cfg(test)]
+                if let Some(pause) = refresh_pause {
+                    let _ =
+                        pause.started.send((refresh_interrupt_handle, conn.try_clone().unwrap()));
+                    let _ = pause.resume.recv();
+                }
+                let connection_init_id = NEXT_CONNECTION_INIT_ID.fetch_add(1, Ordering::Relaxed);
+                check_admission(watchdog)?;
+                for step in manager.setup_plan.steps() {
+                    let result =
+                        Self::run_setup_steps(connection_init_id, &conn, std::iter::once(step));
+                    check_admission(watchdog)?;
+                    result.map_err(setup_error)?;
+                }
+                Ok(conn)
+            })
+            .await?;
         let mut current = self.shared_instance.lock().map_err(|_| {
             etl_error!(
                 ErrorKind::InvalidState,
@@ -773,13 +840,19 @@ fn redact_ducklake_connection_error_message(message: &str) -> Cow<'_, str> {
     POSTGRES_PASSWORD_REGEX.replace_all(message, "password='[redacted]'")
 }
 
-/// Builds and warms an r2d2 pool of initialized DuckDB connections.
+/// Builds and warms an r2d2 pool of initialized DuckDB connections while
+/// retaining the caller's lifecycle guard through native setup.
 pub(super) async fn build_warm_ducklake_pool(
     manager: DuckLakeConnectionManager,
     pool_size: u32,
     purpose: &'static str,
+    guard: impl Send + 'static,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
     AbortOnDropHandle::new(tokio::task::spawn_blocking(move || -> EtlResult<_> {
+        let _guard = guard;
+        if manager.shutdown_requested.load(Ordering::Relaxed) {
+            return Err(ducklake_shutdown_requested_error());
+        }
         let started = Instant::now();
         let pool = r2d2::Pool::builder()
             .max_size(pool_size)
@@ -822,6 +895,48 @@ pub(super) async fn build_warm_ducklake_pool(
     }))
     .await
     .map_err(EtlError::from)?
+}
+
+/// Retains native resources until completion, releasing admission last.
+///
+/// Fields drop in declaration order, including when queued work is cancelled.
+/// A shutdown waiter acquiring the permit must observe completed cleanup.
+pub(super) struct DuckLakeBlockingGuard<G> {
+    /// Resources whose lifetime is included in the shutdown barrier.
+    _resources: G,
+    /// Released only after the retained resources have been dropped.
+    _permit: OwnedSemaphorePermit,
+}
+
+impl<G> DuckLakeBlockingGuard<G> {
+    /// Couples native resource cleanup to its existing admission permit.
+    pub(super) fn new(resources: G, permit: OwnedSemaphorePermit) -> Self {
+        Self { _resources: resources, _permit: permit }
+    }
+
+    /// Runs native work before releasing its admission permit, including
+    /// unwind.
+    fn run<R>(self, operation: impl FnOnce(G) -> R) -> R {
+        let Self { _resources: resources, _permit: permit } = self;
+        let result = operation(resources);
+        drop(permit);
+        result
+    }
+}
+
+/// Waits for admitted native work to finish, then permanently closes admission.
+///
+/// The manager's shutdown flag must be set and async producers stopped first.
+/// Holding every permit proves no blocking operation still owns native work.
+/// A closed semaphore means an earlier or concurrent shutdown already drained
+/// it.
+pub(super) async fn drain_duckdb_blocking_operations(
+    blocking_slots: Arc<Semaphore>,
+    pool_size: u32,
+) {
+    if let Ok(_permits) = Arc::clone(&blocking_slots).acquire_many_owned(pool_size).await {
+        blocking_slots.close();
+    }
 }
 
 /// Builds a consistent timeout error for one blocking DuckDB stage.
@@ -940,37 +1055,17 @@ where
     .await
 }
 
-/// Runs one DuckDB operation with an explicit timeout and diagnostic context.
-async fn run_duckdb_blocking_with_provider_and_context<P, R, F>(
-    provider: P,
-    blocking_slots: Arc<Semaphore>,
+/// Runs native work with interruption and a hard deadline that survive
+/// cancellation of the async caller.
+async fn run_supervised_duckdb_blocking<R, F>(
+    deadline: Instant,
     timeout: Duration,
     operation: F,
 ) -> EtlResult<R>
 where
-    P: DuckLakeConnectionProvider,
     R: Send + 'static,
-    F: FnOnce(&duckdb::Connection, &DuckLakeBlockingOperationContext) -> EtlResult<R>
-        + Send
-        + 'static,
+    F: FnOnce(&mut DuckDbQueryWatchdog) -> EtlResult<R> + Send + 'static,
 {
-    let operation_kind = DUCKDB_BLOCKING_OPERATION_KIND;
-    let operation_id = NEXT_DUCKDB_BLOCKING_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
-    let deadline = Instant::now() + timeout;
-    let slot_wait_started = Instant::now();
-    let permit = tokio::time::timeout_at(deadline, Arc::clone(&blocking_slots).acquire_owned())
-        .await
-        .map_err(|_| duckdb_blocking_timeout_error(timeout, "slot_wait"))?
-        .map_err(|error| {
-            etl_error!(ErrorKind::InvalidState, "DuckLake blocking slot acquisition failed", source: error)
-        })?;
-    histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
-        .record(slot_wait_started.elapsed().as_secs_f64());
-    trace!(
-        wait_ms = slot_wait_started.elapsed().as_millis() as u64,
-        "wait for ducklake blocking slot"
-    );
-
     // This is needed to make sure we properly interrupt the blocking operation
     // if it exceeds the timeout, we don't just cancel the task and leave the
     // connection active.
@@ -993,73 +1088,17 @@ where
         }
     }));
 
-    let blocking_work = move || -> EtlResult<R> {
-        // Please if you modify the code inside this blocking task do not add
-        // any blocking operations that could delay other tasks waiting on this
-        // slot.
-        let _permit = permit;
-        provider.with_connection(deadline, timeout, move |pooled_conn| {
-            if pooled_conn.broken {
-                return Err(etl_error!(
-                    ErrorKind::DestinationConnectionFailed,
-                    "DuckLake connection was invalidated",
-                    "Restart the operation that owned this connection"
-                ));
-            }
-            if pooled_conn.shutdown_requested.load(Ordering::Relaxed) {
-                warn!(
-                    operation_id,
-                    operation_kind = operation_kind,
-                    "ducklake blocking operation skipped because shutdown was requested"
-                );
-                return Err(ducklake_shutdown_requested_error());
-            }
-            let operation_timeout =
-                deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO);
-            if operation_timeout.is_zero() {
-                return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
-            }
-            pooled_conn.interrupt_handle.clear_reason();
-            let operation_context = DuckLakeBlockingOperationContext::new(
-                operation_id,
-                operation_kind,
-                timeout,
-                pooled_conn.interrupt_handle.interrupt_state(),
-            );
-            let interrupt_handle: Arc<RegisteredDuckLakeInterrupt> =
-                Arc::clone(&pooled_conn.interrupt_handle);
-            let interrupt_handle: DuckDbQueryInterruptHandle = interrupt_handle;
-            watchdog.publish_interrupt_handle(interrupt_handle);
-            if watchdog.timed_out() {
-                pooled_conn.broken = true;
-                return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
-            }
-            let operation_started = Instant::now();
-            let result = operation(&pooled_conn.conn, &operation_context);
-            watchdog.finish();
-            histogram!(ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS)
-                .record(operation_started.elapsed().as_secs_f64());
-            trace!(
-                duration_ms = operation_started.elapsed().as_millis() as u64,
-                "ducklake blocking operation finished"
-            );
-            if watchdog.timed_out() {
-                pooled_conn.broken = true;
-                return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
-            }
-            if result.is_err() {
-                pooled_conn.broken = true;
-            }
-
-            result
-        })
-    };
-
     let blocking_task = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
         let _blocking_done = blocking_done_tx;
-        (blocking_work(), watchdog_task, abort_task)
+        let result = operation(&mut watchdog);
+        watchdog.finish();
+        let result = if watchdog.timed_out() {
+            Err(duckdb_blocking_timeout_error(timeout, "query_execution"))
+        } else {
+            result
+        };
+        (result, watchdog_task, abort_task)
     }));
-
     let (blocking_result, watchdog_task, abort_task) =
         blocking_task.await.map_err(EtlError::from)?;
 
@@ -1067,14 +1106,106 @@ where
     let result = blocking_result?;
     watchdog_task.await.map_err(EtlError::from)?;
     abort_task.await.map_err(EtlError::from)?;
-
     Ok(result)
+}
+
+/// Runs one DuckDB operation with an explicit timeout and diagnostic context.
+async fn run_duckdb_blocking_with_provider_and_context<P, R, F>(
+    provider: P,
+    blocking_slots: Arc<Semaphore>,
+    timeout: Duration,
+    operation: F,
+) -> EtlResult<R>
+where
+    P: DuckLakeConnectionProvider,
+    R: Send + 'static,
+    F: FnOnce(&duckdb::Connection, &DuckLakeBlockingOperationContext) -> EtlResult<R>
+        + Send
+        + 'static,
+{
+    let operation_kind = DUCKDB_BLOCKING_OPERATION_KIND;
+    let operation_id = NEXT_DUCKDB_BLOCKING_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
+    let deadline = Instant::now() + timeout;
+    let slot_wait_started = Instant::now();
+    let permit = tokio::time::timeout_at(deadline, Arc::clone(&blocking_slots).acquire_owned())
+        .await
+        .map_err(|_| duckdb_blocking_timeout_error(timeout, "slot_wait"))?
+        .map_err(|_| ducklake_shutdown_requested_error())?;
+    histogram!(ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS)
+        .record(slot_wait_started.elapsed().as_secs_f64());
+    trace!(
+        wait_ms = slot_wait_started.elapsed().as_millis() as u64,
+        "wait for ducklake blocking slot"
+    );
+
+    let work = DuckLakeBlockingGuard::new((provider, operation), permit);
+    run_supervised_duckdb_blocking(deadline, timeout, move |watchdog| {
+        work.run(|(provider, operation)| {
+            provider.with_connection(deadline, timeout, move |pooled_conn| {
+                if pooled_conn.broken {
+                    return Err(etl_error!(
+                        ErrorKind::DestinationConnectionFailed,
+                        "DuckLake connection was invalidated",
+                        "Restart the operation that owned this connection"
+                    ));
+                }
+                if pooled_conn.shutdown_requested.load(Ordering::Relaxed) {
+                    warn!(
+                        operation_id,
+                        operation_kind = operation_kind,
+                        "ducklake blocking operation skipped because shutdown was requested"
+                    );
+                    return Err(ducklake_shutdown_requested_error());
+                }
+                let operation_timeout =
+                    deadline.checked_duration_since(Instant::now()).unwrap_or(Duration::ZERO);
+                if operation_timeout.is_zero() {
+                    return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
+                }
+                pooled_conn.interrupt_handle.clear_reason();
+                let operation_context = DuckLakeBlockingOperationContext::new(
+                    operation_id,
+                    operation_kind,
+                    timeout,
+                    pooled_conn.interrupt_handle.interrupt_state(),
+                );
+                let interrupt_handle: Arc<RegisteredDuckLakeInterrupt> =
+                    Arc::clone(&pooled_conn.interrupt_handle);
+                let interrupt_handle: DuckDbQueryInterruptHandle = interrupt_handle;
+                watchdog.publish_interrupt_handle(interrupt_handle);
+                if watchdog.timed_out() {
+                    pooled_conn.broken = true;
+                    return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
+                }
+                let operation_started = Instant::now();
+                let result = operation(&pooled_conn.conn, &operation_context);
+                watchdog.finish();
+                histogram!(ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS)
+                    .record(operation_started.elapsed().as_secs_f64());
+                trace!(
+                    duration_ms = operation_started.elapsed().as_millis() as u64,
+                    "ducklake blocking operation finished"
+                );
+                if watchdog.timed_out() {
+                    pooled_conn.broken = true;
+                    return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
+                }
+                if result.is_err() {
+                    pooled_conn.broken = true;
+                }
+
+                result
+            })
+        })
+    })
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use futures::FutureExt;
     use tokio::sync::{Barrier, Semaphore, oneshot};
 
     use super::*;
@@ -1089,6 +1220,7 @@ mod tests {
             interrupt_registry: Arc::new(DuckLakeInterruptRegistry::default()),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
             shared_instance: Arc::new(Mutex::new(duckdb::Connection::open_in_memory().unwrap())),
+            refresh_pause: Arc::default(),
             #[cfg(feature = "test-utils")]
             open_count: Arc::new(AtomicUsize::new(0)),
         }
@@ -1161,7 +1293,7 @@ mod tests {
         let old_connection = r2d2::ManageConnection::connect(&manager).unwrap();
         old_connection.conn.execute_batch("create table old_generation (id integer)").unwrap();
 
-        manager.recreate_shared_instance().await.unwrap();
+        manager.recreate_shared_instance(()).await.unwrap();
         let new_connection = r2d2::ManageConnection::connect(&copy_manager).unwrap();
 
         assert!(new_connection.conn.execute_batch("select * from old_generation").is_err());
@@ -1303,7 +1435,7 @@ mod tests {
     #[tokio::test]
     async fn run_duckdb_blocking_timeout_releases_resources_for_follow_up_queries() {
         let pool = Arc::new(
-            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test")
+            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );
@@ -1359,7 +1491,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_blocking_caller_retains_watchdog_and_permit() {
         let pool = Arc::new(
-            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test").await.unwrap(),
+            build_warm_ducklake_pool(make_blocking_test_manager(), 1, "test", ()).await.unwrap(),
         );
         let slots = Arc::new(Semaphore::new(1));
         let (started_tx, started_rx) = oneshot::channel();
@@ -1389,6 +1521,162 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), interrupted_rx).await.unwrap().unwrap();
         let _permit =
             tokio::time::timeout(Duration::from_secs(5), slots.acquire()).await.unwrap().unwrap();
+    }
+
+    /// Observes the shutdown permit at the resource-release boundary.
+    struct AdmissionProbe(Arc<Semaphore>);
+
+    impl Drop for AdmissionProbe {
+        fn drop(&mut self) {
+            assert_eq!(self.0.available_permits(), 0);
+        }
+    }
+
+    /// Both queued and completed work release resources before admission.
+    #[test]
+    fn blocking_guard_releases_resources_before_admission() {
+        for execute in [false, true] {
+            let slots = Arc::new(Semaphore::new(1));
+            let permit = Arc::clone(&slots).try_acquire_owned().unwrap();
+            let work = DuckLakeBlockingGuard::new(AdmissionProbe(Arc::clone(&slots)), permit);
+            if execute {
+                work.run(drop);
+            } else {
+                drop(work);
+            }
+            assert_eq!(slots.available_permits(), 1);
+        }
+    }
+
+    /// Cancelling refresh preserves its deadline and cleanup barrier; a
+    /// cancelled shutdown can be retried without publishing the abandoned
+    /// database.
+    #[tokio::test]
+    async fn cancelled_refresh_retains_guards_until_native_cleanup() {
+        let manager = make_blocking_test_manager();
+        manager
+            .shared_instance
+            .lock()
+            .unwrap()
+            .execute_batch("create table original (id int)")
+            .unwrap();
+        let slots = Arc::new(Semaphore::new(2));
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let permit = Arc::clone(&slots).acquire_owned().await.unwrap();
+        let guard = DuckLakeBlockingGuard::new(Arc::clone(&gate).write_owned().await, permit);
+        let (started, reached) = oneshot::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        *manager.refresh_pause.lock().unwrap() =
+            Some(NativeRefreshPause { started, resume: release });
+        let task = tokio::spawn({
+            let manager = manager.clone();
+            async move {
+                manager.recreate_shared_instance_with_timeout(guard, Duration::from_secs(1)).await
+            }
+        });
+        let (interrupt, _observer) = reached.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while interrupt.state.reason() == DuckLakeInterruptReason::None {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(interrupt.state.reason(), DuckLakeInterruptReason::QueryTimeout);
+        assert!(gate.try_read().is_err());
+        assert_eq!(slots.available_permits(), 1);
+
+        manager.interrupt_all_connections_for_shutdown();
+        let mut drain = Box::pin(drain_duckdb_blocking_operations(Arc::clone(&slots), 2));
+        assert!(drain.as_mut().now_or_never().is_none());
+        drop(drain);
+        assert!(!slots.is_closed());
+        resume.send(()).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            drain_duckdb_blocking_operations(Arc::clone(&slots), 2),
+        )
+        .await
+        .unwrap();
+        assert!(gate.try_read().is_ok());
+        assert!(slots.is_closed());
+        drain_duckdb_blocking_operations(Arc::clone(&slots), 2).await;
+        manager.shared_instance.lock().unwrap().execute_batch("select * from original").unwrap();
+        assert!(is_ducklake_shutdown_requested_error(
+            &manager.recreate_shared_instance(()).await.unwrap_err()
+        ));
+    }
+
+    /// A shutdown after registration must interrupt the setup connection and
+    /// prevent a later setup phase from starting.
+    #[tokio::test]
+    async fn pool_refresh_observes_shutdown_after_registration() {
+        let mut manager = make_blocking_test_manager();
+        manager.setup_plan = Arc::new(DuckLakeSetupPlan::from_steps(vec![DuckLakeSetupStep {
+            label: "must_not_run",
+            sql: "create table setup_marker (id int)".to_owned(),
+        }]));
+        let (started, reached) = oneshot::channel();
+        let (resume, release) = std::sync::mpsc::channel();
+        *manager.refresh_pause.lock().unwrap() =
+            Some(NativeRefreshPause { started, resume: release });
+        let task = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.recreate_shared_instance(()).await }
+        });
+        let (interrupt_handle, setup_observer) = reached.await.unwrap();
+
+        assert_eq!(manager.interrupt_all_connections_for_shutdown(), 1);
+        assert_eq!(interrupt_handle.state.reason(), DuckLakeInterruptReason::DestinationShutdown);
+        resume.send(()).unwrap();
+        let error =
+            tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap_err();
+
+        assert!(is_ducklake_shutdown_requested_error(&error));
+        let count: i64 = setup_observer
+            .query_row(
+                "select count(*) from information_schema.tables where table_name = 'setup_marker'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// A timed-out native setup query must return without publishing the new
+    /// database, leaving the previous instance available for recovery.
+    #[tokio::test]
+    async fn pool_refresh_timeout_interrupts_native_setup() {
+        let mut manager = make_blocking_test_manager();
+        manager.setup_plan = Arc::new(DuckLakeSetupPlan::from_steps(vec![DuckLakeSetupStep {
+            label: "slow_setup",
+            sql: "select sum(sin(i)) from range(100000000000) t(i)".to_owned(),
+        }]));
+        manager
+            .shared_instance
+            .lock()
+            .unwrap()
+            .execute_batch("create table original (id int)")
+            .unwrap();
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            manager.recreate_shared_instance_with_timeout((), Duration::from_secs(1)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(error.description(), Some("DuckLake blocking operation timed out"));
+        let count: i64 = manager
+            .shared_instance
+            .lock()
+            .unwrap()
+            .query_row("select count(*) from original", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
@@ -1821,7 +2109,7 @@ mod tests {
     async fn interrupt_all_connections_cancels_running_query() {
         let manager = make_blocking_test_manager();
         let pool = Arc::new(
-            build_warm_ducklake_pool(manager.clone(), 1, "test")
+            build_warm_ducklake_pool(manager.clone(), 1, "test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );
@@ -1878,7 +2166,7 @@ mod tests {
     async fn shutdown_requested_skips_new_blocking_operations() {
         let manager = make_blocking_test_manager();
         let pool = Arc::new(
-            build_warm_ducklake_pool(manager.clone(), 1, "shutdown-skip-test")
+            build_warm_ducklake_pool(manager.clone(), 1, "shutdown-skip-test", ())
                 .await
                 .expect("failed to build blocking test pool"),
         );
