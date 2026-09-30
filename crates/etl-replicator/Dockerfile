@@ -41,7 +41,7 @@ ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 # Select the same package, binaries, features, and flags in both build stages.
 ARG ENABLE_EGRESS="false"
-ENV RUSTFLAGS="-C panic=abort -C link-arg=-fuse-ld=lld"
+ENV RUSTFLAGS="--cfg tokio_unstable -C panic=abort -C link-arg=-fuse-ld=lld"
 RUN test "$BUILDPLATFORM" = "$TARGETPLATFORM"
 
 # TODO: remove protobuf-compiler once the upstream gcp-bigquery-client removes it from its deps.
