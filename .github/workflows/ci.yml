@@ -84,6 +84,8 @@ jobs:
                   raise SystemExit(f"MSRV mismatch in {member}")
           PYTHON
       - name: Run Clippy
+        env:
+          RUSTFLAGS: --cfg tokio_unstable
         run: cargo clippy --locked --workspace --all-targets --all-features --no-deps -- -D warnings
 
       - name: Check fuzz crate
