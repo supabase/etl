@@ -692,15 +692,26 @@ async fn array_values_roundtrip_through_destination() {
     });
 }
 
+#[derive(clickhouse::Row, serde::Deserialize)]
+struct NullableArrayRow {
+    values: Vec<Option<i64>>,
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn nullable_array_columns_fail_only_for_top_level_null_values() {
+async fn nullable_array_columns_store_top_level_null_as_empty_array() {
     let table = PropertyTable::create("nullablearray", &[("values", Type::INT8_ARRAY, true)]).await;
 
-    table.write(vec![Cell::Array(ArrayCell::I64(vec![]))]).await.unwrap();
-    let error = table.write(vec![Cell::Null]).await.unwrap_err();
+    let empty_id = table.write(vec![Cell::Array(ArrayCell::I64(vec![]))]).await.unwrap();
+    let null_id = table.write(vec![Cell::Null]).await.unwrap();
+    let elements_id =
+        table.write(vec![Cell::Array(ArrayCell::I64(vec![None, Some(1)]))]).await.unwrap();
 
-    assert_eq!(error.kind(), ErrorKind::ConversionError);
-    assert_eq!(error.description(), Some("NULL value for non-nullable ClickHouse column"));
+    let empty: NullableArrayRow = table.read("values", empty_id).await;
+    let null: NullableArrayRow = table.read("values", null_id).await;
+    let elements: NullableArrayRow = table.read("values", elements_id).await;
+    assert_eq!(empty.values, Vec::<Option<i64>>::new());
+    assert_eq!(null.values, Vec::<Option<i64>>::new());
+    assert_eq!(elements.values, [None, Some(1)]);
 }
 
 /// Dates legal in Postgres but outside ClickHouse `Date32`'s

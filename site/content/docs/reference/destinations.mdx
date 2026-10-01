@@ -230,9 +230,10 @@ destination. Drop the conflicting object or use another database.
   table. Changes that keep the ClickHouse type, such as a longer `varchar`,
   continue without DDL. Every insert names its columns and types, so ClickHouse
   also rejects writes to a column whose type changed outside ETL.
-- ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
-  array cannot be encoded in RowBinary and fails the write; empty arrays and
-  `NULL` array elements remain supported.
+- ClickHouse `Array` columns are non-nullable. As with BigQuery, ETL stores a
+  top-level PostgreSQL `NULL` array as an empty array, so the two source
+  values are indistinguishable in the destination. `NULL` array elements are
+  preserved.
 - ETL sends any value RowBinary can encode; ClickHouse applies its own
   conversion and rejection rules.
 - You may add `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` columns to a table ETL
