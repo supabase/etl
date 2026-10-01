@@ -238,6 +238,11 @@ fn ensure_clickhouse_additions_are_supported(table_name: &str, plan: &SchemaPlan
     Ok(())
 }
 
+/// Returns whether `typ` holds wall-clock timestamps without a time zone.
+fn is_wall_clock_timestamp(typ: &Type) -> bool {
+    matches!(*typ, Type::TIMESTAMP | Type::TIMESTAMP_ARRAY)
+}
+
 /// Rejects source type changes that change the mapped ClickHouse type before
 /// any metadata or DDL mutation.
 ///
@@ -247,6 +252,10 @@ fn ensure_clickhouse_additions_are_supported(table_name: &str, plan: &SchemaPlan
 /// source. Writing new rows into the old column would instead reinterpret
 /// RowBinary bytes or fail every insert. Changes that keep the mapped type,
 /// such as `varchar(50)` to `varchar(100)`, need no DDL and are accepted.
+///
+/// `timestamp` and `timestamptz` share a ClickHouse type, but a change between
+/// them is still rejected: Postgres converts existing values through the
+/// session time zone, so stored ClickHouse rows would no longer match.
 fn ensure_clickhouse_type_changes_are_supported(
     table_name: &str,
     plan: &SchemaPlan,
@@ -272,6 +281,20 @@ fn ensure_clickhouse_type_changes_are_supported(
                 format!(
                     "Table '{table_name}' changes column '{}' from {} to {}, which changes its \
                      ClickHouse type from '{before_type}' to '{after_type}'. ETL does not convert \
+                     existing ClickHouse rows. Resynchronize the table.",
+                    after.name,
+                    before.typ.name(),
+                    after.typ.name(),
+                )
+            ));
+        }
+        if is_wall_clock_timestamp(&before.typ) != is_wall_clock_timestamp(&after.typ) {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ClickHouse cannot apply a source column type change",
+                format!(
+                    "Table '{table_name}' changes column '{}' from {} to {}. Postgres converts \
+                     existing values through the session time zone, and ETL does not convert \
                      existing ClickHouse rows. Resynchronize the table.",
                     after.name,
                     before.typ.name(),

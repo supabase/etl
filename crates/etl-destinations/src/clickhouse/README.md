@@ -206,6 +206,29 @@ recreates it and re-copies the source. **This discards the event history**,
 so export it first if you need it. `TRUNCATE` on its own neither
 migrates the layout nor resets ETL checkpoints.
 
+### `timestamp` columns
+
+ETL maps PostgreSQL `timestamp` and `timestamp[]` to `DateTime64(6, 'UTC')`.
+Tables created by earlier versions use `DateTime64(6)`, which ClickHouse
+renders in the reader's server or session time zone, and ETL now rejects them
+with a column type mismatch. The stored values are already UTC, so changing
+the column's time zone fixes the table without rewriting data or resetting ETL
+state:
+
+1. Stop all writers to the table.
+2. Change every `timestamp` column, keeping any `Nullable` wrapper:
+
+   ```sql
+   alter table default.public_orders
+       modify column created_at DateTime64(6, 'UTC'),
+       modify column delivery_windows Array(Nullable(DateTime64(6, 'UTC')));
+   ```
+
+3. For `ReplacingMergeTree`, recreate the `__current` view so it reports the
+   new type: run `show create table default.public_orders__current` and
+   re-run its statement as `create or replace view`.
+4. Restart the pipeline.
+
 ## Connection notes
 
 For HTTPS connections, provide an `https://` URL. TLS uses `webpki` root
