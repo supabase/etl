@@ -79,8 +79,8 @@ impl SchemaChangeMessage {
     /// snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is
-    /// detected. The snapshot ID should identify both the commit LSN that
-    /// activates the schema and the logical DDL message LSN within that commit.
+    /// detected. The snapshot ID identifies both the transaction's COMMIT
+    /// record start and the logical DDL message LSN within that transaction.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         build_table_schema(
             self.table_id(),
@@ -108,8 +108,8 @@ impl FromStr for SchemaChangeMessage {
 
 /// Returns the durable schema snapshot identifier for a logical message.
 ///
-/// The commit LSN is the activation frontier because transactions are decoded
-/// in commit order. The message LSN cannot provide that order across
+/// The commit LSN orders transactions because they are decoded in commit
+/// order. The message LSN cannot provide that order across
 /// overlapping transactions, but it does preserve the order of multiple DDL
 /// messages delivered within the same commit.
 pub(crate) fn schema_snapshot_id_from_message(

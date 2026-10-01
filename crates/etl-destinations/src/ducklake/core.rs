@@ -2710,9 +2710,9 @@ where
             return Ok(());
         }
 
-        // A relation carries no durable DML sequence key. Reject both schema
-        // advancement and an equal-snapshot mask conflict before either can
-        // drive DuckLake DDL. Older relations are harmless replay markers;
+        // A relation carries no durable DML sequence key. Reject an
+        // equal-snapshot mask conflict before it can drive DuckLake DDL.
+        // Older relations are harmless replay markers;
         // later row and truncate handling validates retained events after the
         // durable streaming watermark has removed an already-applied prefix.
         ensure_relation_schema_transition(

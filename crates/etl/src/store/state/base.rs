@@ -74,8 +74,12 @@ pub trait StateStore {
     /// Returns the persisted checkpoint LSN for a replication worker, if any.
     ///
     /// This checkpoint is the durable replay frontier used during worker
-    /// startup. It is distinct from the apply loop's received and flush LSNs
-    /// and may have been selected from either one at a safe persistence point.
+    /// startup. ETL advances it to a transaction's commit end LSN after the
+    /// corresponding destination work is durable. Quiescent received progress
+    /// may advance PostgreSQL feedback without advancing this stored value.
+    /// A transaction whose commit record starts exactly at this LSN remains
+    /// replayable. Convert it with [`crate::schema::SnapshotId::before_lsn`]
+    /// when deriving a schema lookup or retention boundary.
     fn get_replication_checkpoint(
         &self,
         worker_type: WorkerType,

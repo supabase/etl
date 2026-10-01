@@ -1558,6 +1558,84 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     assert_events_equal(inserts, &expected_inserts);
 }
 
+/// Rows whose WAL precedes idle feedback remain replayable if their transaction
+/// commits after the replication stream restarts.
+#[tokio::test(flavor = "multi_thread")]
+async fn quiescent_feedback_preserves_open_transaction_across_restart() {
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
+        create_database_and_sync_done_pipeline_with_table(
+            "open_transaction_feedback",
+            &[("value", "int4 not null")],
+        )
+        .await;
+
+    let other_database = spawn_source_database().await;
+    let other_table = test_table_name("unrelated_wal");
+    other_database
+        .create_table(other_table.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    let mut transaction_database = PgDatabase::try_connect(database.config.clone()).await.unwrap();
+    let transaction = transaction_database.begin_transaction().await;
+    transaction.insert_values(table_name, &["value"], &[&42_i32]).await.unwrap();
+    let open_transaction_wal: PgLsn = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one("select pg_current_wal_insert_lsn()", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    // A commit in another database flushes the open transaction's row WAL
+    // without emitting a transaction on this stream, allowing idle feedback.
+    other_database.insert_values(other_table.clone(), &["value"], &[&1_i32]).await.unwrap();
+    let target_lsn = other_database.current_wal_flush_lsn().await.unwrap();
+    let confirmed_lsn = wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    assert!(confirmed_lsn > open_transaction_wal);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let mut pipeline =
+        create_pipeline(&database.config, pipeline_id, publication, store, destination.clone());
+    pipeline.start().await.unwrap();
+
+    // Fresh feedback proves the new stream has started while the source
+    // transaction is still open; the old confirmed position cannot prove that.
+    other_database.insert_values(other_table, &["value"], &[&2_i32]).await.unwrap();
+    let restart_target = other_database.current_wal_flush_lsn().await.unwrap();
+    let restarted_lsn =
+        wait_for_apply_worker_to_reach(&database, pipeline_id, restart_target).await;
+    assert!(restarted_lsn > confirmed_lsn);
+
+    let insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    transaction.commit_transaction().await;
+
+    insert_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let inserts = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                Some(insert)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inserts.len(), 1);
+    assert_eq!(inserts[0].table_row.values(), &[Cell::I64(1), Cell::I32(42)]);
+    assert!(inserts[0].commit_lsn >= restarted_lsn);
+}
+
 /// Whether the first replicated row precedes the first schema change.
 #[derive(Clone, Copy)]
 enum SchemaReplayOrder {
@@ -1726,6 +1804,22 @@ async fn run_schema_replay_scenario(
 
     let initial_events = collect_table_events(&events, table_id);
     let initial_table_schema_snapshots = table_schemas_snapshots.clone();
+
+    if matches!(transaction_scope, SchemaReplayTransactionScope::OneTransaction) {
+        // Adjacent commits can leave the previous transaction's end LSN equal
+        // to this transaction's commit LSN. Recreate that durable restart
+        // boundary with all of this transaction's schemas already stored.
+        let restart_lsn = table_schemas_snapshots[1].0.commit_lsn();
+        assert_eq!(restart_lsn, table_schemas_snapshots[2].0.commit_lsn());
+
+        let apply_slot_name: String =
+            EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        let (confirmed_flush_lsn, _) =
+            replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
+        assert!(confirmed_flush_lsn < restart_lsn);
+
+        store.upsert_replication_checkpoint(WorkerType::Apply, restart_lsn).await.unwrap();
+    }
 
     fail::remove(SEND_STATUS_UPDATE_FP);
     destination.clear_events().await;
