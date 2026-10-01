@@ -72,6 +72,22 @@ pub fn group_events_by_type_and_table_id(
     grouped
 }
 
+/// Returns whether the events hold a relation for the table whose replicated
+/// columns include `column`.
+pub fn has_relation_with_column(events: &[Event], table_id: TableId, column: &str) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            Event::Relation(relation)
+                if relation.replicated_table_schema.id() == table_id
+                    && relation
+                        .replicated_table_schema
+                        .column_schemas()
+                        .any(|column_schema| column_schema.name == column)
+        )
+    })
+}
+
 /// Checks if the combined count of events and table rows equals the expected
 /// counts.
 ///
