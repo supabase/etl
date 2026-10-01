@@ -244,9 +244,10 @@ destination. Drop the conflicting object or use another database.
   earlier ETL versions use `DateTime64(6)` for `timestamp` and fail with a
   column type mismatch; follow the upgrade steps in the ClickHouse destination
   guide.
-- ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
-  array cannot be encoded in RowBinary and fails the write; empty arrays and
-  `NULL` array elements remain supported.
+- ClickHouse `Array` columns are non-nullable. As with BigQuery, ETL stores a
+  top-level PostgreSQL `NULL` array as an empty array, so the two source
+  values are indistinguishable in the destination. `NULL` array elements are
+  preserved.
 - ETL sends any value RowBinary can encode; ClickHouse applies its own
   conversion and rejection rules.
 - You may add `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` columns to a table ETL

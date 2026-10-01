@@ -2806,7 +2806,7 @@ mod tests {
 
     use super::*;
     use crate::clickhouse::{
-        encoding::encode_to_row_binary,
+        encoding::{ColumnEncoding, encode_to_row_binary},
         schema::{
             CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
             ETL_DELETED_COLUMN_NAME, ETL_VERSION_COLUMN_NAME, clickhouse_column_type,
@@ -3473,7 +3473,7 @@ mod tests {
     }
 
     #[test]
-    fn clickhouse_full_update_row_defers_null_array_failure_to_row_binary_encoding() {
+    fn clickhouse_full_update_row_encodes_null_array_as_empty_array() {
         // GIVEN: The replicated schema contains a nullable array column.
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
@@ -3482,26 +3482,23 @@ mod tests {
         ));
         let schema = ReplicatedTableSchema::all(table_schema);
 
-        // WHEN: A complete update row contains a null array.
+        // WHEN: A complete update row containing a null array is encoded.
         let row = clickhouse_full_update_row(
             &schema,
             UpdatedTableRow::Full(TableRow::new(vec![Cell::Null])),
         )
         .unwrap();
-
-        // THEN: The null array is accepted for later encoding.
         let values = row
             .into_values()
             .into_iter()
             .map(cell_to_clickhouse_value)
             .collect::<EtlResult<Vec<_>>>()
             .unwrap();
+        let mut buf = Vec::new();
+        encode_to_row_binary(values, &[ColumnEncoding::Array], &mut buf).unwrap();
 
-        // WHEN: RowBinary encodes the array as non-nullable.
-        let error = encode_to_row_binary(values, &[false], &mut Vec::new()).unwrap_err();
-
-        // THEN: RowBinary encoding reports the conversion error.
-        assert_eq!(error.kind(), ErrorKind::ConversionError);
+        // THEN: RowBinary carries a zero-length array.
+        assert_eq!(buf, [0x00]);
     }
 
     #[test]
@@ -3973,7 +3970,15 @@ mod tests {
         .unwrap();
 
         // THEN: Only the Nullable wrapper adds a null marker.
-        assert_eq!(layout.nullable_flags(), [false, true, false, false]);
+        assert_eq!(
+            layout.column_encodings(),
+            [
+                ColumnEncoding::Required,
+                ColumnEncoding::Nullable,
+                ColumnEncoding::Array,
+                ColumnEncoding::Required,
+            ]
+        );
     }
 
     /// Any column drift other than an outer `Nullable(...)` rejects the table.
