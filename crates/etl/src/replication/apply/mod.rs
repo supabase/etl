@@ -322,6 +322,9 @@ struct HandleMessageResult {
     /// Set when a batch should be ended earlier than the normal batching
     /// parameters.
     end_batch: bool,
+    /// Set when a protocol relation applies a schema snapshot from a DDL
+    /// message.
+    schema_change: bool,
 }
 
 impl HandleMessageResult {
@@ -1710,6 +1713,15 @@ where
         let result = self.handle_replication_message(message).await?;
 
         if let Some((event, relation)) = result.event {
+            // A schema change enters the batch only after every earlier commit
+            // is durable, so a lost acknowledgement for the write that applies
+            // it cannot replay rows or relations that use the previous schema.
+            if (result.schema_change || relation.is_some())
+                && !self.settle_before_schema_change().await?
+            {
+                return Ok(());
+            }
+
             // A schema snapshot that pgoutput did not accompany with a protocol
             // relation is written first so destinations apply the new schema
             // before the following row.
@@ -1805,6 +1817,59 @@ where
             "keepalive settling idle durability",
         )
         .await
+    }
+
+    /// Makes every earlier commit durable before a schema change is batched.
+    ///
+    /// Destinations apply a schema change as soon as they receive it. If the
+    /// write that carries it loses its acknowledgement, the timed retry starts
+    /// from the persisted checkpoint. Settling earlier commits first keeps
+    /// that checkpoint after them, so the retry cannot resend rows or
+    /// relations that use the previous schema. Rows written earlier in the
+    /// schema change's own transaction still replay, because the checkpoint
+    /// only advances at commit boundaries.
+    ///
+    /// Returns `false` when shutdown or an exit intent stops intake while
+    /// waiting. The caller then drops the current message: its transaction is
+    /// still open, so the checkpoint stays behind it and a restart replays it.
+    async fn settle_before_schema_change(&mut self) -> EtlResult<bool> {
+        debug_assert!(!self.state.processing_paused);
+
+        loop {
+            if self.state.has_pending_flush_result() {
+                let ShutdownResult::Ok(flush_result) = with_shutdown!(
+                    Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()),
+                    self.shutdown_token,
+                ) else {
+                    self.handle_shutdown_signal();
+                    return Ok(false);
+                };
+                self.handle_flush_result(flush_result).await?;
+                if self.state.exit_intent.is_some() {
+                    return Ok(false);
+                }
+
+                continue;
+            }
+
+            // No commit is waiting for durability, so the checkpoint already
+            // covers everything before this schema change.
+            if self.state.last_commit_end_lsn.is_none() {
+                return Ok(true);
+            }
+
+            let event_batch = if self.state.has_pending_batch() {
+                self.state.event_batch.take()
+            } else {
+                EventBatch::empty()
+            };
+            self.dispatch_write_events(
+                event_batch,
+                WriteEventsDurability::RequireDurable,
+                "settling commits before a schema change",
+            )
+            .await?;
+        }
     }
 
     /// Dispatches one streaming write through the shared async-result path.
@@ -2304,6 +2369,12 @@ where
             column_names.join(",")
         }
 
+        // A preceding DDL message leaves a pending relation, so this relation
+        // changes the schema instead of repeating the current decoder.
+        let schema_change = matches!(
+            self.table_decoding_states.get(&table_id),
+            Some(TableDecodingState::PendingRelation { .. })
+        );
         let schema_selection =
             self.resolve_relation_schema_selection(table_id, remote_final_lsn).await?;
         let replicated_table_schema = self
@@ -2326,7 +2397,10 @@ where
 
         let relation_event = RelationEvent { replicated_table_schema };
 
-        Ok(HandleMessageResult::return_event(Event::Relation(relation_event)))
+        Ok(HandleMessageResult {
+            schema_change,
+            ..HandleMessageResult::return_event(Event::Relation(relation_event))
+        })
     }
 
     /// Returns the schema lookup selected for a table's next relation message.
