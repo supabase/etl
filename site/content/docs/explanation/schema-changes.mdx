@@ -187,6 +187,11 @@ ETL does not infer missing recovery state:
 - An older relation, or an equal snapshot with a different replication mask,
   is rejected instead of rewinding destination DDL.
 
+Before ETL batches a schema change, it waits until every earlier commit is
+durable at the destination and checkpointed. If the write that applies the
+change then fails, the retry starts after those commits, so it does not send
+the destination the previous schema.
+
 Recovery then follows each destination's DDL guarantees:
 
 - DuckLake applies a plan transactionally and can retry unambiguous old or
@@ -211,6 +216,10 @@ Resynchronize the affected table when recovery cannot prove a safe endpoint.
   activity settles or resynchronize the table.
 - Destination default and add-column behavior is not a historical-data
   migration contract. Resynchronize when exact historical values matter.
+- Rows that a transaction writes before its own DDL replay with the previous
+  schema if the write that applies the DDL fails. ClickHouse, BigQuery, and
+  Snowflake then require a resync of the table. Commit those rows in an earlier
+  transaction to avoid this.
 
 ## Custom destinations
 

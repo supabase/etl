@@ -4,14 +4,16 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
     config::BatchConfig,
     data::{Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow},
+    error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
-    store::StateStore,
+    store::{StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::EventCondition,
+        event::{EventCondition, has_relation_with_column},
+        faults::FaultAction,
         notifying_store::NotifyingStore,
-        pipeline::{create_pipeline, create_pipeline_with_batch_config},
+        pipeline::{PipelineBuilder, create_pipeline, create_pipeline_with_batch_config},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
@@ -21,10 +23,11 @@ use etl_config::shared::{
     BigQueryTimePartitionGranularity,
 };
 use etl_destinations::bigquery::test_utils::{
-    setup_bigquery_database, skip_if_missing_bigquery_env_vars,
+    parse_table_cell, setup_bigquery_database, skip_if_missing_bigquery_env_vars,
 };
 use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
+use gcp_bigquery_client::model::table_row::TableRow as BigQueryTableRow;
 use rand::{Rng, distr::Alphanumeric, random};
 
 use crate::support::{
@@ -91,6 +94,23 @@ fn pipeline_table_option(
         partition_by,
         cluster_by: cluster_by.iter().map(|column| (*column).to_owned()).collect(),
     }
+}
+
+/// Parses `(id, value, note)` BigQuery rows sorted by primary key.
+fn parse_id_value_note_rows(rows: Vec<BigQueryTableRow>) -> Vec<(i64, String, Option<String>)> {
+    let mut rows = rows
+        .into_iter()
+        .map(|row| {
+            let columns = row.columns.unwrap();
+            (
+                parse_table_cell(columns[0].clone()).unwrap(),
+                parse_table_cell(columns[1].clone()).unwrap(),
+                parse_table_cell(columns[2].clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2309,5 +2329,153 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
                 age: Some("thirty".to_owned()),
             },
         ]
+    );
+}
+
+/// Verifies that a timed retry after a lost write acknowledgement resumes
+/// streaming across a column addition without requiring a table resync.
+///
+/// BigQuery applies the write that carries the added column, but ETL observes
+/// a timeout. The retry must not send BigQuery a schema older than the one it
+/// already applied.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_after_schema_change_resumes_without_resync() {
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: a Ready table streaming into BigQuery with a batch window long
+    // enough to hold the three source transactions below.
+    let database = spawn_source_database().await;
+    let bigquery_database = setup_bigquery_database().await;
+    let table_name = test_table_name("retry_schema_change");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[("id", "bigint primary key"), ("value", "text not null")],
+        )
+        .await
+        .unwrap();
+
+    let publication_name = "test_pub_bq_retry_schema_change".to_owned();
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+    // The copied seed row lets a later delete emit CDC for this table.
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value) values (0, 'seed')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
+    let destination = TestDestinationWrapper::wrap(raw_destination);
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 5000,
+        memory_budget_ratio: 0.2,
+        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+    })
+    .with_retry_config(1000, 2)
+    .build();
+
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    pipeline.start().await.unwrap();
+
+    table_sync_complete_notify.notified().await;
+
+    // A copied table becomes Ready only after the apply worker decodes and
+    // flushes CDC for it.
+    database
+        .run_sql(&format!("delete from {} where id = 0", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+
+    table_ready_notify.notified().await;
+    destination.clear_events().await;
+
+    // BigQuery applies the write that carries the new schema, but ETL observes
+    // a timeout, as when the write acknowledgement is lost.
+    destination
+        .inject_write_events_fault_when(
+            move |events| has_relation_with_column(events, table_id, "note"),
+            FaultAction::fail_after_write(
+                ErrorKind::DestinationTimeout,
+                "injected lost write acknowledgement",
+            ),
+        )
+        .await;
+    let acknowledged_inserts_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    // WHEN: a pre-DDL row, a column addition, and a post-DDL row commit in
+    // separate source transactions.
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value) values (1, 'before')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter table {} add column note text", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value, note) values (2, 'after', 'added')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // THEN: the timed retry acknowledges both rows while the pipeline keeps
+    // running, and BigQuery holds both rows with the added column.
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+
+    tokio::select! {
+        biased;
+
+        result = &mut pipeline_wait => {
+            panic!("pipeline stopped before the retry acknowledged both inserts: {result:?}");
+        }
+
+        () = acknowledged_inserts_notify.notified() => {}
+    }
+
+    pipeline.shutdown();
+    pipeline_wait.await.unwrap();
+
+    let destination_metadata =
+        store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    assert!(destination_metadata.is_applied());
+
+    let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    table_schema.assert_columns(&["id", "value", "note"]);
+
+    let rows = bigquery_database.query_table(table_name).await.unwrap();
+    assert_eq!(
+        parse_id_value_note_rows(rows),
+        vec![(1, "before".to_owned(), None), (2, "after".to_owned(), Some("added".to_owned())),]
     );
 }
