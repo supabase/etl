@@ -351,16 +351,15 @@ impl HandleMessageResult {
 
 /// Returns the earliest safe schema-cleanup boundary.
 ///
-/// A persisted checkpoint at LSN `X` covers every transaction committed through
-/// `X`, including every DDL message within a transaction committed at exactly
-/// `X`. It therefore maps to `(X, u64::MAX)`, not `(X, 0)`. Taking the minimum
-/// of that inclusive frontier and the exact destination snapshot keeps both
-/// replay and destination recovery safe.
+/// A transaction whose commit record starts at the persisted checkpoint is
+/// still replayable. Retain its predecessor schema and every newer snapshot.
+/// Taking the minimum with the exact destination snapshot also preserves
+/// schemas needed to recover an interrupted destination change.
 fn schema_cleanup_retention_snapshot_id(
     persisted_checkpoint_lsn: PgLsn,
     destination_retention_snapshot_id: SnapshotId,
 ) -> SnapshotId {
-    SnapshotId::at_lsn(persisted_checkpoint_lsn).min(destination_retention_snapshot_id)
+    SnapshotId::before_lsn(persisted_checkpoint_lsn).min(destination_retention_snapshot_id)
 }
 
 /// A buffered batch of events waiting to be sent to the destination.
@@ -482,8 +481,8 @@ struct ApplyLoopState {
     ///
     /// Entries remain pending if evaluation fails or the cleanup queue is full.
     pending_schema_cleanup_table_ids: HashSet<TableId>,
-    /// The LSN of the commit WAL entry of the transaction that is currently
-    /// being processed.
+    /// Start of the current transaction's COMMIT WAL record, reported by
+    /// pgoutput's synthesized `BEGIN` message.
     remote_final_lsn: Option<PgLsn>,
     /// The current replication progress tracking received and flushed LSN
     /// positions.
@@ -521,9 +520,9 @@ struct ApplyLoopState {
     /// Fallback snapshot used before a table establishes connection-local
     /// protocol state or receives stored table decoding state.
     ///
-    /// This is seeded from the worker start LSN as an inclusive
-    /// [`SnapshotId::at_lsn`] frontier, so a first `RELATION` message can
-    /// resolve the latest schema committed at or before the start point.
+    /// [`SnapshotId::before_lsn`] converts the exclusive worker start LSN to
+    /// this inclusive schema bound, so the first `RELATION` cannot select a
+    /// schema from a transaction that still needs to be replayed.
     bootstrap_snapshot_id: SnapshotId,
 }
 
@@ -660,10 +659,10 @@ impl ApplyLoopState {
     /// handled, so the last received LSN is a safe replay frontier even if no
     /// destination write occurred. A logical keepalive can cross an open
     /// transaction still buffered by PostgreSQL; the slot retains its earlier
-    /// `restart_lsn` and rebuilds transactions that commit after the confirmed
-    /// checkpoint. While any client-side transaction, batch, or destination
-    /// write is unresolved, the checkpoint remains at the last completed
-    /// destination flush.
+    /// `restart_lsn` and rebuilds transactions whose commit record starts at
+    /// or after the confirmed checkpoint. While any client-side transaction,
+    /// batch, or destination write is unresolved, the checkpoint remains at
+    /// the last completed destination flush.
     ///
     /// Starting new work after a quiescent checkpoint can make this computed
     /// value lower than a value already reported on the connection. The
@@ -892,10 +891,10 @@ where
         };
         let ((replication_message_stream, feedback), wal_sender_timeout) = initialized?;
 
-        // A restart LSN is an inclusive WAL frontier, not an exact schema
-        // snapshot. Use the maximum message LSN so a restart at a transaction's
-        // commit LSN can select the last DDL within that committed transaction.
-        let bootstrap_snapshot_id = SnapshotId::at_lsn(start_lsn);
+        // PostgreSQL replays a transaction whose commit record starts exactly
+        // at the restart LSN. Its persisted DDL must not affect schema
+        // selection until this connection reaches that DDL again.
+        let bootstrap_snapshot_id = SnapshotId::before_lsn(start_lsn);
 
         let replication_progress = ReplicationProgress::new(start_lsn);
         let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
@@ -1395,10 +1394,10 @@ where
     ///
     /// The cleanup boundary is the minimum of the persisted checkpoint frontier
     /// and the earliest snapshot still referenced by destination metadata. A
-    /// checkpoint at `X` becomes `(X, u64::MAX)` because it covers every schema
-    /// message in a transaction committed at `X`. The schema store resolves the
-    /// resulting boundary to the greatest stored snapshot at or below it,
-    /// preserving that snapshot and every newer version.
+    /// checkpoint at `X` excludes transactions whose commit record starts at
+    /// `X`, since they remain replayable. The schema store resolves the
+    /// boundary to the greatest stored snapshot at or below it, preserving
+    /// that snapshot and every newer version.
     ///
     /// Progress and metadata do not need to be read in one transaction. During
     /// normal replication both safe boundaries move forward, so taking their
@@ -2044,11 +2043,12 @@ where
     /// change needs an ordered snapshot for its new replication mask even
     /// though the stored full-table columns can remain identical.
     ///
-    /// `pgoutput_message()` emits the logical message directly. A protocol
-    /// relation follows lazily before a row or truncate when PostgreSQL's
-    /// relation cache needs refreshing. This is independent of ETL's snapshot
-    /// lineage: maintenance can resend a relation without a DDL message, and
-    /// no-op DDL can emit a message without invalidating the relation cache.
+    /// `pgoutput_message()` emits the decoded logical message directly. A
+    /// protocol relation follows lazily before a row or truncate when
+    /// PostgreSQL's relation cache needs refreshing. This is independent of
+    /// ETL's snapshot lineage: maintenance can resend a relation without a
+    /// DDL message, and no-op DDL can emit a message without invalidating
+    /// the relation cache.
     ///
     /// When no relation follows DDL, the first row combines the pending schema
     /// with the previous masks and emits a destination-facing relation event.
@@ -2400,9 +2400,9 @@ where
             }
             None => {
                 let bootstrap_snapshot_id = self.state.bootstrap_snapshot_id();
-                let schema_upper_bound = sync_done_lsn
-                    .map_or(bootstrap_snapshot_id, |sync_done_lsn| {
-                        bootstrap_snapshot_id.max(SnapshotId::at_lsn(sync_done_lsn))
+                let schema_upper_bound =
+                    sync_done_lsn.map_or(bootstrap_snapshot_id, |sync_done_lsn| {
+                        bootstrap_snapshot_id.max(SnapshotId::before_lsn(sync_done_lsn))
                     });
 
                 RelationSchemaSelection::AtOrBefore(schema_upper_bound)
@@ -2651,8 +2651,8 @@ where
     /// Materializing `PendingRelation` also returns a [`RelationEvent`] so the
     /// destination can apply the stored schema snapshot before the row.
     /// Restoring a complete `SyncDone` decoder does not, because that snapshot
-    /// was already applied during table sync. Truncate does not use this path:
-    /// pgoutput emits a protocol relation first.
+    /// was already applied during table sync. Truncate instead requires an
+    /// already materialized decoder.
     async fn get_replicated_table_schema(
         &mut self,
         table_id: TableId,
@@ -2719,9 +2719,9 @@ where
 
     /// Returns the complete decoder required to handle a truncate message.
     ///
-    /// pgoutput emits a protocol relation before truncate, so the connection
-    /// must already have [`TableDecodingState::WithSchema`]. A pending schema
-    /// snapshot or missing decoder means that relation did not arrive.
+    /// Requires [`TableDecodingState::WithSchema`]; unlike row handling, this
+    /// path does not materialize pending schemas. Pgoutput checks its relation
+    /// cache before truncate but can omit metadata already sent in the session.
     fn replicated_table_schema_for_truncate(
         &self,
         table_id: TableId,
@@ -3266,11 +3266,15 @@ mod apply_worker {
         fn is_state_ready_for_changes(state: TableState, remote_final_lsn: PgLsn) -> bool {
             match state {
                 TableState::Ready => true,
-                // Match PostgreSQL's table-sync boundary rule. SyncDone may point one byte past the
-                // initial slot's consistent-point WAL record, which is also the start of a COMMIT
-                // record whose transaction was excluded from the copied snapshot. BEGIN's final LSN
-                // can therefore equal SyncDone even though the apply worker, not the table-sync
-                // worker, must apply that transaction.
+                // SyncDone records an exclusive progress boundary. For example, table sync
+                // finishes A at A.end_lsn = 100, durably flushes, publishes SyncDone
+                // at 100, and stops before processing B. With adjacent COMMIT records,
+                // B.commit_lsn can also be 100 even though B's row WAL precedes it.
+                // Apply receives B on its own stream, where BEGIN's final LSN sets
+                // remote_final_lsn = B.commit_lsn = 100. Equality must admit B here:
+                // table sync did not apply B, so a strict comparison would lose it.
+                // The initial slot's consistent point can likewise equal the next
+                // COMMIT's start when that transaction was excluded from the copied snapshot.
                 TableState::SyncDone { lsn, .. } => lsn <= remote_final_lsn,
                 _ => false,
             }
@@ -4346,16 +4350,16 @@ mod tests {
     }
 
     #[test]
-    fn schema_cleanup_uses_inclusive_checkpoint_frontier() {
+    fn schema_cleanup_excludes_replayable_transaction_at_checkpoint() {
         let destination_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(100));
 
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(200), destination_snapshot_id),
-            SnapshotId::at_lsn(PgLsn::from(200))
+            test_snapshot_id(199, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(300), destination_snapshot_id),
-            destination_snapshot_id
+            test_snapshot_id(299, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(400), destination_snapshot_id),
@@ -4372,15 +4376,15 @@ mod tests {
                 PgLsn::from(u64::MAX - 1),
                 max_commit_first_message
             ),
-            SnapshotId::at_lsn(PgLsn::from(u64::MAX - 1))
+            test_snapshot_id(u64::MAX - 2, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(u64::MAX), max_commit_first_message),
-            max_commit_first_message
+            test_snapshot_id(u64::MAX - 1, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(u64::MAX), SnapshotId::max()),
-            SnapshotId::max()
+            test_snapshot_id(u64::MAX - 1, u64::MAX)
         );
     }
 
@@ -4388,7 +4392,7 @@ mod tests {
     fn stored_sync_done_decoder_materializes_schema_and_masks() {
         let snapshot_id = test_snapshot_id(20_u64, 20_u64);
         let replicated_table_schema = replicated_schema(snapshot_id);
-        let table_state = TableState::sync_done(20.into(), &replicated_table_schema);
+        let table_state = TableState::sync_done(21.into(), &replicated_table_schema);
         let (sync_done_lsn, table_decoding_state) = sync_done_decoding_state(&table_state);
 
         let loaded_schema = table_decoding_state

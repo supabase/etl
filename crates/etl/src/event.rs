@@ -4,6 +4,12 @@
 //! to destinations during streaming replication. Each data-bearing event
 //! carries the [`crate::schema::ReplicatedTableSchema`] needed to interpret its
 //! row payload.
+//!
+//! Pgoutput synthesizes transaction framing (`BEGIN`) and metadata
+//! (`RELATION`, `TYPE`, `ORIGIN`). `COMMIT`, row changes, `TRUNCATE`, and
+//! `MESSAGE` represent decoded WAL events; publication rules can suppress or
+//! transform row operations. ETL emits [`RelationEvent`] as a
+//! schema barrier derived from protocol metadata and stored schema snapshots.
 
 use std::{fmt, mem::size_of};
 
@@ -12,18 +18,18 @@ use crate::{
     schema::{PgLsn, ReplicatedTableSchema, TableId},
 };
 
-/// Transaction begin event from Postgres logical replication.
+/// Transaction begin event synthesized by pgoutput.
 ///
-/// [`BeginEvent`] marks the start of a new transaction in the replication
-/// stream. It contains metadata about the transaction including its commit LSN
-/// and timing information for proper sequencing and recovery.
+/// Opens the logical envelope of an already-committed transaction in ETL's
+/// non-streaming session; it is not a source `BEGIN` WAL record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeginEvent {
-    /// LSN position where the transaction will commit.
+    /// Start of the transaction's COMMIT WAL record.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
-    /// Transaction start timestamp in Postgres format.
+    /// Transaction commit timestamp in microseconds since the Postgres epoch
+    /// (2000-01-01 UTC).
     pub timestamp: i64,
     /// Transaction ID for tracking and coordination.
     pub xid: u32,
@@ -36,22 +42,23 @@ impl BeginEvent {
     }
 }
 
-/// Transaction commit event from Postgres logical replication.
-///
-/// [`CommitEvent`] marks the successful completion of a transaction in the
-/// replication stream. It provides final metadata about the transaction
-/// including timing and LSN positions for maintaining consistency and ordering.
+/// Transaction commit event decoded from a COMMIT WAL record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommitEvent {
-    /// LSN position where the transaction committed.
+    /// Start of the transaction's COMMIT WAL record.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
     /// Transaction commit flags from Postgres.
     pub flags: i8,
-    /// Final LSN position after the transaction.
+    /// Exclusive position after the transaction's COMMIT WAL record.
+    ///
+    /// Completed-transaction progress advances to this LSN after destination
+    /// durability. A different transaction whose commit record starts here
+    /// remains replayable.
     pub end_lsn: PgLsn,
-    /// Transaction commit timestamp in Postgres format.
+    /// Transaction commit timestamp in microseconds since the Postgres epoch
+    /// (2000-01-01 UTC).
     pub timestamp: i64,
 }
 
@@ -62,14 +69,14 @@ impl CommitEvent {
     }
 }
 
-/// Row insertion event from Postgres logical replication.
+/// Logical row insertion decoded by pgoutput from WAL.
 ///
 /// [`InsertEvent`] represents a new row being added to a table. It contains the
 /// complete row data for the inserted source row.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct InsertEvent {
-    /// LSN position where the transaction of this event will commit.
+    /// Start of the transaction's COMMIT WAL record.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
@@ -86,7 +93,7 @@ impl InsertEvent {
     }
 }
 
-/// Row update event from Postgres logical replication.
+/// Logical row update decoded by pgoutput from WAL.
 ///
 /// [`UpdateEvent`] represents an existing row being modified.
 ///
@@ -106,7 +113,7 @@ impl InsertEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct UpdateEvent {
-    /// LSN position where the transaction of this event will commit.
+    /// Start of the transaction's COMMIT WAL record.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
@@ -134,7 +141,7 @@ impl UpdateEvent {
     }
 }
 
-/// Row deletion event from Postgres logical replication.
+/// Logical row deletion decoded by pgoutput from WAL.
 ///
 /// [`DeleteEvent`] represents a row being removed from a table.
 ///
@@ -149,7 +156,7 @@ impl UpdateEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct DeleteEvent {
-    /// LSN position where the transaction of this event will commit.
+    /// Start of the transaction's COMMIT WAL record.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
@@ -166,7 +173,7 @@ impl DeleteEvent {
     }
 }
 
-/// Table truncation event from Postgres logical replication.
+/// Table truncation decoded by pgoutput from WAL.
 ///
 /// [`TruncateEvent`] represents one or more tables being truncated (all rows
 /// deleted). This is a bulk operation that clears entire tables and may affect
@@ -174,7 +181,7 @@ impl DeleteEvent {
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct TruncateEvent {
-    /// LSN position where the transaction of this event will commit.
+    /// Start of the transaction's COMMIT WAL record.
     pub commit_lsn: PgLsn,
     /// Zero-based ordinal of this event within the transaction.
     pub tx_ordinal: u64,
@@ -191,7 +198,9 @@ impl TruncateEvent {
     }
 }
 
-/// Ordered schema and column-mask notification for subsequent table events.
+/// Schema barrier synthesized by ETL from source schema metadata.
+///
+/// Carries the schema and column masks for subsequent table events.
 ///
 /// In ETL's non-streaming `pgoutput` session, PostgreSQL sends relation
 /// metadata lazily before a published row change or truncate:
@@ -202,9 +211,12 @@ impl TruncateEvent {
 ///   `VACUUM`, index creation, or `TRUNCATE` can trigger a resend without
 ///   changing columns.
 ///
-/// These protocol messages do not create schema versions. ETL selects the
-/// exact pending DDL snapshot or the current decoder snapshot; only bootstrap
-/// uses the newest stored snapshot at or before its safe lookup boundary.
+/// These protocol messages are generated from session-local metadata, not
+/// decoded as individual WAL changes, and do not create schema versions. ETL
+/// selects the exact pending DDL snapshot or the current decoder snapshot;
+/// only bootstrap uses the newest stored snapshot at or before its safe lookup
+/// boundary.
+///
 /// The [`crate::schema::SnapshotId`] starts at `0:0` and advances with ETL's
 /// transactional messages for supported table and publication DDL, including
 /// no-op commands. Publication column-list changes need a new snapshot to
@@ -213,6 +225,7 @@ impl TruncateEvent {
 /// ETL also synthesizes this event before insert, update, or delete when DDL
 /// left a pending snapshot but PostgreSQL omitted a relation message. It uses
 /// the previous masks; a received relation always supplies fresh masks.
+/// Truncate relies on the existing protocol schema state instead.
 ///
 /// Destinations compare the snapshot and replication mask with their applied
 /// metadata. An identical pair needs no schema transition. A newer snapshot
@@ -241,16 +254,14 @@ pub struct RelationEvent {
 
 /// Represents a single replication event from Postgres logical replication.
 ///
-/// [`Event`] encapsulates all possible events that can occur in a Postgres
-/// replication stream, including data modification events and transaction
-/// control events. Each event type corresponds to specific operations in the
-/// source database.
+/// [`Event`] carries decoded changes, synthesized transaction framing, and
+/// derived schema barriers for destinations.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub enum Event {
-    /// Transaction begin event marking the start of a new transaction.
+    /// Synthesized start marker for a committed logical transaction.
     Begin(BeginEvent),
-    /// Transaction commit event marking successful transaction completion.
+    /// Transaction commit decoded from source WAL.
     Commit(CommitEvent),
     /// Row insertion event with new row data.
     Insert(InsertEvent),

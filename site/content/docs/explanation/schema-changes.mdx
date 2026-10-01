@@ -162,6 +162,25 @@ and broader destination limitations.
 
 ## Recovery and safety
 
+Stored source schemas can be ahead of durable replication progress. For tables
+already in steady replication, restart selects the schema committed strictly
+before the
+[selected restart boundary](/explanation/traits/#replication-checkpoint-methods),
+then applies schema changes in replay order. A transaction whose
+commit record starts exactly at that boundary remains replayable. This keeps
+future schemas out of earlier rows without rewinding destination DDL. Tables
+still handing over from initial sync use their durable handoff state, which can
+be ahead of the apply worker's restart position.
+
+The initial table-copy schema uses `SnapshotId::initial()` (`0:0`), a sentinel
+without a schema-message commit position. It remains eligible even when the
+restart frontier is zero.
+
+A corrected restart boundary cannot recreate missing or previously pruned
+schema history. If a required historical schema is unavailable, resynchronize
+the table. The current source schema cannot substitute for the schema needed
+to decode earlier rows.
+
 Destination metadata records the target snapshot and replication mask. While a
 change is `Applying`, it also records the previous snapshot and previous
 replication mask as one logical recovery endpoint.
@@ -192,10 +211,16 @@ ETL does not infer missing recovery state:
 
 - Previous snapshot and mask values must be stored together.
 - Incomplete or stale recovery metadata fails during loading.
-- An equal snapshot with a different replication mask is rejected.
-- Older relations never rewind destination DDL. DuckLake ignores these replay
-  markers and validates retained row and truncate events after filtering its
-  durable replay prefix. The other built-in destinations reject older relations.
+- An equal snapshot with a different replication mask is rejected because it
+  has no valid schema ordering.
+
+Older relations never rewind destination DDL. ClickHouse, BigQuery, Snowflake,
+and Iceberg reject a replayed relation older than their applied destination
+snapshot. DuckLake skips older relations and uses durable per-table progress
+to discard already-applied rows and truncates before validating the remaining
+events against the applied schema. DuckLake commits that progress in the same
+transaction as the data changes; an older schema on an event outside that
+durable progress still fails validation.
 
 Recovery then follows each destination's DDL guarantees:
 

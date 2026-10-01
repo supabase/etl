@@ -16,6 +16,9 @@ pub trait SchemaStore: CachedStore {
     /// The cache must contain all retained versions to avoid selecting an
     /// outdated schema. Implementations may refresh it when uninitialized or
     /// invalidated.
+    ///
+    /// Use [`SnapshotId::before_lsn`] to convert an exclusive replication
+    /// checkpoint into this inclusive snapshot bound.
     fn get_table_schema(
         &self,
         table_id: &TableId,
@@ -47,6 +50,9 @@ pub trait SchemaStore: CachedStore {
     ///
     /// Implementations may skip completed boundaries unless schema writes or
     /// lifecycle changes require another pass.
+    ///
+    /// Checkpoint-derived bounds use [`SnapshotId::before_lsn`], additionally
+    /// limited by any older snapshot needed for destination recovery.
     ///
     /// Returns the number of schema versions removed.
     fn prune_table_schemas(

@@ -148,7 +148,8 @@ pub trait Destination {
     /// [`Event::Relation`] events, including multiple schema changes for the
     /// same table or repeated notifications for an unchanged schema. Process
     /// them in order: compare the snapshot and replication mask with applied
-    /// metadata before deciding whether destination DDL is needed. See
+    /// metadata before deciding whether destination DDL is needed. Replayed
+    /// relations must not rewind destination DDL. See
     /// [`crate::event::RelationEvent`] for snapshot and replay semantics.
     ///
     /// The main ordering guarantee is per table: ETL preserves the required

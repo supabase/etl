@@ -133,7 +133,7 @@ current-state tables, upsert by the destination's chosen row key so replayed
 events converge to the same state.
 
 The `commit_lsn` and `tx_ordinal` fields on sequenced events provide stable
-**ordering and checkpointing**. Destinations such as ClickHouse and BigQuery
+**ordering and replay detection**. Destinations such as ClickHouse and BigQuery
 use the pair to keep replayed events ordered. See [Event
 Types](/explanation/events/#understanding-event-sequence-keys) for details.
 

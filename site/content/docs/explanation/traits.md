@@ -201,11 +201,40 @@ pub trait StateStore: CachedStore {
 ### Replication Checkpoint Methods
 
 A persisted replication checkpoint records a safe replay frontier for the apply
-worker or a table-sync worker. ETL saves progress at commit boundaries after
-the corresponding destination work is durable. PostgreSQL slot feedback
-can also advance when the loop is fully idle, but that feedback is distinct
-from the checkpoint saved in the store. The persisted checkpoint participates
-in selecting a safe restart position.
+worker or a table-sync worker. ETL saves `Commit.end_lsn` after the corresponding
+destination work is durable, including a commit carried forward from an earlier
+write that was accepted but not yet durable.
+
+The apply worker chooses its `start_lsn` as follows:
+
+- For an existing valid slot, use the greater of its `confirmed_flush_lsn` and
+  the stored checkpoint. If no checkpoint exists, use `confirmed_flush_lsn`.
+- For a new slot, use its `consistent_point`. ETL clears the previous slot
+  lineage's checkpoint before creating the replacement slot.
+
+PostgreSQL feedback is separate from the stored checkpoint. ETL selects its
+completed flush frontier while emitted work is unresolved, or its last received
+LSN when quiescent, including progress received in keepalives. The sender keeps
+feedback monotonic on the connection. Quiescent feedback can therefore advance
+beyond the last emitted COMMIT without updating the stored checkpoint.
+Consequently, `start_lsn` need not be a COMMIT record's end.
+
+`start_lsn` filters transactions by their COMMIT record's start: a transaction
+at or after it remains eligible for replay. PostgreSQL can read earlier retained
+WAL to reconstruct that transaction, so its first row or schema-message record
+can precede `start_lsn`. For consecutive transactions A and B in commit order:
+
+- If `A.end_lsn = start_lsn = B.commit_lsn`, B remains replayable at equality.
+- If `A.end_lsn <= start_lsn < B.commit_lsn`, B also remains replayable across
+  the intervening WAL positions.
+
+For tables already in steady replication, both cases require schemas committed
+strictly before `start_lsn` for initial decoding; B's schemas become active only
+as their messages are replayed. Initial-sync handoff uses the table's `SyncDone`
+boundary and saved decoder, which can be ahead of the apply stream. Use
+`SnapshotId::before_lsn` to convert this position into an inclusive schema lookup
+or retention bound. `SnapshotId::at_lsn` remains an inclusive bound for exact
+commit-LSN lookups.
 
 | Method | Purpose |
 |--------|---------|

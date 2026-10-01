@@ -1063,8 +1063,8 @@ async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
     assert!(checkpoint_lsn < second_commit_first_snapshot.commit_lsn());
     let legacy_message_lsn = second_commit_first_snapshot.message_lsn();
     let migrated_snapshot_id = SnapshotId::new(legacy_message_lsn, legacy_message_lsn);
-    assert!(migrated_snapshot_id <= SnapshotId::at_lsn(checkpoint_lsn));
-    assert!(second_commit_first_snapshot > SnapshotId::at_lsn(checkpoint_lsn));
+    assert!(migrated_snapshot_id <= SnapshotId::before_lsn(checkpoint_lsn));
+    assert!(second_commit_first_snapshot > SnapshotId::before_lsn(checkpoint_lsn));
 
     // Narrower bounds must select the correct version from the loaded index.
     let at_second_commit = reloaded_store
@@ -1082,11 +1082,87 @@ async fn schema_store_orders_composite_snapshots_by_commit_then_message_lsn() {
     assert_eq!(between_second_commit_messages.snapshot_id, second_commit_first_snapshot);
 
     let at_checkpoint_before_second_commit = reloaded_store
-        .get_table_schema(&table_id, SnapshotId::at_lsn(checkpoint_lsn))
+        .get_table_schema(&table_id, SnapshotId::before_lsn(checkpoint_lsn))
         .await
         .unwrap()
         .unwrap();
     assert_eq!(at_checkpoint_before_second_commit.snapshot_id, first_commit_snapshot);
+}
+
+/// Exclusive checkpoints preserve schemas needed to replay the next
+/// transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_store_exclusive_checkpoint_preserves_replayed_transaction_schemas() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let pipeline_id = 1;
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let mut table_schema = create_sample_table_schema();
+    let table_id = table_schema.id;
+    let predecessor = test_snapshot_id(200, 100);
+    let first_message = test_snapshot_id(300, 150);
+    let second_message = test_snapshot_id(300, 250);
+    let later_transaction = test_snapshot_id(400, 50);
+
+    for (snapshot_id, column_name) in [
+        (SnapshotId::initial(), "initial_name"),
+        (predecessor, "old_name"),
+        (first_message, "first_name"),
+        (second_message, "second_name"),
+        (later_transaction, "later_name"),
+    ] {
+        table_schema.snapshot_id = snapshot_id;
+        table_schema.column_schemas[1].name = column_name.to_owned();
+        store.store_table_schema(table_schema.clone()).await.unwrap();
+    }
+    store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(300)).await.unwrap();
+
+    // Adjacent COMMIT records can make the persisted end equal the next
+    // transaction's commit LSN. A cold lookup must recover its old-shape
+    // schema.
+    let cold_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    let checkpoint =
+        cold_store.get_replication_checkpoint(WorkerType::Apply).await.unwrap().unwrap();
+    let restart_bound = SnapshotId::before_lsn(checkpoint);
+    let schema = cold_store.get_table_schema(&table_id, restart_bound).await.unwrap().unwrap();
+    assert_eq!(schema.snapshot_id, predecessor);
+    assert_eq!(schema.column_schemas[1].name, "old_name");
+
+    let deleted =
+        cold_store.prune_table_schemas(BTreeMap::from([(table_id, restart_bound)])).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    // Reload all retained versions after pruning to verify both persisted
+    // history and lookup from the rebuilt cache.
+    let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    reloaded_store.load_cache().await.unwrap();
+    for snapshot_id in [later_transaction, second_message, first_message, predecessor] {
+        let schema =
+            reloaded_store.get_table_schema(&table_id, snapshot_id).await.unwrap().unwrap();
+        assert_eq!(schema.snapshot_id, snapshot_id);
+    }
+
+    // Once the transaction is complete, its final schema replaces the replay
+    // predecessor and earlier same-transaction schema as the retention floor.
+    let checkpoint = reloaded_store
+        .upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(301))
+        .await
+        .unwrap();
+    let deleted = reloaded_store
+        .prune_table_schemas(BTreeMap::from([(table_id, SnapshotId::before_lsn(checkpoint))]))
+        .await
+        .unwrap();
+    assert_eq!(deleted, 2);
+    assert!(reloaded_store.get_table_schema(&table_id, first_message).await.unwrap().is_none());
+
+    let final_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    final_store.load_cache().await.unwrap();
+    for snapshot_id in [later_transaction, second_message] {
+        let schema = final_store.get_table_schema(&table_id, snapshot_id).await.unwrap().unwrap();
+        assert_eq!(schema.snapshot_id, snapshot_id);
+    }
+    assert!(final_store.get_table_schema(&table_id, first_message).await.unwrap().is_none());
 }
 
 /// Retained versions are loaded together, so older lookups cannot leave gaps
