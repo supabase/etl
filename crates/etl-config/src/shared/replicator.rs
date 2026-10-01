@@ -157,6 +157,33 @@ mod tests {
         }
     }
 
+    /// Replicator validation propagates source TLS errors through both
+    /// configuration representations.
+    #[test]
+    fn replicator_source_tls_validation() {
+        let mut config = ReplicatorConfig {
+            health: None,
+            destination: DestinationConfig::BigQuery {
+                project_id: "example-project".to_owned(),
+                dataset_id: "example_dataset".to_owned(),
+                service_account_key: "placeholder-key".to_owned().into(),
+                max_staleness_mins: None,
+                connection_pool_size: DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE,
+                table_options: BigQueryTableOptionsConfig::default(),
+            },
+            pipeline: pipeline_config(),
+            sentry: None,
+            supabase: None,
+        };
+        config.pipeline.pg_connection.tls.enabled = true;
+        let without_secrets = ReplicatorConfigWithoutSecrets::from(config.clone());
+
+        for result in [config.validate(), without_secrets.validate()] {
+            let ValidationError::InvalidFieldValue { field, .. } = result.unwrap_err();
+            assert_eq!(field, "pg_connection.tls.trusted_root_certs");
+        }
+    }
+
     #[test]
     fn replicator_validation_recurses_with_and_without_secrets() {
         let config = ReplicatorConfig {

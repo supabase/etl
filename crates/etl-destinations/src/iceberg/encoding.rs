@@ -12,7 +12,10 @@ use arrow::{
     error::ArrowError,
 };
 use chrono::{NaiveDate, NaiveTime};
-use etl::data::{ArrayCell, Cell, DATE_FORMAT, TIME_FORMAT, TIMESTAMP_FORMAT, TableRow};
+use etl::data::{
+    ArrayCell, Cell, Date, PgTime, TableRow, Timestamp, format_date, format_timestamp,
+    format_timestamptz,
+};
 
 pub const UNIX_EPOCH: NaiveDate =
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("unix epoch is a valid date");
@@ -48,7 +51,7 @@ pub(super) fn rows_to_record_batch(
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
 
     for (field_idx, field) in schema.fields().iter().enumerate() {
-        let array = build_array_for_field(rows, field_idx, field.data_type());
+        let array = build_array_for_field(rows, field_idx, field.data_type())?;
         arrays.push(array);
     }
 
@@ -68,8 +71,12 @@ pub(super) fn rows_to_record_batch(
 /// Returns an [`ArrayRef`] containing the encoded field values in the
 /// appropriate Arrow array type. For unsupported types, returns a string array
 /// with string representations of the values.
-fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataType) -> ArrayRef {
-    match data_type {
+fn build_array_for_field(
+    rows: &[TableRow],
+    field_idx: usize,
+    data_type: &DataType,
+) -> Result<ArrayRef, ArrowError> {
+    Ok(match data_type {
         DataType::Boolean => build_boolean_array(rows, field_idx),
         DataType::Int32 => build_primitive_array::<Int32Type, _>(rows, field_idx, cell_to_i32),
         DataType::Int64 => build_primitive_array::<Int64Type, _>(rows, field_idx, cell_to_i64),
@@ -77,20 +84,44 @@ fn build_array_for_field(rows: &[TableRow], field_idx: usize, data_type: &DataTy
         DataType::Float64 => build_primitive_array::<Float64Type, _>(rows, field_idx, cell_to_f64),
         DataType::Utf8 => build_string_array(rows, field_idx),
         DataType::LargeBinary => build_binary_array(rows, field_idx),
-        DataType::Date32 => build_primitive_array::<Date32Type, _>(rows, field_idx, cell_to_date32),
+        DataType::Date32 => build_temporal_array::<Date32Type, _>(rows, field_idx, cell_to_date32)?,
         DataType::Time64(TimeUnit::Microsecond) => {
-            build_primitive_array::<Time64MicrosecondType, _>(rows, field_idx, cell_to_time64)
+            build_temporal_array::<Time64MicrosecondType, _>(rows, field_idx, cell_to_time64)?
         }
         DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) => {
-            build_timestamptz_array(rows, field_idx, tz)
+            build_timestamptz_array(rows, field_idx, tz)?
         }
         DataType::Timestamp(TimeUnit::Microsecond, None) => {
-            build_primitive_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)
+            build_temporal_array::<TimestampMicrosecondType, _>(rows, field_idx, cell_to_timestamp)?
         }
         DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_array(rows, field_idx),
-        DataType::List(field) => build_list_array(rows, field_idx, Arc::clone(field)),
+        DataType::List(field) => build_list_array(rows, field_idx, Arc::clone(field))?,
         _ => build_string_array(rows, field_idx),
+    })
+}
+
+/// Builds a temporal array without turning encoding failures into nulls.
+fn build_temporal_array<T, F>(
+    rows: &[TableRow],
+    field_idx: usize,
+    converter: F,
+) -> Result<ArrayRef, ArrowError>
+where
+    T: ArrowPrimitiveType,
+    F: Fn(&Cell) -> Result<Option<T::Native>, ArrowError>,
+{
+    let mut builder = PrimitiveBuilder::<T>::with_capacity(rows.len());
+    for row in rows {
+        builder.append_option(converter(&row.values()[field_idx])?);
     }
+    Ok(Arc::new(builder.finish()))
+}
+
+/// Reports a value that has no faithful Iceberg temporal representation.
+fn unsupported_temporal_value() -> ArrowError {
+    ArrowError::CastError(
+        "Cannot encode infinity or end-of-day in an Iceberg temporal type".to_owned(),
+    )
 }
 
 /// Builds a primitive Arrow array from [`TableRow`]s using a type-specific
@@ -148,15 +179,19 @@ impl_array_builder!(build_binary_array, LargeBinaryBuilder, cell_to_bytes);
 ///
 /// Returns an [`ArrayRef`] containing a timestamp array with time zone
 /// metadata. Non-timestamp cells become null entries in the resulting array.
-fn build_timestamptz_array(rows: &[TableRow], field_idx: usize, tz: &str) -> ArrayRef {
+fn build_timestamptz_array(
+    rows: &[TableRow],
+    field_idx: usize,
+    tz: &str,
+) -> Result<ArrayRef, ArrowError> {
     let mut builder = TimestampMicrosecondBuilder::new().with_timezone(tz);
 
     for row in rows {
-        let arrow_value = cell_to_timestamptz(&row.values()[field_idx]);
+        let arrow_value = cell_to_timestamptz(&row.values()[field_idx])?;
         builder.append_option(arrow_value);
     }
 
-    Arc::new(builder.finish())
+    Ok(Arc::new(builder.finish()))
 }
 
 /// Builds a fixed-size binary array for UUID values from [`TableRow`]s.
@@ -265,11 +300,14 @@ fn cell_to_bytes(cell: &Cell) -> Option<Vec<u8>> {
 ///
 /// Transforms [`Cell::Date`] values into the number of days since the Unix
 /// epoch (1970-01-01) as required by Arrow's Date32 type. Returns [`None`] for
-/// non-date cell types.
-fn cell_to_date32(cell: &Cell) -> Option<i32> {
+/// non-date cell types. Infinite dates return an encoding error.
+fn cell_to_date32(cell: &Cell) -> Result<Option<i32>, ArrowError> {
     match cell {
-        Cell::Date(date) => Some(date.signed_duration_since(UNIX_EPOCH).num_days() as i32),
-        _ => None,
+        Cell::Date(Date::Value(date)) => {
+            Ok(Some(date.signed_duration_since(UNIX_EPOCH).num_days() as i32))
+        }
+        Cell::Date(_) => Err(unsupported_temporal_value()),
+        _ => Ok(None),
     }
 }
 
@@ -277,11 +315,15 @@ fn cell_to_date32(cell: &Cell) -> Option<i32> {
 ///
 /// Transforms [`Cell::Time`] values into microseconds since midnight as
 /// required by Arrow's Time64 type. Returns [`None`] if the duration cannot be
-/// represented in microseconds or for non-time cell types.
-fn cell_to_time64(cell: &Cell) -> Option<i64> {
+/// represented in microseconds or for non-time cell types. End-of-day has no
+/// Arrow time representation and returns an encoding error.
+fn cell_to_time64(cell: &Cell) -> Result<Option<i64>, ArrowError> {
     match cell {
-        Cell::Time(time) => time.signed_duration_since(MIDNIGHT).num_microseconds(),
-        _ => None,
+        Cell::Time(PgTime::Value(time)) => {
+            Ok(time.signed_duration_since(MIDNIGHT).num_microseconds())
+        }
+        Cell::Time(_) => Err(unsupported_temporal_value()),
+        _ => Ok(None),
     }
 }
 
@@ -290,11 +332,12 @@ fn cell_to_time64(cell: &Cell) -> Option<i64> {
 ///
 /// Transforms naive [`Cell::Timestamp`] values into microseconds since the Unix
 /// epoch by treating them as UTC timestamps. Returns [`None`] for non-timestamp
-/// cell types.
-fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
+/// cell types. Infinite timestamps return an encoding error.
+fn cell_to_timestamp(cell: &Cell) -> Result<Option<i64>, ArrowError> {
     match cell {
-        Cell::Timestamp(ts) => Some(ts.and_utc().timestamp_micros()),
-        _ => None,
+        Cell::Timestamp(Timestamp::Value(ts)) => Ok(Some(ts.and_utc().timestamp_micros())),
+        Cell::Timestamp(_) => Err(unsupported_temporal_value()),
+        _ => Ok(None),
     }
 }
 
@@ -303,11 +346,13 @@ fn cell_to_timestamp(cell: &Cell) -> Option<i64> {
 ///
 /// Transforms time zone aware [`Cell::TimestampTz`] values into microseconds
 /// since the Unix epoch, preserving the time zone information in the timestamp.
-/// Returns [`None`] for non-timestamptz cell types.
-fn cell_to_timestamptz(cell: &Cell) -> Option<i64> {
+/// Returns [`None`] for non-timestamptz cell types. Infinite timestamps return
+/// an encoding error.
+fn cell_to_timestamptz(cell: &Cell) -> Result<Option<i64>, ArrowError> {
     match cell {
-        Cell::TimestampTz(ts) => Some(ts.timestamp_micros()),
-        _ => None,
+        Cell::TimestampTz(Timestamp::Value(ts)) => Ok(Some(ts.timestamp_micros())),
+        Cell::TimestampTz(_) => Err(unsupported_temporal_value()),
+        _ => Ok(None),
     }
 }
 
@@ -391,8 +436,12 @@ fn cell_to_array_cell(cell: &Cell) -> Option<&ArrayCell> {
 /// Returns an [`ArrayRef`] containing a list array with the appropriate element
 /// type. Rows with non-array cells become null entries in the resulting list
 /// array.
-fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
-    match field.data_type() {
+fn build_list_array(
+    rows: &[TableRow],
+    field_idx: usize,
+    field: FieldRef,
+) -> Result<ArrayRef, ArrowError> {
+    Ok(match field.data_type() {
         DataType::Boolean => build_boolean_list_array(rows, field_idx, field),
         DataType::Int32 => build_int32_list_array(rows, field_idx, field),
         DataType::Int64 => build_int64_list_array(rows, field_idx, field),
@@ -400,18 +449,18 @@ fn build_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> Arr
         DataType::Float64 => build_float64_list_array(rows, field_idx, field),
         DataType::Utf8 => build_string_list_array(rows, field_idx, field),
         DataType::LargeBinary => build_binary_list_array(rows, field_idx, field),
-        DataType::Date32 => build_date32_list_array(rows, field_idx, field),
-        DataType::Time64(TimeUnit::Microsecond) => build_time64_list_array(rows, field_idx, field),
+        DataType::Date32 => build_date32_list_array(rows, field_idx, field)?,
+        DataType::Time64(TimeUnit::Microsecond) => build_time64_list_array(rows, field_idx, field)?,
         DataType::Timestamp(TimeUnit::Microsecond, None) => {
-            build_timestamp_list_array(rows, field_idx, field)
+            build_timestamp_list_array(rows, field_idx, field)?
         }
         DataType::Timestamp(TimeUnit::Microsecond, Some(_)) => {
-            build_timestamptz_list_array(rows, field_idx, field)
+            build_timestamptz_list_array(rows, field_idx, field)?
         }
         DataType::FixedSizeBinary(UUID_BYTE_WIDTH) => build_uuid_list_array(rows, field_idx, field),
         // For unsupported element types, fall back to string representation
         _ => build_list_array_for_strings(rows, field_idx, field),
-    }
+    })
 }
 
 /// Builds a list array for boolean elements.
@@ -641,7 +690,11 @@ fn build_binary_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
 }
 
 /// Builds a list array for Date32 elements.
-fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+fn build_date32_list_array(
+    rows: &[TableRow],
+    field_idx: usize,
+    field: FieldRef,
+) -> Result<ArrayRef, ArrowError> {
     let mut list_builder =
         ListBuilder::new(PrimitiveBuilder::<Date32Type>::new()).with_field(Arc::clone(&field));
 
@@ -650,14 +703,13 @@ fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
             match array_cell {
                 ArrayCell::Date(vec) => {
                     for item in vec {
-                        let arrow_value = item
-                            .map(|date| date.signed_duration_since(UNIX_EPOCH).num_days() as i32);
+                        let arrow_value = cell_to_date32(&item.map_or(Cell::Null, Cell::Date))?;
                         list_builder.values().append_option(arrow_value);
                     }
                     list_builder.append(true);
                 }
                 _ => {
-                    return build_list_array_for_strings(rows, field_idx, field);
+                    return Ok(build_list_array_for_strings(rows, field_idx, field));
                 }
             }
         } else {
@@ -665,11 +717,15 @@ fn build_date32_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
         }
     }
 
-    Arc::new(list_builder.finish())
+    Ok(Arc::new(list_builder.finish()))
 }
 
 /// Builds a list array for Time64 elements.
-fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+fn build_time64_list_array(
+    rows: &[TableRow],
+    field_idx: usize,
+    field: FieldRef,
+) -> Result<ArrayRef, ArrowError> {
     let mut list_builder = ListBuilder::new(PrimitiveBuilder::<Time64MicrosecondType>::new())
         .with_field(Arc::clone(&field));
 
@@ -678,15 +734,13 @@ fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
             match array_cell {
                 ArrayCell::Time(vec) => {
                     for item in vec {
-                        let arrow_value = item.and_then(|time| {
-                            time.signed_duration_since(MIDNIGHT).num_microseconds()
-                        });
+                        let arrow_value = cell_to_time64(&item.map_or(Cell::Null, Cell::Time))?;
                         list_builder.values().append_option(arrow_value);
                     }
                     list_builder.append(true);
                 }
                 _ => {
-                    return build_list_array_for_strings(rows, field_idx, field);
+                    return Ok(build_list_array_for_strings(rows, field_idx, field));
                 }
             }
         } else {
@@ -694,11 +748,15 @@ fn build_time64_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef)
         }
     }
 
-    Arc::new(list_builder.finish())
+    Ok(Arc::new(list_builder.finish()))
 }
 
 /// Builds a list array for Timestamp elements.
-fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+fn build_timestamp_list_array(
+    rows: &[TableRow],
+    field_idx: usize,
+    field: FieldRef,
+) -> Result<ArrayRef, ArrowError> {
     let mut list_builder = ListBuilder::new(PrimitiveBuilder::<TimestampMicrosecondType>::new())
         .with_field(Arc::clone(&field));
 
@@ -707,13 +765,14 @@ fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldR
             match array_cell {
                 ArrayCell::Timestamp(vec) => {
                     for item in vec {
-                        let arrow_value = item.map(|ts| ts.and_utc().timestamp_micros());
+                        let arrow_value =
+                            cell_to_timestamp(&item.map_or(Cell::Null, Cell::Timestamp))?;
                         list_builder.values().append_option(arrow_value);
                     }
                     list_builder.append(true);
                 }
                 _ => {
-                    return build_list_array_for_strings(rows, field_idx, field);
+                    return Ok(build_list_array_for_strings(rows, field_idx, field));
                 }
             }
         } else {
@@ -721,11 +780,15 @@ fn build_timestamp_list_array(rows: &[TableRow], field_idx: usize, field: FieldR
         }
     }
 
-    Arc::new(list_builder.finish())
+    Ok(Arc::new(list_builder.finish()))
 }
 
 /// Builds a list array for TimestampTz elements.
-fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: FieldRef) -> ArrayRef {
+fn build_timestamptz_list_array(
+    rows: &[TableRow],
+    field_idx: usize,
+    field: FieldRef,
+) -> Result<ArrayRef, ArrowError> {
     // Extract the time zone from the field's data type.
     let tz = if let DataType::Timestamp(TimeUnit::Microsecond, Some(tz_str)) = field.data_type() {
         Arc::clone(tz_str)
@@ -741,13 +804,14 @@ fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: Fiel
             match array_cell {
                 ArrayCell::TimestampTz(vec) => {
                     for item in vec {
-                        let arrow_value = item.map(|ts| ts.timestamp_micros());
+                        let arrow_value =
+                            cell_to_timestamptz(&item.map_or(Cell::Null, Cell::TimestampTz))?;
                         list_builder.values().append_option(arrow_value);
                     }
                     list_builder.append(true);
                 }
                 _ => {
-                    return build_list_array_for_strings(rows, field_idx, field);
+                    return Ok(build_list_array_for_strings(rows, field_idx, field));
                 }
             }
         } else {
@@ -755,7 +819,7 @@ fn build_timestamptz_list_array(rows: &[TableRow], field_idx: usize, field: Fiel
         }
     }
 
-    Arc::new(list_builder.finish())
+    Ok(Arc::new(list_builder.finish()))
 }
 
 /// Builds a list array for UUID elements.
@@ -918,7 +982,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(d) => {
-                        list_builder.values().append_value(d.format(DATE_FORMAT).to_string());
+                        list_builder.values().append_value(format_date(d).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -928,7 +992,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(t) => {
-                        list_builder.values().append_value(t.format(TIME_FORMAT).to_string());
+                        list_builder.values().append_value(t.to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -946,7 +1010,7 @@ fn append_array_cell_as_strings(
             for item in vec {
                 match item {
                     Some(ts) => {
-                        list_builder.values().append_value(ts.format(TIMESTAMP_FORMAT).to_string());
+                        list_builder.values().append_value(format_timestamp(ts).to_string());
                     }
                     None => list_builder.values().append_null(),
                 }
@@ -955,7 +1019,12 @@ fn append_array_cell_as_strings(
         ArrayCell::TimestampTz(vec) => {
             for item in vec {
                 match item {
-                    Some(ts) => list_builder.values().append_value(ts.to_rfc3339()),
+                    Some(Timestamp::Value(ts)) => {
+                        list_builder.values().append_value(ts.to_rfc3339());
+                    }
+                    Some(ts) => {
+                        list_builder.values().append_value(format_timestamptz(ts).to_string());
+                    }
                     None => list_builder.values().append_null(),
                 }
             }
@@ -987,7 +1056,9 @@ fn append_array_cell_as_strings(
 #[cfg(test)]
 mod tests {
     use arrow::array::Array;
-    use etl::data::ArrayCell;
+    use etl::data::{
+        ArrayCell, DATE_FORMAT, Date, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT, Timestamp,
+    };
 
     use super::*;
 
@@ -1053,10 +1124,13 @@ mod tests {
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
 
-        assert_eq!(cell_to_date32(&Cell::Date(test_date)), Some(expected_days));
-        assert_eq!(cell_to_date32(&Cell::Date(UNIX_EPOCH)), Some(0));
-        assert_eq!(cell_to_date32(&Cell::Null), None);
-        assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_owned())), None);
+        assert_eq!(
+            cell_to_date32(&Cell::Date(Date::Value(test_date))).unwrap(),
+            Some(expected_days)
+        );
+        assert_eq!(cell_to_date32(&Cell::Date(Date::Value(UNIX_EPOCH))).unwrap(), Some(0));
+        assert_eq!(cell_to_date32(&Cell::Null).unwrap(), None);
+        assert_eq!(cell_to_date32(&Cell::String("2023-05-15".to_owned())).unwrap(), None);
     }
 
     #[test]
@@ -1065,10 +1139,10 @@ mod tests {
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
         let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds();
 
-        assert_eq!(cell_to_time64(&Cell::Time(test_time)), expected_micros);
-        assert_eq!(cell_to_time64(&Cell::Time(MIDNIGHT)), Some(0));
-        assert_eq!(cell_to_time64(&Cell::Null), None);
-        assert_eq!(cell_to_time64(&Cell::String("12:30:45".to_owned())), None);
+        assert_eq!(cell_to_time64(&Cell::Time(PgTime::Value(test_time))).unwrap(), expected_micros);
+        assert_eq!(cell_to_time64(&Cell::Time(PgTime::Value(MIDNIGHT))).unwrap(), Some(0));
+        assert_eq!(cell_to_time64(&Cell::Null).unwrap(), None);
+        assert_eq!(cell_to_time64(&Cell::String("12:30:45".to_owned())).unwrap(), None);
     }
 
     #[test]
@@ -1077,9 +1151,15 @@ mod tests {
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap().naive_utc();
         let expected_micros = test_ts.and_utc().timestamp_micros();
 
-        assert_eq!(cell_to_timestamp(&Cell::Timestamp(test_ts)), Some(expected_micros));
-        assert_eq!(cell_to_timestamp(&Cell::Null), None);
-        assert_eq!(cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_owned())), None);
+        assert_eq!(
+            cell_to_timestamp(&Cell::Timestamp(Timestamp::Value(test_ts))).unwrap(),
+            Some(expected_micros)
+        );
+        assert_eq!(cell_to_timestamp(&Cell::Null).unwrap(), None);
+        assert_eq!(
+            cell_to_timestamp(&Cell::String("2001-09-09 01:46:40".to_owned())).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1088,9 +1168,15 @@ mod tests {
         let test_ts = DateTime::from_timestamp(1000000000, 0).unwrap();
         let expected_micros = test_ts.timestamp_micros();
 
-        assert_eq!(cell_to_timestamptz(&Cell::TimestampTz(test_ts)), Some(expected_micros));
-        assert_eq!(cell_to_timestamptz(&Cell::Null), None);
-        assert_eq!(cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_owned())), None);
+        assert_eq!(
+            cell_to_timestamptz(&Cell::TimestampTz(Timestamp::Value(test_ts))).unwrap(),
+            Some(expected_micros)
+        );
+        assert_eq!(cell_to_timestamptz(&Cell::Null).unwrap(), None);
+        assert_eq!(
+            cell_to_timestamptz(&Cell::String("2001-09-09T01:46:40Z".to_owned())).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1123,10 +1209,10 @@ mod tests {
 
         // Test temporal types with known formats
         let test_date = NaiveDate::from_ymd_opt(2023, 5, 15).unwrap();
-        assert_eq!(cell_to_string(&Cell::Date(test_date)), None);
+        assert_eq!(cell_to_string(&Cell::Date(Date::Value(test_date))), None);
 
         let test_time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
-        assert_eq!(cell_to_string(&Cell::Time(test_time)), None);
+        assert_eq!(cell_to_string(&Cell::Time(PgTime::Value(test_time))), None);
 
         // Test UUID
         let test_uuid = Uuid::new_v4();
@@ -1154,7 +1240,7 @@ mod tests {
             TableRow::new(vec![Cell::String("not bool".to_owned())]),
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Boolean);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::Boolean).unwrap();
         let bool_array = array_ref.as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap();
 
         assert_eq!(bool_array.len(), 4);
@@ -1173,7 +1259,7 @@ mod tests {
             TableRow::new(vec![Cell::String("not int".to_owned())]),
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Int32);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::Int32).unwrap();
         let int_array = array_ref.as_any().downcast_ref::<arrow::array::Int32Array>().unwrap();
 
         assert_eq!(int_array.len(), 4);
@@ -1193,7 +1279,7 @@ mod tests {
             TableRow::new(vec![Cell::I32(42)]), // Non-I64 becomes null
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Int64);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::Int64).unwrap();
         let int_array = array_ref.as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
 
         assert_eq!(int_array.len(), 5);
@@ -1213,7 +1299,7 @@ mod tests {
             TableRow::new(vec![Cell::F64(3.0)]), // Non-F32 becomes null
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Float32);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::Float32).unwrap();
         let float_array = array_ref.as_any().downcast_ref::<arrow::array::Float32Array>().unwrap();
 
         assert_eq!(float_array.len(), 4);
@@ -1232,7 +1318,7 @@ mod tests {
             TableRow::new(vec![Cell::F32(2.5)]), // Non-F64 becomes null
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Float64);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::Float64).unwrap();
         let float_array = array_ref.as_any().downcast_ref::<arrow::array::Float64Array>().unwrap();
 
         assert_eq!(float_array.len(), 4);
@@ -1251,7 +1337,7 @@ mod tests {
             TableRow::new(vec![Cell::Null]),
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Utf8);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::Utf8).unwrap();
         let string_array = array_ref.as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
 
         assert_eq!(string_array.len(), 4);
@@ -1271,7 +1357,7 @@ mod tests {
             TableRow::new(vec![Cell::String("not bytes".to_owned())]),
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::LargeBinary);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::LargeBinary).unwrap();
         let binary_array =
             array_ref.as_any().downcast_ref::<arrow::array::LargeBinaryArray>().unwrap();
 
@@ -1289,13 +1375,13 @@ mod tests {
         let expected_days = test_date.signed_duration_since(UNIX_EPOCH).num_days() as i32;
 
         let rows = vec![
-            TableRow::new(vec![Cell::Date(test_date)]),
-            TableRow::new(vec![Cell::Date(UNIX_EPOCH)]),
+            TableRow::new(vec![Cell::Date(Date::Value(test_date))]),
+            TableRow::new(vec![Cell::Date(Date::Value(UNIX_EPOCH))]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("2023-05-15".to_owned())]),
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Date32);
+        let array_ref = build_array_for_field(&rows, 0, &DataType::Date32).unwrap();
         let date_array = array_ref.as_any().downcast_ref::<arrow::array::Date32Array>().unwrap();
 
         assert_eq!(date_array.len(), 4);
@@ -1312,13 +1398,14 @@ mod tests {
         let expected_micros = test_time.signed_duration_since(MIDNIGHT).num_microseconds().unwrap();
 
         let rows = vec![
-            TableRow::new(vec![Cell::Time(test_time)]),
-            TableRow::new(vec![Cell::Time(MIDNIGHT)]),
+            TableRow::new(vec![Cell::Time(PgTime::Value(test_time))]),
+            TableRow::new(vec![Cell::Time(PgTime::Value(MIDNIGHT))]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("12:30:45".to_owned())]),
         ];
 
-        let array_ref = build_array_for_field(&rows, 0, &DataType::Time64(TimeUnit::Microsecond));
+        let array_ref =
+            build_array_for_field(&rows, 0, &DataType::Time64(TimeUnit::Microsecond)).unwrap();
         let time_array =
             array_ref.as_any().downcast_ref::<arrow::array::Time64MicrosecondArray>().unwrap();
 
@@ -1336,13 +1423,14 @@ mod tests {
         let expected_micros = test_ts.and_utc().timestamp_micros();
 
         let rows = vec![
-            TableRow::new(vec![Cell::Timestamp(test_ts)]),
+            TableRow::new(vec![Cell::Timestamp(Timestamp::Value(test_ts))]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("2001-09-09 01:46:40".to_owned())]),
         ];
 
         let array_ref =
-            build_array_for_field(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
+            build_array_for_field(&rows, 0, &DataType::Timestamp(TimeUnit::Microsecond, None))
+                .unwrap();
         let ts_array =
             array_ref.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
 
@@ -1359,7 +1447,7 @@ mod tests {
         let expected_micros = test_ts.timestamp_micros();
 
         let rows = vec![
-            TableRow::new(vec![Cell::TimestampTz(test_ts)]),
+            TableRow::new(vec![Cell::TimestampTz(Timestamp::Value(test_ts))]),
             TableRow::new(vec![Cell::Null]),
             TableRow::new(vec![Cell::String("2001-09-09T01:46:40Z".to_owned())]),
         ];
@@ -1368,7 +1456,8 @@ mod tests {
             &rows,
             0,
             &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-        );
+        )
+        .unwrap();
         let ts_array =
             array_ref.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>().unwrap();
 
@@ -1392,7 +1481,7 @@ mod tests {
         ];
 
         let array_ref =
-            build_array_for_field(&rows, 0, &DataType::FixedSizeBinary(UUID_BYTE_WIDTH));
+            build_array_for_field(&rows, 0, &DataType::FixedSizeBinary(UUID_BYTE_WIDTH)).unwrap();
         let uuid_array =
             array_ref.as_any().downcast_ref::<arrow::array::FixedSizeBinaryArray>().unwrap();
 
@@ -1482,10 +1571,10 @@ mod tests {
         let test_ts_tz = DateTime::from_timestamp(1000000000, 0).unwrap();
 
         let rows = vec![TableRow::new(vec![
-            Cell::Date(test_date),
-            Cell::Time(test_time),
-            Cell::Timestamp(test_ts),
-            Cell::TimestampTz(test_ts_tz),
+            Cell::Date(Date::Value(test_date)),
+            Cell::Time(PgTime::Value(test_time)),
+            Cell::Timestamp(Timestamp::Value(test_ts)),
+            Cell::TimestampTz(Timestamp::Value(test_ts_tz)),
         ])];
 
         let schema = Schema::new(vec![
@@ -2067,16 +2156,16 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![
-                Some(test_date_1),
-                Some(test_date_2),
+                Some(Date::Value(test_date_1)),
+                Some(Date::Value(test_date_2)),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some(test_date_3)]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some(Date::Value(test_date_3))]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
 
-        let array_ref = build_date32_list_array(&rows, 0, field_ref);
+        let array_ref = build_date32_list_array(&rows, 0, field_ref).unwrap();
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2129,16 +2218,18 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![
-                Some(test_time_1),
-                Some(test_time_2),
+                Some(PgTime::Value(test_time_1)),
+                Some(PgTime::Value(test_time_2)),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some(test_time_3)]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some(PgTime::Value(
+                test_time_3,
+            ))]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                           // Null cell,
         ];
 
-        let array_ref = build_time64_list_array(&rows, 0, field_ref);
+        let array_ref = build_time64_list_array(&rows, 0, field_ref).unwrap();
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2193,16 +2284,18 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![
-                Some(test_ts_1),
-                Some(test_ts_2),
+                Some(Timestamp::Value(test_ts_1)),
+                Some(Timestamp::Value(test_ts_2)),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts_3)]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(Timestamp::Value(
+                test_ts_3,
+            ))]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                                // Null cell,
         ];
 
-        let array_ref = build_timestamp_list_array(&rows, 0, field_ref);
+        let array_ref = build_timestamp_list_array(&rows, 0, field_ref).unwrap();
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2252,16 +2345,18 @@ mod tests {
 
         let rows = vec![
             TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![
-                Some(test_ts_1),
-                Some(test_ts_2),
+                Some(Timestamp::Value(test_ts_1)),
+                Some(Timestamp::Value(test_ts_2)),
                 None,
             ]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(test_ts_3)]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(Timestamp::Value(
+                test_ts_3,
+            ))]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![]))]), // Empty array,
             TableRow::new(vec![Cell::Null]),                                  // Null cell,
         ];
 
-        let array_ref = build_timestamptz_list_array(&rows, 0, field_ref);
+        let array_ref = build_timestamptz_list_array(&rows, 0, field_ref).unwrap();
         let list_array = array_ref.as_any().downcast_ref::<ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 4);
@@ -2379,10 +2474,22 @@ mod tests {
                 None,
             ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![Some(test_date), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![Some(test_time), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![Some(test_ts), None]))]),
-            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![Some(test_ts_tz), None]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Date(vec![
+                Some(Date::Value(test_date)),
+                None,
+            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Time(vec![
+                Some(PgTime::Value(test_time)),
+                None,
+            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::Timestamp(vec![
+                Some(Timestamp::Value(test_ts)),
+                None,
+            ]))]),
+            TableRow::new(vec![Cell::Array(ArrayCell::TimestampTz(vec![
+                Some(Timestamp::Value(test_ts_tz)),
+                None,
+            ]))]),
             TableRow::new(vec![Cell::Array(ArrayCell::Numeric(vec![
                 Some("123.45".parse::<PgNumeric>().unwrap()),
                 None,
@@ -2572,22 +2679,22 @@ mod tests {
                 1, // 1 null
             ),
             (
-                ArrayCell::Date(vec![Some(test_date), None]),
+                ArrayCell::Date(vec![Some(Date::Value(test_date)), None]),
                 vec![date_str.as_str()],
                 1, // 1 null
             ),
             (
-                ArrayCell::Time(vec![Some(test_time), None]),
+                ArrayCell::Time(vec![Some(PgTime::Value(test_time)), None]),
                 vec![time_str.as_str()],
                 1, // 1 null
             ),
             (
-                ArrayCell::Timestamp(vec![Some(test_ts), None]),
+                ArrayCell::Timestamp(vec![Some(Timestamp::Value(test_ts)), None]),
                 vec![ts_str.as_str()],
                 1, // 1 null
             ),
             (
-                ArrayCell::TimestampTz(vec![Some(test_ts_tz), None]),
+                ArrayCell::TimestampTz(vec![Some(Timestamp::Value(test_ts_tz)), None]),
                 vec![ts_tz_str.as_str()],
                 1, // 1 null
             ),
@@ -2670,7 +2777,7 @@ mod tests {
             ];
 
             // Should not panic and should create an array
-            let array_ref = build_list_array(&rows, 0, field_ref);
+            let array_ref = build_list_array(&rows, 0, field_ref).unwrap();
             let list_array = array_ref.as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
 
             assert_eq!(list_array.len(), 2, "Failed for {test_name}");
@@ -2690,7 +2797,7 @@ mod tests {
         let rows =
             vec![TableRow::new(vec![Cell::Array(ArrayCell::I32(vec![Some(123), Some(456)]))])];
 
-        let array_ref = build_list_array(&rows, 0, field_ref);
+        let array_ref = build_list_array(&rows, 0, field_ref).unwrap();
         let list_array = array_ref.as_any().downcast_ref::<arrow::array::ListArray>().unwrap();
 
         assert_eq!(list_array.len(), 1);
@@ -2719,7 +2826,7 @@ mod tests {
                 Cell::Array(ArrayCell::I32(vec![Some(10), Some(20), None])),
                 Cell::Array(ArrayCell::String(vec![Some("hello".to_owned()), None])),
                 Cell::Array(ArrayCell::Uuid(vec![Some(test_uuid)])),
-                Cell::Array(ArrayCell::Date(vec![Some(test_date), None])),
+                Cell::Array(ArrayCell::Date(vec![Some(Date::Value(test_date)), None])),
             ]),
             TableRow::new(vec![
                 Cell::I32(2),
@@ -2953,5 +3060,49 @@ mod tests {
         assert_eq!(string_array.len(), 2);
         assert_eq!(string_array.value(0), "a");
         assert_eq!(string_array.value(1), "b");
+    }
+    #[test]
+    fn special_temporal_values_never_become_null_in_arrow() {
+        use arrow::datatypes::Field;
+        for (cell, data_type) in [
+            (Cell::Date(Date::PosInfinity), DataType::Date32),
+            (Cell::Date(Date::NegInfinity), DataType::Date32),
+            (Cell::Time(PgTime::EndOfDay), DataType::Time64(TimeUnit::Microsecond)),
+            (
+                Cell::Timestamp(Timestamp::PosInfinity),
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+            ),
+            (
+                Cell::TimestampTz(Timestamp::NegInfinity),
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            ),
+        ] {
+            let schema = Schema::new(vec![Field::new("value", data_type, true)]);
+            assert!(rows_to_record_batch(&[TableRow::new(vec![cell])], schema).is_err());
+        }
+        for (array, element_type) in [
+            (ArrayCell::Date(vec![None, Some(Date::PosInfinity)]), DataType::Date32),
+            (
+                ArrayCell::Time(vec![None, Some(PgTime::EndOfDay)]),
+                DataType::Time64(TimeUnit::Microsecond),
+            ),
+            (
+                ArrayCell::Timestamp(vec![None, Some(Timestamp::NegInfinity)]),
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+            ),
+            (
+                ArrayCell::TimestampTz(vec![None, Some(Timestamp::PosInfinity)]),
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+            ),
+        ] {
+            let schema = Schema::new(vec![Field::new(
+                "value",
+                DataType::List(Arc::new(Field::new("item", element_type, true))),
+                true,
+            )]);
+            assert!(
+                rows_to_record_batch(&[TableRow::new(vec![Cell::Array(array)])], schema).is_err()
+            );
+        }
     }
 }

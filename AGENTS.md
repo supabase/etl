@@ -2,8 +2,7 @@
 
 Postgres logical-replication engine. `etl` is the library, `etl-replicator` is
 the standalone binary, and `etl-destinations` holds built-in destinations.
-`etl-api` is an optional Kubernetes control plane; you do not need it to run
-ETL. Product docs: https://supabase.github.io/etl/. Human walkthrough:
+Product docs: https://supabase.github.io/etl/. Human walkthrough:
 [DEVELOPMENT.md](DEVELOPMENT.md).
 
 This file is for agents. Read it before changing code. Use it to **set up** the
@@ -15,10 +14,10 @@ Do this on a fresh clone before tests, examples, or local services.
 
 1. Toolchain: Rust **1.95.0** from `rust-toolchain.toml` (rustup uses it
    automatically), `psql`, Docker Compose, and [cargo-nextest](https://nexte.st).
-2. SQLx CLI (migrations; `cargo x init` and `cargo x setup api` need it):
+2. SQLx CLI (migrations; `cargo x init` needs it):
 
    ```bash
-   cargo install --version 0.9.0-alpha.1 sqlx-cli --no-default-features --features rustls,postgres --locked
+   cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
    ```
 
 3. Start the local data plane (Postgres, ClickHouse, Iceberg catalog, migrations).
@@ -32,18 +31,15 @@ Do this on a fresh clone before tests, examples, or local services.
 
    ```bash
    cargo x setup replicator && cargo x seed && cargo x run replicator
-   cargo x setup api && cargo x run api
    ```
 
-5. Generated files in `crates/etl-api/configuration/` and
-   `crates/etl-replicator/configuration/` are gitignored. Re-run with `--force`
+5. Generated files in `crates/etl-replicator/configuration/` are gitignored. Re-run with `--force`
    to replace them. Do not commit them or put real secrets in tracked files.
 
 | Need | Do |
 | --- | --- |
-| API / OrbStack k8s | `kubectl` plus [OrbStack](https://orbstack.dev) Kubernetes; `cargo x setup api` applies `scripts/k8s/local/` |
 | Existing Postgres, no Docker | `SKIP_DOCKER=1` and `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` |
-| Test clusters only | `cargo xtask postgres start` (or `create`) |
+| Test clusters only | `cargo xtask postgres start` |
 | Ports and destination env | [DEVELOPMENT.md](DEVELOPMENT.md) |
 
 Default stack: Postgres `localhost:5430` (`postgres`/`postgres`), replica
@@ -78,13 +74,12 @@ what ran. Skip expensive workspace checks for docs-only or YAML-only edits.
 | `crates/etl-postgres/` | Reusable Postgres primitives, source helpers, slots, ETL metadata SQL |
 | `crates/etl-destinations/` | Destination implementations |
 | `crates/etl-config/` | Config types and loading |
-| `crates/etl-api/` | HTTP control plane |
 | `crates/etl-replicator/` | Standalone replicator binary |
 | `crates/etl-telemetry/` | Tracing and Prometheus |
 | `crates/etl-examples/`, `crates/etl-benchmarks/` | Examples and benches |
 | `crates/xtask/` | `cargo x` automation |
 | `site/` | Next.js/Fumadocs site; docs in `site/content/docs/` |
-| `scripts/docker/`, `scripts/k8s/local/` | Compose stack and API k8s manifests |
+| `scripts/docker/` | Local Compose stack |
 | `src/` / `tests/` | Tests next to code; crate integration tests in `tests/main.rs` |
 
 Crate boundaries are for reuse across crates, not for organizing one domain.
@@ -133,7 +128,7 @@ implementation details private.
 
 | Situation | Do |
 | --- | --- |
-| Schema *permits* a value/event the destination might not preserve | API preflight **warning** via stable destination capabilities; do not reject the schema |
+| Schema *permits* a value/event the destination might not preserve | Expose stable destination capabilities so callers can warn; do not reject the schema |
 | ETL can faithfully build the destination request/wire form | Send it; rely on the destination’s native behavior and errors |
 | ETL cannot build that form, or a structural/state invariant is broken | Typed local error at the encoding point; same path for copy, insert, and update |
 
@@ -229,8 +224,6 @@ message. Detail fields are owned context (operations, tables, IDs, SQL).
 Preserve the source chain. Error text is sentence case and starts with an
 uppercase letter (`thiserror` included).
 
-- `etl-api` HTTP responses: never leak Postgres/SQLx/database errors; generic
-  customer message, original error in the internal chain and logs.
 - ETL Postgres and DuckDB: keep the chain for debugging, still avoid highly
   critical data.
 - Panics only for programmer errors or broken invariants. `debug_assert!` /
@@ -317,9 +310,7 @@ counts, lengths, LSNs, IDs, operations). Production errors: `error = %err` or
 `error = %error` (not `err =`, `source =`, or debug for the primary error).
 Prefer `Display` (`%`) over `Debug` (`?`) unless the type is known not to
 contain sensitive values. Table state: `table_state_type` (one) and
-`table_state_types` (list). Sentry: wrap sensitive API route groups with the
-sensitive scope marker and scrub bodies on marked events; do not duplicate path
-matchers in the scrubber.
+`table_state_types` (list).
 
 ## Tests
 
@@ -347,7 +338,7 @@ pipeline.start().await.unwrap();
 ready.notified().await;
 ```
 
-Need Postgres? `cargo xtask postgres create` (or `cargo x init`) and
+Need Postgres? `cargo xtask postgres start` (or `cargo x init`) and
 `TESTS_DATABASE_HOST`. Debug with `ENABLE_TRACING=1` and a focused `RUST_LOG`,
 for example
 `RUST_LOG=etl::replication::apply=debug,etl_destinations::bigquery=debug`.

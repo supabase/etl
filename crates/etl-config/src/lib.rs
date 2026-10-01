@@ -4,12 +4,14 @@
 //! secret handling, and shared configuration types for various ETL services and
 //! components.
 
+mod clickhouse;
 mod ducklake;
 mod environment;
 mod load;
 mod secret;
 pub mod shared;
 
+pub use clickhouse::{ClickHouseUrl, ParseClickHouseUrlError};
 pub use ducklake::{
     DuckLakeCatalogConnectOptionsError, ParseDucklakeUrlError, default_ducklake_s3_url_style,
     default_ducklake_s3_use_ssl, ducklake_catalog_metadata_connect_options, libpq_tcp_host,

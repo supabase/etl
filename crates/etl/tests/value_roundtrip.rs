@@ -11,15 +11,13 @@
 //! the `PROPERTY_TEST_BUDGET_SECS` budget knob and the `PROPERTY_TEST_SEED`
 //! failure replay knob.
 //!
-//! Known codec gaps stay outside the generated envelope and are documented on
-//! the strategies that would otherwise reach them: temporal `infinity` values,
-//! `BC` dates, years above 9999, and the `24:00:00` time are all legal in
-//! Postgres but are rejected by the codec today. Multidimensional arrays are
-//! also rejected; their property pins reject-not-corrupt.
+//! These properties cover ordinary finite temporal values. Special temporal
+//! values are covered by the replication-stream boundary matrix. Finite values
+//! beyond chrono's range and multidimensional arrays remain unsupported.
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
-    data::{ArrayCell, Cell},
+    data::{ArrayCell, Cell, Date, PgTime, Timestamp},
     schema::ColumnSchema,
     test_utils::{
         database::spawn_source_database,
@@ -332,13 +330,7 @@ async fn numeric_values_roundtrip_through_text_codec() {
     });
 }
 
-/// Dates over the four-digit ISO year range.
-///
-/// Postgres also legally emits `BC`-suffixed years and years above 9999 (dates
-/// up to year 5874897, timestamps up to 294276), plus the special
-/// `infinity`/`-infinity` values, but the codec rejects all of them today. They
-/// stay outside the generated envelope until the codec handles them; see the
-/// findings recorded with this harness.
+/// Ordinary finite dates over the four-digit ISO year range.
 fn pg_date() -> impl Strategy<Value = NaiveDate> {
     let min = NaiveDate::from_ymd_opt(1, 1, 1).unwrap().num_days_from_ce();
     let max = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap().num_days_from_ce();
@@ -356,7 +348,7 @@ async fn date_values_roundtrip_through_text_codec() {
 
     run_property("date text roundtrip", &pg_date(), |date| {
         let rendered = query_text(client, &render, &[date])?;
-        assert_parses_to(&Type::DATE, &rendered, &Cell::Date(*date))
+        assert_parses_to(&Type::DATE, &rendered, &Cell::Date(Date::Value(*date)))
     });
 }
 
@@ -370,7 +362,7 @@ async fn time_values_roundtrip_through_text_codec() {
 
     run_property("time text roundtrip", &pg_time(), |time| {
         let rendered = query_text(client, &render, &[time])?;
-        assert_parses_to(&Type::TIME, &rendered, &Cell::Time(*time))
+        assert_parses_to(&Type::TIME, &rendered, &Cell::Time(PgTime::Value(*time)))
     });
 }
 
@@ -385,7 +377,11 @@ async fn timestamp_values_roundtrip_through_text_codec() {
     let strategy = (pg_date(), pg_time()).prop_map(|(date, time)| NaiveDateTime::new(date, time));
     run_property("timestamp text roundtrip", &strategy, |timestamp| {
         let rendered = query_text(client, &render, &[timestamp])?;
-        assert_parses_to(&Type::TIMESTAMP, &rendered, &Cell::Timestamp(*timestamp))
+        assert_parses_to(
+            &Type::TIMESTAMP,
+            &rendered,
+            &Cell::Timestamp(Timestamp::Value(*timestamp)),
+        )
     });
 }
 
@@ -402,7 +398,11 @@ async fn timestamptz_values_roundtrip_through_text_codec() {
     });
     run_property("timestamptz text roundtrip", &strategy, |timestamp| {
         let rendered = query_text(client, &render, &[timestamp])?;
-        assert_parses_to(&Type::TIMESTAMPTZ, &rendered, &Cell::TimestampTz(*timestamp))
+        assert_parses_to(
+            &Type::TIMESTAMPTZ,
+            &rendered,
+            &Cell::TimestampTz(Timestamp::Value(*timestamp)),
+        )
     });
 }
 
@@ -425,7 +425,9 @@ async fn timestamptz_array_values_roundtrip_through_text_codec() {
         assert_parses_to(
             &Type::TIMESTAMPTZ_ARRAY,
             &rendered,
-            &Cell::Array(ArrayCell::TimestampTz(values.clone())),
+            &Cell::Array(ArrayCell::TimestampTz(
+                values.iter().map(|value| value.map(Timestamp::Value)).collect(),
+            )),
         )
     });
 }
@@ -717,7 +719,7 @@ async fn copy_rows_roundtrip_through_copy_codec() {
             array.clone().map_or(Cell::Null, |values| Cell::Array(ArrayCell::String(values))),
             int.map_or(Cell::Null, Cell::I64),
             float.map_or(Cell::Null, Cell::F64),
-            tstz.map_or(Cell::Null, Cell::TimestampTz),
+            tstz.map_or(Cell::Null, |value| Cell::TimestampTz(Timestamp::Value(value))),
             bytes.clone().map_or(Cell::Null, Cell::Bytes),
             b.map_or(Cell::Null, Cell::Bool),
         ];

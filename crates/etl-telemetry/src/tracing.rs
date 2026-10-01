@@ -70,20 +70,13 @@ pub enum LogFlusher {
 
 /// Initializes tracing for test environments.
 ///
-/// Call once at the beginning of tests. Set `ENABLE_TRACING=1` to view tracing
-/// output:
-/// ```bash
-/// ENABLE_TRACING=1 cargo test test_name
-/// ```
+/// Call once at the beginning of tests. Set `ENABLE_TRACING=1` to write tracing
+/// output to the console without changing `APP_ENVIRONMENT`.
 pub fn init_test_tracing() {
     INIT_TEST_TRACING.call_once(|| {
         if std::env::var("ENABLE_TRACING").is_ok() {
-            // Needed because if no env is set, it defaults to prod, which logs
-            // to files instead of terminal, and we need to log to terminal when
-            // `ENABLE_TRACING` env var is set.
-            Environment::Dev.set();
-            let _log_flusher =
-                init_tracing("test").expect("Failed to initialize tracing for tests");
+            let _log_flusher = init_tracing_for_environment("test", Environment::Dev)
+                .expect("Failed to initialize tracing for tests");
         }
     });
 }
@@ -265,12 +258,38 @@ fn normalize_field_name(field_name: &str) -> String {
     field_name.strip_prefix("r#").unwrap_or(field_name).to_owned()
 }
 
-/// Initializes tracing for the application.
+/// Initializes tracing for an explicitly selected environment.
 ///
-/// Sets up structured logging with environment-appropriate configuration.
-/// Production environments log to rotating files, development to console.
-pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
-    init_tracing_with_top_level_fields(app_name, None, None)
+/// Production and staging environments log to rotating JSON files; development
+/// logs to the console. Reads `RUST_LOG` for filtering, defaulting to `info`.
+/// Does not read or change `APP_ENVIRONMENT`.
+///
+/// Keep the returned [`LogFlusher`] alive until logging is finished so file
+/// output is flushed before shutdown.
+pub fn init_tracing_for_environment(
+    app_name: &str,
+    environment: Environment,
+) -> Result<LogFlusher, TracingError> {
+    // Initialize the log tracer to capture logs from the `log` crate and send
+    // them to the `tracing` subscriber. This captures logs from libraries that
+    // use the `log` crate.
+    LogTracer::init()?;
+
+    // Set the default log level to `info` if not specified in the `RUST_LOG`
+    // environment variable.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+
+    let log_flusher = if environment.is_prod() {
+        configure_prod_tracing(filter, app_name)?
+    } else {
+        configure_dev_tracing(filter)?
+    };
+
+    set_tracing_panic_hook();
+
+    // Return the log flusher to ensure logs are flushed before the application
+    // exits without this the logs in memory may not be flushed to the file.
+    Ok(log_flusher)
 }
 
 /// Initializes tracing with optional top-level fields.
@@ -292,28 +311,15 @@ pub fn init_tracing_with_top_level_fields(
         set_global_pipeline_id(pipeline_id);
     }
 
-    // Initialize the log tracer to capture logs from the `log` crate and send
-    // them to the `tracing` subscriber. This captures logs from libraries that
-    // use the `log` crate.
-    LogTracer::init()?;
+    init_tracing_for_environment(app_name, Environment::load()?)
+}
 
-    let is_prod = Environment::load()?.is_prod();
-
-    // Set the default log level to `info` if not specified in the `RUST_LOG`
-    // environment variable.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-
-    let log_flusher = if is_prod {
-        configure_prod_tracing(filter, app_name)?
-    } else {
-        configure_dev_tracing(filter)?
-    };
-
-    set_tracing_panic_hook();
-
-    // Return the log flusher to ensure logs are flushed before the application
-    // exits without this the logs in memory may not be flushed to the file.
-    Ok(log_flusher)
+/// Initializes tracing for the application.
+///
+/// Sets up structured logging with environment-appropriate configuration.
+/// Production environments log to rotating files, development to console.
+pub fn init_tracing(app_name: &str) -> Result<LogFlusher, TracingError> {
+    init_tracing_with_top_level_fields(app_name, None, None)
 }
 
 /// Configures tracing for production environments.

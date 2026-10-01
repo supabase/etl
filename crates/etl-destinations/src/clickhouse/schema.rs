@@ -34,9 +34,13 @@ pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 /// The returned string does not include `Nullable(...)` wrapping — callers are
 /// responsible for applying that when the column is nullable. Arrays always use
 /// `Array(Nullable(T))` since Postgres array elements are nullable.
+///
+/// Names are ClickHouse's canonical spellings (`Bool`, not the `Boolean`
+/// alias), because `system.columns` reports them and the
+/// `RowBinaryWithNamesAndTypes` header check compares them literally.
 fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
     match *typ {
-        Type::BOOL => "Boolean",
+        Type::BOOL => "Bool",
         Type::INT2 => "Int16",
         Type::INT4 => "Int32",
         Type::INT8 => "Int64",
@@ -54,7 +58,7 @@ fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
 /// Returns the ClickHouse array element type for a Postgres array type.
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     match *typ {
-        Type::BOOL_ARRAY => "Boolean",
+        Type::BOOL_ARRAY => "Bool",
         Type::INT2_ARRAY => "Int16",
         Type::INT4_ARRAY => "Int32",
         Type::INT8_ARRAY => "Int64",
@@ -220,13 +224,20 @@ fn is_json_type(typ: &Type) -> bool {
     matches!(typ, &Type::JSON | &Type::JSONB)
 }
 
-/// Trailing CDC column names appended to each replicated row, by engine.
-pub(super) fn trailing_cdc_column_names(engine: ClickHouseEngine) -> &'static [&'static str] {
+/// Trailing CDC columns appended to each replicated row, by engine, as
+/// `(name, ClickHouse type)` pairs.
+pub(super) fn trailing_cdc_columns(
+    engine: ClickHouseEngine,
+) -> &'static [(&'static str, &'static str)] {
     match engine {
-        ClickHouseEngine::MergeTree => {
-            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME]
+        ClickHouseEngine::MergeTree => &[
+            (CDC_OPERATION_COLUMN_NAME, "String"),
+            (CDC_LSN_COLUMN_NAME, "UInt64"),
+            (CDC_TX_ORDINAL_COLUMN_NAME, "UInt64"),
+        ],
+        ClickHouseEngine::ReplacingMergeTree => {
+            &[(ETL_VERSION_COLUMN_NAME, "UInt128"), (ETL_DELETED_COLUMN_NAME, "UInt8")]
         }
-        ClickHouseEngine::ReplacingMergeTree => &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME],
     }
 }
 
@@ -264,9 +275,9 @@ where
         cols.push(format!("  {} {}{}", quote_identifier(&col.name), col_type, default_clause));
     }
 
-    cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
-    cols.push(format!("  {} UInt64", quote_identifier(CDC_LSN_COLUMN_NAME)));
-    cols.push(format!("  {} UInt64", quote_identifier(CDC_TX_ORDINAL_COLUMN_NAME)));
+    for (name, type_name) in trailing_cdc_columns(ClickHouseEngine::MergeTree) {
+        cols.push(format!("  {} {type_name}", quote_identifier(name)));
+    }
 
     let col_defs = cols.join(",\n");
     let quoted_table_name = quote_identifier(table_name);
@@ -307,8 +318,9 @@ where
             )
         })
         .collect();
-    col_defs.push(format!("  {} UInt128", quote_identifier(ETL_VERSION_COLUMN_NAME)));
-    col_defs.push(format!("  {} UInt8", quote_identifier(ETL_DELETED_COLUMN_NAME)));
+    for (name, type_name) in trailing_cdc_columns(ClickHouseEngine::ReplacingMergeTree) {
+        col_defs.push(format!("  {} {type_name}", quote_identifier(name)));
+    }
 
     let order_by =
         pk_columns.iter().map(|c| quote_identifier(&c.name)).collect::<Vec<_>>().join(", ");
@@ -410,7 +422,7 @@ mod tests {
 
     #[test]
     fn scalar_type_mapping() {
-        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Boolean");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Bool");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::CHAR), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BPCHAR), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::VARCHAR), "String");
@@ -441,7 +453,7 @@ mod tests {
 
     #[test]
     fn array_type_mapping() {
-        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Bool");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::MONEY_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TIMETZ_ARRAY), "String");
@@ -618,7 +630,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_single_pk() {
-        // --- GIVEN: single-column PK with a nullable non-PK column ---
+        // GIVEN: a single-column PK with a nullable non-PK column.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -639,9 +651,11 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
-        // --- THEN: trailing etl columns, engine, and ORDER BY are correct ---
+
+        // THEN: the trailing ETL columns, engine, and ORDER BY are correct.
         assert!(sql.contains("\"id\" Int32"));
         assert!(sql.contains("\"name\" Nullable(String)"));
         assert!(sql.contains("\"_etl_version\" UInt128"));
@@ -652,8 +666,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_composite_pk_orders_by_ordinal() {
-        // --- GIVEN: composite PK whose ordinal order differs from table order
-        // ---
+        // GIVEN: a composite PK whose ordinal order differs from table order.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -683,9 +696,11 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
-        // --- THEN: ORDER BY follows PK ordinal, not table ordinal ---
+
+        // THEN: ORDER BY follows the PK ordinal, not the table ordinal.
         assert!(
             sql.contains("ORDER BY (\"tenant_id\", \"id\")"),
             "ORDER BY must follow PK ordinal: {sql}"
@@ -694,7 +709,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_rejects_pkless_schema() {
-        // --- GIVEN: schema with no PK columns ---
+        // GIVEN: a schema with no PK columns.
         let schemas = vec![ColumnSchema {
             name: "value".to_owned(),
             typ: Type::TEXT,
@@ -704,15 +719,17 @@ mod tests {
             nullable: true,
             default_expression: None,
         }];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let err = create_replacing_merge_tree_sql("public_events", &schemas).unwrap_err();
-        // --- THEN: builder rejects with SourceSchemaError ---
+
+        // THEN: the builder rejects it with SourceSchemaError.
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
     }
 
     #[test]
     fn create_table_sql_dispatches_on_engine() {
-        // --- GIVEN: a schema with a single PK column ---
+        // GIVEN: a schema with a single PK column.
         let schemas = vec![ColumnSchema {
             name: "id".to_owned(),
             typ: Type::INT4,
@@ -722,7 +739,9 @@ mod tests {
             nullable: false,
             default_expression: None,
         }];
-        // --- WHEN/THEN: dispatcher selects the matching engine branch ---
+
+        // WHEN: the DDL is built for each engine.
+        // THEN: the dispatcher selects the matching engine branch.
         let merge_tree =
             create_table_sql(ClickHouseEngine::MergeTree, "public_t", &schemas).unwrap();
         assert!(merge_tree.contains("ENGINE = MergeTree()"));
@@ -733,7 +752,7 @@ mod tests {
 
     #[test]
     fn create_current_view_sql_selects_user_columns_only() {
-        // --- GIVEN: a two-column schema ---
+        // GIVEN: a two-column schema.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -754,10 +773,12 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the current-state view DDL ---
+
+        // WHEN: the current-state view DDL is built.
         let sql = create_current_view_sql("public_users", &schemas);
-        // --- THEN: __current suffix, FINAL read, tombstone filter, no etl cols
-        // ---
+
+        // THEN: the view uses the __current suffix, reads FINAL, filters
+        // tombstones, and omits ETL columns.
         assert!(sql.contains("CREATE VIEW IF NOT EXISTS \"public_users__current\""));
         assert!(sql.contains("SELECT \"id\", \"name\""));
         assert!(sql.contains("FROM \"public_users\" FINAL"));
@@ -770,17 +791,5 @@ mod tests {
         let sql = drop_current_view_sql("public_us\"ers");
 
         assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\\\"ers__current\"");
-    }
-
-    #[test]
-    fn trailing_cdc_column_names_by_engine() {
-        assert_eq!(
-            trailing_cdc_column_names(ClickHouseEngine::MergeTree),
-            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,]
-        );
-        assert_eq!(
-            trailing_cdc_column_names(ClickHouseEngine::ReplacingMergeTree),
-            &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME]
-        );
     }
 }

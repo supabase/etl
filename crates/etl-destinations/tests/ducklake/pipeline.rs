@@ -63,17 +63,17 @@ struct SchemaMutationRow {
     email: Option<String>,
 }
 
-/// Expected row shape after simulator-style generated-column rotation.
+/// Expected row shape after generated-column rotation.
 #[derive(Debug, Eq, PartialEq)]
-struct SimulatorDdlRotationRow {
+struct DdlRotationRow {
     id: i64,
     text_col: String,
     ddl_col_0_0: Option<String>,
 }
 
-/// Expected row shape after simulator-style generated-column type changes.
+/// Expected row shape after generated-column type changes.
 #[derive(Debug, Eq, PartialEq)]
-struct SimulatorDdlTypeRow {
+struct DdlTypeRow {
     id: i64,
     text_col: String,
     ddl_col_0_0: Option<String>,
@@ -336,15 +336,15 @@ fn query_schema_mutation_rows(
     result
 }
 
-/// Queries rows after simulator-style generated-column rotation using blocking
+/// Queries rows after generated-column rotation using blocking
 /// DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_simulator_ddl_rotation_rows(
+fn query_ddl_rotation_rows(
     conn: &Connection,
     table_name: &DuckLakeTableName,
-) -> Vec<SimulatorDdlRotationRow> {
+) -> Vec<DdlRotationRow> {
     let sql = format!(
         "select id, text_col, ddl_col_0_0 from {} order by id",
         qualified_lake_table_name(table_name)
@@ -354,7 +354,7 @@ fn query_simulator_ddl_rotation_rows(
     let mut result = Vec::new();
 
     while let Some(row) = rows.next().unwrap() {
-        result.push(SimulatorDdlRotationRow {
+        result.push(DdlRotationRow {
             id: row.get(0).unwrap(),
             text_col: row.get(1).unwrap(),
             ddl_col_0_0: row.get(2).unwrap(),
@@ -364,15 +364,12 @@ fn query_simulator_ddl_rotation_rows(
     result
 }
 
-/// Queries the final row after simulator-style generated-column type changes
+/// Queries the final row after generated-column type changes
 /// using blocking DuckDB APIs.
 ///
 /// Production async code must wrap equivalent DuckDB work in
 /// `run_duckdb_blocking`.
-fn query_simulator_ddl_type_row(
-    conn: &Connection,
-    table_name: &DuckLakeTableName,
-) -> SimulatorDdlTypeRow {
+fn query_ddl_type_row(conn: &Connection, table_name: &DuckLakeTableName) -> DdlTypeRow {
     let sql = format!(
         "select id, text_col, ddl_col_0_0, ddl_col_1_0, ddl_col_2_0, ddl_col_3_0 is not null, \
          ddl_col_4_0 from {} where id = 5",
@@ -380,7 +377,7 @@ fn query_simulator_ddl_type_row(
     );
     let mut statement = conn.prepare(&sql).unwrap();
     let row = statement.query_row([], |row| {
-        Ok(SimulatorDdlTypeRow {
+        Ok(DdlTypeRow {
             id: row.get(0)?,
             text_col: row.get(1)?,
             ddl_col_0_0: row.get(2)?,
@@ -1601,19 +1598,19 @@ async fn schema_change_then_update_and_delete() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_matches_simulator_generated_column_rotation() {
+async fn schema_change_handles_generated_column_rotation() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let table_name = test_table_name("ducklake_schema_simulator_rotation");
+    let table_name = test_table_name("ducklake_schema_rotation");
     let table_id = database
         .create_table(table_name.clone(), true, &[("text_col", "text not null")])
         .await
         .unwrap();
-    let publication_name = "test_pub_ducklake_schema_simulator_rotation";
+    let publication_name = "test_pub_ducklake_schema_rotation";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let lake = create_test_lake("schema_change_matches_simulator_generated_column_rotation").await;
+    let lake = create_test_lake("schema_change_handles_generated_column_rotation").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
@@ -1724,16 +1721,12 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
         vec!["id", "text_col", "ddl_col_0_0"]
     );
     assert_eq!(
-        query_simulator_ddl_rotation_rows(&conn, &ducklake_table_name),
+        query_ddl_rotation_rows(&conn, &ducklake_table_name),
         vec![
-            SimulatorDdlRotationRow { id: 1, text_col: "after_add".to_owned(), ddl_col_0_0: None },
-            SimulatorDdlRotationRow {
-                id: 2,
-                text_col: "after_rename".to_owned(),
-                ddl_col_0_0: None,
-            },
-            SimulatorDdlRotationRow { id: 3, text_col: "after_drop".to_owned(), ddl_col_0_0: None },
-            SimulatorDdlRotationRow {
+            DdlRotationRow { id: 1, text_col: "after_add".to_owned(), ddl_col_0_0: None },
+            DdlRotationRow { id: 2, text_col: "after_rename".to_owned(), ddl_col_0_0: None },
+            DdlRotationRow { id: 3, text_col: "after_drop".to_owned(), ddl_col_0_0: None },
+            DdlRotationRow {
                 id: 4,
                 text_col: "after_readd".to_owned(),
                 ddl_col_0_0: Some("slot0_readded".to_owned()),
@@ -1743,19 +1736,19 @@ async fn schema_change_matches_simulator_generated_column_rotation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_matches_simulator_generated_column_types() {
+async fn schema_change_handles_generated_column_types() {
     init_test_tracing();
 
     let database = spawn_source_database().await;
-    let table_name = test_table_name("ducklake_schema_simulator_types");
+    let table_name = test_table_name("ducklake_schema_types");
     let table_id = database
         .create_table(table_name.clone(), true, &[("text_col", "text not null")])
         .await
         .unwrap();
-    let publication_name = "test_pub_ducklake_schema_simulator_types";
+    let publication_name = "test_pub_ducklake_schema_types";
     database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
 
-    let lake = create_test_lake("schema_change_matches_simulator_generated_column_types").await;
+    let lake = create_test_lake("schema_change_handles_generated_column_types").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
     let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
@@ -1903,8 +1896,8 @@ async fn schema_change_matches_simulator_generated_column_types() {
         ]
     );
     assert_eq!(
-        query_simulator_ddl_type_row(&conn, &ducklake_table_name),
-        SimulatorDdlTypeRow {
+        query_ddl_type_row(&conn, &ducklake_table_name),
+        DdlTypeRow {
             id: 5,
             text_col: "after_numeric".to_owned(),
             ddl_col_0_0: Some("text_4".to_owned()),
@@ -1914,4 +1907,119 @@ async fn schema_change_matches_simulator_generated_column_types() {
             ddl_col_4_0: Some(Decimal::new(1234567, 2)),
         }
     );
+}
+
+/// Verifies COPY and CDC preserve special temporal values in persisted DuckLake
+/// data.
+#[tokio::test(flavor = "multi_thread")]
+async fn special_temporal_values_survive_copy_and_cdc() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("special_temporal_values");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[
+                ("id", "bigint primary key"),
+                ("d", "date"),
+                ("t", "time"),
+                ("tz", "timetz"),
+                ("ts", "timestamp"),
+                ("tsz", "timestamptz"),
+                ("da", "date[]"),
+                ("ta", "time[]"),
+                ("tsa", "timestamp[]"),
+                ("tsza", "timestamptz[]"),
+            ],
+        )
+        .await
+        .unwrap();
+    let publication = "special_temporal_values_pub";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let source = database.client.as_ref().unwrap();
+    let source_table = table_name.as_quoted_identifier();
+    // Include null array elements and both infinities to distinguish them from
+    // nulls.
+    let values = "'-infinity', '24:00:00', '24:00:00+02', '0044-02-01 11:12:13 BC', 'infinity',
+        array['-infinity'::date, null, 'infinity'::date, '0001-01-01 BC'::date],
+        array['24:00:00'::time, null, '00:00:00'::time],
+        array['infinity'::timestamp, null, '-infinity'::timestamp, '0044-02-01 11:12:13 \
+                  BC'::timestamp],
+        array['-infinity'::timestamptz, null, 'infinity'::timestamptz]";
+    source
+        .batch_execute(&format!(
+            "alter table {source_table} replica identity full; insert into {source_table} values \
+             (1, {values}), (2, {values})"
+        ))
+        .await
+        .unwrap();
+
+    let lake = create_test_lake("special_temporal_values").await;
+    let store = NotifyingStore::new();
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+    let destination = build_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        publication.to_owned(),
+        store,
+        destination.clone(),
+    );
+    pipeline.start().await.unwrap();
+    synced.notified().await;
+    let applied = destination
+        .wait_for_events(vec![
+            EventCondition::TableCount(EventType::Insert, table_id, 1),
+            EventCondition::TableCount(EventType::Update, table_id, 1),
+            EventCondition::TableCount(EventType::Delete, table_id, 1),
+        ])
+        .await;
+    source
+        .batch_execute(&format!(
+            "insert into {source_table} values (3, {values});
+        update {source_table} set d = 'infinity', tsz = '-infinity' where id = 2;
+        delete from {source_table} where id = 3;"
+        ))
+        .await
+        .unwrap();
+    applied.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&lake.catalog_url, &lake.data_url);
+
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let destination_table =
+        qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
+    let total: i64 = conn
+        .query_row(&format!("select count(*) from {destination_table}"), [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(total, 2);
+    for (name, predicate) in [
+        (
+            "date and timestamptz",
+            "(id = 1 and d = date '-infinity' and tsz = timestamptz 'infinity') or (id = 2 and d \
+             = date 'infinity' and tsz = timestamptz '-infinity')",
+        ),
+        ("time", "t = time '24:00:00' and t <> time '00:00:00'"),
+        ("timetz", "tz = '24:00:00+02'"),
+        ("timestamp", "ts = timestamp '-0043-02-01 11:12:13'"),
+        ("date array", "da = [date '-infinity', null, date 'infinity', date '0000-01-01']"),
+        ("time array", "ta = [time '24:00:00', null, time '00:00:00']"),
+        (
+            "timestamp array",
+            "tsa = [timestamp 'infinity', null, timestamp '-infinity', timestamp '-0043-02-01 \
+             11:12:13']",
+        ),
+        ("timestamptz array", "tsza = [timestamptz '-infinity', null, timestamptz 'infinity']"),
+    ] {
+        let valid: i64 = conn
+            .query_row(
+                &format!("select count(*) from {destination_table} where {predicate}"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(valid, 2, "{name}");
+    }
 }

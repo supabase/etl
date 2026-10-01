@@ -81,11 +81,17 @@ impl ConnectionKind {
 }
 
 /// Builds a rustls client config from PEM-encoded trusted root certificates.
+///
+/// Rejects bundles with no certificates before constructing the client config.
 fn tls_client_config_from_root_certs(trusted_root_certs: &str) -> EtlResult<ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(trusted_root_certs.as_bytes()) {
         let cert = cert?;
         root_store.add(cert)?;
+    }
+
+    if root_store.is_empty() {
+        bail!(ErrorKind::ConfigError, "Source TLS trust bundle contains no certificates");
     }
 
     Ok(ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth())
@@ -834,6 +840,33 @@ mod tests {
     };
 
     use super::*;
+
+    /// Certificate-less bundles fail before a crypto provider or connection
+    /// is needed, including nonblank input silently skipped by the PEM parser.
+    #[test]
+    fn tls_client_config_rejects_bundles_without_certificates() {
+        // These PEM payloads contain a dummy byte; their labels are filtered
+        // out before certificate DER parsing.
+        for (case, trusted_root_certs) in [
+            ("empty", ""),
+            ("whitespace", " \t\r\n"),
+            ("plain_text", "placeholder-certificate"),
+            (
+                "trusted_certificate",
+                "-----BEGIN TRUSTED CERTIFICATE-----\nAA==\n-----END TRUSTED CERTIFICATE-----\n",
+            ),
+            ("private_key", "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n"),
+        ] {
+            let err = tls_client_config_from_root_certs(trusted_root_certs).unwrap_err();
+
+            assert_eq!(err.kind(), ErrorKind::ConfigError, "{case}");
+            assert_eq!(
+                err.description(),
+                Some("Source TLS trust bundle contains no certificates"),
+                "{case}"
+            );
+        }
+    }
 
     /// Closing the owner channel must release a socket even when the server
     /// never responds to an already-dispatched query.

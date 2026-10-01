@@ -1,6 +1,7 @@
 //! Local Multigres cluster management.
 
 use std::{
+    path::PathBuf,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -56,6 +57,10 @@ struct TestArgs {
     /// Host port for the multigateway PostgreSQL endpoint.
     #[arg(long, env = "MULTIGRES_GATEWAY_PORT", default_value_t = DEFAULT_GATEWAY_PORT)]
     gateway_port: u16,
+
+    /// Run the Multigres tests from an existing nextest archive.
+    #[arg(long)]
+    archive_file: Option<PathBuf>,
 }
 
 /// Resolved Docker Compose command.
@@ -167,20 +172,13 @@ impl TestArgs {
         self.recreate_cluster()?;
 
         let mut test = Command::new("cargo");
-        test.args([
-            "nextest",
-            "run",
-            "--locked",
-            "-p",
-            "etl",
-            "--features",
-            "test-utils",
-            "--test",
-            "multigres",
-            "--run-ignored",
-            "only",
-            "--no-capture",
-        ]);
+        test.args(["nextest", "run"]);
+        if let Some(archive) = &self.archive_file {
+            test.arg("--archive-file").arg(archive).args(["--workspace-remap", "."]);
+        } else {
+            test.args(["--locked", "-p", "etl", "--features", "test-utils", "--test", "multigres"]);
+        }
+        test.args(["-E", "binary_id(etl::multigres)", "--run-ignored", "only", "--no-capture"]);
         test.env("MULTIGRES_GW_HOST", "127.0.0.1");
         test.env("MULTIGRES_GW_PORT", self.gateway_port.to_string());
         test.env("MULTIGRES_GW_USER", "postgres");

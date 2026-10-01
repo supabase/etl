@@ -123,7 +123,11 @@ pipeline:
 
 Those host, port, and password values match the published `cargo x init` Docker
 defaults. For a remote ClickHouse, change `url`, `user`, `password`, and
-`database`, and enable TLS on both connections.
+`database`, and enable TLS on both connections. Keep credentials out of `url`:
+a value with embedded credentials, such as
+`https://alice:secret@clickhouse.example:8443`, or with a query string is
+rejected when the configuration is loaded, because the URL is treated as
+non-secret configuration.
 
 Create `/absolute/path/to/etl-config/prod.yaml` for production overrides. It
 may be empty when `base.yaml` contains the complete configuration:
@@ -224,11 +228,9 @@ allow the greater of `stall_timeout_ms` and PostgreSQL's `wal_sender_timeout`
 expected copy batch and finalization durations.
 
 For Kubernetes, use `/livez` for startup and liveness, and `/readyz` for readiness
-on the configured port. The optional ETL API configures these independently under
-`k8s.replicator_health.startup`, `.liveness`, and `.readiness`. Each supplied block
-requires `period_seconds`, `timeout_seconds`, and `failure_threshold_count`;
-omitted blocks generate no probe. With no probes, the API also omits the listener.
-Enable probes only with a replicator image that supports these endpoints.
+on the configured port. Configure probe timing and failure thresholds in the Pod
+specification. Enable probes only with a replicator image that supports these
+endpoints and has its health listener enabled.
 
 ## Recovery and operations
 

@@ -18,7 +18,7 @@ pub(crate) const READ_REPLICA_PORT_OFFSET: u16 = 1000;
 pub(crate) const NIGHTLY_TOOLCHAIN: &str = "nightly-2026-09-16";
 
 /// Packages covered by destination-focused xtask presets.
-const DESTINATION_PACKAGES: &[&str] = &["etl-destinations", "etl-api", "etl-replicator"];
+const DESTINATION_PACKAGES: &[&str] = &["etl-destinations", "etl-replicator"];
 /// ANSI yellow foreground color.
 const YELLOW: &str = "\x1b[33m";
 /// ANSI cyan foreground color.

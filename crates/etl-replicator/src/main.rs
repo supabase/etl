@@ -145,7 +145,7 @@ fn try_main() -> ReplicatorResult<()> {
     debug!("replicator bootstrap initialized");
 
     // We prepare the notification client used to send errors.
-    let notification_client = init::init_error_notification(&replicator_config);
+    let notification_client = init::init_error_notification(&replicator_config)?;
 
     debug!("starting tokio runtime");
 

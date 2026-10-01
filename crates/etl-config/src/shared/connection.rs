@@ -330,7 +330,7 @@ impl IntoConnectOptions<SqlxConnectOptions> for PgConnectionConfig {
         // TODO: Enable TCP keepalive once available in sqlx. The
         // tcp_keepalive_time() method was added in PR #3559 but may not be
         // available in the current sqlx version (0.8.6). When upgrading sqlx,
-        // uncomment the following to enable keepalive for API/state
+        // uncomment the following to enable keepalive for metadata
         // connections:
         //
         // ```

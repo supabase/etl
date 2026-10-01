@@ -32,7 +32,7 @@ use chrono::NaiveDate;
 use chrono::{TimeDelta, Utc};
 use duckdb::Connection;
 use etl::{
-    data::{Cell, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
+    data::{Cell, Date, OldTableRow, PartialTableRow, SizeHint, TableRow, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
         TableCopyAttemptId, TableCopyBatchId,
@@ -94,7 +94,7 @@ use crate::support::ducklake::{
 static DUCKLAKE_TEST_HOOKS_GUARD: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
-/// Maintenance store wrapper that can suspend watcher state reads.
+/// Maintenance store wrapper that can suspend watcher reads after quiescence.
 #[cfg(feature = "test-utils")]
 #[derive(Clone)]
 struct LoadBlockingExternalMaintenanceStore {
@@ -109,7 +109,7 @@ impl LoadBlockingExternalMaintenanceStore {
         Self { inner, load_blocked: Arc::new(AtomicBool::new(false)) }
     }
 
-    /// Controls whether watcher state reads remain pending until timeout.
+    /// Makes reads after quiescence remain pending until timeout.
     fn set_load_blocked(&self, blocked: bool) {
         self.load_blocked.store(blocked, Ordering::Relaxed);
     }
@@ -119,11 +119,17 @@ impl LoadBlockingExternalMaintenanceStore {
 #[async_trait::async_trait]
 impl ExternalMaintenanceStore for LoadBlockingExternalMaintenanceStore {
     async fn load_state(&self) -> EtlResult<ExternalMaintenanceState> {
-        if self.load_blocked.load(Ordering::Relaxed) {
+        let state = self.inner.load_state().await?;
+        if self.load_blocked.load(Ordering::Relaxed)
+            && state
+                .replicator
+                .as_ref()
+                .is_some_and(|status| status.state == ExternalMaintenanceReplicatorState::Quiesced)
+        {
             return std::future::pending().await;
         }
 
-        self.inner.load_state().await
+        Ok(state)
     }
 
     async fn request_operations(
@@ -953,28 +959,28 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
     let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
     let store = MemoryStore::new();
     store.store_table_schema(schema.clone()).await.unwrap();
+    let old_row = TableRow::new(vec![Cell::I32(1), Cell::String("old".to_owned())]);
+    let target_bytes = u64::try_from(old_row.size_hint()).unwrap() * 2;
     let destination =
-        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 1, store.clone())
+        DuckLakeDestination::builder(catalog_url.clone(), data_url.clone(), 2, store.clone())
             .copy_buffer(DuckLakeCopyBufferConfig {
                 enabled: true,
-                target_bytes: 1024 * 1024,
-                max_total_bytes: 2 * 1024 * 1024,
+                target_bytes,
+                max_total_bytes: target_bytes * 2,
             })
             .build()
             .await
             .unwrap();
 
+    write_table_rows_with_status(&destination, &replicated_table_schema, vec![old_row.clone()])
+        .await
+        .unwrap();
     let append_reached = arm_pause_next_copy_append_for_tests();
     let write_task = tokio::spawn({
         let destination = destination.clone();
         let replicated_table_schema = replicated_table_schema.clone();
         async move {
-            destination
-                .write_table_rows_for_tests(
-                    &replicated_table_schema,
-                    vec![TableRow::new(vec![Cell::I32(1), Cell::String("cancelled".to_owned())])],
-                )
-                .await
+            destination.write_table_rows_for_tests(&replicated_table_schema, vec![old_row]).await
         }
     });
     append_reached.await.unwrap();
@@ -986,8 +992,10 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
         let replicated_table_schema = replicated_table_schema.clone();
         async move { drop_table_for_copy_with_result(&destination, &replicated_table_schema).await }
     });
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut reset_task).await.is_err());
+    let reset_waited =
+        tokio::time::timeout(Duration::from_millis(100), &mut reset_task).await.is_err();
     release_paused_copy_append_for_tests();
+    assert!(reset_waited);
     tokio::time::timeout(Duration::from_secs(5), reset_task).await.unwrap().unwrap().unwrap();
 
     store.prepare_table_state_for_copy(schema.id).await.unwrap();
@@ -1001,8 +1009,68 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
     .unwrap();
     write_table_rows_with_status(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
-    let row_count = count_rows_when_visible(&catalog_url, &data_url, &table_name).await;
-    assert_eq!(row_count, 1);
+    destination.shutdown().await.unwrap();
+    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
+    let rows = conn
+        .prepare(&format!("select id, name from {}", qualified_lake_table_name(&table_name)))
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, vec![(1, "recopied".to_owned())]);
+    reset_paused_copy_append_for_tests();
+}
+
+/// Native COPY retains maintenance exclusion and shutdown admission after its
+/// caller is cancelled. Repeated shutdown remains safe and rejects new work.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_waits_for_cancelled_copy_and_rejects_new_work() {
+    let _test_hook_guard = acquire_ducklake_test_hook_guard().await;
+    reset_paused_copy_append_for_tests();
+    let lake = create_test_lake("shutdown_waits_for_cancelled_copy_and_rejects_new_work").await;
+    let schema = make_schema(171, "public", "cancelled_copy_shutdown");
+    let replicated_schema = make_replicated_table_schema(&schema);
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let destination =
+        DuckLakeDestination::builder(lake.catalog_url.clone(), lake.data_url.clone(), 2, store)
+            .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
+            .build()
+            .await
+            .unwrap();
+    let reached = arm_pause_next_copy_append_for_tests();
+    let task = tokio::spawn({
+        let destination = destination.clone();
+        let replicated_schema = replicated_schema.clone();
+        async move {
+            write_table_rows_with_status(
+                &destination,
+                &replicated_schema,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("copy".to_owned())])],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let mut maintenance = Box::pin(destination.acquire_external_maintenance_pause());
+    let maintenance_waited = maintenance.as_mut().now_or_never().is_none();
+    drop(maintenance);
+    let mut shutdown = Box::pin(destination.shutdown());
+    let shutdown_waited =
+        tokio::time::timeout(Duration::from_millis(100), &mut shutdown).await.is_err();
+    release_paused_copy_append_for_tests();
+    assert!(maintenance_waited);
+    assert!(shutdown_waited);
+    tokio::time::timeout(Duration::from_secs(5), shutdown).await.unwrap().unwrap();
+    destination.shutdown().await.unwrap();
+    let error = write_table_rows_with_status(&destination, &replicated_schema, Vec::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.description(), Some("DuckLake shutdown requested"));
     reset_paused_copy_append_for_tests();
 }
 
@@ -4360,6 +4428,9 @@ async fn external_inline_flush_retries_pool_refresh_before_replication_resumes()
     assert_eq!(destination.streaming_connection_open_count_for_tests(), 2);
     assert_eq!(destination.copy_connection_open_count_for_tests(), 2);
 
+    // Arm the store outage before requesting the pause so verification I/O
+    // cannot consume its lifetime before the watcher sees the outage.
+    watcher_store.set_load_blocked(true);
     let second_run_id = "pipe-1047-inline-flush-store-timeout";
     let second_requested_at = Utc::now();
     sqlx::query(
@@ -4386,32 +4457,6 @@ async fn external_inline_flush_retries_pool_refresh_before_replication_resumes()
         ExternalMaintenanceReplicatorState::Quiesced,
     )
     .await;
-
-    let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
-    assert_eq!(flush_inlined_rows(&conn, &table_name), 8);
-    drop(conn);
-
-    // Hide the completed run from the watcher until its local pause expires.
-    watcher_store.set_load_blocked(true);
-    let second_completed_at = Utc::now();
-    let second_successful_operations = ExternalMaintenanceOperationHistory {
-        inline_flush: Some(ExternalMaintenanceOperationRun {
-            run_id: Some(second_run_id.to_owned()),
-            completed_at: second_completed_at,
-        }),
-        ..ExternalMaintenanceOperationHistory::default()
-    };
-    sqlx::query(
-        "update etl.external_maintenance_state set active_run = null, pause_request = null, \
-         last_successful_operations = $2, last_completed_at = $3, updated_at = now() where \
-         pipeline_id = $1",
-    )
-    .bind(pipeline_id)
-    .bind(Json(second_successful_operations))
-    .bind(second_completed_at)
-    .execute(&coordination_pool)
-    .await
-    .unwrap();
 
     wait_for_replicator_maintenance_state(
         &coordination_store,
@@ -5116,7 +5161,7 @@ async fn type_mapping_round_trip() {
                 Cell::String("hello".to_owned()),
                 Cell::F64(PI),
                 Cell::Bool(true),
-                Cell::Date(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap()),
+                Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2024, 6, 15).unwrap())),
             ])],
         )
         .await

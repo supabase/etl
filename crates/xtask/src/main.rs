@@ -5,9 +5,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
-    FixArgs, FixPipelineArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs,
-    PgFillTableArgs, PostgresArgs, RotateEncryptionKeyArgs, RunArgs, SeedArgs, SetupArgs, TestArgs,
-    TestClickhouseArgs, TestSnowflakeArgs, VendorDuckdbArgs,
+    FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs, PgFillTableArgs,
+    PostgresArgs, RunArgs, SeedArgs, SetupArgs, TestArgs, TestClickhouseArgs, TestSnowflakeArgs,
+    VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -41,9 +41,6 @@ enum Command {
     Init(InitArgs),
     /// Run database migrations.
     Migrate(MigrateArgs),
-    /// Fix a pipeline by applying one of the available repair sub-commands.
-    #[command(name = "fix-pipeline")]
-    FixPipeline(FixPipelineArgs),
     /// Verify MSRV consistency across Cargo.toml, rust-toolchain.toml, and
     /// cargo-msrv.
     Msrv(MsrvArgs),
@@ -56,15 +53,10 @@ enum Command {
     PgFillTable(PgFillTableArgs),
     /// Manage test Postgres clusters.
     Postgres(PostgresArgs),
-    /// Run the API or replicator with generated local configuration.
+    /// Run the replicator with generated local configuration.
     Run(RunArgs),
-    /// Generate local configuration. API setup also applies Kubernetes
-    /// resources.
+    /// Generate local replicator configuration.
     Setup(SetupArgs),
-    /// Re-encrypt API source and destination configs with the latest configured
-    /// key.
-    #[command(name = "rotate-encryption-key")]
-    RotateEncryptionKey(RotateEncryptionKeyArgs),
     /// Seed a Postgres database with test tables and data for destination
     /// examples.
     Seed(SeedArgs),
@@ -96,7 +88,6 @@ async fn main() -> Result<()> {
         Command::Fmt(cmd) => cmd.run(),
         Command::Init(cmd) => cmd.run(),
         Command::Migrate(cmd) => cmd.run(),
-        Command::FixPipeline(cmd) => cmd.run().await,
         Command::Msrv(cmd) => cmd.run(),
         Command::Multigres(cmd) => cmd.run(),
         Command::Nextest(cmd) => cmd.run(),
@@ -104,7 +95,6 @@ async fn main() -> Result<()> {
         Command::Postgres(cmd) => cmd.run(),
         Command::Run(cmd) => cmd.run(),
         Command::Setup(cmd) => cmd.run(),
-        Command::RotateEncryptionKey(cmd) => cmd.run().await,
         Command::Seed(cmd) => cmd.run(),
         Command::Test(cmd) => cmd.run(),
         Command::TestClickhouse(cmd) => cmd.run(),

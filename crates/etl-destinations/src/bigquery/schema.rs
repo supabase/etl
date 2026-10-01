@@ -2,13 +2,16 @@ use etl::{
     error::EtlResult,
     schema::{
         ColumnSchema, DefaultExpression, ReplicatedTableSchema, Type, is_array_type,
-        parse_default_expression,
+        parse_default_expression, unquote_postgres_string_literal,
     },
 };
 use gcp_bigquery_client::storage::{ColumnMode, ColumnType, FieldDescriptor, TableDescriptor};
 use tracing::warn;
 
-use crate::bigquery::{BIGQUERY_COLUMN_NAME_MAPPING, sql::quote_identifier};
+use crate::bigquery::{
+    BIGQUERY_COLUMN_NAME_MAPPING,
+    sql::{quote_identifier, quote_string_literal},
+};
 
 /// Special column name for Change Data Capture operations in BigQuery.
 const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
@@ -60,10 +63,15 @@ fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String
 }
 
 /// Renders a parsed default expression as BigQuery SQL.
+///
+/// Literal variants carry the PostgreSQL SQL literal. They are decoded and
+/// re-quoted with GoogleSQL escapes because the dialects disagree on quotes and
+/// backslashes: PostgreSQL doubles quotes and stores backslashes, GoogleSQL
+/// rejects doubled quotes and interprets backslashes.
 fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression) => {
-            is_bigquery_string_default_type(typ).then(|| expression.clone())
+        DefaultExpression::StringLiteral(expression) if is_bigquery_string_default_type(typ) => {
+            bigquery_string_literal(expression)
         }
         DefaultExpression::NumericLiteral(expression) => {
             if is_bigquery_numeric_default_type(typ) {
@@ -77,28 +85,35 @@ fn render_default_expression(expression: &DefaultExpression, typ: &Type) -> Opti
         DefaultExpression::BooleanLiteral(expression) => {
             matches!(typ, &Type::BOOL).then(|| expression.clone())
         }
-        DefaultExpression::DateLiteral(expression) => {
-            matches!(typ, &Type::DATE).then(|| format!("DATE {expression}"))
+        DefaultExpression::DateLiteral(expression) if matches!(typ, &Type::DATE) => {
+            bigquery_string_literal(expression).map(|literal| format!("DATE {literal}"))
         }
-        DefaultExpression::TimeLiteral(expression) => {
-            matches!(typ, &Type::TIME).then(|| format!("TIME {expression}"))
+        DefaultExpression::TimeLiteral(expression) if matches!(typ, &Type::TIME) => {
+            bigquery_string_literal(expression).map(|literal| format!("TIME {literal}"))
         }
-        DefaultExpression::TimeTzLiteral(expression) => {
-            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        DefaultExpression::TimeTzLiteral(expression) if matches!(typ, &Type::TIMETZ) => {
+            bigquery_string_literal(expression)
         }
-        DefaultExpression::TimestampLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMP).then(|| format!("DATETIME {expression}"))
+        DefaultExpression::TimestampLiteral(expression) if matches!(typ, &Type::TIMESTAMP) => {
+            bigquery_string_literal(expression).map(|literal| format!("DATETIME {literal}"))
         }
-        DefaultExpression::TimestampTzLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMPTZ).then(|| format!("TIMESTAMP {expression}"))
+        DefaultExpression::TimestampTzLiteral(expression) if matches!(typ, &Type::TIMESTAMPTZ) => {
+            bigquery_string_literal(expression).map(|literal| format!("TIMESTAMP {literal}"))
         }
-        DefaultExpression::IntervalLiteral(expression) => {
-            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
+        DefaultExpression::IntervalLiteral(expression) if matches!(typ, &Type::INTERVAL) => {
+            bigquery_string_literal(expression)
         }
-        DefaultExpression::JsonLiteral(expression) => {
-            is_json_type(typ).then(|| format!("JSON {expression}"))
+        DefaultExpression::JsonLiteral(expression) if is_json_type(typ) => {
+            bigquery_string_literal(expression).map(|literal| format!("JSON {literal}"))
         }
+        _ => None,
     }
+}
+
+/// Re-quotes one parser-validated PostgreSQL string literal with GoogleSQL
+/// escapes.
+fn bigquery_string_literal(expression: &str) -> Option<String> {
+    unquote_postgres_string_literal(expression).map(|value| quote_string_literal(&value))
 }
 
 /// Returns whether this Postgres type is created as a BigQuery string column
@@ -257,7 +272,9 @@ pub(crate) fn column_schemas_to_table_descriptor(
             Type::FLOAT4 => ColumnType::Float,
             Type::FLOAT8 => ColumnType::Double,
             Type::TIMESTAMPTZ => ColumnType::Int64,
-            Type::OID => ColumnType::Int32,
+            // OIDs are unsigned 32-bit values, so values above `i32::MAX` need a
+            // 64-bit field to keep their sign.
+            Type::OID => ColumnType::Int64,
             Type::BYTEA => ColumnType::Bytes,
             Type::BOOL_ARRAY => ColumnType::Bool,
             Type::INT2_ARRAY => ColumnType::Int32,
@@ -266,7 +283,7 @@ pub(crate) fn column_schemas_to_table_descriptor(
             Type::FLOAT4_ARRAY => ColumnType::Float,
             Type::FLOAT8_ARRAY => ColumnType::Double,
             Type::TIMESTAMPTZ_ARRAY => ColumnType::Int64,
-            Type::OID_ARRAY => ColumnType::Int32,
+            Type::OID_ARRAY => ColumnType::Int64,
             Type::BYTEA_ARRAY => ColumnType::Bytes,
             _ => ColumnType::String,
         };
@@ -317,13 +334,18 @@ pub(crate) fn column_schemas_to_table_descriptor(
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use etl::schema::{
-        ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
-        TableSchema, Type,
+    use etl::{
+        data::{ArrayCell, Cell, TableRow},
+        schema::{
+            ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId, TableName,
+            TableSchema, Type,
+        },
     };
     use gcp_bigquery_client::storage::{ColumnMode, ColumnType};
+    use prost::Message;
 
     use super::*;
+    use crate::bigquery::encoding::BigQueryTableRow;
 
     /// Creates a test column schema with common defaults.
     fn test_column(
@@ -486,6 +508,32 @@ mod tests {
 
         for (typ, expression, expected) in cases {
             assert_eq!(default_expression_sql(expression, &typ).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn default_expression_requotes_postgres_string_literals_for_bigquery() {
+        // PostgreSQL literals double single quotes and keep backslashes as
+        // ordinary characters. GoogleSQL literals use backslash escapes, reject
+        // doubled quotes, and cannot contain a raw newline.
+        let cases = [
+            (Type::TEXT, "'don''t'::text", r"'don\'t'"),
+            (Type::TEXT, r"'C:\temp\new'::text", r"'C:\\temp\\new'"),
+            (Type::TEXT, "'line\nnext'::text", r"'line\nnext'"),
+            (
+                Type::JSONB,
+                r#"'{"path": "C:\\temp", "note": "it''s"}'::jsonb"#,
+                r#"JSON '{"path": "C:\\\\temp", "note": "it\'s"}'"#,
+            ),
+            (Type::DATE, "'2026-01-01'::date", "DATE '2026-01-01'"),
+        ];
+
+        for (typ, expression, expected) in cases {
+            assert_eq!(
+                default_expression_sql(expression, &typ).as_deref(),
+                Some(expected),
+                "expression: {expression}"
+            );
         }
     }
 
@@ -690,5 +738,57 @@ mod tests {
         assert!(matches!(descriptor.field_descriptors[8].mode, ColumnMode::Repeated));
         assert!(matches!(descriptor.field_descriptors[9].typ, ColumnType::Int64));
         assert!(matches!(descriptor.field_descriptors[9].mode, ColumnMode::Repeated));
+    }
+
+    /// Decodes integer fields the way BigQuery reads them: with the proto type
+    /// declared in the writer descriptor, not the type used to encode them.
+    fn decode_integers_as(typ: &ColumnType, mut buf: &[u8]) -> Vec<i64> {
+        let mut values = Vec::new();
+        while !buf.is_empty() {
+            let (_, wire_type) = prost::encoding::decode_key(&mut buf).unwrap();
+            let ctx = prost::encoding::DecodeContext::default();
+            match typ {
+                ColumnType::Int32 => {
+                    let mut decoded: Vec<i32> = Vec::new();
+                    prost::encoding::int32::merge_repeated(wire_type, &mut decoded, &mut buf, ctx)
+                        .unwrap();
+                    values.extend(decoded.into_iter().map(i64::from));
+                }
+                ColumnType::Int64 => {
+                    prost::encoding::int64::merge_repeated(wire_type, &mut values, &mut buf, ctx)
+                        .unwrap();
+                }
+                _ => panic!("unexpected integer column type"),
+            }
+        }
+        values
+    }
+
+    #[test]
+    fn column_schemas_to_table_descriptor_keeps_oid_values_above_i32_max() {
+        let schema = test_replicated_schema(vec![
+            test_column("oid_col", Type::OID, 1, true, None),
+            test_column("oid_array_col", Type::OID_ARRAY, 2, true, None),
+        ]);
+        let descriptor = column_schemas_to_table_descriptor(&schema, false);
+
+        // OIDs are unsigned 32-bit values, so a large cluster hands out values
+        // above `i32::MAX`.
+        let oid = u32::MAX;
+        let oid_array = vec![Some(3_000_000_000), Some(7)];
+
+        let scalar_row = BigQueryTableRow::try_from(TableRow::new(vec![Cell::U32(oid)])).unwrap();
+        assert_eq!(
+            decode_integers_as(&descriptor.field_descriptors[0].typ, &scalar_row.encode_to_vec()),
+            vec![i64::from(oid)]
+        );
+
+        let array_row =
+            BigQueryTableRow::try_from(TableRow::new(vec![Cell::Array(ArrayCell::U32(oid_array))]))
+                .unwrap();
+        assert_eq!(
+            decode_integers_as(&descriptor.field_descriptors[1].typ, &array_row.encode_to_vec()),
+            vec![3_000_000_000, 7]
+        );
     }
 }

@@ -15,11 +15,12 @@ pub struct SupabaseConfig {
     ///
     /// This URL is used to send error notifications to the Supabase API. If not
     /// provided, error notifications will not be sent.
+    /// The replicator rejects empty or whitespace-only URLs.
     pub api_url: Option<String>,
     /// Supabase API key for authentication.
     ///
     /// This API key is used to authenticate requests to the Supabase API.
-    /// Required when `api_url` is provided.
+    /// The replicator requires a nonblank key when `api_url` is provided.
     pub api_key: Option<SecretString>,
     /// Optional ConfigCat SDK key for feature flag integration used at
     /// Supabase.

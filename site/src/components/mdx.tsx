@@ -9,6 +9,7 @@ import {
   Construction,
   Database,
   DatabaseZap,
+  FlaskConical,
   RefreshCw,
   Rocket,
   Terminal,
@@ -28,6 +29,7 @@ const docPathIcons: Record<string, LucideIcon> = {
 
 const destinationStatuses = {
   stable: { icon: BadgeCheck, label: 'Stable' },
+  'private-alpha': { icon: FlaskConical, label: 'Private alpha' },
   'in-progress': { icon: Construction, label: 'In progress' },
   deprecated: { icon: ArchiveX, label: 'Deprecated' },
 } as const;

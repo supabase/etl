@@ -85,8 +85,8 @@ struct DbArgs {
     /// Postgres database user name (must have REPLICATION privileges)
     #[arg(long)]
     db_username: String,
-    /// Postgres database user password (optional if using trust authentication)
-    #[arg(long)]
+    /// Postgres database user password (optional with trust authentication).
+    #[arg(long, env = "TESTS_DATABASE_PASSWORD", hide_env_values = true)]
     db_password: Option<String>,
 }
 

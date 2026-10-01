@@ -58,8 +58,9 @@ use crate::{
             retain_truncates_after_sequence_key,
         },
         client::{
-            DuckLakeConnectionManager, DuckLakeDedicatedConnection, DuckLakeInterruptRegistry,
-            build_warm_ducklake_pool, format_query_error_detail,
+            DuckLakeBlockingGuard, DuckLakeConnectionManager, DuckLakeDedicatedConnection,
+            DuckLakeInterruptRegistry, build_warm_ducklake_pool, drain_duckdb_blocking_operations,
+            ducklake_shutdown_requested_error, format_query_error_detail,
             is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_dedicated_blocking_with_context,
         },
@@ -423,12 +424,34 @@ impl DuckLakeCopyBufferHandle {
     }
 }
 
+/// Keeps table ordering and maintenance exclusion alive through native writes.
+#[derive(Clone)]
+pub(super) struct DuckLakeWriteGuard {
+    /// Prevents reset or a later write from overtaking this operation.
+    _table_write_permit: Arc<OwnedSemaphorePermit>,
+    /// Prevents external maintenance from overlapping this operation.
+    _checkpoint_guard: Arc<OwnedRwLockReadGuard<()>>,
+}
+
+impl DuckLakeWriteGuard {
+    /// Shares the caller's guards with an operation that may outlive it.
+    fn new(
+        table_write_permit: &Arc<OwnedSemaphorePermit>,
+        checkpoint_guard: &Arc<OwnedRwLockReadGuard<()>>,
+    ) -> Self {
+        Self {
+            _table_write_permit: Arc::clone(table_write_permit),
+            _checkpoint_guard: Arc::clone(checkpoint_guard),
+        }
+    }
+}
+
 /// Table-local replay state retained while deciding whether work is pending.
 struct DuckLakeTableReplayCursor {
     table_name: DuckLakeTableName,
     replay_epoch: String,
     last_sequence_key: Option<EventSequenceKey>,
-    table_write_permit: OwnedSemaphorePermit,
+    table_write_permit: Arc<OwnedSemaphorePermit>,
 }
 
 /// Streaming and initial-copy pools installed as one destination generation.
@@ -795,6 +818,7 @@ where
         if let Some(sampler) = sampler {
             abort_and_join(sampler).await?;
         }
+        drain_duckdb_blocking_operations(Arc::clone(&self.blocking_slots), self.pool_size).await;
 
         Ok(())
     }
@@ -1841,8 +1865,9 @@ where
         .await?;
         let copy_manager = manager.new_pool_manager();
         let manager = Arc::new(manager);
-        let pool =
-            Arc::new(build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write").await?);
+        let pool = Arc::new(
+            build_warm_ducklake_pool(manager.as_ref().clone(), pool_size, "write", ()).await?,
+        );
         let blocking_slots = Arc::new(Semaphore::new(pool_size as usize));
 
         // `target_file_size` is a catalog-wide DuckLake option consumed during
@@ -1948,6 +1973,7 @@ where
             Arc::clone(&blocking_slots),
             Arc::clone(&table_creation_slots),
             Arc::clone(&applied_batches_table_created),
+            (),
         )
         .await?;
         ensure_streaming_progress_table_exists(
@@ -1955,11 +1981,12 @@ where
             Arc::clone(&blocking_slots),
             Arc::clone(&table_creation_slots),
             Arc::clone(&streaming_progress_table_created),
+            (),
         )
         .await?;
 
         let copy_pool =
-            Arc::new(build_warm_ducklake_pool(copy_manager.clone(), pool_size, "copy").await?);
+            Arc::new(build_warm_ducklake_pool(copy_manager.clone(), pool_size, "copy", ()).await?);
         let pools =
             Arc::new(DuckLakePoolHandle::new(DuckLakePools::new(Arc::clone(&pool), copy_pool)));
         let applied_tables = Arc::default();
@@ -2061,13 +2088,15 @@ where
     ) -> EtlResult<()> {
         let table_name =
             self.ensure_table_ready_for_streaming_schema(replicated_table_schema).await?;
-        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
         let replay_epoch = self.begin_table_replay_epoch_transition(&table_name).await?;
         let table_name_for_truncate = table_name.clone();
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
+            let _write_guard = write_guard;
             conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
@@ -2125,17 +2154,19 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
-        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.copy_buffers.lock().remove(&table_name);
         #[cfg(feature = "test-utils")]
         maybe_fail_drop_table_for_copy_for_tests()?;
         self.ensure_applied_batches_table_exists().await?;
         self.ensure_streaming_progress_table_exists().await?;
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
         let replay_epoch = self.begin_table_replay_epoch_transition(&table_name).await?;
         let table_name_for_drop = table_name.clone();
 
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
+            let _write_guard = write_guard;
             conn.execute_batch("begin transaction").map_err(|e| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
@@ -2195,12 +2226,14 @@ where
     async fn ensure_copy_writes_direct_to_parquet(
         &self,
         table_name: &DuckLakeTableName,
+        guard: impl Send + 'static,
     ) -> EtlResult<()> {
         if self.copy_direct_to_parquet_tables.lock().contains(table_name) {
             return Ok(());
         }
 
-        self.set_copy_data_inlining_row_limit(table_name, COPY_DATA_INLINING_ROW_LIMIT).await?;
+        self.set_copy_data_inlining_row_limit(table_name, COPY_DATA_INLINING_ROW_LIMIT, guard)
+            .await?;
         self.copy_direct_to_parquet_tables.lock().insert(table_name.clone());
         Ok(())
     }
@@ -2210,8 +2243,10 @@ where
     async fn restore_streaming_data_inlining(
         &self,
         table_name: &DuckLakeTableName,
+        guard: impl Send + 'static,
     ) -> EtlResult<()> {
-        self.set_copy_data_inlining_row_limit(table_name, ATTACH_DATA_INLINING_ROW_LIMIT).await?;
+        self.set_copy_data_inlining_row_limit(table_name, ATTACH_DATA_INLINING_ROW_LIMIT, guard)
+            .await?;
         self.copy_direct_to_parquet_tables.lock().remove(table_name);
         Ok(())
     }
@@ -2222,17 +2257,20 @@ where
         &self,
         table_name: &DuckLakeTableName,
         row_limit: u64,
+        guard: impl Send + 'static,
     ) -> EtlResult<()> {
-        self.set_table_data_inlining_row_limit(table_name, row_limit)
+        self.set_table_data_inlining_row_limit(table_name, row_limit, guard)
             .await
             .map_err(|error| classify_copy_data_inlining_error(table_name, row_limit, error))
     }
 
-    /// Sets one DuckLake table's data-inlining threshold.
+    /// Sets one DuckLake table's data-inlining threshold while retaining its
+    /// caller's table and maintenance guards through native execution.
     async fn set_table_data_inlining_row_limit(
         &self,
         table_name: &DuckLakeTableName,
         row_limit: u64,
+        guard: impl Send + 'static,
     ) -> EtlResult<()> {
         let sql = format!(
             "CALL {LAKE_CATALOG}.set_option('data_inlining_row_limit', {row_limit}, schema => {}, \
@@ -2242,6 +2280,7 @@ where
         );
         let table_name = table_name.clone();
         self.run_duckdb_blocking(move |conn| {
+            let _guard = guard;
             debug!(table = %table_name, row_limit, "ducklake table data inlining configuration begin");
             conn.execute_batch(&sql).map_err(|error| {
                 etl_error!(
@@ -2297,10 +2336,11 @@ where
         // Copy batches for the same table must still serialize so concurrent
         // callers do not race each other inside DuckDB.
         self.ensure_applied_batches_table_exists().await?;
-        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
         if !copy_complete {
-            self.ensure_copy_writes_direct_to_parquet(&table_name).await?;
+            self.ensure_copy_writes_direct_to_parquet(&table_name, write_guard.clone()).await?;
         }
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
         let prepared_batch = match (batch_id, copy_complete) {
@@ -2324,10 +2364,11 @@ where
             self.copy_pool()?,
             Arc::clone(&self.blocking_slots),
             prepared_batch,
+            write_guard.clone(),
         )
         .await?;
         if copy_complete {
-            self.restore_streaming_data_inlining(&table_name).await?;
+            self.restore_streaming_data_inlining(&table_name, write_guard).await?;
         }
 
         Ok(())
@@ -2343,10 +2384,14 @@ where
     ) -> EtlResult<()> {
         let table_name = self.prepare_table_for_writes(replicated_table_schema).await?;
         self.ensure_applied_batches_table_exists().await?;
-        let _table_write_permit = self.acquire_table_write_slot(&table_name).await?;
+        let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         if !table_rows.is_empty() {
-            let _checkpoint_guard = self.acquire_mutation_guard().await;
-            self.ensure_copy_writes_direct_to_parquet(&table_name).await?;
+            let checkpoint_guard = self.acquire_mutation_guard().await;
+            self.ensure_copy_writes_direct_to_parquet(
+                &table_name,
+                DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard),
+            )
+            .await?;
         }
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
 
@@ -2364,22 +2409,34 @@ where
             let copy_complete = prepare_copy_complete_table_batch(table_name.clone(), replay_epoch);
             let handle = self.copy_buffers.lock().get(&table_name).cloned();
             let Some(handle) = handle else {
-                let _checkpoint_guard = self.acquire_mutation_guard().await;
+                let checkpoint_guard = self.acquire_mutation_guard().await;
                 apply_table_batch_with_retry(
                     self.copy_pool()?,
                     Arc::clone(&self.blocking_slots),
                     copy_complete,
+                    DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard),
                 )
                 .await?;
-                self.restore_streaming_data_inlining(&table_name).await?;
+                self.restore_streaming_data_inlining(
+                    &table_name,
+                    DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard),
+                )
+                .await?;
                 return Ok(());
             };
 
-            if let Err(error) = self.flush_copy_buffer(&handle, Some(copy_complete)).await {
+            if let Err(error) = self
+                .flush_copy_buffer(&handle, Some(copy_complete), Arc::clone(&table_write_permit))
+                .await
+            {
                 self.invalidate_copy_buffer(&table_name);
                 return Err(error);
             }
-            self.restore_streaming_data_inlining(&table_name).await?;
+            self.restore_streaming_data_inlining(
+                &table_name,
+                (Arc::clone(&table_write_permit), Arc::clone(&handle)),
+            )
+            .await?;
             handle.reservations.lock().clear();
             self.copy_buffers.lock().remove(&table_name);
             return Ok(());
@@ -2398,7 +2455,12 @@ where
         self.validate_copy_buffer_batch_size(prepared_batch.estimated_bytes())?;
         let handle = self.copy_buffer_handle(&table_name, &prepared_batch).await?;
         let reservation = self
-            .reserve_copy_buffer_capacity(&table_name, &handle, prepared_batch.estimated_bytes())
+            .reserve_copy_buffer_capacity(
+                &table_name,
+                &handle,
+                prepared_batch.estimated_bytes(),
+                Arc::clone(&table_write_permit),
+            )
             .await?;
         // Store the reservation before the blocking call starts. If the async
         // caller is cancelled, the detached blocking task and live session
@@ -2407,10 +2469,12 @@ where
         let blocking_handle = Arc::clone(&handle);
         let connection = handle.connection.clone();
         let target_bytes = self.copy_buffer_config.target_bytes;
+        let table_write_permit = Arc::clone(&table_write_permit);
         let append_result = run_duckdb_dedicated_blocking_with_context(
             connection,
             Arc::clone(&self.blocking_slots),
             move |conn, _operation_context| {
+                let _table_write_permit = table_write_permit;
                 #[cfg(feature = "test-utils")]
                 wait_if_copy_append_paused_for_tests();
                 let mut accumulator = blocking_handle.accumulator.lock();
@@ -2505,6 +2569,7 @@ where
         table_name: &DuckLakeTableName,
         handle: &Arc<DuckLakeCopyBufferHandle>,
         estimated_bytes: u64,
+        table_write_permit: Arc<OwnedSemaphorePermit>,
     ) -> EtlResult<OwnedSemaphorePermit> {
         let reserved_bytes = estimated_bytes.max(1);
         let permits = u32::try_from(reserved_bytes).map_err(|error| {
@@ -2531,7 +2596,7 @@ where
 
         // This may wait for a cancelled caller's detached append. Both that
         // wait and the conditional DuckDB flush must stay on the blocking pool.
-        if let Err(error) = self.flush_copy_buffer(handle, None).await {
+        if let Err(error) = self.flush_copy_buffer(handle, None, table_write_permit).await {
             self.invalidate_copy_buffer(table_name);
             return Err(error);
         }
@@ -2565,6 +2630,7 @@ where
         &self,
         handle: &Arc<DuckLakeCopyBufferHandle>,
         copy_complete: Option<crate::ducklake::batches::PreparedDuckLakeTableBatch>,
+        table_write_permit: Arc<OwnedSemaphorePermit>,
     ) -> EtlResult<()> {
         let blocking_handle = Arc::clone(handle);
         let connection = handle.connection.clone();
@@ -2572,6 +2638,7 @@ where
             connection,
             Arc::clone(&self.blocking_slots),
             move |conn, _operation_context| {
+                let _table_write_permit = table_write_permit;
                 blocking_handle.accumulator.lock().flush(conn, copy_complete)
             },
         )
@@ -2752,12 +2819,14 @@ where
             "ducklake applying schema plan"
         );
 
-        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
         let table_name = table_name.clone();
         let plan = plan.clone();
 
         run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
+            let _write_guard = write_guard;
             let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
                 conn.execute_batch(sql).map_err(|source| {
                     etl_error!(
@@ -2814,8 +2883,9 @@ where
     ) -> EtlResult<()> {
         let desired =
             resolve_table_sort_columns(self.table_sorting.as_ref(), table_name, table_schema)?;
-        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
 
         let sql = format!(
             "select e.expression, e.sort_direction, e.null_order from {}.{} as e join {}.{} as i \
@@ -2871,6 +2941,7 @@ where
         let table_name = table_name.clone();
 
         run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
+            let _write_guard = write_guard;
             conn.execute_batch(&ddl).map_err(|source| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
@@ -2893,11 +2964,14 @@ where
     ) -> EtlResult<()> {
         let table_name_for_read = table_name.clone();
         let ducklake_columns = {
-            let _checkpoint_guard = self.acquire_mutation_guard().await;
+            let checkpoint_guard = self.acquire_mutation_guard().await;
             run_duckdb_blocking(
                 self.streaming_pool()?,
                 Arc::clone(&self.blocking_slots),
-                move |conn| read_ducklake_table_column_names_blocking(conn, &table_name_for_read),
+                move |conn| {
+                    let _checkpoint_guard = checkpoint_guard;
+                    read_ducklake_table_column_names_blocking(conn, &table_name_for_read)
+                },
             )
             .await?
         };
@@ -2942,12 +3016,14 @@ where
         table_name: &DuckLakeTableName,
         target_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let _table_write_permit = self.acquire_table_write_slot(table_name).await?;
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
+        let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
         let table_name = table_name.clone();
         let target_schema = target_schema.clone();
 
         run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
+            let _write_guard = write_guard;
             let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
                 conn.execute_batch(sql).map_err(|source| {
                     etl_error!(
@@ -3221,12 +3297,11 @@ where
                                 )
                                 .await?;
                             debug_assert_eq!(ready_table_name, destination_table_name);
-                            let _table_write_permit = destination
+                            let table_write_permit = destination
                                 .acquire_table_write_slot(&destination_table_name)
                                 .await?;
                             let checkpoint_wait_started = tokio::time::Instant::now();
-                            let _checkpoint_guard =
-                                Arc::clone(&destination.checkpoint_gate).read_owned().await;
+                            let checkpoint_guard = destination.acquire_mutation_guard().await;
                             let checkpoint_wait = checkpoint_wait_started.elapsed();
                             if checkpoint_wait > Duration::from_secs(1) {
                                 info!(
@@ -3253,6 +3328,7 @@ where
                                 destination.streaming_pool()?,
                                 Arc::clone(&destination.blocking_slots),
                                 prepared_batches,
+                                DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard),
                             )
                             .await?;
                             info!(
@@ -3338,10 +3414,9 @@ where
                             .ensure_table_ready_for_streaming_schema(&replicated_table_schema)
                             .await?;
                         debug_assert_eq!(ready_table_name, table_name);
-                        let _table_write_permit =
+                        let table_write_permit =
                             destination.acquire_table_write_slot(&table_name).await?;
-                        let _checkpoint_guard =
-                            Arc::clone(&destination.checkpoint_gate).read_owned().await;
+                        let checkpoint_guard = destination.acquire_mutation_guard().await;
                         let pool = destination.streaming_pool()?;
 
                         let prepared_batch = prepare_truncate_table_batch(
@@ -3353,6 +3428,7 @@ where
                             pool,
                             Arc::clone(&destination.blocking_slots),
                             prepared_batch,
+                            DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard),
                         )
                         .await
                     });
@@ -3402,12 +3478,13 @@ where
             .collect();
         let ddl = build_create_table_sql_ducklake(table_name, &column_schemas);
         let table_name = table_name.clone();
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
 
         run_duckdb_blocking(
             self.streaming_pool()?,
             Arc::clone(&self.blocking_slots),
             move |conn| -> EtlResult<()> {
+                let _checkpoint_guard = checkpoint_guard;
                 debug!(table = %table_name, "ducklake create table begin");
                 match conn.execute_batch(&ddl) {
                     Ok(()) => {}
@@ -3697,12 +3774,13 @@ where
             return Ok(());
         }
 
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_applied_batches_table_exists(
             self.streaming_pool()?,
             Arc::clone(&self.blocking_slots),
             Arc::clone(&self.table_creation_slots),
             Arc::clone(&self.applied_batches_table_created),
+            checkpoint_guard,
         )
         .await
     }
@@ -3713,12 +3791,13 @@ where
             return Ok(());
         }
 
-        let _checkpoint_guard = self.acquire_mutation_guard().await;
+        let checkpoint_guard = self.acquire_mutation_guard().await;
         ensure_streaming_progress_table_exists(
             self.streaming_pool()?,
             Arc::clone(&self.blocking_slots),
             Arc::clone(&self.table_creation_slots),
             Arc::clone(&self.streaming_progress_table_created),
+            checkpoint_guard,
         )
         .await
     }
@@ -3741,10 +3820,10 @@ where
     async fn acquire_table_write_slot(
         &self,
         table_name: &DuckLakeTableName,
-    ) -> EtlResult<OwnedSemaphorePermit> {
+    ) -> EtlResult<Arc<OwnedSemaphorePermit>> {
         let table_slot = table_write_slot(&self.table_write_slots, table_name);
         match Arc::clone(&table_slot).try_acquire_owned() {
-            Ok(permit) => Ok(permit),
+            Ok(permit) => Ok(Arc::new(permit)),
             Err(TryAcquireError::NoPermits) => {
                 info!(
                     table = %table_name,
@@ -3757,7 +3836,7 @@ where
                     table = %table_name,
                     "ducklake acquired table write slot after wait"
                 );
-                Ok(permit)
+                Ok(Arc::new(permit))
             }
             Err(TryAcquireError::Closed) => {
                 Err(etl_error!(ErrorKind::InvalidState, "DuckLake table write semaphore closed"))
@@ -3778,11 +3857,14 @@ where
     /// Recreates and atomically installs both connection pools after successful
     /// external maintenance.
     ///
-    /// The caller must retain the exclusive external-maintenance pause until
-    /// this method returns. If either replacement pool fails to initialize, the
-    /// old pools are removed so later replication cannot reuse stale
+    /// Native setup retains the exclusive pause and a blocking slot even if
+    /// the caller is cancelled. If either replacement pool fails to initialize,
+    /// the old pools are removed so later replication cannot reuse stale
     /// connections after the pause guard is released.
-    pub(super) async fn recreate_pools_after_external_maintenance(&self) -> EtlResult<()> {
+    pub(super) async fn recreate_pools_after_external_maintenance(
+        &self,
+        pause: Arc<DuckLakeExternalMaintenancePause>,
+    ) -> EtlResult<()> {
         #[cfg(feature = "test-utils")]
         if FAIL_POOL_REFRESH_ONCE.swap(false, std::sync::atomic::Ordering::Relaxed) {
             drop(self.pools.invalidate());
@@ -3793,33 +3875,34 @@ where
             ));
         }
 
-        if let Err(error) = self.manager.recreate_shared_instance().await {
-            drop(self.pools.invalidate());
-            return Err(error);
-        }
-
-        let streaming =
-            match build_warm_ducklake_pool(self.manager.as_ref().clone(), self.pool_size, "write")
-                .await
-            {
-                Ok(pool) => Arc::new(pool),
-                Err(error) => {
-                    drop(self.pools.invalidate());
-                    return Err(error);
-                }
-            };
-        let copy = match build_warm_ducklake_pool(self.copy_manager.clone(), self.pool_size, "copy")
+        // Share one admission permit across the refresh sequence and each
+        // native stage, so cancellation cannot hide active setup from shutdown.
+        let permit = Arc::clone(&self.blocking_slots)
+            .acquire_owned()
             .await
-        {
-            Ok(pool) => Arc::new(pool),
-            Err(error) => {
-                drop(streaming);
-                drop(self.pools.invalidate());
-                return Err(error);
-            }
-        };
-
-        let previous = self.pools.replace(DuckLakePools::new(streaming, copy));
+            .map_err(|_| ducklake_shutdown_requested_error())?;
+        let refresh_guard = Arc::new(DuckLakeBlockingGuard::new(pause, permit));
+        let replacement = async {
+            self.manager.recreate_shared_instance(Arc::clone(&refresh_guard)).await?;
+            let streaming = build_warm_ducklake_pool(
+                self.manager.as_ref().clone(),
+                self.pool_size,
+                "write",
+                Arc::clone(&refresh_guard),
+            )
+            .await?;
+            let copy = build_warm_ducklake_pool(
+                self.copy_manager.clone(),
+                self.pool_size,
+                "copy",
+                Arc::clone(&refresh_guard),
+            )
+            .await?;
+            Ok::<_, etl::error::EtlError>(DuckLakePools::new(Arc::new(streaming), Arc::new(copy)))
+        }
+        .await
+        .inspect_err(|_| drop(self.pools.invalidate()))?;
+        let previous = self.pools.replace(replacement);
         drop(previous);
         info!(
             pool_size = self.pool_size,
@@ -3830,9 +3913,10 @@ where
     }
 
     /// Acquires shared mutation access so exclusive external maintenance cannot
-    /// start in the middle of a foreground write sequence.
-    async fn acquire_mutation_guard(&self) -> OwnedRwLockReadGuard<()> {
-        Arc::clone(&self.checkpoint_gate).read_owned().await
+    /// start in the middle of a foreground write sequence. Share the returned
+    /// guard with each native operation that can outlive its async caller.
+    async fn acquire_mutation_guard(&self) -> Arc<OwnedRwLockReadGuard<()>> {
+        Arc::new(Arc::clone(&self.checkpoint_gate).read_owned().await)
     }
 
     /// Reads one table's durable replay cursor while retaining table-local
@@ -3853,6 +3937,7 @@ where
             Arc::clone(&self.blocking_slots),
             table_name.clone(),
             replay_epoch.clone(),
+            DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard),
         )
         .await?;
         // Schema reconciliation acquires the checkpoint gate itself.
@@ -4072,8 +4157,10 @@ async fn read_table_streaming_progress_sequence_key_blocking(
     blocking_slots: Arc<Semaphore>,
     table_name: DuckLakeTableName,
     replay_epoch: String,
+    write_guard: DuckLakeWriteGuard,
 ) -> EtlResult<Option<EventSequenceKey>> {
     run_duckdb_blocking(pool, blocking_slots, move |conn| {
+        let _write_guard = write_guard;
         read_table_streaming_progress_sequence_key(conn, &table_name, &replay_epoch)
     })
     .await
@@ -4180,7 +4267,7 @@ pub fn reset_paused_streaming_write_for_tests() {
     PAUSED_STREAMING_WRITE_RESUME_TX.lock().take();
 }
 
-/// Arms a one-shot hook that pauses the next buffered COPY append inside its
+/// Arms a one-shot hook that pauses the next COPY append inside its
 /// blocking task.
 #[cfg(feature = "test-utils")]
 pub fn arm_pause_next_copy_append_for_tests() -> oneshot::Receiver<()> {
@@ -4192,7 +4279,7 @@ pub fn arm_pause_next_copy_append_for_tests() -> oneshot::Receiver<()> {
     reached_rx
 }
 
-/// Releases the paused buffered COPY append, if one is armed.
+/// Releases the paused COPY append, if one is armed.
 #[cfg(feature = "test-utils")]
 pub fn release_paused_copy_append_for_tests() {
     let Some(resume) = PAUSED_COPY_APPEND_RESUME.lock().take() else {
@@ -4204,7 +4291,7 @@ pub fn release_paused_copy_append_for_tests() {
     resume_ready.notify_all();
 }
 
-/// Clears and releases the paused buffered COPY append hook.
+/// Clears and releases the paused COPY append hook.
 #[cfg(feature = "test-utils")]
 pub fn reset_paused_copy_append_for_tests() {
     PAUSED_COPY_APPEND_HOOK.lock().take();
@@ -4224,7 +4311,7 @@ async fn wait_if_streaming_write_paused_for_tests() {
 }
 
 #[cfg(feature = "test-utils")]
-fn wait_if_copy_append_paused_for_tests() {
+pub(super) fn wait_if_copy_append_paused_for_tests() {
     let Some(PausedCopyAppendHook { reached_tx, resume }) = PAUSED_COPY_APPEND_HOOK.lock().take()
     else {
         return;

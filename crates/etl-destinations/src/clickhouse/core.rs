@@ -5,19 +5,19 @@ use std::{
 };
 
 use etl::{
-    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    data::{Cell, Date, OldTableRow, TableRow, Timestamp, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
         ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
         IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
-        TableId, Type, is_array_type,
+        TableId, TableName, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
     task::{TaskGroup, TaskRegistry},
@@ -31,19 +31,18 @@ use url::Url;
 use crate::{
     clickhouse::{
         CLICKHOUSE_COLUMN_NAME_MAPPING,
-        client::{ClickHouseClient, ClickHouseTableColumn, DdlKind},
+        client::{
+            ClickHouseClient, ClickHouseTableColumn, DdlKind, InsertRowsError, RowBinaryLayout,
+        },
         encoding::{ClickHouseValue, cell_to_clickhouse_value},
         metrics::{CDC_REPLICATION_PATH, COPY_REPLICATION_PATH, register_metrics},
         schema::{
             CDC_LSN_COLUMN_NAME, CDC_OPERATION_COLUMN_NAME, CDC_TX_ORDINAL_COLUMN_NAME,
-            create_current_view_sql, create_table_sql, drop_current_view_sql,
-            supports_column_default, trailing_cdc_column_names,
+            CURRENT_VIEW_SUFFIX, clickhouse_type, create_current_view_sql, create_table_sql,
+            drop_current_view_sql, supports_column_default, trailing_cdc_columns,
         },
     },
-    recovery::{
-        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        warn_unsupported_column_type_change,
-    },
+    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
     table_name::try_stringify_table_name,
 };
 
@@ -135,22 +134,28 @@ fn append_cdc_columns(
     }
 }
 
-/// Returns true if the ClickHouse type has an outer Nullable wrapper.
-fn clickhouse_type_expects_nullable_marker(type_name: &str) -> bool {
-    type_name.starts_with("Nullable(")
-}
-
-/// Returns expected ClickHouse column names for a replicated schema under the
+/// Returns the ClickHouse columns ETL expects for a replicated schema under the
 /// given engine: user columns in source order, then the engine's trailing CDC
 /// columns.
-fn expected_clickhouse_column_names(
+///
+/// Types are the non-nullable form. A physical user column may additionally be
+/// wrapped in `Nullable(...)`, because publication-mask additions and relaxed
+/// `NOT NULL` columns are nullable in ClickHouse even when the source column is
+/// not.
+fn expected_clickhouse_columns(
     schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
-) -> Vec<String> {
+) -> Vec<ClickHouseTableColumn> {
     schema
         .destination_column_schemas(CLICKHOUSE_COLUMN_NAME_MAPPING)
-        .map(|column| column.name)
-        .chain(trailing_cdc_column_names(engine).iter().map(|name| (*name).to_owned()))
+        .map(|column| ClickHouseTableColumn {
+            type_name: clickhouse_type(&column.typ, false, false),
+            name: column.name,
+        })
+        .chain(trailing_cdc_columns(engine).iter().map(|(name, type_name)| ClickHouseTableColumn {
+            name: (*name).to_owned(),
+            type_name: (*type_name).to_owned(),
+        }))
         .collect()
 }
 
@@ -233,17 +238,63 @@ fn ensure_clickhouse_additions_are_supported(table_name: &str, plan: &SchemaPlan
     Ok(())
 }
 
+/// Rejects source type changes that change the mapped ClickHouse type before
+/// any metadata or DDL mutation.
+///
+/// ETL does not alter ClickHouse column types. Postgres rewrites existing rows
+/// with its own cast or `USING` expression and emits no row events for that
+/// rewrite, so a ClickHouse `CAST` of the stored rows could disagree with the
+/// source. Writing new rows into the old column would instead reinterpret
+/// RowBinary bytes or fail every insert. Changes that keep the mapped type,
+/// such as `varchar(50)` to `varchar(100)`, need no DDL and are accepted.
+fn ensure_clickhouse_type_changes_are_supported(
+    table_name: &str,
+    plan: &SchemaPlan,
+) -> EtlResult<()> {
+    for operation in plan.ordered_operations() {
+        let SchemaOperation::AlterColumn { alteration } = operation else {
+            continue;
+        };
+        if alteration.kind() != ColumnAlterationKind::Type {
+            continue;
+        }
+
+        let before = alteration.before_column_schema();
+        let after = alteration.after_column_schema();
+        // Nullability is a separate alteration kind, so compare the types
+        // alone.
+        let before_type = clickhouse_type(&before.typ, false, false);
+        let after_type = clickhouse_type(&after.typ, false, false);
+        if before_type != after_type {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "ClickHouse cannot apply a source column type change",
+                format!(
+                    "Table '{table_name}' changes column '{}' from {} to {}, which changes its \
+                     ClickHouse type from '{before_type}' to '{after_type}'. ETL does not convert \
+                     existing ClickHouse rows. Resynchronize the table.",
+                    after.name,
+                    before.typ.name(),
+                    after.typ.name(),
+                )
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Returns physical user columns after validating the trailing ETL columns.
 fn clickhouse_user_column_names(
     columns: &[ClickHouseTableColumn],
     engine: ClickHouseEngine,
 ) -> EtlResult<Vec<String>> {
-    let trailing_names = trailing_cdc_column_names(engine);
-    if columns.len() < trailing_names.len()
-        || !columns[columns.len() - trailing_names.len()..]
+    let trailing_columns = trailing_cdc_columns(engine);
+    if columns.len() < trailing_columns.len()
+        || !columns[columns.len() - trailing_columns.len()..]
             .iter()
             .map(|column| column.name.as_str())
-            .eq(trailing_names.iter().copied())
+            .eq(trailing_columns.iter().map(|(name, _)| *name))
     {
         return Err(etl_error!(
             ErrorKind::CorruptedTableSchema,
@@ -252,7 +303,7 @@ fn clickhouse_user_column_names(
         ));
     }
 
-    Ok(columns[..columns.len() - trailing_names.len()]
+    Ok(columns[..columns.len() - trailing_columns.len()]
         .iter()
         .map(|column| column.name.clone())
         .collect())
@@ -383,22 +434,25 @@ fn summarize_column_names<'a>(column_names: impl IntoIterator<Item = &'a str>) -
 /// as this upgrade.
 fn reject_legacy_merge_tree_layout(
     clickhouse_table_name: &str,
-    expected_column_names: &[String],
+    expected_columns: &[ClickHouseTableColumn],
     actual_columns: &[ClickHouseTableColumn],
 ) -> EtlResult<()> {
-    let Some((last_name, legacy_names)) = expected_column_names.split_last() else {
+    let Some((last_column, legacy_columns)) = expected_columns.split_last() else {
         return Ok(());
     };
     let [.., operation, lsn] = actual_columns else {
         return Ok(());
     };
-    if last_name != CDC_TX_ORDINAL_COLUMN_NAME
+    if last_column.name != CDC_TX_ORDINAL_COLUMN_NAME
         || operation.name != CDC_OPERATION_COLUMN_NAME
         || operation.type_name != "String"
         || lsn.name != CDC_LSN_COLUMN_NAME
         || lsn.type_name != "UInt64"
         || actual_columns.iter().any(|column| column.name == CDC_TX_ORDINAL_COLUMN_NAME)
-        || !actual_columns.iter().map(|column| &column.name).eq(legacy_names)
+        || !actual_columns
+            .iter()
+            .map(|column| &column.name)
+            .eq(legacy_columns.iter().map(|column| &column.name))
     {
         return Ok(());
     }
@@ -421,26 +475,29 @@ fn reject_legacy_merge_tree_layout(
     ))
 }
 
-/// Derives RowBinary nullable flags from the actual ClickHouse table schema.
+/// Builds the `RowBinaryWithNamesAndTypes` layout from the actual ClickHouse
+/// table schema after checking it against the expected columns.
 ///
-/// RowBinary requires a leading null-marker byte before each `Nullable(T)`
-/// column. The actual nullability of a ClickHouse column can drift from the
-/// source Postgres column: publication-mask additions use `Nullable(T)` without
-/// a source default so historical rows remain unknown instead of acquiring a
-/// value that was never replicated. Deriving flags from the destination schema
-/// therefore matches what ClickHouse expects on the wire even after schema
-/// evolution.
+/// Column names, order, and types must match the stored replication schema.
+/// The only accepted difference is an outer `Nullable(...)` on the physical
+/// column: publication-mask additions use `Nullable(T)` without a source
+/// default so historical rows remain unknown, and relaxed `NOT NULL` columns
+/// stay nullable. The layout then carries the null-marker byte ClickHouse
+/// expects on the wire.
 ///
-/// The column-count and column-order checks are an integrity guard: if the
-/// destination has otherwise drifted from `ReplicatedTableSchema`, we surface a
-/// `CorruptedTableSchema` error rather than emit misaligned RowBinary bytes.
-fn nullable_flags_from_clickhouse_columns(
+/// Any other drift, such as a source type change or an external `ALTER`,
+/// surfaces as `CorruptedTableSchema` rather than misaligned or reinterpreted
+/// RowBinary bytes.
+fn row_binary_layout_from_clickhouse_columns(
     clickhouse_table_name: &str,
-    expected_column_names: &[String],
+    expected_columns: &[ClickHouseTableColumn],
     actual_columns: &[ClickHouseTableColumn],
-) -> EtlResult<Arc<[bool]>> {
-    reject_legacy_merge_tree_layout(clickhouse_table_name, expected_column_names, actual_columns)?;
-    if actual_columns.len() != expected_column_names.len() {
+) -> EtlResult<Arc<RowBinaryLayout>> {
+    reject_legacy_merge_tree_layout(clickhouse_table_name, expected_columns, actual_columns)?;
+    let expected_names =
+        || summarize_column_names(expected_columns.iter().map(|c| c.name.as_str()));
+    let actual_names = || summarize_column_names(actual_columns.iter().map(|c| c.name.as_str()));
+    if actual_columns.len() != expected_columns.len() {
         return Err(etl_error!(
             ErrorKind::CorruptedTableSchema,
             "ClickHouse destination table columns do not match the stored replication schema",
@@ -449,18 +506,17 @@ fn nullable_flags_from_clickhouse_columns(
                  {}. Expected columns: {}. Actual columns: {}.",
                 clickhouse_table_name,
                 actual_columns.len(),
-                expected_column_names.len(),
-                summarize_column_names(expected_column_names.iter().map(String::as_str)),
-                summarize_column_names(actual_columns.iter().map(|column| column.name.as_str()))
+                expected_columns.len(),
+                expected_names(),
+                actual_names()
             )
         ));
     }
 
-    let mut nullable_flags = Vec::with_capacity(actual_columns.len());
-    for (index, (actual_column, expected_name)) in
-        actual_columns.iter().zip(expected_column_names).enumerate()
+    for (index, (actual_column, expected_column)) in
+        actual_columns.iter().zip(expected_columns).enumerate()
     {
-        if actual_column.name != *expected_name {
+        if actual_column.name != expected_column.name {
             return Err(etl_error!(
                 ErrorKind::CorruptedTableSchema,
                 "ClickHouse destination table columns do not match the stored replication schema",
@@ -470,19 +526,36 @@ fn nullable_flags_from_clickhouse_columns(
                     clickhouse_table_name,
                     actual_column.name,
                     index + 1,
-                    expected_name,
-                    summarize_column_names(expected_column_names.iter().map(String::as_str)),
-                    summarize_column_names(
-                        actual_columns.iter().map(|column| column.name.as_str())
-                    )
+                    expected_column.name,
+                    expected_names(),
+                    actual_names()
                 )
             ));
         }
 
-        nullable_flags.push(clickhouse_type_expects_nullable_marker(&actual_column.type_name));
+        let actual_value_type = actual_column
+            .type_name
+            .strip_prefix("Nullable(")
+            .and_then(|inner| inner.strip_suffix(')'))
+            .unwrap_or(&actual_column.type_name);
+        if actual_value_type != expected_column.type_name {
+            return Err(etl_error!(
+                ErrorKind::CorruptedTableSchema,
+                "ClickHouse destination column type does not match the stored replication schema",
+                format!(
+                    "Destination table '{}' column '{}' has type '{}', but the stored replication \
+                     schema expects '{}'. Resynchronize the table after a source column type \
+                     change or an external ALTER.",
+                    clickhouse_table_name,
+                    actual_column.name,
+                    actual_column.type_name,
+                    expected_column.type_name
+                )
+            ));
+        }
     }
 
-    Ok(nullable_flags.into())
+    Ok(Arc::new(RowBinaryLayout::new(actual_columns)))
 }
 
 /// Controls intermediate flushing inside a single `write_table_rows` /
@@ -658,8 +731,36 @@ struct ClickHouseTableCacheEntry {
     table_name: String,
     /// Exact applied schema endpoint validated before this entry was inserted.
     metadata: DestinationTableMetadata,
-    /// Per-column nullable flags, including the trailing CDC columns.
-    nullable_flags: Arc<[bool]>,
+    /// Checked `RowBinaryWithNamesAndTypes` layout, including the trailing CDC
+    /// columns.
+    layout: Arc<RowBinaryLayout>,
+}
+
+/// Drops `table_id`'s cached layout when ClickHouse rejected an insert that
+/// used `layout` because its column list or header no longer matches the
+/// table, then returns the insert's error.
+///
+/// That happens when the table changed after the layout was loaded, for
+/// example through an external `ALTER`. Evicting makes the next write reload
+/// and check the table, which reports the drift as `CorruptedTableSchema`
+/// instead of retrying the same rejected header. Other failures, such as
+/// timeouts and network errors, keep the layout so a retry needs no extra
+/// schema query. The entry is removed only while it still holds `layout`, so a
+/// failed insert cannot evict a layout that a concurrent writer already
+/// reloaded.
+fn evict_layout_after_rejected_insert(
+    table_cache: &RwLock<HashMap<TableId, Arc<ClickHouseTableCacheEntry>>>,
+    table_id: TableId,
+    layout: &Arc<RowBinaryLayout>,
+    failure: InsertRowsError,
+) -> EtlError {
+    if failure.is_layout_rejection() {
+        let mut guard = table_cache.write();
+        if guard.get(&table_id).is_some_and(|entry| Arc::ptr_eq(&entry.layout, layout)) {
+            guard.remove(&table_id);
+        }
+    }
+    failure.into()
 }
 
 /// Execution context captured by ClickHouse background event tasks.
@@ -899,14 +1000,15 @@ where
     /// async completion result.
     ///
     /// Test-only entrypoint for exercising the production write path without
-    /// pipeline plumbing.
+    /// pipeline plumbing. It passes no [`TableCopyBatchId`], so its inserts
+    /// send no deduplication token.
     #[cfg(feature = "test-utils")]
     pub async fn write_table_rows(
         &self,
         schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.writer.write_table_rows_inner(schema, table_rows).await
+        self.writer.write_table_rows_inner(schema, None, table_rows).await
     }
 
     /// Dispatches a streaming event batch through the [`Destination`] trait
@@ -996,6 +1098,33 @@ where
         ))
     }
 
+    /// Rejects creating a table when ClickHouse already has an object with its
+    /// name, or with its `__current` view name under ReplacingMergeTree.
+    ///
+    /// Without destination metadata ETL cannot prove it owns such an object.
+    /// `CREATE ... IF NOT EXISTS` would keep it, and the copy would land on top
+    /// of rows that outrank copy rows.
+    async fn ensure_table_absent(&self, clickhouse_table_name: &str) -> EtlResult<()> {
+        let mut names = vec![clickhouse_table_name.to_owned()];
+        if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
+            names.push(format!("{clickhouse_table_name}{CURRENT_VIEW_SUFFIX}"));
+        }
+        for name in names {
+            if self.client.table_engine(&name).await?.is_some() {
+                return Err(etl_error!(
+                    ErrorKind::DestinationTableAlreadyExists,
+                    "ClickHouse destination table already exists",
+                    format!(
+                        "Table '{name}' exists, but this pipeline has no destination metadata \
+                         proving ownership. Drop the table or use another database before \
+                         retrying."
+                    )
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Issues the engine-correct `CREATE TABLE`, and under ReplacingMergeTree
     /// also the companion `CREATE VIEW "<table>__current"`. Both statements are
     /// `IF NOT EXISTS`, so retries on the recovery path are idempotent.
@@ -1045,15 +1174,15 @@ where
     }
 
     /// Prepares the ETL-owned ClickHouse table for writes, returning
-    /// `(clickhouse_table_name, nullable_flags)`.
+    /// `(clickhouse_table_name, layout)`.
     ///
     /// Applied metadata never triggers repair DDL. A cold cache performs the
-    /// one read-only schema load required to reconstruct RowBinary null-marker
-    /// flags; missing or externally modified tables fail that load.
+    /// one read-only schema load required to build the checked RowBinary
+    /// layout; missing or externally modified tables fail that load.
     async fn prepare_table_for_writes(
         &self,
         schema: &ReplicatedTableSchema,
-    ) -> EtlResult<(String, Arc<[bool]>)> {
+    ) -> EtlResult<(String, Arc<RowBinaryLayout>)> {
         let table_id = schema.id();
 
         if let Some(entry) = self.table_cache.read().get(&table_id).cloned() {
@@ -1063,7 +1192,7 @@ where
                 &entry.metadata,
                 schema,
             )?;
-            return Ok((entry.table_name.clone(), Arc::clone(&entry.nullable_flags)));
+            return Ok((entry.table_name.clone(), Arc::clone(&entry.layout)));
         }
 
         // Serialise the first-time create/recover path per `table_id`. When
@@ -1084,7 +1213,7 @@ where
                 &entry.metadata,
                 schema,
             )?;
-            return Ok((entry.table_name.clone(), Arc::clone(&entry.nullable_flags)));
+            return Ok((entry.table_name.clone(), Arc::clone(&entry.layout)));
         }
 
         // Load durable metadata once under the lock so table identity and state
@@ -1101,9 +1230,13 @@ where
         match metadata {
             None => {
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
-                // Detect an unmanaged pre-existing table with an incompatible
-                // engine before recording ownership or issuing creation DDL.
-                self.ensure_engine_matches(&clickhouse_table_name).await?;
+                validate_clickhouse_table_name(
+                    &clickhouse_table_name,
+                    schema.name(),
+                    self.inserter_config.engine,
+                )?;
+                // An existing object without metadata is not ETL's to reuse.
+                self.ensure_table_absent(&clickhouse_table_name).await?;
                 self.create_table_with_metadata(
                     table_id,
                     &clickhouse_table_name,
@@ -1115,6 +1248,11 @@ where
             }
             Some(metadata) if metadata.is_pending() => {
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
+                validate_clickhouse_table_name(
+                    &clickhouse_table_name,
+                    schema.name(),
+                    self.inserter_config.engine,
+                )?;
                 self.ensure_engine_matches(&clickhouse_table_name).await?;
                 self.recover_pending_metadata(table_id, &clickhouse_table_name, schema, metadata)
                     .await?;
@@ -1122,17 +1260,14 @@ where
             Some(_) => {}
         }
 
-        // Compute nullable flags from the actual ClickHouse schema. This
-        // matters after `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are
-        // forced to `Nullable(T)` even when the Postgres column is `NOT NULL`,
-        // so RowBinary must include the nullable marker byte ClickHouse
-        // expects.
+        // Build the layout from the actual ClickHouse schema. This matters
+        // after `ALTER TABLE ADD COLUMN`: ClickHouse scalar columns are forced
+        // to `Nullable(T)` even when the Postgres column is `NOT NULL`, so
+        // RowBinary must include the nullable marker byte ClickHouse expects.
         let actual_columns = self.client.table_columns(&clickhouse_table_name).await?;
-        let expected_column_names =
-            expected_clickhouse_column_names(schema, self.inserter_config.engine);
-        let nullable_flags = nullable_flags_from_clickhouse_columns(
+        let layout = row_binary_layout_from_clickhouse_columns(
             &clickhouse_table_name,
-            &expected_column_names,
+            &expected_clickhouse_columns(schema, self.inserter_config.engine),
             &actual_columns,
         )?;
 
@@ -1147,12 +1282,12 @@ where
                 Arc::new(ClickHouseTableCacheEntry {
                     table_name: clickhouse_table_name.clone(),
                     metadata: applied_metadata,
-                    nullable_flags,
+                    layout,
                 })
             }))
         };
 
-        Ok((entry.table_name.clone(), Arc::clone(&entry.nullable_flags)))
+        Ok((entry.table_name.clone(), Arc::clone(&entry.layout)))
     }
 
     /// Recovers initial creation or an unambiguous schema-change endpoint and
@@ -1204,10 +1339,7 @@ where
                 for endpoint_schema in [&old_schema, schema] {
                     reject_legacy_merge_tree_layout(
                         clickhouse_table_name,
-                        &expected_clickhouse_column_names(
-                            endpoint_schema,
-                            self.inserter_config.engine,
-                        ),
+                        &expected_clickhouse_columns(endpoint_schema, self.inserter_config.engine),
                         &actual_columns,
                     )?;
                 }
@@ -1283,11 +1415,9 @@ where
         }
 
         let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
-        let expected_column_names =
-            expected_clickhouse_column_names(schema, self.inserter_config.engine);
-        nullable_flags_from_clickhouse_columns(
+        row_binary_layout_from_clickhouse_columns(
             clickhouse_table_name,
-            &expected_column_names,
+            &expected_clickhouse_columns(schema, self.inserter_config.engine),
             &actual_columns,
         )?;
 
@@ -1311,7 +1441,13 @@ where
             ));
         }
 
-        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
+        // Destination metadata names the table this source table writes to. The
+        // current source name differs from it after a rename.
+        let metadata = self.store.get_destination_table_metadata(schema.id()).await?;
+        let clickhouse_table_name = metadata.as_ref().map_or_else(
+            || try_stringify_table_name(schema.name()),
+            |metadata| Ok(metadata.table_id().to_owned()),
+        )?;
 
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             let drop_view = drop_current_view_sql(&clickhouse_table_name);
@@ -1327,16 +1463,20 @@ where
     async fn write_table_rows_inner(
         &self,
         schema: &ReplicatedTableSchema,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let (clickhouse_table_name, nullable_flags) = self.prepare_table_for_writes(schema).await?;
+        let (clickhouse_table_name, layout) = self.prepare_table_for_writes(schema).await?;
 
         let engine = self.inserter_config.engine;
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
             .map(|table_row| {
-                let mut values: Vec<ClickHouseValue> =
-                    table_row.into_values().into_iter().map(cell_to_clickhouse_value).collect();
+                let mut values: Vec<ClickHouseValue> = table_row
+                    .into_values()
+                    .into_iter()
+                    .map(cell_to_clickhouse_value)
+                    .collect::<EtlResult<Vec<_>>>()?;
                 // Initial-copy rows are tagged as INSERT with LSN 0 /
                 // tx_ordinal 0 (sentinel meaning "this row pre-dates the
                 // streaming cursor"). For ReplacingMergeTree, any streaming
@@ -1356,11 +1496,15 @@ where
             .insert_rows(
                 &clickhouse_table_name,
                 rows,
-                &nullable_flags,
+                &layout,
                 self.inserter_config.max_bytes_per_insert,
+                batch_id,
                 COPY_REPLICATION_PATH,
             )
             .await
+            .map_err(|failure| {
+                evict_layout_after_rejected_insert(&self.table_cache, schema.id(), &layout, failure)
+            })
     }
 
     /// Handles relation metadata, applying the schema diff for a new snapshot
@@ -1457,6 +1601,7 @@ where
         let plan = current_schema.plan_schema_change(new_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
         ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
         ensure_clickhouse_additions_are_supported(clickhouse_table_name, &plan)?;
+        ensure_clickhouse_type_changes_are_supported(clickhouse_table_name, &plan)?;
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_replacing_merge_tree(
                 clickhouse_table_name,
@@ -1473,7 +1618,7 @@ where
         let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
         reject_legacy_merge_tree_layout(
             clickhouse_table_name,
-            &expected_clickhouse_column_names(&current_schema, self.inserter_config.engine),
+            &expected_clickhouse_columns(&current_schema, self.inserter_config.engine),
             &actual_columns,
         )?;
         // A cached RowBinary layout is valid only for Applied metadata. Remove
@@ -1537,6 +1682,7 @@ where
         let is_replacing_merge_tree =
             matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
         ensure_clickhouse_additions_are_supported(clickhouse_table_name, plan)?;
+        ensure_clickhouse_type_changes_are_supported(clickhouse_table_name, plan)?;
         if plan.is_empty() {
             if is_replacing_merge_tree {
                 self.refresh_current_view(clickhouse_table_name, after_schema).await?;
@@ -1653,11 +1799,9 @@ where
                             }
                         }
                         ColumnAlterationKind::Type => {
-                            warn_unsupported_column_type_change(
-                                "clickhouse",
-                                clickhouse_table_name,
-                                alteration,
-                            );
+                            // Validation above rejected every change of the
+                            // mapped ClickHouse type, so the column already
+                            // has the target type.
                         }
                         ColumnAlterationKind::Nullability => {
                             if !before.nullable && after.nullable {
@@ -1674,32 +1818,17 @@ where
                             }
                         }
                         ColumnAlterationKind::Default => {
-                            if before.default_expression.is_some() {
-                                self.client
-                                    .drop_column_default(clickhouse_table_name, &before.name)
-                                    .await?;
-                            }
-
-                            if let Some(after_default_expression) =
-                                after.default_expression.as_deref()
-                            {
-                                if supports_column_default(after_default_expression, &after.typ) {
-                                    self.client
-                                        .set_column_default(
-                                            clickhouse_table_name,
-                                            &before.name,
-                                            &after.typ,
-                                            after_default_expression,
-                                        )
-                                        .await?;
-                                } else {
-                                    warn!(
-                                        table_name = %clickhouse_table_name,
-                                        column_name = %before.name,
-                                        "skipping unsupported source column default for clickhouse"
-                                    );
-                                }
-                            }
+                            // ETL writes every column on every insert, so a
+                            // ClickHouse default only fills rows stored before
+                            // the column was added. Changing it would change
+                            // those rows, while Postgres keeps their add-time
+                            // value.
+                            warn!(
+                                table_name = %clickhouse_table_name,
+                                column_name = %before.name,
+                                "skipping source column default change for clickhouse because it \
+                                 would change rows stored before the column was added"
+                            );
                         }
                     }
                 }
@@ -1723,9 +1852,9 @@ where
     ///
     /// Schema changes are applied only after all preceding inserts in the batch
     /// are complete: step 2 awaits every INSERT before step 3 runs any DDL, and
-    /// the client pins `wait_for_async_insert = 1`, so an insert
-    /// acknowledgement implies the rows were flushed into the table and cannot
-    /// be overtaken by a following `ALTER TABLE`.
+    /// the client pins `async_insert = 0`, so an insert acknowledgement implies
+    /// the rows were written into the table and cannot be overtaken by a
+    /// following `ALTER TABLE`.
     async fn write_events_inner(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut event_iter = events.into_iter().peekable();
 
@@ -1862,26 +1991,28 @@ where
             return Ok(());
         }
 
-        let mut prepared: Vec<(String, Arc<[bool]>, Vec<PendingRow>)> =
+        let mut prepared: Vec<(TableId, String, Arc<RowBinaryLayout>, Vec<PendingRow>)> =
             Vec::with_capacity(pending.len());
-        for (_, (schema, rows)) in pending {
-            let (clickhouse_table_name, nullable_flags) =
-                self.prepare_table_for_writes(&schema).await?;
-            prepared.push((clickhouse_table_name, nullable_flags, rows));
+        for (table_id, (schema, rows)) in pending {
+            let (clickhouse_table_name, layout) = self.prepare_table_for_writes(&schema).await?;
+            prepared.push((table_id, clickhouse_table_name, layout, rows));
         }
 
         let mut tasks: TaskGroup<()> = TaskGroup::new();
         let engine = self.inserter_config.engine;
-        for (clickhouse_table_name, nullable_flags, rows) in prepared {
+        for (table_id, clickhouse_table_name, layout, rows) in prepared {
             let client = self.client.clone();
+            let table_cache = Arc::clone(&self.table_cache);
             let max_bytes = self.inserter_config.max_bytes_per_insert;
 
             tasks.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
                     .map(|PendingRow { operation, sequence_key, cells }| {
-                        let mut values: Vec<ClickHouseValue> =
-                            cells.into_iter().map(cell_to_clickhouse_value).collect();
+                        let mut values: Vec<ClickHouseValue> = cells
+                            .into_iter()
+                            .map(cell_to_clickhouse_value)
+                            .collect::<EtlResult<Vec<_>>>()?;
                         append_cdc_columns(&mut values, operation, sequence_key, engine);
                         Ok(values)
                     })
@@ -1891,11 +2022,15 @@ where
                     .insert_rows(
                         &clickhouse_table_name,
                         rows,
-                        &nullable_flags,
+                        &layout,
                         max_bytes,
+                        None,
                         CDC_REPLICATION_PATH,
                     )
                     .await
+                    .map_err(|failure| {
+                        evict_layout_after_rejected_insert(&table_cache, table_id, &layout, failure)
+                    })
             });
         }
 
@@ -2022,6 +2157,35 @@ fn validate_clickhouse_table_shape(
     validate_clickhouse_schema_capabilities(replicated_table_schema, engine)
 }
 
+/// Rejects destination table names that ReplacingMergeTree reserves for
+/// current views.
+///
+/// The encoder doubles underscores, so a source table ending in `_current`
+/// encodes to `<other>__current`, the current view name of the table whose
+/// encoding is `<other>`. ClickHouse's `IF NOT EXISTS` keeps whichever object
+/// exists first, so the collision would otherwise pass silently.
+fn validate_clickhouse_table_name(
+    clickhouse_table_name: &str,
+    source_table_name: &TableName,
+    engine: ClickHouseEngine,
+) -> EtlResult<()> {
+    if matches!(engine, ClickHouseEngine::ReplacingMergeTree)
+        && clickhouse_table_name.ends_with(CURRENT_VIEW_SUFFIX)
+    {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse table name collides with a current view name",
+            format!(
+                "Table '{source_table_name}' maps to '{clickhouse_table_name}', which \
+                 ReplacingMergeTree reserves for the current view of another table; rename the \
+                 source table or set `engine: merge_tree`."
+            )
+        ));
+    }
+
+    Ok(())
+}
+
 /// Validates ClickHouse-specific schema capabilities.
 ///
 /// Shared planning owns destination name-equivalence validation during schema
@@ -2031,9 +2195,9 @@ fn validate_clickhouse_schema_capabilities(
     replicated_table_schema: &ReplicatedTableSchema,
     engine: ClickHouseEngine,
 ) -> EtlResult<()> {
-    let trailing_column_names = trailing_cdc_column_names(engine);
+    let trailing_columns = trailing_cdc_columns(engine);
     if let Some(column) = replicated_table_schema.column_schemas().find(|column| {
-        trailing_column_names.iter().any(|trailing_name| {
+        trailing_columns.iter().any(|(trailing_name, _)| {
             CLICKHOUSE_COLUMN_NAME_MAPPING.equivalent(&column.name, trailing_name)
         })
     }) {
@@ -2448,9 +2612,11 @@ fn default_cell(typ: &Type) -> Cell {
         Type::OID => Cell::U32(0),
         Type::FLOAT4 => Cell::F32(0.0),
         Type::FLOAT8 => Cell::F64(0.0),
-        Type::DATE => Cell::Date(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap()),
-        Type::TIMESTAMP => Cell::Timestamp(chrono::DateTime::UNIX_EPOCH.naive_utc()),
-        Type::TIMESTAMPTZ => Cell::TimestampTz(chrono::DateTime::UNIX_EPOCH),
+        Type::DATE => Cell::Date(Date::Value(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())),
+        Type::TIMESTAMP => {
+            Cell::Timestamp(Timestamp::Value(chrono::DateTime::UNIX_EPOCH.naive_utc()))
+        }
+        Type::TIMESTAMPTZ => Cell::TimestampTz(Timestamp::Value(chrono::DateTime::UNIX_EPOCH)),
         Type::UUID => Cell::Uuid(uuid::Uuid::nil()),
         Type::BOOL_ARRAY => Cell::Array(ArrayCell::Bool(Vec::new())),
         Type::INT2_ARRAY => Cell::Array(ArrayCell::I16(Vec::new())),
@@ -2516,11 +2682,12 @@ where
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        _batch_id: Option<TableCopyBatchId>,
+        batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = self.writer.write_table_rows_inner(replicated_table_schema, table_rows).await;
+        let result =
+            self.writer.write_table_rows_inner(replicated_table_schema, batch_id, table_rows).await;
         async_result.send(result.map(|_| DestinationWriteStatus::Durable));
         Ok(())
     }
@@ -2542,7 +2709,7 @@ where
         let fence_guards = self.fences.acquire(&events).await;
 
         // Durability needs no branch: the task completes only after every
-        // INSERT in the batch is acknowledged under `wait_for_async_insert=1`,
+        // INSERT in the batch is acknowledged under `async_insert = 0`,
         // so each result is already `Durable` and `RequireDurable` calls are
         // satisfied by construction. `Accepted` is never reported.
         let writer = self.writer.clone();
@@ -3283,8 +3450,12 @@ mod tests {
         .unwrap();
 
         // THEN: The null array is accepted for later encoding.
-        let values =
-            row.into_values().into_iter().map(cell_to_clickhouse_value).collect::<Vec<_>>();
+        let values = row
+            .into_values()
+            .into_iter()
+            .map(cell_to_clickhouse_value)
+            .collect::<EtlResult<Vec<_>>>()
+            .unwrap();
 
         // WHEN: RowBinary encodes the array as non-nullable.
         let error = encode_to_row_binary(values, &[false], &mut Vec::new()).unwrap_err();
@@ -3410,6 +3581,30 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_clickhouse_table_name_rejects_current_view_suffix_under_replacing_merge_tree() {
+        // GIVEN: an encoded name that equals another table's current view.
+        let source_name = TableName::new("public".to_owned(), "foo_current".to_owned());
+        let clickhouse_table_name = "public_foo__current";
+
+        // WHEN: validated for both engines.
+        let error = validate_clickhouse_table_name(
+            clickhouse_table_name,
+            &source_name,
+            ClickHouseEngine::ReplacingMergeTree,
+        )
+        .unwrap_err();
+        let merge_tree = validate_clickhouse_table_name(
+            clickhouse_table_name,
+            &source_name,
+            ClickHouseEngine::MergeTree,
+        );
+
+        // THEN: only the engine with current views rejects it.
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        merge_tree.unwrap();
     }
 
     #[test]
@@ -3681,76 +3876,65 @@ mod tests {
     }
 
     #[test]
-    fn nullable_flags_use_clickhouse_destination_nullability() {
-        let expected_names = vec![
-            "id".to_owned(),
-            "score".to_owned(),
-            "tags".to_owned(),
-            CDC_OPERATION_COLUMN_NAME.to_owned(),
-            CDC_LSN_COLUMN_NAME.to_owned(),
-            CDC_TX_ORDINAL_COLUMN_NAME.to_owned(),
+    fn row_binary_layout_accepts_destination_nullability() {
+        // GIVEN: The source columns are NOT NULL, but ClickHouse made `score`
+        // nullable when the column was added.
+        let expected_columns = vec![
+            clickhouse_column("id", "Int64"),
+            clickhouse_column("score", "Int32"),
+            clickhouse_column("tags", "Array(Nullable(String))"),
+            clickhouse_column(CDC_OPERATION_COLUMN_NAME, "String"),
         ];
         let actual_columns = vec![
             clickhouse_column("id", "Int64"),
             clickhouse_column("score", "Nullable(Int32)"),
             clickhouse_column("tags", "Array(Nullable(String))"),
             clickhouse_column(CDC_OPERATION_COLUMN_NAME, "String"),
-            clickhouse_column(CDC_LSN_COLUMN_NAME, "UInt64"),
-            clickhouse_column(CDC_TX_ORDINAL_COLUMN_NAME, "UInt64"),
         ];
 
-        let flags =
-            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
-                .unwrap();
+        // WHEN: The layout is built from the actual table.
+        let layout = row_binary_layout_from_clickhouse_columns(
+            "test_table",
+            &expected_columns,
+            &actual_columns,
+        )
+        .unwrap();
 
-        assert_eq!(flags.as_ref(), [false, true, false, false, false, false]);
+        // THEN: Only the Nullable wrapper adds a null marker.
+        assert_eq!(layout.nullable_flags(), [false, true, false, false]);
     }
 
+    /// Any column drift other than an outer `Nullable(...)` rejects the table.
     #[test]
-    fn nullable_flags_reject_clickhouse_column_count_mismatch() {
-        let expected_names = vec!["id".to_owned(), CDC_OPERATION_COLUMN_NAME.to_owned()];
-        let actual_columns = vec![clickhouse_column("id", "Int64")];
+    fn row_binary_layout_rejects_clickhouse_schema_drift() {
+        // GIVEN: an expected layout and physical tables that differ from it.
+        let expected_columns =
+            vec![clickhouse_column("id", "Int64"), clickhouse_column("name", "String")];
+        let cases = [
+            // Missing column.
+            vec![clickhouse_column("id", "Int64")],
+            // Reordered columns.
+            vec![clickhouse_column("name", "String"), clickhouse_column("id", "Int64")],
+            // Source type change that ClickHouse never applied.
+            vec![clickhouse_column("id", "Int32"), clickhouse_column("name", "String")],
+            // A wrapper other than Nullable, which is a different type.
+            vec![
+                clickhouse_column("id", "Int64"),
+                clickhouse_column("name", "LowCardinality(String)"),
+            ],
+        ];
 
-        let err =
-            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
-                .unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
-        assert_eq!(
-            err.description(),
-            Some("ClickHouse destination table columns do not match the stored replication schema")
-        );
-        assert_eq!(
-            err.detail(),
-            Some(
-                "Destination table 'test_table' has 1 columns, but the stored replication schema \
-                 expects 2. Expected columns: id, cdc_operation. Actual columns: id."
+        for actual_columns in cases {
+            // WHEN: the layout is built from the drifted table.
+            let error = row_binary_layout_from_clickhouse_columns(
+                "test_table",
+                &expected_columns,
+                &actual_columns,
             )
-        );
-    }
+            .unwrap_err();
 
-    #[test]
-    fn nullable_flags_reject_clickhouse_column_order_mismatch() {
-        let expected_names = vec!["id".to_owned(), "name".to_owned()];
-        let actual_columns =
-            vec![clickhouse_column("name", "String"), clickhouse_column("id", "Int64")];
-
-        let err =
-            nullable_flags_from_clickhouse_columns("test_table", &expected_names, &actual_columns)
-                .unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::CorruptedTableSchema);
-        assert_eq!(
-            err.description(),
-            Some("ClickHouse destination table columns do not match the stored replication schema")
-        );
-        assert_eq!(
-            err.detail(),
-            Some(
-                "Destination table 'test_table' has column 'name' at position 1, but the stored \
-                 replication schema expects 'id'. Expected columns: id, name. Actual columns: \
-                 name, id."
-            )
-        );
+            // THEN: the table is reported as corrupted.
+            assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema, "{actual_columns:?}");
+        }
     }
 }
