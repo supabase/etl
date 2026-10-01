@@ -26,6 +26,9 @@ pub trait SchemaStore {
     ///
     /// Returns `None` if no schema version exists for the table at or before
     /// the given snapshot.
+    ///
+    /// Use [`SnapshotId::before_lsn`] to convert an exclusive replication
+    /// checkpoint into this inclusive snapshot bound.
     fn get_table_schema(
         &self,
         table_id: &TableId,
@@ -60,6 +63,9 @@ pub trait SchemaStore {
     /// because PostgreSQL may replay them, or the destination may need them for
     /// schema application. The ordered map keeps per-table cleanup iteration
     /// deterministic.
+    ///
+    /// Checkpoint-derived bounds use [`SnapshotId::before_lsn`], additionally
+    /// limited by any older snapshot needed for destination recovery.
     ///
     /// Returns the number of schema versions removed.
     fn prune_table_schemas(

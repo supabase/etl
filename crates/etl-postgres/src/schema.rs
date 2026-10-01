@@ -34,22 +34,25 @@ type Oid = u32;
 /// messages `M1` and `M2`, a second transaction later writes `M3`, and the
 /// second transaction commits first, delivery order is `M3`, `M1`, `M2` even
 /// though message-LSN order is `M1`, `M2`, `M3`. The commit LSN therefore
-/// orders schema activation across transactions, while the message LSN orders
+/// orders transactions containing schema changes, while the message LSN orders
 /// multiple schema changes within one transaction.
 ///
 /// The commit LSN also prevents an uncommitted schema message from becoming
 /// visible too early. A message at `M` may be below a durable checkpoint `P`
-/// while its transaction remains open and eventually commits at `C > P`.
-/// Ordering only by `M` would incorrectly select that schema at `P`; ordering
-/// by `(C, M)` does not.
+/// while its transaction remains open and eventually commits at `C >= P`.
+/// Ordering only by `M` would incorrectly select that schema at `P`. Ordering
+/// by `(C, M)` and using [`SnapshotId::before_lsn`] for the exclusive restart
+/// boundary keeps that transaction's schemas out until they are replayed.
 ///
-/// The `0:0` value represents the initial schema before any DDL changes.
+/// The `0:0` value represents the initial table-copy schema, which has no
+/// schema-message commit position. It remains eligible even at a zero replay
+/// frontier.
 ///
 /// The string representation encodes both LSNs as decimal `u64` values
 /// separated by a colon.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SnapshotId {
-    /// Commit LSN that determines when the schema becomes active.
+    /// Start of the COMMIT WAL record that orders this schema's transaction.
     commit_lsn: PgLsn,
     /// Message LSN that orders schemas sharing the same commit LSN.
     message_lsn: PgLsn,
@@ -71,18 +74,31 @@ impl SnapshotId {
         Self { commit_lsn, message_lsn }
     }
 
-    /// Returns an inclusive snapshot upper bound for a WAL frontier.
+    /// Returns an inclusive snapshot upper bound for a commit LSN.
     ///
     /// Every schema committed at or before `lsn` sorts at or below this value,
-    /// including every schema message sharing that commit LSN. Use this method
-    /// when an LSN represents a WAL frontier; comparing only
-    /// [`SnapshotId::commit_lsn`] discards the within-transaction ordering
-    /// component.
+    /// including every schema message sharing that commit LSN. For exclusive
+    /// replication progress, use [`SnapshotId::before_lsn`] instead.
     pub fn at_lsn(lsn: PgLsn) -> Self {
         Self::new(lsn, PgLsn::from(u64::MAX))
     }
 
-    /// Returns the commit LSN that activates this schema.
+    /// Returns a snapshot upper bound strictly before an exclusive WAL
+    /// frontier.
+    ///
+    /// A transaction whose commit record starts at `lsn` is still replayed when
+    /// replication resumes there. Exclude all its schema messages, even when
+    /// they were persisted by an earlier attempt. This conversion applies to
+    /// schema lookup and retention, not to the replication start LSN itself.
+    /// A zero frontier retains only the initial schema sentinel.
+    pub fn before_lsn(lsn: PgLsn) -> Self {
+        match u64::from(lsn).checked_sub(1) {
+            Some(previous_lsn) => Self::at_lsn(PgLsn::from(previous_lsn)),
+            None => Self::initial(),
+        }
+    }
+
+    /// Returns the start of the schema transaction's COMMIT WAL record.
     pub fn commit_lsn(self) -> PgLsn {
         self.commit_lsn
     }
@@ -148,9 +164,9 @@ mod snapshot_id_tests {
 
     #[test]
     fn snapshot_id_orders_by_commit_then_message_lsn() {
-        let committed_first = SnapshotId::new(PgLsn::from(200), PgLsn::from(300));
+        let committed_first = SnapshotId::new(PgLsn::from(200), PgLsn::from(150));
         let committed_second_first_message = SnapshotId::new(PgLsn::from(400), PgLsn::from(100));
-        let committed_second_second_message = SnapshotId::new(PgLsn::from(400), PgLsn::from(150));
+        let committed_second_second_message = SnapshotId::new(PgLsn::from(400), PgLsn::from(175));
 
         assert!(SnapshotId::initial() < committed_first);
         assert!(committed_first < committed_second_first_message);
@@ -158,7 +174,7 @@ mod snapshot_id_tests {
     }
 
     #[test]
-    fn snapshot_id_wal_frontier_includes_every_message_at_commit_lsn() {
+    fn snapshot_id_commit_bound_includes_every_message_at_commit_lsn() {
         let commit_lsn = PgLsn::from(400);
 
         assert!(SnapshotId::new(commit_lsn, PgLsn::from(100)) <= SnapshotId::at_lsn(commit_lsn));
@@ -169,6 +185,20 @@ mod snapshot_id_tests {
         );
         assert!(SnapshotId::new(PgLsn::from(401), PgLsn::from(1)) > SnapshotId::at_lsn(commit_lsn));
         assert_eq!(SnapshotId::at_lsn(PgLsn::from(u64::MAX)), SnapshotId::max());
+    }
+
+    #[test]
+    fn snapshot_id_progress_bound_excludes_every_message_at_commit_lsn() {
+        for frontier in [1, 400, u64::MAX] {
+            let bound = SnapshotId::before_lsn(PgLsn::from(frontier));
+
+            assert!(SnapshotId::initial() <= bound);
+            assert!(SnapshotId::new(PgLsn::from(frontier - 1), PgLsn::from(u64::MAX)) <= bound);
+            for message_lsn in [0, 100, u64::MAX] {
+                assert!(SnapshotId::new(PgLsn::from(frontier), PgLsn::from(message_lsn)) > bound);
+            }
+        }
+        assert_eq!(SnapshotId::before_lsn(PgLsn::from(0)), SnapshotId::initial());
     }
 
     #[test]
@@ -560,8 +590,8 @@ pub struct TableSchema {
     pub column_schemas: Vec<ColumnSchema>,
     /// The identifier for this stored source schema version.
     ///
-    /// The commit LSN determines when the schema becomes active, and the
-    /// message LSN orders multiple schema changes within the same transaction.
+    /// The commit LSN orders transactions, and the message LSN orders schema
+    /// changes within each transaction.
     pub snapshot_id: SnapshotId,
 }
 

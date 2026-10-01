@@ -147,8 +147,8 @@ pub trait Destination {
     /// boundaries. A single call may contain zero, one, or many
     /// [`Event::Relation`] events, including multiple schema changes for the
     /// same table. Implementations that apply destination DDL should process
-    /// events in order and update their active table schema each time a
-    /// relation event appears.
+    /// events in order and validate each relation against their applied schema
+    /// before changing it. Replayed relations must not rewind destination DDL.
     ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.

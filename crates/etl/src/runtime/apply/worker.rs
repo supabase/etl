@@ -321,10 +321,16 @@ where
 /// Determines the position from which the apply worker should start reading the
 /// replication stream.
 ///
-/// This function implements critical replication consistency logic by managing
-/// the apply worker's replication slot. The slot serves as a persistent marker
-/// in Postgres's WAL (Write-Ahead Log) that tracks the apply worker's progress
-/// and prevents WAL deletion of unreplicated data.
+/// For an existing slot, returns the greater of its `confirmed_flush_lsn` and
+/// the optional durable store checkpoint. A new slot starts at its consistent
+/// point after the previous slot lineage's checkpoint has been cleared.
+///
+/// This is a logical replay threshold: PostgreSQL can emit transactions whose
+/// COMMIT record starts at or after it, including their earlier WAL changes.
+/// It need not be a commit end LSN, since slot feedback can advance to a
+/// received WAL position while the apply loop is quiescent. Schema bootstrap
+/// therefore selects snapshots with a commit LSN strictly below this value.
+/// The slot retains the earlier `restart_lsn` needed to reconstruct replay.
 ///
 /// When an existing slot is found, this function checks if it's been
 /// invalidated. If so, it handles the situation according to the configured
@@ -363,8 +369,6 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         Err(err) => return Err(err),
     };
 
-    // Once we have the slot, we determine the start lsn, which is the
-    // consistent point from which Postgres tells us to start streaming from.
     let slot_start_lsn = slot.get_start_lsn();
 
     match &slot {
@@ -426,11 +430,9 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         return Ok(slot_start_lsn);
     };
 
-    // The two frontiers can legitimately differ because checkpoint persistence
-    // and PostgreSQL status feedback are separate operations. The checkpoint is
-    // selected from a completed destination flush boundary. PostgreSQL slot
-    // feedback may advance farther while the loop is quiescent, so startup
-    // chooses the later available frontier.
+    // PostgreSQL also takes this maximum, but ETL needs the resolved frontier
+    // for schema bootstrap before streaming. Using only the checkpoint could
+    // select an older schema whose DDL PostgreSQL will no longer replay.
     let start_lsn = persisted_checkpoint_lsn.max(slot_start_lsn);
 
     if persisted_checkpoint_lsn > slot_start_lsn {
