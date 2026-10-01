@@ -233,8 +233,8 @@ struct MemoryMonitorInner {
     backpressure: Option<BackpressureMonitor>,
     /// Latest coherent used and total memory snapshot.
     snapshot: RwLock<MemorySnapshot>,
-    /// Revision incremented after each complete snapshot update.
-    snapshot_revision: AtomicU64,
+    /// Revision incremented only when sampled memory capacity changes.
+    capacity_revision: AtomicU64,
 }
 
 /// Shared backpressure state that exists only when backpressure is configured.
@@ -298,7 +298,7 @@ impl MemoryMonitor {
             inner: Arc::new(MemoryMonitorInner {
                 backpressure,
                 snapshot: RwLock::new(startup_snapshot),
-                snapshot_revision: AtomicU64::new(0),
+                capacity_revision: AtomicU64::new(0),
             }),
         };
 
@@ -399,18 +399,18 @@ impl MemoryMonitor {
         let snapshot = self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner);
 
         MemoryCapacitySnapshot {
-            revision: self.inner.snapshot_revision.load(Ordering::Relaxed),
+            revision: self.inner.capacity_revision.load(Ordering::Relaxed),
             total_memory_bytes: snapshot.total,
         }
     }
 
-    /// Returns the revision of the latest complete memory snapshot.
+    /// Returns the revision of the latest sampled memory capacity.
     ///
     /// The revision is only a change-detection hint. Snapshot contents are
     /// synchronized independently by their [`RwLock`], so this load does not
     /// publish any associated data.
-    pub(crate) fn snapshot_revision(&self) -> u64 {
-        self.inner.snapshot_revision.load(Ordering::Relaxed)
+    pub(crate) fn capacity_revision(&self) -> u64 {
+        self.inner.capacity_revision.load(Ordering::Relaxed)
     }
 
     /// Updates the backpressure active state and notifies subscribers when it
@@ -443,19 +443,21 @@ impl MemoryMonitor {
         }
     }
 
-    /// Publishes one coherent memory snapshot and advances its wrapping
-    /// revision.
+    /// Publishes one coherent memory snapshot, advancing the governor revision
+    /// only when capacity changes.
     fn publish_snapshot(&self, snapshot: MemorySnapshot) {
         let previous_source = {
             let mut current = self.inner.snapshot.write().unwrap_or_else(PoisonError::into_inner);
             let previous_source = current.source;
-            *current = snapshot;
 
-            // Wrapping is intentional. Governor readers compare revisions for
-            // inequality, so `u64::MAX -> 0` still denotes a new snapshot.
-            // Update it while the snapshot is write-locked so readers cannot
-            // pair this snapshot with the preceding revision.
-            self.inner.snapshot_revision.fetch_add(1, Ordering::Relaxed);
+            // Usage still updates every sample for backpressure and metrics,
+            // but it does not affect the governor's capacity-derived target.
+            // Keep capacity and its wrapping revision under the same lock so
+            // readers cannot pair a new capacity with the preceding revision.
+            if current.total != snapshot.total {
+                self.inner.capacity_revision.fetch_add(1, Ordering::Relaxed);
+            }
+            *current = snapshot;
 
             previous_source
         };
@@ -548,7 +550,7 @@ impl MemoryMonitor {
                     total: 0,
                     source: MemorySnapshotSource::System,
                 }),
-                snapshot_revision: AtomicU64::new(0),
+                capacity_revision: AtomicU64::new(0),
             }),
         }
     }
@@ -570,16 +572,16 @@ impl MemoryMonitor {
         self.publish_snapshot(MemorySnapshot { used, total, source: MemorySnapshotSource::System });
     }
 
-    /// Sets the snapshot revision directly for wrapping tests.
-    pub(crate) fn set_snapshot_revision_for_test(&self, revision: u64) {
-        self.inner.snapshot_revision.store(revision, Ordering::Relaxed);
+    /// Sets the capacity revision directly for wrapping tests.
+    pub(crate) fn set_capacity_revision_for_test(&self, revision: u64) {
+        self.inner.capacity_revision.store(revision, Ordering::Relaxed);
     }
 }
 
 /// System or cgroup memory capacity used for batch governance.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryCapacitySnapshot {
-    /// Revision identifying this exact coherent snapshot.
+    /// Revision identifying the sampled memory capacity.
     pub(crate) revision: u64,
     /// Latest system or cgroup memory capacity in bytes.
     pub(crate) total_memory_bytes: u64,
@@ -637,16 +639,19 @@ mod tests {
         let (monitor, task) = MemoryMonitor::spawn(None, 100);
         let reader = monitor.clone();
         drop(monitor);
-        // Observe a real sample before exercising owner-driven teardown.
-        while reader.snapshot_revision() == 0 {
+        // Force a capacity change so a real sample is observable before
+        // exercising owner-driven teardown.
+        reader.set_total_memory_bytes_for_test(0);
+        let initial_revision = reader.capacity_revision();
+        while reader.capacity_revision() == initial_revision {
             tokio::task::yield_now().await;
         }
 
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        let revision = reader.snapshot_revision();
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        assert_eq!(reader.snapshot_revision(), revision);
+        let revision = reader.capacity_revision();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(reader.capacity_revision(), revision);
         assert_eq!(Arc::strong_count(&reader.inner), 1);
     }
 
@@ -900,7 +905,7 @@ mod tests {
 
         let snapshot = memory_monitor.capacity_snapshot();
 
-        assert_eq!(snapshot.revision, memory_monitor.snapshot_revision());
+        assert_eq!(snapshot.revision, memory_monitor.capacity_revision());
         assert_eq!(snapshot.total_memory_bytes, 6_000);
     }
 
@@ -909,26 +914,44 @@ mod tests {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(790, 1_000);
         let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 1.0, 1_000);
-        let revision = memory_monitor.snapshot_revision();
+        let revision = memory_monitor.capacity_revision();
         let snapshot = memory_monitor.current_snapshot();
 
         memory_monitor.publish_refresh(MemoryRefresh::retained(snapshot));
 
-        assert_eq!(memory_monitor.snapshot_revision(), revision);
+        assert_eq!(memory_monitor.capacity_revision(), revision);
         assert_eq!(governor.batch_size_target_bytes(), 1_000);
 
-        // A genuinely new sample advances the revision even when its values and
-        // resulting target are unchanged.
+        // A fresh reading of the same capacity also leaves the target valid.
         memory_monitor.publish_refresh(MemoryRefresh::fresh(snapshot));
 
-        assert_eq!(memory_monitor.snapshot_revision(), revision.wrapping_add(1));
+        assert_eq!(memory_monitor.capacity_revision(), revision);
         assert_eq!(governor.batch_size_target_bytes(), 1_000);
     }
 
     #[test]
-    fn snapshot_revision_wraps_without_losing_the_update() {
+    fn usage_refresh_publishes_without_invalidating_the_capacity() {
         let memory_monitor = MemoryMonitor::new_for_test();
-        memory_monitor.set_snapshot_revision_for_test(u64::MAX);
+        memory_monitor.set_memory_snapshot_for_test(200, 1_000);
+        let revision = memory_monitor.capacity_revision();
+
+        memory_monitor.publish_refresh(MemoryRefresh::fresh(MemorySnapshot {
+            used: 900,
+            total: 1_000,
+            source: MemorySnapshotSource::ProcessCgroup,
+        }));
+
+        let snapshot = memory_monitor.current_snapshot();
+        assert_eq!(snapshot.used, 900);
+        assert_eq!(snapshot.source, MemorySnapshotSource::ProcessCgroup);
+        assert_eq!(memory_monitor.capacity_revision(), revision);
+        assert_eq!(memory_monitor.capacity_snapshot().total_memory_bytes, 1_000);
+    }
+
+    #[test]
+    fn capacity_revision_wraps_without_losing_the_update() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_capacity_revision_for_test(u64::MAX);
 
         memory_monitor.set_memory_snapshot_for_test(4_000, 6_000);
 

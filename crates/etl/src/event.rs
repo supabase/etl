@@ -200,24 +200,39 @@ impl TruncateEvent {
 
 /// Schema barrier synthesized by ETL from source schema metadata.
 ///
-/// Carries the schema and replication mask for subsequent events.
+/// Carries the schema and column masks for subsequent table events.
 ///
-/// PostgreSQL generates relation messages at runtime from `pgoutput`'s
-/// session-local schema cache; they are not WAL-backed changes. Which relation
-/// messages appear is therefore session-dependent: a fresh session resets the
-/// cache and can re-emit schema metadata during replay. ETL also emits this
-/// event when a stored schema snapshot is materialized for a following insert,
-/// update, or delete because pgoutput omitted a protocol relation. Truncate
-/// relies on the existing protocol schema state instead. This event
-/// intentionally has no LSN, transaction ordinal, or sequence key because such
-/// metadata would not be a durable replay identity. Consumers should instead
-/// treat it as an ordered schema barrier for the row events that follow it.
+/// In ETL's non-streaming `pgoutput` session, PostgreSQL sends relation
+/// metadata lazily before a published row change or truncate:
 ///
-/// The carried [`crate::schema::SnapshotId`] identifies the underlying stored
-/// table schema, and it is created as `0:0` when a table is just copied. Then
-/// it evolves based on the DDL messages that are received when there is a
-/// change to the table being replicated or the publication used by this
-/// pipeline.
+/// - On first use of a table in a decoding session, including after reconnect.
+/// - After invalidation of its relation or publication cache. Table and
+///   publication DDL, namespace changes, and maintenance such as `ANALYZE`,
+///   `VACUUM`, index creation, or `TRUNCATE` can trigger a resend without
+///   changing columns.
+///
+/// These protocol messages are generated from session-local metadata, not
+/// decoded as individual WAL changes, and do not create schema versions. ETL
+/// selects the exact pending DDL snapshot or the current decoder snapshot;
+/// only bootstrap uses the newest stored snapshot at or before its safe lookup
+/// boundary.
+///
+/// The [`crate::schema::SnapshotId`] starts at `0:0` and advances with ETL's
+/// transactional messages for supported table and publication DDL, including
+/// no-op commands. Publication column-list changes need a new snapshot to
+/// order replication-mask changes even when the full table schema is unchanged.
+///
+/// ETL also synthesizes this event before insert, update, or delete when DDL
+/// left a pending snapshot but PostgreSQL omitted a relation message. It uses
+/// the previous masks; a received relation always supplies fresh masks.
+/// Truncate relies on the existing protocol schema state instead.
+///
+/// Destinations compare the snapshot and replication mask with their applied
+/// metadata. An identical pair needs no schema transition. A newer snapshot
+/// requires a supported transition: evaluate the projected schema diff and
+/// record the new endpoint, even if no physical DDL is needed. An equal
+/// snapshot with a different replication mask is ambiguous and must not drive
+/// destination DDL.
 ///
 /// PostgreSQL emits relation-message columns in `pg_attribute.attnum` order,
 /// skipping unpublished columns, and sends tuple data in that same order. The
@@ -226,6 +241,9 @@ impl TruncateEvent {
 /// schema creates a [`ReplicatedTableSchema`] whose column order matches the
 /// tuple payloads. Event conversion can then decode row values by
 /// replicated-column position.
+///
+/// Relation messages have no durable replay identity, so this event has no
+/// LSN or sequence key and does not consume a transaction ordinal.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {

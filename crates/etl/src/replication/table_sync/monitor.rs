@@ -44,11 +44,15 @@ impl TableSyncMonitor {
 
             loop {
                 ticker.tick().await;
-                emit_replication_lag_metrics(table_id, consistent_point, &out_of_band_source_pool)
-                    .await;
+                match out_of_band_source_pool.get_slot_state_and_current_wal_lsn(&slot_name).await {
+                    Ok((slot_state, source_current_lsn)) => {
+                        if let Some(source_current_lsn) = source_current_lsn {
+                            emit_replication_lag_metrics(consistent_point, source_current_lsn);
+                        }
+                        if slot_state != SlotState::Invalidated {
+                            continue;
+                        }
 
-                match out_of_band_source_pool.get_slot_state(&slot_name).await {
-                    Ok(SlotState::Invalidated) => {
                         counter!(ETL_SLOT_INVALIDATIONS_TOTAL).increment(1);
                         warn!(
                             table_id = table_id.0,
@@ -61,7 +65,6 @@ impl TableSyncMonitor {
 
                         break;
                     }
-                    Ok(SlotState::NotInvalidated) => {}
                     Err(error) if error.kind() == ErrorKind::ReplicationSlotNotFound => {
                         counter!(ETL_SLOT_INVALIDATIONS_TOTAL).increment(1);
                         warn!(
@@ -79,7 +82,7 @@ impl TableSyncMonitor {
                         warn!(
                             table_id = table_id.0,
                             error = %error,
-                            "table sync monitor failed to check replication slot state"
+                            "table sync monitor failed to poll source database"
                         );
                     }
                 }
@@ -114,27 +117,10 @@ impl TableSyncMonitor {
 }
 
 /// Emits end-to-end lag metrics for a table sync while initial copy runs.
-async fn emit_replication_lag_metrics(
-    table_id: TableId,
-    consistent_point: PgLsn,
-    out_of_band_source_pool: &OutOfBandSourcePool,
-) {
-    match out_of_band_source_pool.get_current_wal_lsn().await {
-        Ok(source_current_lsn) => {
-            let source_current_lsn = u64::from(source_current_lsn);
-            let consistent_point = u64::from(consistent_point);
-            let table_copy_lag_bytes = source_current_lsn.saturating_sub(consistent_point);
-
-            gauge!(ETL_TABLE_COPY_END_TO_END_LAG_BYTES).set(table_copy_lag_bytes as f64);
-        }
-        Err(error) => {
-            warn!(
-                table_id = table_id.0,
-                error = %error,
-                "table copy replication lag reporter failed to poll source database"
-            );
-        }
-    }
+fn emit_replication_lag_metrics(consistent_point: PgLsn, source_current_lsn: PgLsn) {
+    let table_copy_lag_bytes =
+        u64::from(source_current_lsn).saturating_sub(u64::from(consistent_point));
+    gauge!(ETL_TABLE_COPY_END_TO_END_LAG_BYTES).set(table_copy_lag_bytes as f64);
 }
 
 #[cfg(test)]

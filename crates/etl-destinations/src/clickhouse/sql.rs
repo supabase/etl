@@ -35,9 +35,7 @@ pub(super) fn quote_identifier(identifier: &str) -> String {
 
 /// Quotes a ClickHouse SQL string literal.
 ///
-/// Takes the decoded string value, not a literal from another SQL dialect.
-/// PostgreSQL literals must be decoded first because PostgreSQL treats a
-/// backslash as an ordinary character while ClickHouse treats it as an escape.
+/// Takes a decoded value, not a SQL literal from another dialect.
 pub(super) fn quote_string_literal(value: &str) -> String {
     quote_with('\'', value)
 }
@@ -56,7 +54,6 @@ mod tests {
 
     #[test]
     fn quote_string_literal_escapes_backslashes_and_quotes() {
-        // GIVEN: values with escapable characters and a double quote to keep.
         let cases = [
             ("plain", "'plain'"),
             ("it's", "'it\\'s'"),
@@ -64,13 +61,12 @@ mod tests {
             ("abc\\", "'abc\\\\'"),
             ("has\"quote", "'has\"quote'"),
             ("line\nbreak", "'line\\nbreak'"),
+            (r"C:\temp'; select 1; --", r"'C:\\temp\'; select 1; --'"),
         ];
 
         for (value, expected) in cases {
-            // WHEN: the value is quoted as a ClickHouse string literal.
             let literal = quote_string_literal(value);
 
-            // THEN: only the delimiter, backslashes, and controls are escaped.
             assert_eq!(literal, expected);
         }
     }

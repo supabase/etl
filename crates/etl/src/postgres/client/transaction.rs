@@ -1,4 +1,8 @@
-use std::{collections::HashSet, fmt, num::NonZeroI32};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+    num::NonZeroI32,
+};
 
 use etl_postgres::{below_version, version::POSTGRES_15};
 use pg_escape::{quote_identifier, quote_literal};
@@ -361,8 +365,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
             .collect::<Vec<_>>()
             .join(", ");
 
-        let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(filter_table_id, publication_name).await?;
+        let (table_name, row_filter) =
+            self.get_table_copy_metadata(table_id, filter_table_id, publication_name).await?;
 
         let copy_query = if let Some(row_filter) = row_filter {
             format!(
@@ -406,44 +410,48 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Err(etl_error!(ErrorKind::InvalidState, "PostgreSQL pg_export_snapshot returned no rows"))
     }
 
-    /// Returns quick planner statistics for table copy.
-    async fn get_table_copy_planning_estimate(
+    /// Returns quick planner statistics for the requested physical tables in
+    /// one query. Empty input requires no database work.
+    async fn get_table_copy_planning_estimates(
         &self,
-        table_id: TableId,
-    ) -> EtlResult<TableCopyPlanningEstimate> {
-        // This query does not use MVCC, so it reflects the relation size at the
-        // time partition planning runs. The row count is an estimate from
-        // pg_class so planning stays cheap for huge tables.
+        table_ids: &[TableId],
+    ) -> EtlResult<BTreeMap<TableId, TableCopyPlanningEstimate>> {
+        if table_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        // Relation sizes reflect planning time rather than the MVCC snapshot.
+        // Planner row estimates keep this cheap without scanning source rows.
+        let table_ids_sql = table_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
         let estimate_query = format!(
-            "select pg_relation_size({table_id}::regclass)::bigint / \
-             current_setting('block_size')::bigint as table_blocks,
+            "select c.oid as table_id,
+             pg_relation_size(c.oid)::bigint / current_setting('block_size')::bigint as \
+             table_blocks,
              greatest(c.reltuples, 0)::bigint as estimated_rows
              from pg_class c
-             where c.oid = {table_id};"
+             where c.oid = any(array[{table_ids_sql}]::oid[]);"
         );
 
+        let mut estimates = BTreeMap::new();
         for message in self.transaction.simple_query(&estimate_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let Some(table_blocks) = row.try_get::<&str>("table_blocks")? else {
-                    continue;
-                };
-                let Some(estimated_rows) = row.try_get::<&str>("estimated_rows")? else {
-                    continue;
-                };
-
-                if let (Ok(table_blocks), Ok(estimated_rows)) =
-                    (table_blocks.parse::<u64>(), estimated_rows.parse::<u64>())
-                {
-                    return Ok(TableCopyPlanningEstimate::new(table_blocks, estimated_rows));
-                }
+                let table_id = get_row_value(&row, "table_id", "pg_class")?;
+                let table_blocks = get_row_value(&row, "table_blocks", "pg_class")?;
+                let estimated_rows = get_row_value(&row, "estimated_rows", "pg_class")?;
+                estimates
+                    .insert(table_id, TableCopyPlanningEstimate::new(table_blocks, estimated_rows));
             }
         }
 
-        Err(etl_error!(
-            ErrorKind::SourceSchemaError,
-            "Could not retrieve table copy planning estimate",
-            format!("table_id: {table_id}")
-        ))
+        if table_ids.iter().any(|table_id| !estimates.contains_key(table_id)) {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "Could not retrieve table copy planning estimates",
+                "One or more source tables were not found"
+            ));
+        }
+
+        Ok(estimates)
     }
 
     /// Checks whether the given table is a partitioned parent (`relkind =
@@ -483,8 +491,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
         publication_name: Option<&str>,
         partition: &CtidPartition,
     ) -> EtlResult<CopyOutStream> {
-        let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(filter_table_id, publication_name).await?;
+        let (table_name, row_filter) =
+            self.get_table_copy_metadata(table_id, filter_table_id, publication_name).await?;
 
         let column_list = column_schemas
             .iter()
@@ -500,21 +508,46 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Ok(stream)
     }
 
-    /// Loads the table name.
-    async fn get_table_name(&self, table_id: TableId) -> EtlResult<TableName> {
-        let table_info_query = format!(
-            "select n.nspname as schema_name, c.relname as table_name
-            from pg_class c
-            join pg_namespace n on c.relnamespace = n.oid
-            where c.oid = {table_id}",
+    /// Loads the physical table name and publication row filter in one query.
+    ///
+    /// Resolve before each COPY because publication expansion can observe
+    /// catalog changes despite an imported snapshot.
+    async fn get_table_copy_metadata(
+        &self,
+        table_id: TableId,
+        filter_table_id: TableId,
+        publication_name: Option<&str>,
+    ) -> EtlResult<(TableName, Option<String>)> {
+        let row_filter = match publication_name {
+            Some(publication_name) if !below_version!(self.server_version, POSTGRES_15) => {
+                format!(
+                    "(select pt.rowfilter
+                      from pg_publication_tables pt
+                      join pg_namespace n on n.nspname = pt.schemaname
+                      join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+                      where pt.pubname = {} and c.oid = {filter_table_id}
+                      limit 1)",
+                    quote_literal(publication_name),
+                )
+            }
+            // PostgreSQL 14 has no publication row filters or rowfilter column.
+            _ => "null::text".to_owned(),
+        };
+        let query = format!(
+            "select n.nspname as schema_name, c.relname as table_name,
+                    {row_filter} as row_filter
+             from pg_class c
+             join pg_namespace n on c.relnamespace = n.oid
+             where c.oid = {table_id}",
         );
 
-        for message in self.transaction.simple_query(&table_info_query).await? {
+        for message in self.transaction.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
                 let table_name = get_row_value::<String>(&row, "table_name", "pg_class")?;
+                let row_filter = row.try_get("row_filter")?.map(str::to_owned);
 
-                return Ok(TableName { schema: schema_name, name: table_name });
+                return Ok((TableName { schema: schema_name, name: table_name }, row_filter));
             }
         }
 
@@ -650,52 +683,6 @@ impl<'a> PgReplicationTransactionCore<'a> {
         )
     }
 
-    /// Retrieves the publication row filter for a table.
-    async fn get_row_filter(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> EtlResult<Option<String>> {
-        // Row filters on publications were added in Postgres 15. For any
-        // earlier versions we know that there is no row filter.
-        if below_version!(self.server_version, POSTGRES_15) {
-            return Ok(None);
-        }
-
-        // If we don't have a publication the row filter is implicitly
-        // non-existent.
-        let Some(publication_name) = publication_name else {
-            return Ok(None);
-        };
-
-        // This uses the same query as the `pg_publication_tables`, but with
-        // some minor tweaks (COALESCE, only return the rowfilter, filter on oid
-        // and pubname). All of these are available >= Postgres 15.
-        let row_filter_query = format!(
-            "select pt.rowfilter as row_filter
-                from pg_publication_tables pt
-                join pg_namespace n on n.nspname = pt.schemaname
-                join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename
-                where pt.pubname = {} and c.oid = {};",
-            quote_literal(publication_name),
-            table_id,
-        );
-
-        let row_filters = self.transaction.simple_query(&row_filter_query).await?;
-
-        for row_filter in row_filters {
-            if let SimpleQueryMessage::Row(row) = row_filter {
-                let row_filter = row.try_get("row_filter")?;
-                match row_filter {
-                    None => return Ok(None),
-                    Some(row_filter) => return Ok(Some(row_filter.to_owned())),
-                }
-            }
-        }
-
-        Ok(None)
-    }
-
     /// Returns a receiver for background connection task updates.
     fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
         self.connection_updates_rx.clone()
@@ -796,12 +783,13 @@ impl<'a> PgReplicationTransaction<'a> {
         self.core.export_snapshot().await
     }
 
-    /// Returns quick planner statistics for table copy.
-    pub async fn get_table_copy_planning_estimate(
+    /// Returns quick planner statistics for the requested physical tables in
+    /// one query, keyed by table ID.
+    pub async fn get_table_copy_planning_estimates(
         &self,
-        table_id: TableId,
-    ) -> EtlResult<TableCopyPlanningEstimate> {
-        self.core.get_table_copy_planning_estimate(table_id).await
+        table_ids: &[TableId],
+    ) -> EtlResult<BTreeMap<TableId, TableCopyPlanningEstimate>> {
+        self.core.get_table_copy_planning_estimates(table_ids).await
     }
 
     /// Checks whether the given table is a partitioned parent (`relkind =

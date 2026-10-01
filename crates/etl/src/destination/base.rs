@@ -146,9 +146,11 @@ pub trait Destination {
     /// Streaming batches are built from size and time limits, not schema change
     /// boundaries. A single call may contain zero, one, or many
     /// [`Event::Relation`] events, including multiple schema changes for the
-    /// same table. Implementations that apply destination DDL should process
-    /// events in order and validate each relation against their applied schema
-    /// before changing it. Replayed relations must not rewind destination DDL.
+    /// same table or repeated notifications for an unchanged schema. Process
+    /// them in order: compare the snapshot and replication mask with applied
+    /// metadata before deciding whether destination DDL is needed. Replayed
+    /// relations must not rewind destination DDL. See
+    /// [`crate::event::RelationEvent`] for snapshot and replay semantics.
     ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.

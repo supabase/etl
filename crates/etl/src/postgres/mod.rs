@@ -1,5 +1,6 @@
 //! Postgres source, protocol, and migration support.
 
+pub(crate) mod pool;
 mod source_pool;
 mod stream;
 

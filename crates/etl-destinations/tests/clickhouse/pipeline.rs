@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use etl::{
     config::BatchConfig,
     error::ErrorKind,
@@ -5,12 +7,13 @@ use etl::{
     failpoints::APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
     pipeline::PipelineId,
     schema::ReplicatedTableSchema,
-    store::{SchemaStore, StateStore},
+    store::{CachedStore, PostgresStore, SchemaStore, StateStore, TableStateType, WorkerType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
         pipeline::{PipelineBuilder, create_pipeline},
+        store::{wait_for_table_state_type, wait_for_table_sync_complete},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -29,6 +32,9 @@ use crate::support::{
     clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query},
     crypto::install_crypto_provider,
 };
+
+/// Deadline for reaching durable table state in restart tests.
+const RESTART_STATE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// User-column projection for the all-types test, with `uuid_col` rendered as a
 /// canonical lowercase UUID string via `toString()`.
@@ -1294,41 +1300,26 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].value, "keep_me");
 }
 
-/// Tests that a pipeline restart resumes CDC streaming without re-running the
-/// initial table copy.
-///
-/// # GIVEN
-///
-/// A Postgres table with one row (`id=1, value='before_restart'`), copied to
-/// ClickHouse by a first pipeline run that then shuts down cleanly.
-///
-/// # WHEN
-///
-/// A new `ClickHouseDestination` and `Pipeline` are built with the same store
-/// and pipeline_id (simulating process restart), the pipeline is started, and a
-/// second row (`id=2, value='after_restart'`) is inserted into Postgres.
-///
-/// # THEN
-///
-/// ClickHouse contains exactly two rows:
-/// - `id=1` from the initial table copy (`cdc_lsn = 0`).
-/// - `id=2` from CDC streaming in the second run (`cdc_lsn > 0`).
-/// No duplicate `id=1` row exists -- table copy must not re-run.
+/// A fresh store and destination resume MergeTree replication without
+/// recopying.
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_restart_resumes_streaming_merge_tree() {
     pipeline_restart_resumes_streaming_inner(ClickHouseEngine::MergeTree).await;
 }
 
+/// A fresh store and destination resume ReplacingMergeTree replication without
+/// recopying.
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_restart_resumes_streaming_replacing_merge_tree() {
     pipeline_restart_resumes_streaming_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
+/// Verifies source/destination equality across a restart from a durable
+/// checkpoint.
 async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: first pipeline run copies one row ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("restart_flow");
 
@@ -1342,42 +1333,66 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('before_restart')",
+            "insert into {} (value) values ('before_restart')",
             table_name.as_quoted_identifier(),
         ))
         .await
         .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
-    let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
-
-    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
         publication_name.to_owned(),
         store.clone(),
-        destination,
+        destination.clone(),
     );
 
     pipeline.start().await.unwrap();
-    table_sync_complete_notify.notified().await;
+    wait_for_table_sync_complete(&store, table_id, RESTART_STATE_TIMEOUT).await.unwrap();
+
+    // The first owned change materializes the decoder and lets SyncDone become
+    // Ready after its apply checkpoint is durable.
+    let update_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
+
+    database
+        .run_sql("update test.restart_flow set value = 'checkpointed' where id = 1")
+        .await
+        .unwrap();
+
+    update_notify.notified().await;
+    wait_for_table_state_type(&store, table_id, TableStateType::Ready, RESTART_STATE_TIMEOUT)
+        .await
+        .unwrap();
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify first run produced exactly one row.
     let restart_query =
         || current_state_query(engine, RESTART_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&restart_query()).await;
-    assert_eq!(rows.len(), 1, "first run should copy exactly one row");
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, 1);
-    assert_eq!(rows[0].value, "before_restart");
+    assert_eq!(rows[0].value, "checkpointed");
 
-    // --- WHEN: rebuild destination and pipeline and stream a new insert ---
+    let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert!(checkpoint.is_some());
+    drop(destination);
+    drop(store);
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    store.load_cache().await.unwrap();
+
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -1398,7 +1413,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('after_restart')",
+            "insert into {} (value) values ('after_restart')",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -1406,16 +1421,21 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     events_notify.notified().await;
 
-    let rows: Vec<IdValueRow> = clickhouse_db.query(&restart_query()).await;
-
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: exactly two rows in current state, no duplicate of id=1 ---
-    assert_eq!(rows.len(), 2, "expected original copied row plus one streamed insert");
-    assert_eq!(rows[0].id, 1);
-    assert_eq!(rows[0].value, "before_restart");
-    assert_eq!(rows[1].id, 2);
-    assert_eq!(rows[1].value, "after_restart");
+    assert_eq!(destination.write_table_rows_called().await, 0);
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&restart_query()).await;
+    let source_rows = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query("select id, value from test.restart_flow order by id", &[])
+        .await
+        .unwrap();
+    let expected: Vec<(i64, String)> =
+        source_rows.iter().map(|row| (row.get(0), row.get(1))).collect();
+    let actual: Vec<_> = rows.into_iter().map(|row| (row.id, row.value)).collect();
+    assert_eq!(actual, expected);
 }
 
 #[tokio::test(flavor = "multi_thread")]

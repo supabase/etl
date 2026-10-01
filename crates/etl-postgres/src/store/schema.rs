@@ -3,12 +3,15 @@
 use std::collections::{BTreeMap, HashMap};
 
 use sqlx::{
-    PgExecutor, PgPool, Row,
+    PgExecutor, QueryBuilder, Row,
     postgres::{PgRow, types::Oid as SqlxTableId},
 };
 use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
+
+/// Columns per INSERT, capped at 2,048 bind parameters per batch.
+pub const MAX_COLUMNS_PER_INSERT: usize = 256;
 
 macro_rules! define_type_mappings {
     (
@@ -235,21 +238,19 @@ define_type_mappings! {
     DATEMULTI_RANGE_ARRAY => "DATEMULTI_RANGE_ARRAY"
 }
 
-/// Stores a table schema in the database with a specific snapshot ID.
+/// Upserts a table schema version and returns its storage ID.
 ///
-/// Upserts table schema and replaces all column information in schema storage
-/// tables using a transaction to ensure atomicity. If a schema version already
-/// exists for the same `(pipeline_id, table_id, snapshot_id)`, columns are
-/// deleted and re-inserted.
-pub async fn store_table_schema(
-    pool: &PgPool,
+/// Call this, [`delete_table_columns`], and [`insert_table_columns`] in the
+/// same transaction to replace a schema version atomically.
+pub async fn upsert_table_schema<'c, E>(
+    executor: E,
     pipeline_id: i64,
     table_schema: &TableSchema,
-) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-
-    // Upsert table schema version
-    let table_schema_id: i64 = sqlx::query(
+) -> Result<i64, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
+    sqlx::query_scalar(
         r#"
         insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, snapshot_id)
         values ($1, $2, $3, $4, $5)
@@ -266,75 +267,79 @@ pub async fn store_table_schema(
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
     .bind(table_schema.snapshot_id.to_string())
-    .fetch_one(&mut *tx)
-    .await?
-    .get(0);
+    .fetch_one(executor)
+    .await
+}
 
-    // Delete existing columns for this table schema to handle schema changes
+/// Deletes the columns of one stored schema version before replacement.
+pub async fn delete_table_columns<'c, E>(
+    executor: E,
+    table_schema_id: i64,
+) -> Result<(), sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
     sqlx::query("delete from etl.table_columns where table_schema_id = $1")
         .bind(table_schema_id)
-        .execute(&mut *tx)
+        .execute(executor)
         .await?;
-
-    // Insert all columns
-    for column_schema in &table_schema.column_schemas {
-        sqlx::query(
-            r#"
-            insert into etl.table_columns
-            (table_schema_id, column_name, column_type, type_modifier, nullable,
-             ordinal_position, primary_key_ordinal_position, default_expression)
-            values ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
-        )
-        .bind(table_schema_id)
-        .bind(&column_schema.name)
-        .bind(postgres_type_to_string(&column_schema.typ))
-        .bind(column_schema.modifier)
-        .bind(column_schema.nullable)
-        .bind(column_schema.ordinal_position)
-        .bind(column_schema.primary_key_ordinal_position)
-        .bind(&column_schema.default_expression)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    tx.commit().await?;
 
     Ok(())
 }
 
-/// Loads all table schemas for a pipeline from the database at the latest
-/// snapshot.
+/// Inserts one column batch for a stored schema version.
 ///
-/// Retrieves table schemas and columns from schema storage tables,
-/// reconstructing complete [`TableSchema`] objects. This is equivalent to
-/// calling [`load_table_schemas_at_snapshot`] with [`SnapshotId::max`].
-pub async fn load_table_schemas(
-    pool: &PgPool,
-    pipeline_id: i64,
-) -> Result<Vec<TableSchema>, sqlx::Error> {
-    load_table_schemas_at_snapshot(pool, pipeline_id, SnapshotId::max()).await
+/// Split larger inputs into chunks of at most [`MAX_COLUMNS_PER_INSERT`]
+/// within the schema replacement transaction. Empty input issues no query.
+pub async fn insert_table_columns<'c, E>(
+    executor: E,
+    table_schema_id: i64,
+    columns: &[ColumnSchema],
+) -> Result<(), sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
+    if columns.is_empty() {
+        return Ok(());
+    }
+
+    let mut query = QueryBuilder::new(
+        r#"
+            insert into etl.table_columns
+            (table_schema_id, column_name, column_type, type_modifier, nullable,
+             ordinal_position, primary_key_ordinal_position, default_expression)
+            "#,
+    );
+    query.push_values(columns, |mut row, column| {
+        row.push_bind(table_schema_id)
+            .push_bind(&column.name)
+            .push_bind(postgres_type_to_string(&column.typ))
+            .push_bind(column.modifier)
+            .push_bind(column.nullable)
+            .push_bind(column.ordinal_position)
+            .push_bind(column.primary_key_ordinal_position)
+            .push_bind(&column.default_expression);
+    });
+    query.build().persistent(false).execute(executor).await?;
+
+    Ok(())
 }
 
-/// Loads the newest table schema at or before the requested snapshot.
+/// Loads every retained schema version for a pipeline in one query.
 ///
-/// Snapshot IDs are stored as compact, variable-width decimal text. Text order
-/// is not numeric order (`10:2` sorts before `2:30` as text), so the query must
-/// split both components and compare the numeric `(commit_lsn, message_lsn)`
-/// tuple. The commit component establishes cross-transaction delivery and
-/// activation order; the message component only breaks ties within one commit.
-///
-/// Returns `None` if no schema version exists for the table at or before the
-/// given snapshot.
-pub async fn load_table_schema_at_snapshot(
-    pool: &PgPool,
+/// The store needs a complete snapshot index for correct at-or-before cache
+/// lookups. Obsolete versions are removed by durable-checkpoint pruning.
+pub async fn load_table_schemas<'c, E>(
+    executor: E,
     pipeline_id: i64,
-    table_id: TableId,
-    snapshot_id: SnapshotId,
-) -> Result<Option<TableSchema>, sqlx::Error> {
+) -> Result<Vec<TableSchema>, sqlx::Error>
+where
+    E: PgExecutor<'c>,
+{
     let rows = sqlx::query(
         r#"
         select
+            ts.id as table_schema_id,
             ts.table_id,
             ts.schema_name,
             ts.table_name,
@@ -347,138 +352,39 @@ pub async fn load_table_schema_at_snapshot(
             tc.primary_key_ordinal_position,
             tc.default_expression
         from etl.table_schemas ts
-        inner join etl.table_columns tc on ts.id = tc.table_schema_id
-        where ts.id = (
-            select id from etl.table_schemas
-            where pipeline_id = $1
-              and table_id = $2
-              and (
-                  pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric,
-                  pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric
-              ) <= (
-                  pg_catalog.split_part($3, ':', 1)::pg_catalog.numeric,
-                  pg_catalog.split_part($3, ':', 2)::pg_catalog.numeric
-              )
-            order by
-                pg_catalog.split_part(snapshot_id, ':', 1)::pg_catalog.numeric desc,
-                pg_catalog.split_part(snapshot_id, ':', 2)::pg_catalog.numeric desc
-            limit 1
-        )
-        order by tc.ordinal_position
+        left join etl.table_columns tc on ts.id = tc.table_schema_id
+        where ts.pipeline_id = $1
+        order by ts.id, tc.ordinal_position
         "#,
     )
     .bind(pipeline_id)
-    .bind(SqlxTableId(table_id.into_inner()))
-    .bind(snapshot_id.to_string())
-    .fetch_all(pool)
-    .await?;
-
-    if rows.is_empty() {
-        return Ok(None);
-    }
-
-    let first_row = &rows[0];
-    let table_oid: SqlxTableId = first_row.get("table_id");
-    let table_id = TableId::new(table_oid.0);
-    let schema_name: String = first_row.get("schema_name");
-    let table_name: String = first_row.get("table_name");
-    let snapshot_id_str: String = first_row.get("snapshot_id");
-    let snapshot_id =
-        snapshot_id_str.parse::<SnapshotId>().map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-
-    let mut table_schema = TableSchema::with_snapshot_id(
-        table_id,
-        TableName::new(schema_name, table_name),
-        vec![],
-        snapshot_id,
-    );
-
-    for row in rows {
-        table_schema.add_column_schema(parse_column_schema(&row));
-    }
-
-    Ok(Some(table_schema))
-}
-
-/// Loads all table schemas for a pipeline at a specific snapshot point.
-///
-/// For each table, retrieves the newest schema version at or before the
-/// requested snapshot. Tables without an eligible schema version are excluded
-/// from the result.
-pub async fn load_table_schemas_at_snapshot(
-    pool: &PgPool,
-    pipeline_id: i64,
-    snapshot_id: SnapshotId,
-) -> Result<Vec<TableSchema>, sqlx::Error> {
-    // Use DISTINCT ON with numeric component ordering to select the latest
-    // eligible schema version for each table.
-    let rows = sqlx::query(
-        r#"
-        with latest_schemas as (
-            select distinct on (ts.table_id)
-                ts.id,
-                ts.table_id,
-                ts.schema_name,
-                ts.table_name,
-                ts.snapshot_id
-            from etl.table_schemas ts
-            where ts.pipeline_id = $1
-              and (
-                  pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric,
-                  pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric
-              ) <= (
-                  pg_catalog.split_part($2, ':', 1)::pg_catalog.numeric,
-                  pg_catalog.split_part($2, ':', 2)::pg_catalog.numeric
-              )
-            order by
-                ts.table_id,
-                pg_catalog.split_part(ts.snapshot_id, ':', 1)::pg_catalog.numeric desc,
-                pg_catalog.split_part(ts.snapshot_id, ':', 2)::pg_catalog.numeric desc
-        )
-        select
-            ls.table_id,
-            ls.schema_name,
-            ls.table_name,
-            ls.snapshot_id,
-            tc.column_name,
-            tc.column_type,
-            tc.type_modifier,
-            tc.nullable,
-            tc.ordinal_position,
-            tc.primary_key_ordinal_position,
-            tc.default_expression
-        from latest_schemas ls
-        inner join etl.table_columns tc on ls.id = tc.table_schema_id
-        order by ls.table_id, tc.ordinal_position
-        "#,
-    )
-    .bind(pipeline_id)
-    .bind(snapshot_id.to_string())
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     let mut table_schemas = HashMap::new();
-
     for row in rows {
         let table_oid: SqlxTableId = row.get("table_id");
         let table_id = TableId::new(table_oid.0);
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
-        let snapshot_id_str: String = row.get("snapshot_id");
-        let row_snapshot_id = snapshot_id_str
+        let snapshot_id: String = row.get("snapshot_id");
+        let snapshot_id = snapshot_id
             .parse::<SnapshotId>()
-            .map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-
-        let entry = table_schemas.entry(table_id).or_insert_with(|| {
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+        let table_schema_id: i64 = row.get("table_schema_id");
+        let entry = table_schemas.entry(table_schema_id).or_insert_with(|| {
             TableSchema::with_snapshot_id(
                 table_id,
                 TableName::new(schema_name, table_name),
                 vec![],
-                row_snapshot_id,
+                snapshot_id,
             )
         });
 
-        entry.add_column_schema(parse_column_schema(&row));
+        // A schema without columns still has a retained version.
+        if row.get::<Option<i32>, _>("ordinal_position").is_some() {
+            entry.add_column_schema(parse_column_schema(&row));
+        }
     }
 
     Ok(table_schemas.into_values().collect())
