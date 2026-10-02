@@ -305,6 +305,10 @@ recommended for new deployments.
 - Schema-change DDL is not supported. A newer relation schema is rejected even
   when only a default, nullability, mapped-equivalent type, or publication mask
   changed. Existing tables must match the exact generated Iceberg schema.
+- In `OnePerSchema` mode, source schema names are normalized into Iceberg
+  namespace names. The destination rejects different source schemas that map to
+  the same namespace within a pipeline, including during restart and recovery.
+  This check does not detect collisions with other pipelines or orphaned tables.
 - Apache Iceberg supports native schema evolution, but this deprecated ETL
   adapter does not implement it and does not translate PostgreSQL defaults.
 - The destination is deprecated and is not receiving the same product
