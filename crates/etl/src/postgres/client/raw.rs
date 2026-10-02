@@ -1,5 +1,6 @@
 use std::{fmt, future::Future, num::NonZeroI32, sync::Arc, time::Duration};
 
+use etl_config::shared::{ReplicationSlotConfig, Validate};
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     publications::publication_table_ids_query,
@@ -431,15 +432,14 @@ impl PgReplicationClient {
     /// operations that depend on this snapshot (e.g. schema fetches, table
     /// copies, or `pg_export_snapshot()` calls for child connections).
     ///
-    /// `failover` requests PostgreSQL 17+ standby synchronization for this
-    /// slot. The option applies only to this creation operation and is not
-    /// retained by the client.
+    /// Slot persistence and failover settings apply only to this creation
+    /// operation and are not retained by the client.
     pub async fn create_slot_with_transaction(
         &mut self,
         slot_name: &str,
-        failover: bool,
+        config: &ReplicationSlotConfig,
     ) -> EtlResult<(PgReplicationTransaction<'_>, CreateSlotResult)> {
-        self.validate_replication_slot_failover_support(failover)?;
+        self.validate_replication_slot_config(config)?;
 
         let connection_config = self.connection_config.clone();
         let server_version = self.server_version;
@@ -447,7 +447,7 @@ impl PgReplicationClient {
 
         let transaction = self.begin_slot_creation_transaction().await?;
         let slot = PgReplicationQueryTarget::new(&transaction)
-            .create_slot(slot_name, SnapshotAction::Use, failover)
+            .create_slot(slot_name, SnapshotAction::Use, config)
             .await?;
 
         // Only slot creation needs unlimited lock waits; schema and copy
@@ -468,19 +468,18 @@ impl PgReplicationClient {
     /// Creates a new logical replication slot with the specified name and no
     /// snapshot.
     ///
-    /// `failover` requests PostgreSQL 17+ standby synchronization for this
-    /// slot. The option applies only to this creation operation and is not
-    /// retained by the client.
+    /// Slot persistence and failover settings apply only to this creation
+    /// operation and are not retained by the client.
     pub async fn create_slot(
         &mut self,
         slot_name: &str,
-        failover: bool,
+        config: &ReplicationSlotConfig,
     ) -> EtlResult<CreateSlotResult> {
-        self.validate_replication_slot_failover_support(failover)?;
+        self.validate_replication_slot_config(config)?;
 
         let transaction = self.begin_slot_creation_transaction().await?;
         let slot = PgReplicationQueryTarget::new(&transaction)
-            .create_slot(slot_name, SnapshotAction::NoExport, failover)
+            .create_slot(slot_name, SnapshotAction::NoExport, config)
             .await?;
         transaction.commit().await?;
 
@@ -767,6 +766,14 @@ impl PgReplicationClient {
         let transaction = self.begin_tx().await?;
         transaction.simple_query("set local lock_timeout = 0").await?;
         Ok(transaction)
+    }
+
+    /// Validates slot options before beginning a slot-creation transaction.
+    fn validate_replication_slot_config(&self, config: &ReplicationSlotConfig) -> EtlResult<()> {
+        config.validate().map_err(|err| {
+            etl_error!(ErrorKind::ConfigError, "Invalid replication slot configuration", source: err)
+        })?;
+        self.validate_replication_slot_failover_support(config.failover)
     }
 
     /// Rejects a failover-slot request when the server explicitly reports a

@@ -257,7 +257,7 @@ where
             // persisted DataSync state makes cancellation restart the copy.
             let ShutdownResult::Ok(created) = with_shutdown!(
                 replication_client
-                    .create_slot_with_transaction(&slot_name, config.replication_slot.failover),
+                    .create_slot_with_transaction(&slot_name, &config.replication_slot),
                 shutdown_token,
             ) else {
                 return Ok(TableSyncResult::Stopped);

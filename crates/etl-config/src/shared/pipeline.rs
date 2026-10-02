@@ -296,10 +296,29 @@ impl Default for MemoryBackpressureConfig {
     }
 }
 
+/// Persistence of a pipeline's PostgreSQL logical replication slots.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicationSlotPersistence {
+    /// Keeps slots after their creating sessions end, allowing replication to
+    /// resume from retained WAL.
+    #[default]
+    Permanent,
+    /// Drops slots on an error or when their creating sessions end.
+    ///
+    /// Use for ephemeral pipelines whose store and destination are rebuilt
+    /// together. Replication cannot resume after the apply connection is lost.
+    Temporary,
+}
+
 /// Configuration for a pipeline's PostgreSQL logical replication slots.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ReplicationSlotConfig {
+    /// Whether apply and table-sync slots persist beyond their sessions.
+    #[serde(default)]
+    pub persistence: ReplicationSlotPersistence,
     /// Enables PostgreSQL failover support for logical replication slots.
     ///
     /// On PostgreSQL 17 or newer, ETL creates new slots with the `FAILOVER`
@@ -309,6 +328,21 @@ pub struct ReplicationSlotConfig {
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(example = false))]
     pub failover: bool,
+}
+
+impl Validate for ReplicationSlotConfig {
+    /// Rejects failover for session-local slots, which PostgreSQL cannot
+    /// synchronize to a standby.
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.failover && self.persistence == ReplicationSlotPersistence::Temporary {
+            return Err(ValidationError::InvalidFieldValue {
+                field: "replication_slot.failover".to_owned(),
+                constraint: "requires permanent replication slots".to_owned(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 /// Configuration for an ETL pipeline.
@@ -489,6 +523,7 @@ impl Validate for PipelineConfig {
         )?;
         validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
+        self.replication_slot.validate()?;
         self.table_sync_copy.validate()
     }
 }
@@ -725,6 +760,7 @@ impl Validate for PipelineConfigWithoutSecrets {
         )?;
         validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
+        self.replication_slot.validate()?;
         self.table_sync_copy.validate()
     }
 }
@@ -933,6 +969,68 @@ mod tests {
             assert_eq!(config.max_bytes, expected_max_bytes);
             config.validate().unwrap();
         }
+    }
+
+    /// Existing slot configurations keep permanent persistence.
+    #[test]
+    fn replication_slot_config_defaults_to_permanent() {
+        for json in [r#"{}"#, r#"{"failover":false}"#, r#"{"failover":true}"#] {
+            let config: ReplicationSlotConfig = serde_json::from_str(json).unwrap();
+
+            assert_eq!(config.persistence, ReplicationSlotPersistence::Permanent);
+            config.validate().unwrap();
+        }
+    }
+
+    /// Both persistence modes round-trip through the public configuration.
+    #[test]
+    fn replication_slot_config_roundtrips_persistence() {
+        for (persistence, name) in [
+            (ReplicationSlotPersistence::Permanent, "permanent"),
+            (ReplicationSlotPersistence::Temporary, "temporary"),
+        ] {
+            let config = ReplicationSlotConfig { persistence, ..Default::default() };
+            let json = serde_json::to_value(&config).unwrap();
+
+            assert_eq!(json["persistence"], name);
+            assert_eq!(serde_json::from_value::<ReplicationSlotConfig>(json).unwrap(), config);
+            config.validate().unwrap();
+        }
+
+        let config: ReplicationSlotConfig =
+            serde_json::from_str(r#"{"persistence":"temporary"}"#).unwrap();
+        assert!(!config.failover);
+    }
+
+    /// Validation rejects temporary failover slots with or without secrets.
+    #[test]
+    fn pipeline_configs_reject_temporary_slot_failover() {
+        let json = r#"{
+            "id": 1,
+            "publication_name": "publication",
+            "pg_connection": {
+                "host": "localhost",
+                "port": 5432,
+                "name": "postgres",
+                "username": "postgres",
+                "password": null,
+                "tls": {"trusted_root_certs": "", "enabled": false}
+            },
+            "replication_slot": {"persistence": "temporary", "failover": true}
+        }"#;
+        let config: PipelineConfig = serde_json::from_str(json).unwrap();
+        let expected = ValidationError::InvalidFieldValue {
+            field: "replication_slot.failover".to_owned(),
+            constraint: "requires permanent replication slots".to_owned(),
+        };
+
+        assert_eq!(config.validate().unwrap_err().to_string(), expected.to_string());
+        let without_secrets = PipelineConfigWithoutSecrets::from(config);
+        assert_eq!(
+            without_secrets.replication_slot.persistence,
+            ReplicationSlotPersistence::Temporary
+        );
+        assert_eq!(without_secrets.validate().unwrap_err().to_string(), expected.to_string());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
+    PipelineConfig, ReplicationSlotConfig, ReplicationSlotPersistence, TableSyncCopyConfig,
 };
 use etl_postgres::tokio::test_utils::PgDatabase;
 use rand::random;
@@ -174,6 +174,15 @@ where
     /// slots.
     pub fn with_replication_slot_failover(mut self, enabled: bool) -> Self {
         self.replication_slot.failover = enabled;
+        self
+    }
+
+    /// Sets persistence for apply and table-sync replication slots.
+    pub fn with_replication_slot_persistence(
+        mut self,
+        persistence: ReplicationSlotPersistence,
+    ) -> Self {
+        self.replication_slot.persistence = persistence;
         self
     }
 
