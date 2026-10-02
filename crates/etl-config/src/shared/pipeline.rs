@@ -331,8 +331,8 @@ pub struct ReplicationSlotConfig {
 }
 
 impl Validate for ReplicationSlotConfig {
-    /// Rejects failover for session-local slots, which PostgreSQL cannot
-    /// synchronize to a standby.
+    /// Rejects failover for temporary slots, which PostgreSQL disallows
+    /// for client-created replication slots.
     fn validate(&self) -> Result<(), ValidationError> {
         if self.failover && self.persistence == ReplicationSlotPersistence::Temporary {
             return Err(ValidationError::InvalidFieldValue {
