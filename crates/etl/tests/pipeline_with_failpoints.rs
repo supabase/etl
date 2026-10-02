@@ -2687,15 +2687,6 @@ impl IdleDurabilityTest {
     async fn start_with_settle_interval(settle_durable_interval_ms: Option<u64>) -> Self {
         init_test_tracing();
         let database = spawn_source_database().await;
-        if settle_durable_interval_ms.is_some() {
-            database
-                .run_sql(&format!(
-                    "alter database {} set wal_sender_timeout = '2000ms'",
-                    quote_identifier(&database.config.name),
-                ))
-                .await
-                .unwrap();
-        }
         let table_name = test_table_name("idle_durability");
         let table_id = database
             .create_table(table_name.clone(), true, &[("value", "int4 not null")])

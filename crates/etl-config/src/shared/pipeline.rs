@@ -352,7 +352,11 @@ pub struct PipelineConfig {
     /// `None` allows forced durability at any keepalive. `Some` guarantees at
     /// least this window of time before a later keepalive can force durability.
     ///
-    /// Shutdown and table-sync completion force durability without this wait.
+    /// Terminal table-sync completion forces durability without this wait.
+    /// Shutdown drains buffered and pending writes but does not start a new
+    /// durability barrier for writes that already returned `Accepted`.
+    /// Writes not confirmed durable remain uncheckpointed for replay after
+    /// restart.
     #[serde(default)]
     pub settle_durable_interval_ms: Option<u64>,
     /// Number of milliseconds between one retry and another for timed worker
