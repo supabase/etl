@@ -588,6 +588,12 @@ pub struct TableSchema {
     pub name: TableName,
     /// The schemas of all columns in the table.
     pub column_schemas: Vec<ColumnSchema>,
+    /// Whether the source primary-key constraint is `DEFERRABLE`.
+    ///
+    /// A deferrable key may hold duplicate values until its constraint check
+    /// runs at the end of a statement or transaction, so a row change can move
+    /// a row into a key before the key's previous row moves out.
+    pub primary_key_deferrable: bool,
     /// The identifier for this stored source schema version.
     ///
     /// The commit LSN orders transactions, and the message LSN orders schema
@@ -608,7 +614,13 @@ impl TableSchema {
         column_schemas: Vec<ColumnSchema>,
         snapshot_id: SnapshotId,
     ) -> Self {
-        Self { id, name, column_schemas, snapshot_id }
+        Self { id, name, column_schemas, primary_key_deferrable: false, snapshot_id }
+    }
+
+    /// Sets whether the source primary-key constraint is `DEFERRABLE`.
+    pub fn with_primary_key_deferrable(mut self, primary_key_deferrable: bool) -> Self {
+        self.primary_key_deferrable = primary_key_deferrable;
+        self
     }
 
     /// Adds a new column schema to this [`TableSchema`].

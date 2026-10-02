@@ -87,6 +87,7 @@ impl SchemaChangeMessage {
             TableName::new(self.nspname, self.relname),
             self.columns,
             self.identity.primary_key_attnums,
+            self.identity.primary_key_condeferrable,
             snapshot_id,
         )
     }
@@ -125,6 +126,13 @@ pub(crate) struct IdentityMessage {
     /// The primary key columns in key order, expressed as `pg_attribute.attnum`
     /// values.
     pub(crate) primary_key_attnums: Vec<i32>,
+    /// Whether the primary-key constraint is `DEFERRABLE`, from
+    /// `pg_constraint.condeferrable`.
+    ///
+    /// Payloads emitted before the source helper reported it omit the field;
+    /// they are read as not deferrable.
+    #[serde(default)]
+    pub(crate) primary_key_condeferrable: bool,
     /// The replica-identity mode from `pg_class.relreplident`.
     pub(crate) relreplident: String,
     /// The replica-identity index columns in key order, expressed as
@@ -269,6 +277,7 @@ pub(crate) fn build_table_schema(
     table_name: TableName,
     columns: Vec<ColumnSchemaMessage>,
     primary_key_attnums: Vec<i32>,
+    primary_key_deferrable: bool,
     snapshot_id: SnapshotId,
 ) -> TableSchema {
     TableSchema::with_snapshot_id(
@@ -277,6 +286,7 @@ pub(crate) fn build_table_schema(
         build_column_schemas(columns, primary_key_attnums),
         snapshot_id,
     )
+    .with_primary_key_deferrable(primary_key_deferrable)
 }
 
 /// Calculates the uncompressed value bytes in a pgoutput tuple.
@@ -1153,6 +1163,38 @@ mod tests {
         assert!(malformed.parse::<SchemaChangeMessage>().is_err());
     }
 
+    #[test]
+    fn schema_change_message_reads_primary_key_deferrability() {
+        // Messages emitted before the source helper reported deferrability.
+        let legacy_payload = r#"{
+            "command_tag": "ALTER TABLE",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [1],
+                "relreplident": "f",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#;
+        let legacy_schema = legacy_payload
+            .parse::<SchemaChangeMessage>()
+            .unwrap()
+            .into_table_schema(SnapshotId::initial());
+        assert!(!legacy_schema.primary_key_deferrable);
+
+        let deferrable_payload = legacy_payload.replace(
+            r#""relreplident": "f""#,
+            r#""primary_key_condeferrable": true, "relreplident": "f""#,
+        );
+        let deferrable_schema = deferrable_payload
+            .parse::<SchemaChangeMessage>()
+            .unwrap()
+            .into_table_schema(SnapshotId::initial());
+        assert!(deferrable_schema.primary_key_deferrable);
+    }
+
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(42),
@@ -1370,6 +1412,7 @@ mod tests {
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![1],
         };
@@ -1398,6 +1441,7 @@ mod tests {
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![2],
         };
@@ -1427,6 +1471,7 @@ mod tests {
         let replication_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1, 2],
+            primary_key_condeferrable: false,
             relreplident: "d".to_owned(),
             replica_identity_index_attnums: Vec::new(),
         };
@@ -1450,6 +1495,7 @@ mod tests {
         let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 0]);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![2, 3],
         };
@@ -1472,6 +1518,7 @@ mod tests {
         let replication_mask = ReplicationMask::from_bytes(vec![1, 0]);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "f".to_owned(),
             replica_identity_index_attnums: Vec::new(),
         };
