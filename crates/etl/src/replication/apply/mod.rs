@@ -635,8 +635,11 @@ impl ApplyLoopState {
     /// durable write proves the carried LSN safe.
     ///
     /// When no later batch arrives, a keepalive can dispatch an empty
-    /// required-durability write through the same pending-result path. The loop
-    /// remains non-quiescent until that result confirms durability.
+    /// required-durability write through the same pending-result path.
+    /// [`PipelineConfig::settle_durable_interval_ms`] of `None` allows forced
+    /// durability at any keepalive. `Some` guarantees at least that window
+    /// before a later keepalive can force durability. The loop remains
+    /// non-quiescent until that result confirms durability.
     fn is_quiescent(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
@@ -1793,14 +1796,25 @@ where
     /// Later events may fill the next batch, but cannot be dispatched until
     /// this result completes. Shutdown never starts a new idle barrier.
     ///
-    /// Only incoming PostgreSQL keepalives trigger idle settlement. While
-    /// intake is backpressured, those messages wait, so no new idle barrier is
-    /// started and fresh feedback positions are not published through this
-    /// path. Existing destination results can still complete. The independent
-    /// feedback sender task keeps the connection alive by repeating the last
-    /// supplied safe positions until intake resumes.
+    /// Only incoming PostgreSQL keepalives trigger idle settlement.
+    /// [`PipelineConfig::settle_durable_interval_ms`] of `None` allows forced
+    /// durability at any keepalive. `Some` guarantees at least that window,
+    /// measured from when the apply loop observed `Accepted`, before a later
+    /// keepalive can force durability. While intake is backpressured, those
+    /// messages wait, so no new idle barrier is started and fresh feedback
+    /// positions are not
+    /// published through this path. Existing destination results can still
+    /// complete. The independent feedback sender task keeps the connection
+    /// alive by repeating the last supplied safe positions until intake
+    /// resumes.
     async fn maybe_settle_idle_durability(&mut self) -> EtlResult<()> {
         if !self.state.can_settle_idle_durability() {
+            return Ok(());
+        }
+        if let Some(minimum_ms) = self.config.settle_durable_interval_ms
+            && let Some(interval) = self.state.pending_durability_interval
+            && interval.accepted_at.elapsed() < Duration::from_millis(minimum_ms)
+        {
             return Ok(());
         }
 

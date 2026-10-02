@@ -346,6 +346,15 @@ pub struct PipelineConfig {
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
+    /// Optional window, in milliseconds, before an idle keepalive may force
+    /// durability of an accepted streaming write.
+    ///
+    /// `None` allows forced durability at any keepalive. `Some` guarantees at
+    /// least this window of time before a later keepalive can force durability.
+    ///
+    /// Shutdown and table-sync completion force durability without this wait.
+    #[serde(default)]
+    pub settle_durable_interval_ms: Option<u64>,
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
@@ -651,6 +660,14 @@ pub struct PipelineConfigWithoutSecrets {
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
+    /// Optional window, in milliseconds, before an idle keepalive may force
+    /// durability of an accepted streaming write.
+    ///
+    /// `None` allows forced durability at any keepalive. `Some` guarantees at
+    /// least this window of time before a later keepalive can force durability.
+    /// See the field of the same name on [`PipelineConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_durable_interval_ms: Option<u64>,
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
@@ -738,6 +755,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             store_pg_connection: value.store_pg_connection.map(Into::into),
             replication_slot: value.replication_slot,
             batch: value.batch,
+            settle_durable_interval_ms: value.settle_durable_interval_ms,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
@@ -904,6 +922,36 @@ mod tests {
         }
     }
 
+    /// Omitting the durability interval leaves idle settlement immediate.
+    #[test]
+    fn pipeline_settle_durable_interval_defaults_to_none() {
+        let config: PipelineConfig = serde_json::from_value(pipeline_config_json()).unwrap();
+        assert_eq!(config.settle_durable_interval_ms, None);
+        let without_secrets = PipelineConfigWithoutSecrets::from(config);
+        assert_eq!(without_secrets.settle_durable_interval_ms, None);
+        assert!(
+            serde_json::to_value(without_secrets)
+                .unwrap()
+                .get("settle_durable_interval_ms")
+                .is_none()
+        );
+    }
+
+    /// An explicit interval is preserved, including zero.
+    #[test]
+    fn pipeline_settle_durable_interval_accepts_explicit_value() {
+        for interval_ms in [0, 1_000] {
+            let mut json = pipeline_config_json();
+            json["settle_durable_interval_ms"] = interval_ms.into();
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(config.settle_durable_interval_ms, Some(interval_ms));
+            config.validate().unwrap();
+            let without_secrets = PipelineConfigWithoutSecrets::from(config);
+            assert_eq!(without_secrets.settle_durable_interval_ms, Some(interval_ms));
+            without_secrets.validate().unwrap();
+        }
+    }
+
     /// Omitting the retry delay retains the valid ten-second default.
     #[test]
     fn pipeline_retry_delay_default() {
@@ -1031,6 +1079,7 @@ mod tests {
             store_pg_connection: None,
             replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig::default(),
+            settle_durable_interval_ms: None,
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
             max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
@@ -1057,6 +1106,7 @@ mod tests {
             store_pg_connection: Some(pg_connection("primary.local", 6432)),
             replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig::default(),
+            settle_durable_interval_ms: None,
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
             max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,

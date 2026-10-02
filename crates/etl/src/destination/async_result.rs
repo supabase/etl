@@ -34,9 +34,12 @@ pub enum DestinationWriteStatus {
     /// [`DestinationWriteStatus::Durable`] result covers it. If no later write
     /// is dispatched before shutdown, ETL normally leaves progress at the last
     /// persisted checkpoint so restart can replay the accepted write. A
-    /// keepalive while idle or a terminal table-sync catchup may instead issue
-    /// an empty [`WriteEventsDurability::RequireDurable`] write to settle this
-    /// debt.
+    /// keepalive while idle may instead issue an empty
+    /// [`WriteEventsDurability::RequireDurable`] write to settle this debt.
+    /// `None` for `settle_durable_interval_ms` allows forced durability at any
+    /// keepalive. `Some` guarantees at least that window before a later
+    /// keepalive can force durability. A terminal table-sync catchup may issue
+    /// the same empty write without waiting.
     ///
     /// For table-copy writes through
     /// [`crate::destination::Destination::write_table_rows`], ETL may request
