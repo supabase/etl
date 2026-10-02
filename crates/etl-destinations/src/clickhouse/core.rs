@@ -2243,6 +2243,23 @@ fn validate_clickhouse_schema_capabilities(
         ));
     }
 
+    // Both engines derive current state per key: ReplacingMergeTree keeps the
+    // highest version and the MergeTree current-state query takes the latest
+    // event. A deferrable key lets one statement move a row into a key before
+    // the key's previous row moves out, so the later old-key tombstone would
+    // hide the moved row.
+    if replicated_table_schema.inner().primary_key_deferrable {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse requires a non-deferrable primary key",
+            format!(
+                "Table '{}' has a DEFERRABLE primary key. Recreate it as NOT DEFERRABLE, or \
+                 remove the table from the publication.",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
     Ok(())
 }
 
@@ -3581,6 +3598,35 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_clickhouse_table_shape_rejects_deferrable_primary_key() {
+        let schema = |primary_key_deferrable: bool| {
+            let table_schema = Arc::new(
+                TableSchema::new(
+                    TableId::new(3),
+                    TableName::new("public".to_owned(), "positions".to_owned()),
+                    vec![
+                        ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                            .with_primary_key(1),
+                        ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                    ],
+                )
+                .with_primary_key_deferrable(primary_key_deferrable),
+            );
+            // PostgreSQL cannot use a deferrable key as the replica identity,
+            // so these tables publish updates and deletes with FULL identity.
+            let replication_mask = ReplicationMask::all(&table_schema);
+            let identity_mask = IdentityMask::from_bytes(vec![1, 1]);
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+        };
+
+        for engine in [ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree] {
+            validate_clickhouse_table_shape(&schema(false), engine).unwrap();
+            let err = validate_clickhouse_table_shape(&schema(true), engine).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+        }
     }
 
     #[test]
