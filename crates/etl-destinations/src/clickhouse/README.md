@@ -12,9 +12,11 @@
 - In either engine, the source primary key must not be `DEFERRABLE`. A
   deferrable key lets one statement move a row into a key before the key's
   previous row moves out, which per-key current state cannot represent. ETL
-  fails the table during its initial copy, or at the schema change that makes
-  the key deferrable. Tables copied before ETL recorded deferrability are
-  checked at their next schema change or resynchronization.
+  fails the table during its initial copy. A schema change that makes an
+  existing key deferrable fails instead, and replication of every table in the
+  pipeline stops until you resynchronize this one. Tables copied before ETL
+  recorded deferrability are checked at their next schema change or
+  resynchronization.
 - For tables with a primary key, updates and deletes need a matching replica
   identity or `FULL`. See [Update requirements](#update-requirements).
 
