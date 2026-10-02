@@ -23,6 +23,8 @@ const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
 const POSTGRES_STORE_PRE_COMPOSITE_SNAPSHOT_VERSION: i64 = 20260610120000;
 const POSTGRES_STORE_PRE_CREATING_STATUS_VERSION: i64 = 20260810120000;
+const SOURCE_PRE_PUBLICATION_SCHEMA_CHANGE_VERSION: i64 = 20260415100000;
+const SOURCE_PRE_PRIMARY_KEY_DEFERRABILITY_VERSION: i64 = 20260724120000;
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
 
 static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
@@ -1089,10 +1091,18 @@ async fn split_migrations_can_be_reverted_independently() {
     assert_eq!(applied_migration_versions(&database).await, all_split_migration_versions());
 
     let client = database.client.as_ref().expect("database client should be initialized");
-    let previous_source_version =
-        source_migration_versions().into_iter().rev().nth(1).expect("a previous migration exists");
+    let identity_reports_deferrability = "select etl.describe_table_identity(
+            'etl.replication_state'::pg_catalog.regclass
+        ) ? 'primary_key_condeferrable'";
+    assert!(query_bool(&database, identity_reports_deferrability).await);
+
     let mut conn = migration_connection(&database.config).await;
-    source_migrator().undo(&mut conn, previous_source_version).await.unwrap();
+    source_migrator().undo(&mut conn, SOURCE_PRE_PRIMARY_KEY_DEFERRABILITY_VERSION).await.unwrap();
+    drop(conn);
+    assert!(!query_bool(&database, identity_reports_deferrability).await);
+
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().undo(&mut conn, SOURCE_PRE_PUBLICATION_SCHEMA_CHANGE_VERSION).await.unwrap();
     drop(conn);
 
     let tags: Vec<String> = client

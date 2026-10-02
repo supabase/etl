@@ -239,6 +239,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
             table_name,
             columns,
             identity.primary_key_attnums,
+            identity.primary_key_condeferrable,
             SnapshotId::initial(),
         ))
     }
@@ -254,6 +255,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
             table_name,
             columns,
             identity.primary_key_attnums.clone(),
+            identity.primary_key_condeferrable,
             SnapshotId::initial(),
         );
 

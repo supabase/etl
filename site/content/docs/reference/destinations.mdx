@@ -214,6 +214,12 @@ destination. Drop the conflicting object or use another database.
 - The default `ReplacingMergeTree` layout requires a source primary key and
   ClickHouse 23.5 or newer.
 - In either engine, publish every primary-key column if the source has a key.
+- In either engine, the source primary key must not be `DEFERRABLE`. A
+  deferrable key lets one statement move a row into a key before the key's
+  previous row moves out, which per-key current state cannot represent. ETL
+  fails the table during its initial copy. A schema change that makes an
+  existing key deferrable fails instead, and replication of every table stops
+  until you resynchronize this one.
 - For updates and deletes on tables with a primary key, replica identity must
   be `DEFAULT`, `FULL`, or `USING INDEX` with the same identity columns as the
   primary key. ETL rejects other index identities. With `NOTHING`, Postgres

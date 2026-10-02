@@ -252,12 +252,14 @@ where
 {
     sqlx::query_scalar(
         r#"
-        insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, snapshot_id)
-        values ($1, $2, $3, $4, $5)
+        insert into etl.table_schemas
+            (pipeline_id, table_id, schema_name, table_name, snapshot_id, primary_key_deferrable)
+        values ($1, $2, $3, $4, $5, $6)
         on conflict (pipeline_id, table_id, snapshot_id)
         do update set
             schema_name = excluded.schema_name,
             table_name = excluded.table_name,
+            primary_key_deferrable = excluded.primary_key_deferrable,
             updated_at = now()
         returning id
         "#,
@@ -267,6 +269,7 @@ where
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
     .bind(table_schema.snapshot_id.to_string())
+    .bind(table_schema.primary_key_deferrable)
     .fetch_one(executor)
     .await
 }
@@ -344,6 +347,7 @@ where
             ts.schema_name,
             ts.table_name,
             ts.snapshot_id,
+            ts.primary_key_deferrable,
             tc.column_name,
             tc.column_type,
             tc.type_modifier,
@@ -368,6 +372,7 @@ where
         let schema_name: String = row.get("schema_name");
         let table_name: String = row.get("table_name");
         let snapshot_id: String = row.get("snapshot_id");
+        let primary_key_deferrable: bool = row.get("primary_key_deferrable");
         let snapshot_id = snapshot_id
             .parse::<SnapshotId>()
             .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
@@ -379,6 +384,7 @@ where
                 vec![],
                 snapshot_id,
             )
+            .with_primary_key_deferrable(primary_key_deferrable)
         });
 
         // A schema without columns still has a retained version.

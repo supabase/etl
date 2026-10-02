@@ -880,6 +880,7 @@ async fn schema_store_upsert_replaces_columns_atomically_in_batches() {
 
     let mut wide = original.clone();
     wide.name = TableName::new("schema'\"; --\\".to_owned(), "table'\"; --\\".to_owned());
+    wide.primary_key_deferrable = true;
     wide.column_schemas = (1..=MAX_POSTGRES_TABLE_COLUMNS)
         .map(|ordinal| {
             let mut column = test_column(
