@@ -3602,30 +3602,33 @@ mod tests {
 
     #[test]
     fn validate_clickhouse_table_shape_rejects_deferrable_primary_key() {
-        let schema = |primary_key_deferrable: bool| {
-            let table_schema = Arc::new(
-                TableSchema::new(
-                    TableId::new(3),
-                    TableName::new("public".to_owned(), "positions".to_owned()),
-                    vec![
-                        ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
-                            .with_primary_key(1),
-                        ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
-                    ],
-                )
-                .with_primary_key_deferrable(primary_key_deferrable),
-            );
-            // PostgreSQL cannot use a deferrable key as the replica identity,
-            // so these tables publish updates and deletes with FULL identity.
-            let replication_mask = ReplicationMask::all(&table_schema);
-            let identity_mask = IdentityMask::from_bytes(vec![1, 1]);
-            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
-        };
+        // GIVEN: A keyed table whose primary key is DEFERRABLE. PostgreSQL
+        // cannot use a deferrable key as the replica identity, so the table
+        // publishes updates and deletes with FULL identity.
+        let table_schema = Arc::new(
+            TableSchema::new(
+                TableId::new(3),
+                TableName::new("public".to_owned(), "positions".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                ],
+            )
+            .with_primary_key_deferrable(true),
+        );
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 1]);
+        let schema =
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
 
         for engine in [ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree] {
-            validate_clickhouse_table_shape(&schema(false), engine).unwrap();
-            let err = validate_clickhouse_table_shape(&schema(true), engine).unwrap_err();
+            // WHEN: Either engine validates the table.
+            let err = validate_clickhouse_table_shape(&schema, engine).unwrap_err();
+
+            // THEN: The deferrable-key check rejects it.
             assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+            assert_eq!(err.description(), Some("ClickHouse requires a non-deferrable primary key"));
         }
     }
 

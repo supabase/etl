@@ -67,6 +67,11 @@ const DELETE_FLOW_TABLE: &str = "test_delete__flow";
 const RESTART_FLOW_TABLE: &str = "test_restart__flow";
 const RESET_COPY_TABLE: &str = "test_reset__copy";
 const TRUNCATE_FLOW_TABLE: &str = "test_truncate__flow";
+const DEFERRABLE_KEY_TABLE: &str = "test_deferrable__key";
+const DEFERRABLE_CHANGE_TABLE: &str = "test_deferrable__change";
+
+/// Description of the ClickHouse rejection of a deferrable primary key.
+const DEFERRABLE_KEY_REJECTION: &str = "ClickHouse requires a non-deferrable primary key";
 
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col`
 /// round-trip).
@@ -579,8 +584,8 @@ async fn deferrable_primary_key_is_rejected_inner(engine: ClickHouseEngine) {
         .unwrap();
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // THEN: the table errors as a source schema problem that needs a manual
-    // fix.
+    // THEN: the deferrable-key check errors the table for a manual fix, and
+    // ClickHouse holds no table for it.
     let TableState::Errored { retry_policy, source_err, .. } =
         store.get_table_state(table_id).await.unwrap().unwrap()
     else {
@@ -588,6 +593,8 @@ async fn deferrable_primary_key_is_rejected_inner(engine: ClickHouseEngine) {
     };
     assert!(matches!(retry_policy, TableRetryPolicy::ManualRetry));
     assert_eq!(source_err.kind(), ErrorKind::SourceSchemaError);
+    assert_eq!(source_err.description(), Some(DEFERRABLE_KEY_REJECTION));
+    assert!(clickhouse_db.column_names(DEFERRABLE_KEY_TABLE).await.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -603,7 +610,7 @@ async fn deferrable_primary_key_is_rejected_replacing_merge_tree() {
 /// A primary key recreated as deferrable after the copy fails the schema change
 /// before ClickHouse writes any row under that schema.
 async fn primary_key_made_deferrable_is_rejected_inner(engine: ClickHouseEngine) {
-    // GIVEN: a copied table with an ordinary primary key.
+    // GIVEN: a copied table with an ordinary primary key and one row.
     init_test_tracing();
     install_crypto_provider();
     let database = spawn_source_database().await;
@@ -659,9 +666,17 @@ async fn primary_key_made_deferrable_is_rejected_inner(engine: ClickHouseEngine)
         .await
         .unwrap();
 
-    // THEN: the pipeline stops on the rejected schema change.
+    // THEN: the pipeline stops on the deferrable-key check, and ClickHouse
+    // holds only the row copied before the change.
     let error = wait_for_pipeline_error(&pipeline).await;
-    assert!(error.kinds().contains(&ErrorKind::SourceSchemaError));
+    assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    assert_eq!(error.description(), Some(DEFERRABLE_KEY_REJECTION));
+
+    let query =
+        current_state_query(engine, DEFERRABLE_CHANGE_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].id, rows[0].value.as_str()), (1, "a"));
 }
 
 #[tokio::test(flavor = "multi_thread")]

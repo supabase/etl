@@ -1164,9 +1164,10 @@ mod tests {
     }
 
     #[test]
-    fn schema_change_message_reads_primary_key_deferrability() {
-        // Messages emitted before the source helper reported deferrability.
-        let legacy_payload = r#"{
+    fn schema_change_message_without_deferrability_reads_as_not_deferrable() {
+        // Messages emitted before the source helper reported deferrability
+        // omit the field.
+        let schema = r#"{
             "command_tag": "ALTER TABLE",
             "nspname": "public",
             "relname": "items",
@@ -1177,22 +1178,34 @@ mod tests {
                 "replica_identity_index_attnums": []
             },
             "columns": []
-        }"#;
-        let legacy_schema = legacy_payload
-            .parse::<SchemaChangeMessage>()
-            .unwrap()
-            .into_table_schema(SnapshotId::initial());
-        assert!(!legacy_schema.primary_key_deferrable);
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap()
+        .into_table_schema(SnapshotId::initial());
 
-        let deferrable_payload = legacy_payload.replace(
-            r#""relreplident": "f""#,
-            r#""primary_key_condeferrable": true, "relreplident": "f""#,
-        );
-        let deferrable_schema = deferrable_payload
-            .parse::<SchemaChangeMessage>()
-            .unwrap()
-            .into_table_schema(SnapshotId::initial());
-        assert!(deferrable_schema.primary_key_deferrable);
+        assert!(!schema.primary_key_deferrable);
+    }
+
+    #[test]
+    fn schema_change_message_carries_primary_key_deferrability() {
+        let schema = r#"{
+            "command_tag": "ALTER TABLE",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [1],
+                "primary_key_condeferrable": true,
+                "relreplident": "f",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap()
+        .into_table_schema(SnapshotId::initial());
+
+        assert!(schema.primary_key_deferrable);
     }
 
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
