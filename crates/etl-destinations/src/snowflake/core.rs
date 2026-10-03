@@ -29,7 +29,7 @@ use crate::{
         encoding::{CdcMeta, CdcOperation},
         metrics::register_metrics,
         schema,
-        streaming::{OffsetToken, RestStreamClient, RowBatchBuilder, StreamClient},
+        streaming::{Completed, OffsetToken, RestStreamClient, RowBatchBuilder, StreamClient},
     },
     table_name::try_stringify_table_name,
 };
@@ -332,7 +332,7 @@ where
         let mut requires_durability_wait = false;
 
         while iter.peek().is_some() {
-            let builders = self.accumulate_data_events(&mut iter).await?;
+            let builders = self.write_data_events(&mut iter).await?;
             self.flush_batches(builders).await?;
             requires_durability_wait |= self.apply_relation_events(&mut iter).await?;
             requires_durability_wait |= self.apply_truncate_events(&mut iter).await?;
@@ -348,16 +348,20 @@ where
         }
     }
 
-    async fn accumulate_data_events(
+    /// Encodes consecutive data events, sending each request as it completes.
+    ///
+    /// Returns the per-table builders still holding rows, for the caller to
+    /// finish at the end of input or before a schema or truncate barrier.
+    async fn write_data_events(
         &self,
         iter: &mut EventIter,
     ) -> EtlResult<HashMap<TableId, RowBatchBuilder>> {
         let mut builders: HashMap<TableId, RowBatchBuilder> = HashMap::new();
         let mut column_cache: HashMap<TableId, Vec<ColumnSchema>> = HashMap::new();
 
-        // Consume data events (insert/update/delete) into per-table batch
-        // builders, stopping at barrier events (truncate, relation) that
-        // require a flush before they can be applied.
+        // Completed requests are sent immediately so encoded output never
+        // accumulates. Stop at barrier events (truncate, relation) that
+        // require pending rows to be flushed before they can be applied.
         while let Some(event) = iter.peek() {
             if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
                 break;
@@ -365,21 +369,35 @@ where
             let Some(event) = iter.next() else {
                 break;
             };
-            match event {
-                Event::Insert(e) => self.encode_insert(e, &mut builders, &mut column_cache).await?,
-                Event::Update(e) => self.encode_update(e, &mut builders, &mut column_cache).await?,
-                Event::Delete(e) => self.encode_delete(e, &mut builders, &mut column_cache).await?,
-                _ => {}
+            let (table_id, completed) = match event {
+                Event::Insert(e) => {
+                    let table_id = e.replicated_table_schema.id();
+                    (table_id, self.encode_insert(e, &mut builders, &mut column_cache).await?)
+                }
+                Event::Update(e) => {
+                    let table_id = e.replicated_table_schema.id();
+                    (table_id, self.encode_update(e, &mut builders, &mut column_cache).await?)
+                }
+                Event::Delete(e) => {
+                    let table_id = e.replicated_table_schema.id();
+                    (table_id, self.encode_delete(e, &mut builders, &mut column_cache).await?)
+                }
+                _ => continue,
+            };
+            for batch in completed {
+                self.client.send_streaming_batch(table_id, batch).await.map_err(EtlError::from)?;
             }
         }
 
         Ok(builders)
     }
 
+    /// Finishes every builder and sends the request each one still holds.
     async fn flush_batches(&self, builders: HashMap<TableId, RowBatchBuilder>) -> EtlResult<()> {
         for (table_id, builder) in builders {
-            let batches = builder.finish().map_err(EtlError::from)?;
-            self.client.send_streaming_batches(table_id, batches).await.map_err(EtlError::from)?;
+            for batch in builder.finish().map_err(EtlError::from)? {
+                self.client.send_streaming_batch(table_id, batch).await.map_err(EtlError::from)?;
+            }
         }
         Ok(())
     }
@@ -407,24 +425,25 @@ where
         Ok(had_truncates)
     }
 
+    /// Encodes an insert row, returning the request it completed, if any.
     async fn encode_insert(
         &self,
         e: InsertEvent,
         builders: &mut HashMap<TableId, RowBatchBuilder>,
         column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
         self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema).await?;
 
         let cols = &column_cache[&table_id];
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
-            return Ok(());
+            return Ok(Completed::default());
         }
 
         builders
             .entry(table_id)
-            .or_default()
+            .or_insert_with(|| RowBatchBuilder::new(table_id))
             .push_row(
                 cols,
                 &e.table_row,
@@ -434,12 +453,13 @@ where
             .map_err(EtlError::from)
     }
 
+    /// Encodes an update row, returning the request it completed, if any.
     async fn encode_update(
         &self,
         e: UpdateEvent,
         builders: &mut HashMap<TableId, RowBatchBuilder>,
         column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<Completed> {
         let full_row = snowflake_update_row(&e.replicated_table_schema, e.updated_table_row)?;
 
         let table_id = e.replicated_table_schema.id();
@@ -448,27 +468,28 @@ where
         let cols = &column_cache[&table_id];
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
-            return Ok(());
+            return Ok(Completed::default());
         }
 
         builders
             .entry(table_id)
-            .or_default()
+            .or_insert_with(|| RowBatchBuilder::new(table_id))
             .push_row(cols, &full_row, CdcMeta::new(CdcOperation::Update, offset.as_ref()), &offset)
             .map_err(EtlError::from)
     }
 
+    /// Encodes a delete row, returning the request it completed, if any.
     async fn encode_delete(
         &self,
         e: DeleteEvent,
         builders: &mut HashMap<TableId, RowBatchBuilder>,
         column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
-    ) -> EtlResult<()> {
+    ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema).await?;
         if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
-            return Ok(());
+            return Ok(Completed::default());
         }
 
         match snowflake_delete_row(&e.replicated_table_schema, e.old_table_row)? {
@@ -476,7 +497,7 @@ where
                 let cols = &column_cache[&table_id];
                 builders
                     .entry(table_id)
-                    .or_default()
+                    .or_insert_with(|| RowBatchBuilder::new(table_id))
                     .push_row(
                         cols,
                         &row,
@@ -493,7 +514,7 @@ where
                     .collect();
                 builders
                     .entry(table_id)
-                    .or_default()
+                    .or_insert_with(|| RowBatchBuilder::new(table_id))
                     .push_row(
                         &identity_cols,
                         &key_row,
@@ -756,12 +777,12 @@ where
                 .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
                 .collect();
 
-            // Build row batches. Snowflake has limits on max size of input, so
-            // we slice into proper batches, when necessary.
+            // Encode rows one at a time and send each request as it completes,
+            // so encoded output never accumulates for the whole copy batch.
             let zero = OffsetToken::zero();
-            let mut builder = RowBatchBuilder::new();
+            let mut builder = RowBatchBuilder::new(table_id);
             for row in &table_rows {
-                builder
+                let completed = builder
                     .push_row(
                         &columns,
                         row,
@@ -769,14 +790,22 @@ where
                         &zero,
                     )
                     .map_err(EtlError::from)?;
+                for batch in completed {
+                    self.writer
+                        .client
+                        .send_table_copy_batch(table_id, batch)
+                        .await
+                        .map_err(EtlError::from)?;
+                }
             }
 
-            let batches = builder.finish().map_err(EtlError::from)?;
-            self.writer
-                .client
-                .send_table_copy_batches(table_id, batches)
-                .await
-                .map_err(EtlError::from)?;
+            for batch in builder.finish().map_err(EtlError::from)? {
+                self.writer
+                    .client
+                    .send_table_copy_batch(table_id, batch)
+                    .await
+                    .map_err(EtlError::from)?;
+            }
 
             Ok(DestinationWriteStatus::Accepted)
         }

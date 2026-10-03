@@ -6,6 +6,43 @@ Status: In progress. See the
 and the [`etl-examples` Snowflake section](../../../etl-examples/README.md#snowflake)
 for the runnable example.
 
+## Request Packing and Large Rows
+
+Snowpipe Streaming rejects any request body over 4 MiB (4,194,304 bytes,
+measured; the docs say "4 MB") with HTTP 413. The encoder in
+`streaming/batch/` fills requests up to that limit and accepts large rows
+whose level-3 frame, using the bounded window described below, fits it.
+
+- A request body is a sequence of zstd frames. Rows up to 256 KiB serialized
+  share one stream frame; each larger row is compressed into its own frame
+  first, so its size is exact before it is admitted. Large rows do not share
+  compression history with adjacent rows, which can increase request sizes for
+  near-duplicate values; the 32 MiB window applies within each row.
+- Every row follows one rule, in arrival order: it joins the open request when
+  the body provably stays under the limit, otherwise the open request completes
+  and the row starts the next one. Small rows are admitted under a derived
+  headroom (`BatchLimits::stream_headroom`). For an all-small-row workload,
+  completed requests are at least 90% full except for the final partial request;
+  large rows pack by their exact compressed size.
+- Each row frame uses and declares a fixed 32 MiB zstd window instead of level
+  3's default 2 MiB. This makes longer-distance matches reachable without
+  measuring the row first; zstd need not find every match. The window bounds
+  compression history, not row size: rows above 32 MiB can still be accepted
+  when their complete level-3 frame fits the 4 MiB request cap. zstd allocates
+  about 33.5 MiB of compressor workspace per active row frame at this setting
+  (measured with zstd 1.5.7), in addition to the 4 MiB output cap, the 64 KiB
+  write buffer, and the source row itself. Resident memory depends on the input
+  and the allocator; concurrent large-row compressors multiply this cost.
+- A large row is compressed once at level 3 into a buffer capped at 4 MiB.
+  A frame that exceeds the limit is rejected with `Error::RowTooLarge`,
+  carrying the table, operation, column count and sizes, never values.
+  It maps to `UnsupportedValueInDestination`.
+- Completed requests are sent as soon as they complete; nothing is retained
+  across rows beyond one open request body and a 256 KiB scratch buffer.
+
+The counter `etl_snowflake_row_frames_total{outcome}` reports rows that took
+the frame path as `fit` or `rejected`.
+
 ## Running Integration Tests
 
 Run the Snowflake destination test suite with:

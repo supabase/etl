@@ -35,6 +35,46 @@ impl CdcOperation {
     }
 }
 
+impl fmt::Display for CdcOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Byte sink that counts what is written and stores nothing.
+struct CountingSink(usize);
+
+impl Write for CountingSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0 += data.len();
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialized NDJSON length of one row, including the newline, without
+/// allocating.
+pub(crate) fn serialized_row_len(
+    cols: &[ColumnSchema],
+    row: &TableRow,
+    cdc: CdcMeta<'_>,
+) -> Result<usize> {
+    let mut sink = CountingSink(0);
+    serialize_row(&mut sink, cols, row, cdc)?;
+    Ok(sink.0)
+}
+
+/// Serialized JSON length of one cell value, without allocating.
+pub(crate) fn serialized_cell_len(cell: &Cell) -> Result<usize> {
+    let mut sink = CountingSink(0);
+    serde_json::to_writer(&mut sink, &CellSerializer(cell))
+        .map_err(|e| Error::Encoding(e.to_string()))?;
+    Ok(sink.0)
+}
+
 /// CDC metadata attached to every row in a batch.
 #[derive(Debug, Clone, Copy)]
 pub struct CdcMeta<'a> {
