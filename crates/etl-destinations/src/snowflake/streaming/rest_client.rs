@@ -581,7 +581,7 @@ fn parse_optional_offset_token(token: Option<String>) -> Result<Option<OffsetTok
 mod tests {
     use etl::{
         data::{Cell, TableRow},
-        schema::{ColumnSchema, Type},
+        schema::{ColumnSchema, TableId, Type},
     };
     use serde_json::json;
 
@@ -681,8 +681,8 @@ mod tests {
     #[test]
     fn compressed_roundtrip() {
         let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, true)];
-        let mut builder = RowBatchBuilder::new();
-        builder
+        let mut builder = RowBatchBuilder::new(TableId::new(1));
+        let completed = builder
             .push_row(
                 &cols,
                 &TableRow::new(vec![Cell::I32(42)]),
@@ -690,9 +690,9 @@ mod tests {
                 &OffsetToken::zero(),
             )
             .unwrap();
+        assert!(completed.is_empty());
 
-        let batches = builder.finish().unwrap();
-        let batch = batches.first().unwrap();
+        let batch = builder.finish().unwrap().into_iter().next().unwrap();
         assert!(batch.size() > 0);
 
         let decompressed = zstd::decode_all(batch.bytes().as_ref()).unwrap();
@@ -707,8 +707,8 @@ mod tests {
         let cols = [ColumnSchema::new("id".into(), Type::INT4, -1, 1, true)];
         let start: OffsetToken = "000000000000000a/0000000000000001".parse().unwrap();
         let end: OffsetToken = "000000000000000a/0000000000000002".parse().unwrap();
-        let mut builder = RowBatchBuilder::new();
-        builder
+        let mut builder = RowBatchBuilder::new(TableId::new(1));
+        let completed = builder
             .push_row(
                 &cols,
                 &TableRow::new(vec![Cell::I32(1)]),
@@ -716,7 +716,8 @@ mod tests {
                 &start,
             )
             .unwrap();
-        builder
+        assert!(completed.is_empty());
+        let completed = builder
             .push_row(
                 &cols,
                 &TableRow::new(vec![Cell::I32(2)]),
@@ -724,7 +725,8 @@ mod tests {
                 &end,
             )
             .unwrap();
-        let batch = builder.finish().unwrap().pop().unwrap();
+        assert!(completed.is_empty());
+        let batch = builder.finish().unwrap().into_iter().next().unwrap();
 
         let params = insert_query_params(&batch, "ct0");
 

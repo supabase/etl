@@ -17,7 +17,15 @@ default = []
 bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
 clickhouse = ["dep:etl-destinations", "etl-destinations/clickhouse"]
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
-snowflake = ["dep:etl-destinations", "etl-destinations/snowflake"]
+snowflake = [
+    "dep:etl-destinations",
+    "etl-destinations/snowflake",
+    "etl-destinations/test-utils",
+]
+
+[[bin]]
+name = "snowflake_encoder"
+required-features = ["snowflake"]
 
 [dependencies]
 anyhow = { workspace = true }

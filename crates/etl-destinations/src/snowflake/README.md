@@ -6,6 +6,32 @@ Status: In progress. See the
 and the [`etl-examples` Snowflake section](../../../etl-examples/README.md#snowflake)
 for the runnable example.
 
+## Request Packing and Large Rows
+
+Snowpipe Streaming rejects any request body over 4 MiB (4,194,304 bytes,
+measured; the docs say "4 MB") with HTTP 413. The encoder in
+`streaming/batch/` fills requests up to that limit and never rejects a row
+that could fit one.
+
+- A request body is a sequence of zstd frames. Rows up to 256 KiB serialized
+  share one stream frame; each larger row is compressed into its own frame
+  first, so its size is exact before it is admitted.
+- Every row follows one rule, in arrival order: it joins the open request when
+  the body provably stays under the limit, otherwise the open request completes
+  and the row starts the next one. Small rows are admitted under a derived
+  headroom (`BatchLimits::stream_headroom`), so a request holding only small
+  rows is at least 90% full; large rows pack exactly.
+- A large row whose frame lands between 1.0x and 1.3x the limit at level 3 is
+  compressed once more at level 19 with a window sized to the row. Only a row
+  that still does not fit is rejected, with `Error::RowTooLarge` carrying the
+  table, operation, column count and sizes, never values. It maps to
+  `UnsupportedValueInDestination`.
+- Completed requests are sent as soon as they complete; nothing is retained
+  across rows beyond one open request body and a 256 KiB scratch buffer.
+
+The counter `etl_snowflake_row_frames_total{outcome}` reports rows that took
+the frame path as `fit`, `escalated`, or `rejected`.
+
 ## Running Integration Tests
 
 Run the Snowflake destination test suite with:
