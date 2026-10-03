@@ -15,12 +15,15 @@ whose level-3 frame, using the bounded window described below, fits it.
 
 - A request body is a sequence of zstd frames. Rows up to 256 KiB serialized
   share one stream frame; each larger row is compressed into its own frame
-  first, so its size is exact before it is admitted.
+  first, so its size is exact before it is admitted. Large rows do not share
+  compression history with adjacent rows, which can increase request sizes for
+  near-duplicate values; the 32 MiB window applies within each row.
 - Every row follows one rule, in arrival order: it joins the open request when
   the body provably stays under the limit, otherwise the open request completes
   and the row starts the next one. Small rows are admitted under a derived
-  headroom (`BatchLimits::stream_headroom`), so a request holding only small
-  rows is at least 90% full; large rows pack exactly.
+  headroom (`BatchLimits::stream_headroom`). For an all-small-row workload,
+  completed requests are at least 90% full except for the final partial request;
+  large rows pack by their exact compressed size.
 - Each row frame uses and declares a fixed 32 MiB zstd window instead of level
   3's default 2 MiB. This makes longer-distance matches reachable without
   measuring the row first; zstd need not find every match. The window bounds

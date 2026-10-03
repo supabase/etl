@@ -2,8 +2,8 @@
 //!
 //! Feeds `RowBatchBuilder` directly with generated rows and reports
 //! throughput, request count and fill, compression ratio, and peak buffer
-//! sizes. Neither Postgres nor Snowflake is involved, so runs on `main` and
-//! on a branch compare the encoder alone.
+//! capacities. Neither Postgres nor Snowflake is involved. Comparing with a
+//! revision that lacks this benchmark requires a benchmark-only API adapter.
 
 use std::time::Instant;
 
@@ -46,20 +46,67 @@ struct Workload {
     row_bytes: usize,
     /// Every n-th row carries this payload length instead, when set.
     large_every: Option<(usize, usize)>,
+    /// Reuse the ordinary payload with a different short prefix in each
+    /// variant.
+    near_duplicate: bool,
 }
 
 const WORKLOADS: &[Workload] = &[
-    Workload { name: "small_1kib", rows: 200_000, row_bytes: 1024, large_every: None },
-    Workload { name: "medium_64kib", rows: 4_000, row_bytes: 64 * 1024, large_every: None },
-    Workload { name: "above_cap_300kib", rows: 1_000, row_bytes: 300 * 1024, large_every: None },
-    Workload { name: "large_1mib", rows: 256, row_bytes: MIB, large_every: None },
-    Workload { name: "large_2_5mib", rows: 64, row_bytes: 5 * MIB / 2, large_every: None },
-    Workload { name: "production_13_6mb", rows: 1, row_bytes: 13_600_000, large_every: None },
+    Workload {
+        name: "near_duplicate_1mib",
+        rows: 256,
+        row_bytes: MIB,
+        large_every: None,
+        near_duplicate: true,
+    },
+    Workload {
+        name: "small_1kib",
+        rows: 200_000,
+        row_bytes: 1024,
+        large_every: None,
+        near_duplicate: false,
+    },
+    Workload {
+        name: "medium_64kib",
+        rows: 4_000,
+        row_bytes: 64 * 1024,
+        large_every: None,
+        near_duplicate: false,
+    },
+    Workload {
+        name: "above_cap_300kib",
+        rows: 1_000,
+        row_bytes: 300 * 1024,
+        large_every: None,
+        near_duplicate: false,
+    },
+    Workload {
+        name: "large_1mib",
+        rows: 256,
+        row_bytes: MIB,
+        large_every: None,
+        near_duplicate: false,
+    },
+    Workload {
+        name: "large_2_5mib",
+        rows: 64,
+        row_bytes: 5 * MIB / 2,
+        large_every: None,
+        near_duplicate: false,
+    },
+    Workload {
+        name: "production_13_6mb",
+        rows: 1,
+        row_bytes: 13_600_000,
+        large_every: None,
+        near_duplicate: false,
+    },
     Workload {
         name: "mixed_small_with_1mib",
         rows: 1_000,
         row_bytes: 1024,
         large_every: Some((100, MIB)),
+        near_duplicate: false,
     },
 ];
 
@@ -125,17 +172,31 @@ struct Payloads {
 
 impl Payloads {
     fn generate(workload: &Workload) -> Self {
-        let ordinary = Self::variants(workload.row_bytes, workload.rows, 1);
+        let ordinary =
+            Self::variants(workload.row_bytes, workload.rows, 1, workload.near_duplicate);
         let large = match workload.large_every {
-            Some((every, bytes)) => Self::variants(bytes, workload.rows / every + 1, 7),
+            Some((every, bytes)) => Self::variants(bytes, workload.rows / every + 1, 7, false),
             None => Vec::new(),
         };
         Self { ordinary, large }
     }
 
-    fn variants(row_bytes: usize, rows: usize, seed: u64) -> Vec<String> {
+    fn variants(row_bytes: usize, rows: usize, seed: u64, near_duplicate: bool) -> Vec<String> {
         let count = rows.min(512).min(MAX_PAYLOAD_VARIANT_BYTES / row_bytes).max(1);
-        (0..count).map(|i| structured_text(row_bytes, seed * 1_000_003 + i as u64)).collect()
+        let shared = near_duplicate.then(|| structured_text(row_bytes, seed * 1_000_003));
+        (0..count)
+            .map(|i| match &shared {
+                Some(shared) => {
+                    let mut payload = shared.clone();
+                    // Preserve almost the entire previous row so this workload
+                    // deliberately favors a shared compression history; it
+                    // is a stress case, not typical traffic.
+                    payload.replace_range(..16, &format!("{i:016x}"));
+                    payload
+                }
+                None => structured_text(row_bytes, seed * 1_000_003 + i as u64),
+            })
+            .collect()
     }
 
     fn payload(&self, workload: &Workload, index: usize) -> &str {

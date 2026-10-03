@@ -16,16 +16,20 @@ use std::{
 };
 
 use etl::{
-    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    data::{Cell, TableRow},
     destination::{DestinationWriteStatus, WriteEventsDurability},
     error::ErrorKind,
-    event::{Event, InsertEvent, UpdateEvent},
+    event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
     schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
-    store::SchemaStore,
+    store::{SchemaStore, StateStore, TableStateType, WorkerType},
     test_utils::{
+        database::{spawn_source_database, test_table_name},
         destination::{write_events, write_table_rows},
+        event::EventCondition,
         notifying_store::NotifyingStore,
+        pipeline::create_pipeline,
+        test_destination_wrapper::TestDestinationWrapper,
     },
 };
 use etl_destinations::snowflake::{
@@ -45,6 +49,9 @@ const PRODUCTION_ROW_BYTES: usize = 13_600_000;
 const SIXTEEN_MIB: usize = 16 * 1024 * 1024;
 const OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const OFFSET_MAX_ATTEMPTS: usize = 90;
+/// Deadline for source replication and destination durability in the pipeline
+/// test.
+const PIPELINE_PROGRESS_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Counts append requests on the way to the real REST client.
 struct CountingStreamClient {
@@ -118,6 +125,12 @@ struct Harness {
 
 impl Harness {
     fn new(store: NotifyingStore) -> Self {
+        Self::with_pipeline_id(store, 1)
+    }
+
+    /// Constructs a harness with a distinct identity for a real source
+    /// pipeline.
+    fn with_pipeline_id(store: NotifyingStore, pipeline_id: PipelineId) -> Self {
         let config = load_test_config().clone_without_credentials();
         let auth = build_auth();
         let http = reqwest::Client::new();
@@ -130,7 +143,6 @@ impl Harness {
             inserts: AtomicUsize::new(0),
         });
         let sql = SqlClient::new(config.clone_without_credentials(), Arc::clone(&auth), http);
-        let pipeline_id: PipelineId = 1;
         let client = Client::with_clients(
             SqlClient::new(config.clone_without_credentials(), auth, reqwest::Client::new()),
             Arc::clone(&stream),
@@ -411,56 +423,121 @@ async fn multi_frame_request_lands_every_row_in_one_append() {
     .await;
 }
 
-#[tokio::test]
-#[ignore = "requires Snowflake credentials"]
+/// Exercises unchanged TOAST reconstruction through PostgreSQL and verifies the
+/// copied, inserted, and updated large values in Snowflake after durability.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires local Postgres and Snowflake credentials"]
 async fn large_rows_survive_copy_insert_and_full_replica_identity_update() {
-    let harness = Harness::new(NotifyingStore::new());
-    let src_table = unique_source_table();
-    let sf_table = snowflake_table_name("public", &src_table);
-    let table_id = TableId::new(1302);
-    let table_schema = large_row_schema(table_id, &src_table);
-    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
-    harness.store.store_table_schema(table_schema).await.unwrap();
+    let database = spawn_source_database().await;
+    let name = test_table_name(&unique_source_table());
+    let table_id = database
+        .create_table(
+            name.clone(),
+            true,
+            &[("payload", "text not null"), ("changed", "integer not null default 0")],
+        )
+        .await
+        .unwrap();
+    let pg = database.client.as_ref().unwrap();
+    pg.batch_execute(&format!(
+        "alter table {} alter column payload set storage external; alter table {} replica \
+         identity full",
+        name.as_quoted_identifier(),
+        name.as_quoted_identifier(),
+    ))
+    .await
+    .unwrap();
+    let publication = "large_row_pub";
+    database.create_publication(publication, std::slice::from_ref(&name)).await.unwrap();
 
-    // The production row shape (13.6 MB, ratio near 4) and a 16 MiB value
-    // that compresses about 6x. Both are far above the old 2 MiB cap.
     let production_row = structured_text(PRODUCTION_ROW_BYTES, 21, 88);
     let sixteen_mib = structured_text(SIXTEEN_MIB, 22, 40);
     let inserted = structured_text(PRODUCTION_ROW_BYTES, 23, 88);
+    pg.execute(
+        &format!("insert into {} (payload) values ($1), ($2)", name.as_quoted_identifier()),
+        &[&production_row, &sixteen_mib],
+    )
+    .await
+    .unwrap();
 
+    let pipeline_id = rand::random();
+    let harness = Harness::with_pipeline_id(NotifyingStore::new(), pipeline_id);
+    let sf_table = snowflake_table_name(&name.schema, &name.name);
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
-        let status = write_table_rows(
-            &harness.destination,
-            &schema,
-            vec![row(1, &production_row, 0), row(2, &sixteen_mib, 0)],
+        let destination = TestDestinationWrapper::wrap(harness.destination.clone());
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            publication.into(),
+            harness.store.clone(),
+            destination.clone(),
+        );
+        let copied = harness.store.notify_on_table_sync_complete(table_id).await;
+        let ready = harness.store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        pipeline.start().await.unwrap();
+        copied.wait_for(PIPELINE_PROGRESS_TIMEOUT).notified().await;
+
+        // This insert also advances the table from copy catch-up to Ready,
+        // avoiding a separate warmup row and its destination requests.
+        pg.execute(
+            &format!("insert into {} (payload) values ($1)", name.as_quoted_identifier()),
+            &[&inserted],
         )
         .await
         .unwrap();
-        assert_eq!(status, DestinationWriteStatus::Accepted);
-        let barrier = write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
-        assert_eq!(barrier, DestinationWriteStatus::Durable);
+        ready.wait_for(PIPELINE_PROGRESS_TIMEOUT).notified().await;
 
-        // CDC: insert a large row, then update only its small column. Under
-        // REPLICA IDENTITY FULL the update carries the unchanged large value.
-        write_events(
-            &harness.destination,
-            WriteEventsDurability::RequireDurable,
-            vec![
-                insert_event(&schema, 10, 0, row(3, &inserted, 0)),
-                Event::Update(UpdateEvent {
-                    commit_lsn: PgLsn::from(11_u64),
-                    tx_ordinal: 0,
-                    replicated_table_schema: schema.clone(),
-                    updated_table_row: UpdatedTableRow::Full(row(3, &inserted, 1)),
-                    old_table_row: Some(OldTableRow::Full(row(3, &inserted, 0))),
-                }),
-            ],
+        let updated = destination
+            .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+            .await;
+        pg.execute(
+            &format!("update {} set changed = 1 where id = 3", name.as_quoted_identifier()),
+            &[],
         )
         .await
         .unwrap();
+        updated.wait_for(PIPELINE_PROGRESS_TIMEOUT).notified().await;
+        let update_lsn = destination
+            .get_events()
+            .await
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Update(event) => Some(event.commit_lsn),
+                _ => None,
+            })
+            .unwrap();
 
-        let update_offset = OffsetToken::new(PgLsn::from(11_u64), 0);
-        let rows = harness.committed_rows(table_id, &sf_table, &update_offset).await;
+        // Observing an UPDATE does not prove its COMMIT was consumed. Poll the
+        // local store until durable progress covers it before stopping intake;
+        // this avoids extra Snowflake status or SQL queries from the test.
+        let durable = tokio::time::timeout(PIPELINE_PROGRESS_TIMEOUT, async {
+            loop {
+                if harness
+                    .store
+                    .get_replication_checkpoint(WorkerType::Apply)
+                    .await
+                    .unwrap()
+                    .is_some_and(|lsn| lsn >= update_lsn)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        pipeline.shutdown_and_wait().await.unwrap();
+        durable.unwrap();
+
+        let fqn = format!("\"{}\".\"{}\".\"{sf_table}\"", harness.database, harness.schema);
+        let rows = query_rows(
+            &harness.sql,
+            &format!(
+                "select \"id\", length(\"payload\"), sha2(\"payload\", 256), \"changed\", \
+                 \"_cdc_operation\" from {fqn} order by \"id\", \"changed\""
+            ),
+        )
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 4);
         assert_stored(&rows[0], 1, &production_row, 0, "insert");
         assert_stored(&rows[1], 2, &sixteen_mib, 0, "insert");

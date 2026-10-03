@@ -270,8 +270,14 @@ cargo x benchmark \
 
 `snowflake_encoder` measures the request encoder alone, with no Postgres or
 Snowflake involved: throughput, request count and fill, compression ratio,
-and peak buffer sizes for synthetic row streams from 1 KiB rows to a single
-13.6 MB row. Run it on `main` and on a branch to compare encoder changes:
+and peak buffer capacities for synthetic row streams from 1 KiB rows to a single
+13.6 MB row. The near-duplicate 1 MiB fixture changes only a 16-byte prefix
+between adjacent values, deliberately favoring shared compression history. Compare
+that fixture across encoder revisions to quantify the trade-off; it is a stress
+case, not an estimate of typical traffic. The capacity figures cover only the
+scratch and request-body buffers; they exclude the temporary row frame, compressor workspace,
+source rows, and process RSS. Compare revisions that both contain this benchmark;
+older revisions without it require a benchmark-only adapter for their encoder API:
 
 ```bash
 cargo run --release -p etl-benchmarks --features snowflake --bin snowflake_encoder -- --repeat 3
