@@ -65,7 +65,7 @@ pub enum Error {
     SchemaNotFound { database: String, schema: String },
 
     /// A single row cannot be sent: its complete compressed frame exceeds the
-    /// Snowflake request limit even at the escalation compression level.
+    /// Snowflake request limit at the configured compression level.
     #[error(
         "Row for table {table_id} ({operation}, {column_count} columns, {serialized_bytes} B \
          serialized{}) compresses to at least {compressed_lower_bound} B, over the \
@@ -83,12 +83,10 @@ pub enum Error {
         serialized_bytes: usize,
         /// Largest column by serialized length, when it could be measured.
         largest_column: Option<LargestColumn>,
-        /// Output length at which the last compression attempt was stopped.
+        /// Output length at which compression was stopped.
         compressed_lower_bound: usize,
         /// Request limit the frame had to fit.
         request_limit: usize,
-        /// Whether the escalation compression level was attempted.
-        escalated: bool,
     },
 }
 
@@ -325,7 +323,6 @@ mod tests {
             }),
             compressed_lower_bound: 5_452_596,
             request_limit: 4_194_304,
-            escalated: false,
         };
         assert_eq!(error.append_failure_type(), AppendFailureType::RowTooLarge);
         assert_eq!(

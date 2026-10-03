@@ -6,7 +6,7 @@ mod rest_client;
 
 use std::future::Future;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub use batch::BuilderFootprint;
 pub use batch::{Completed, RowBatch, RowBatchBuilder};
 pub(crate) use channel::{

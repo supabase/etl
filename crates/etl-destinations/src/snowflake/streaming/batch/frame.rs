@@ -3,11 +3,11 @@
 //! A large row is compressed into its own complete frame before it is admitted
 //! to a request, so its size is exact. The row streams from its cells through
 //! the JSON serializer into the compressor; no serialized copy is allocated.
-//! When the first attempt lands between the request limit and the escalation
-//! cap, the row is compressed once more at the escalation level with a window
-//! sized to the row. Only a row that fails that attempt is rejected.
+//! The row is compressed once at level 3 with a fixed 32 MiB window into a
+//! buffer capped at the request limit. A row whose compressed frame exceeds
+//! that limit is rejected.
 
-use std::io::{self, BufWriter, Write};
+use std::io::BufWriter;
 
 use etl::{
     data::{ArrayCell, Cell, TableRow},
@@ -23,16 +23,13 @@ use crate::snowflake::{
     streaming::batch::{
         buffer::BoundedBuffer,
         limits::{
-            BASE_COMPRESSION_LEVEL, BatchLimits, ESCALATION_COMPRESSION_LEVEL,
-            ESCALATION_WINDOW_LOG_MAX, ESCALATION_WINDOW_LOG_MIN, ROW_FRAME_WRITE_BUFFER_BYTES,
+            BASE_COMPRESSION_LEVEL, BatchLimits, ROW_FRAME_WINDOW_LOG, ROW_FRAME_WRITE_BUFFER_BYTES,
         },
     },
 };
 
-/// Metric outcome: the first attempt fit the request limit.
+/// Metric outcome: the row frame fit the request limit.
 const OUTCOME_FIT: &str = "fit";
-/// Metric outcome: the escalation attempt fit the request limit.
-const OUTCOME_ESCALATED: &str = "escalated";
 /// Metric outcome: the row cannot fit a request.
 const OUTCOME_REJECTED: &str = "rejected";
 
@@ -40,8 +37,6 @@ const OUTCOME_REJECTED: &str = "rejected";
 #[derive(Debug)]
 pub(super) struct RowFrame {
     bytes: Vec<u8>,
-    serialized_bytes: usize,
-    escalated: bool,
 }
 
 impl RowFrame {
@@ -54,51 +49,15 @@ impl RowFrame {
     pub(super) fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
-
-    /// Serialized NDJSON length of the row, including the newline.
-    pub(super) fn serialized_bytes(&self) -> usize {
-        self.serialized_bytes
-    }
-
-    /// Whether the escalation attempt produced this frame.
-    pub(super) fn escalated(&self) -> bool {
-        self.escalated
-    }
-}
-
-/// Encoder settings for one compression attempt.
-struct AttemptSettings {
-    level: i32,
-    window_log: Option<u32>,
-    pledged_size: Option<u64>,
-    output_cap: usize,
 }
 
 /// Result of one compression attempt into a capped buffer.
 enum Attempt {
     /// The frame is complete and within the attempt's output cap.
-    Complete { bytes: Vec<u8>, serialized_bytes: usize },
+    Complete { bytes: Vec<u8> },
     /// Output exceeded the cap; `output_lower_bound` is the length the first
     /// rejected write would have produced.
     Overflow { output_lower_bound: usize },
-}
-
-/// Counts bytes passed through to the inner writer.
-struct CountingWriter<W> {
-    inner: W,
-    written: usize,
-}
-
-impl<W: Write> Write for CountingWriter<W> {
-    fn write(&mut self, data: &[u8]) -> io::Result<usize> {
-        let written = self.inner.write(data)?;
-        self.written += written;
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
 }
 
 /// Lower bound on a row's serialized length, from cell lengths alone.
@@ -124,8 +83,8 @@ fn cell_len_hint(cell: &Cell) -> usize {
 
 /// Compresses one row into its own zstd frame no larger than the request limit.
 ///
-/// Returns [`Error::RowTooLarge`] when the row cannot fit even after the
-/// escalation attempt, and the row's own serialization error when its values
+/// Returns [`Error::RowTooLarge`] when the row's level-3 frame exceeds the
+/// request limit, and the row's own serialization error when its values
 /// cannot be encoded.
 pub(super) fn compress_row_frame(
     limits: &BatchLimits,
@@ -134,71 +93,32 @@ pub(super) fn compress_row_frame(
     row: &TableRow,
     cdc: CdcMeta<'_>,
 ) -> Result<RowFrame> {
-    let first = AttemptSettings {
-        level: BASE_COMPRESSION_LEVEL,
-        window_log: None,
-        pledged_size: None,
-        output_cap: limits.escalation_cap,
-    };
-    let serialized_bytes = match attempt(first, cols, row, cdc)? {
-        Attempt::Complete { bytes, serialized_bytes } if bytes.len() <= limits.request_limit => {
+    match attempt(limits.request_limit, cols, row, cdc)? {
+        Attempt::Complete { bytes } => {
             record_outcome(OUTCOME_FIT);
-            return Ok(RowFrame { bytes, serialized_bytes, escalated: false });
-        }
-        Attempt::Complete { serialized_bytes, .. } => serialized_bytes,
-        Attempt::Overflow { output_lower_bound } => {
-            record_outcome(OUTCOME_REJECTED);
-            return Err(row_too_large(limits, table_id, cols, row, cdc, output_lower_bound, false));
-        }
-    };
-
-    let retry = AttemptSettings {
-        level: ESCALATION_COMPRESSION_LEVEL,
-        window_log: Some(escalation_window_log(serialized_bytes)),
-        pledged_size: Some(serialized_bytes as u64),
-        output_cap: limits.request_limit,
-    };
-    match attempt(retry, cols, row, cdc)? {
-        Attempt::Complete { bytes, serialized_bytes } => {
-            record_outcome(OUTCOME_ESCALATED);
-            Ok(RowFrame { bytes, serialized_bytes, escalated: true })
+            Ok(RowFrame { bytes })
         }
         Attempt::Overflow { output_lower_bound } => {
             record_outcome(OUTCOME_REJECTED);
-            Err(row_too_large(limits, table_id, cols, row, cdc, output_lower_bound, true))
+            Err(row_too_large(limits, table_id, cols, row, cdc, output_lower_bound))
         }
     }
 }
 
-/// Window log that covers a row of `serialized_bytes`, within the escalation
-/// range.
-fn escalation_window_log(serialized_bytes: usize) -> u32 {
-    let ceil_log2 = usize::BITS - (serialized_bytes.max(2) - 1).leading_zeros();
-    ceil_log2.clamp(ESCALATION_WINDOW_LOG_MIN, ESCALATION_WINDOW_LOG_MAX)
-}
-
-/// Serializes and compresses the row once with the given settings.
+/// Serializes and compresses the row once into a capped level-3 frame with
+/// the fixed row-frame window.
 fn attempt(
-    settings: AttemptSettings,
+    output_cap: usize,
     cols: &[ColumnSchema],
     row: &TableRow,
     cdc: CdcMeta<'_>,
 ) -> Result<Attempt> {
-    let mut encoder = Encoder::new(BoundedBuffer::new(settings.output_cap), settings.level)
+    let mut encoder = Encoder::new(BoundedBuffer::new(output_cap), BASE_COMPRESSION_LEVEL)
         .map_err(|error| Error::Encoding(format!("Row frame compressor start failed: {error}")))?;
-    if let Some(window_log) = settings.window_log {
-        encoder.window_log(window_log).map_err(|error| {
-            Error::Encoding(format!("Row frame compressor window setup failed: {error}"))
-        })?;
-    }
-    if let Some(size) = settings.pledged_size {
-        encoder.set_pledged_src_size(Some(size)).map_err(|error| {
-            Error::Encoding(format!("Row frame compressor size pledge failed: {error}"))
-        })?;
-    }
-
-    let mut counter = CountingWriter { inner: &mut encoder, written: 0 };
-    let mut buffered = BufWriter::with_capacity(ROW_FRAME_WRITE_BUFFER_BYTES, &mut counter);
+    encoder.window_log(ROW_FRAME_WINDOW_LOG).map_err(|error| {
+        Error::Encoding(format!("Row frame compressor window setup failed: {error}"))
+    })?;
+    let mut buffered = BufWriter::with_capacity(ROW_FRAME_WRITE_BUFFER_BYTES, &mut encoder);
     let serialized = match serialize_row(&mut buffered, cols, row, cdc) {
         // `into_inner` drains the buffer without flushing the compressor, which
         // would end a zstd block early.
@@ -210,7 +130,6 @@ fn attempt(
             Err(error)
         }
     };
-    let serialized_bytes = counter.written;
 
     if let Err(error) = serialized {
         return match encoder.get_ref().overflow() {
@@ -220,7 +139,7 @@ fn attempt(
     }
 
     match encoder.try_finish() {
-        Ok(buffer) => Ok(Attempt::Complete { bytes: buffer.into_bytes(), serialized_bytes }),
+        Ok(buffer) => Ok(Attempt::Complete { bytes: buffer.into_bytes() }),
         Err((encoder, error)) => match encoder.get_ref().overflow() {
             Some(output_lower_bound) => Ok(Attempt::Overflow { output_lower_bound }),
             None => Err(Error::Encoding(format!("Row frame compression finish failed: {error}"))),
@@ -239,7 +158,6 @@ fn row_too_large(
     row: &TableRow,
     cdc: CdcMeta<'_>,
     compressed_lower_bound: usize,
-    escalated: bool,
 ) -> Error {
     let serialized_bytes = match serialized_row_len(cols, row, cdc) {
         Ok(serialized_bytes) => serialized_bytes,
@@ -264,7 +182,6 @@ fn row_too_large(
         largest_column,
         compressed_lower_bound,
         request_limit: limits.request_limit,
-        escalated,
     }
 }
 
@@ -274,6 +191,8 @@ fn record_outcome(outcome: &'static str) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use etl::{
         data::{Cell, TableRow},
         schema::{ColumnSchema, TableId, Type},
@@ -305,12 +224,7 @@ mod tests {
     }
 
     fn limits(request_limit: usize) -> BatchLimits {
-        BatchLimits {
-            request_limit,
-            small_row_limit: 1024,
-            flush_interval: 512,
-            escalation_cap: request_limit * 13 / 10,
-        }
+        BatchLimits { request_limit, small_row_limit: 1024, flush_interval: 512 }
     }
 
     fn random_text(len: usize, seed: u64) -> String {
@@ -322,23 +236,6 @@ mod tests {
                 ALPHABET[((state >> 33) % 62) as usize] as char
             })
             .collect()
-    }
-
-    /// Word text with a skewed vocabulary: compresses materially better at
-    /// level 19 than at level 3.
-    fn word_text(len: usize, seed: u64) -> String {
-        let vocabulary: Vec<String> =
-            (0..4096).map(|i| random_text(3 + (i % 7), seed ^ (i as u64 * 977))).collect();
-        let mut state = seed;
-        let mut text = String::with_capacity(len + 16);
-        while text.len() < len {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let skewed = ((state >> 33) % 4096) as usize;
-            text.push_str(&vocabulary[skewed * skewed / 4096]);
-            text.push(' ');
-        }
-        text.truncate(len);
-        text
     }
 
     fn serialized(payload: &str) -> Vec<u8> {
@@ -355,13 +252,11 @@ mod tests {
                 .unwrap();
 
         assert!(frame.len() <= 16 * 1024);
-        assert!(!frame.escalated());
-        assert_eq!(frame.serialized_bytes(), serialized(&payload).len());
         assert_eq!(zstd::decode_all(frame.as_slice()).unwrap(), serialized(&payload));
     }
 
     #[test]
-    fn incompressible_row_over_the_cap_is_rejected_without_retry() {
+    fn incompressible_row_over_the_cap_is_rejected() {
         let payload = random_text(64 * 1024, 1);
         let limits = limits(16 * 1024);
         let error = compress_row_frame(&limits, table(), &cols(), &row(payload.clone()), cdc())
@@ -375,7 +270,6 @@ mod tests {
             largest_column,
             compressed_lower_bound,
             request_limit,
-            escalated,
         } = error
         else {
             panic!("expected RowTooLarge, got {error:?}");
@@ -388,52 +282,29 @@ mod tests {
         assert_eq!(largest.name, "payload");
         // The JSON string includes its quotes.
         assert_eq!(largest.serialized_bytes, payload.len() + 2);
-        assert!(compressed_lower_bound > limits.escalation_cap);
+        assert!(compressed_lower_bound > limits.request_limit);
         assert_eq!(request_limit, limits.request_limit);
-        assert!(!escalated);
     }
 
     #[test]
-    fn row_in_the_escalation_band_is_retried_at_the_higher_level() {
-        let payload = word_text(300 * 1024, 3);
-        let line = serialized(&payload);
-        let level_3 =
-            zstd::stream::encode_all(line.as_slice(), BASE_COMPRESSION_LEVEL).unwrap().len();
-        let level_19 =
-            zstd::stream::encode_all(line.as_slice(), ESCALATION_COMPRESSION_LEVEL).unwrap().len();
-        // Precondition for the scenario: the higher level buys at least 5%.
-        assert!(level_19 * 20 < level_3 * 19, "level 19 {level_19} vs level 3 {level_3}");
+    fn row_frame_accepts_the_exact_limit_and_rejects_one_byte_less() {
+        let payload = random_text(64 * 1024, 3);
+        let row = row(payload.clone());
+        let frame = compress_row_frame(&limits(128 * 1024), table(), &cols(), &row, cdc()).unwrap();
+        let frame_bytes = frame.len();
 
-        let limits = limits((level_3 + level_19) / 2);
-        assert!(limits.escalation_cap >= level_3);
+        let exact =
+            compress_row_frame(&limits(frame_bytes), table(), &cols(), &row, cdc()).unwrap();
+        assert_eq!(exact.as_slice(), frame.as_slice());
+        assert_eq!(zstd::decode_all(exact.as_slice()).unwrap(), serialized(&payload));
 
-        let frame = compress_row_frame(&limits, table(), &cols(), &row(payload), cdc()).unwrap();
-
-        assert!(frame.escalated());
-        assert!(frame.len() <= limits.request_limit);
-        assert_eq!(zstd::decode_all(frame.as_slice()).unwrap(), line);
-    }
-
-    #[test]
-    fn row_that_fails_the_retry_is_rejected_as_escalated() {
-        let payload = word_text(300 * 1024, 5);
-        let line = serialized(&payload);
-        let level_3 =
-            zstd::stream::encode_all(line.as_slice(), BASE_COMPRESSION_LEVEL).unwrap().len();
-        let level_19 =
-            zstd::stream::encode_all(line.as_slice(), ESCALATION_COMPRESSION_LEVEL).unwrap().len();
-        assert!(level_19 < level_3);
-
-        let mut limits = limits(level_19 * 9 / 10);
-        limits.escalation_cap = level_3 + 1024;
-
-        let error =
-            compress_row_frame(&limits, table(), &cols(), &row(payload), cdc()).unwrap_err();
-
-        assert!(
-            matches!(error, Error::RowTooLarge { escalated: true, request_limit, .. } if request_limit == limits.request_limit),
-            "{error:?}"
-        );
+        let error = compress_row_frame(&limits(frame_bytes - 1), table(), &cols(), &row, cdc())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::RowTooLarge { compressed_lower_bound, request_limit, .. }
+                if compressed_lower_bound == frame_bytes && request_limit == frame_bytes - 1
+        ));
     }
 
     #[test]
@@ -446,6 +317,55 @@ mod tests {
             compress_row_frame(&limits(16 * 1024), table(), &cols, &row, cdc()).unwrap_err();
 
         assert!(matches!(error, Error::Encoding(message) if message.contains("non-finite")));
+    }
+
+    #[test]
+    fn row_frames_declare_the_fixed_window_regardless_of_row_size() {
+        let payload = "a".repeat(4 * 1024);
+        let frame =
+            compress_row_frame(&limits(16 * 1024), table(), &cols(), &row(payload.clone()), cdc())
+                .unwrap();
+
+        // Inspect the declared window through the decoder's memory limit
+        // rather than assuming the frame header layout: one bit below the
+        // fixed window must be refused, the fixed window must decode.
+        let mut decoder = zstd::stream::read::Decoder::new(frame.as_slice()).unwrap();
+        decoder.window_log_max(ROW_FRAME_WINDOW_LOG - 1).unwrap();
+        assert!(decoder.read_to_end(&mut Vec::new()).is_err());
+
+        let mut decoder = zstd::stream::read::Decoder::new(frame.as_slice()).unwrap();
+        decoder.window_log_max(ROW_FRAME_WINDOW_LOG).unwrap();
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, serialized(&payload));
+    }
+
+    #[test]
+    fn row_frames_roundtrip_json_escaping_and_binary_beyond_the_default_window() {
+        let cases = [
+            (Type::JSONB, Cell::Json(serde_json::json!({"text": "\0".repeat(512 * 1024)}))),
+            (Type::TEXT, Cell::String("\0".repeat(512 * 1024))),
+            (Type::BYTEA, Cell::Bytes(vec![0xab; 3 * 1024 * 1024 / 2])),
+        ];
+        for (ty, cell) in cases {
+            let cols = [ColumnSchema::new("payload".into(), ty, -1, 1, false)];
+            let row = TableRow::new(vec![cell]);
+            let mut line = Vec::new();
+            serialize_row(&mut line, &cols, &row, cdc()).unwrap();
+            // JSON nesting, escaping, or hex encoding alone push these rows
+            // past level 3's default 2 MiB window.
+            assert!(line.len() > 2 * 1024 * 1024);
+            assert!(line.len() < 4 * 1024 * 1024);
+
+            let frame =
+                compress_row_frame(&BatchLimits::SNOWFLAKE, table(), &cols, &row, cdc()).unwrap();
+            assert_eq!(zstd::decode_all(frame.as_slice()).unwrap(), line);
+
+            // A decoder limited to the default window must refuse the frame.
+            let mut decoder = zstd::stream::read::Decoder::new(frame.as_slice()).unwrap();
+            decoder.window_log_max(21).unwrap();
+            assert!(decoder.read_to_end(&mut Vec::new()).is_err());
+        }
     }
 
     #[test]

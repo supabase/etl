@@ -44,6 +44,7 @@ impl BoundedBuffer {
     }
 
     /// Allocated capacity, never above the limit.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn capacity(&self) -> usize {
         self.bytes.capacity()
     }
@@ -95,8 +96,8 @@ impl io::Write for BoundedBuffer {
 
     /// Single checked append. JSON serialization issues many small writes per
     /// row through `write_all`; the default implementation loops over
-    /// [`Self::write`], so this override keeps the hot path as cheap as a
-    /// plain `Vec`: one capacity compare and a copy.
+    /// [`std::io::Write::write`], so this override keeps the hot path as cheap
+    /// as a plain `Vec`: one capacity compare and a copy.
     #[inline]
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         let required = self.bytes.len().saturating_add(data.len());

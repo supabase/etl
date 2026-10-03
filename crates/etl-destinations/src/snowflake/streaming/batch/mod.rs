@@ -21,7 +21,6 @@ use etl::{
     data::TableRow,
     schema::{ColumnSchema, TableId},
 };
-use tracing::info;
 
 use crate::snowflake::{
     Error, Result,
@@ -236,14 +235,6 @@ impl RowBatchBuilder {
         }
 
         let frame = compress_row_frame(&self.limits, self.table_id, cols, row, cdc)?;
-        if frame.escalated() {
-            info!(
-                table_id = %self.table_id,
-                serialized_bytes = frame.serialized_bytes(),
-                frame_bytes = frame.len(),
-                "snowflake row compressed at the escalation level to fit a request"
-            );
-        }
         self.row_frames += 1;
         self.open.close_stream_frame()?;
         let completed = if self.open.row_count() > 0
@@ -326,7 +317,6 @@ mod tests {
             request_limit: REQUEST_LIMIT,
             small_row_limit: SMALL_ROW_LIMIT,
             flush_interval: 1024,
-            escalation_cap: REQUEST_LIMIT * 13 / 10,
         }
     }
 
@@ -630,10 +620,7 @@ mod tests {
         let mut builder = builder();
         let error = push(&mut builder, 1, random_text(200 * 1024, 9)).unwrap_err();
 
-        assert!(
-            matches!(&error, Error::RowTooLarge { escalated: false, column_count: 2, .. }),
-            "{error:?}"
-        );
+        assert!(matches!(&error, Error::RowTooLarge { column_count: 2, .. }), "{error:?}");
         assert_eq!(EtlError::from(error).kind(), ErrorKind::UnsupportedValueInDestination);
     }
 
@@ -714,10 +701,34 @@ mod tests {
     }
 
     #[test]
-    fn production_limits_reject_an_incompressible_eight_mebibyte_row_without_escalation() {
+    fn production_limits_accept_repeated_blocks_in_text_and_json_rows() {
+        let payload = random_text(3 * 1024 * 1024, 71).repeat(5);
+        for (ty, cell) in [
+            (Type::TEXT, Cell::String(payload.clone())),
+            (Type::JSONB, Cell::Json(serde_json::json!({"text": payload}))),
+        ] {
+            let cols = [ColumnSchema::new("payload".into(), ty, -1, 1, false)];
+            let row = TableRow::new(vec![cell]);
+            let offset = offset(1);
+            let cdc = CdcMeta::new(CdcOperation::Insert, offset.as_ref());
+            let mut builder = RowBatchBuilder::new(TableId::new(7));
+            assert!(builder.push_row(&cols, &row, cdc, &offset).unwrap().is_empty());
+            let batches: Vec<RowBatch> = builder.finish().unwrap().into_iter().collect();
+
+            assert_eq!(batches.len(), 1);
+            assert_eq!(batches[0].row_count(), 1);
+            assert!(batches[0].size() <= REQUEST_LIMIT_BYTES);
+            let mut line = Vec::new();
+            serialize_row(&mut line, &cols, &row, cdc).unwrap();
+            assert_eq!(zstd::decode_all(batches[0].bytes().as_ref()).unwrap(), line);
+        }
+    }
+
+    #[test]
+    fn production_limits_reject_an_incompressible_eight_mebibyte_row() {
         let mut builder = RowBatchBuilder::new(TableId::new(1));
         let error = push(&mut builder, 1, random_text(8 * 1024 * 1024, 2)).unwrap_err();
-        assert!(matches!(error, Error::RowTooLarge { escalated: false, .. }), "{error:?}");
+        assert!(matches!(error, Error::RowTooLarge { .. }), "{error:?}");
     }
 
     #[test]

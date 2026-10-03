@@ -114,8 +114,8 @@ pub(super) fn register_metrics() {
         describe_counter!(
             ETL_SNOWFLAKE_ROW_FRAMES_TOTAL,
             Unit::Count,
-            "Total rows compressed into their own request frame, labeled by outcome: fit, \
-             escalated, or rejected."
+            "Total rows compressed into their own request frame, labeled by outcome: fit or \
+             rejected."
         );
     });
 }

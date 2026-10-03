@@ -83,6 +83,7 @@ impl OpenRequest {
     }
 
     /// Allocated body capacity, for footprint checks.
+    #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn body_capacity(&self) -> usize {
         match &self.body {
             Body::Idle(buffer) => buffer.capacity(),
@@ -214,12 +215,7 @@ mod tests {
     use crate::snowflake::Error;
 
     fn limits() -> BatchLimits {
-        BatchLimits {
-            request_limit: 64 * 1024,
-            small_row_limit: 1024,
-            flush_interval: 128,
-            escalation_cap: 64 * 1024 * 13 / 10,
-        }
+        BatchLimits { request_limit: 64 * 1024, small_row_limit: 1024, flush_interval: 128 }
     }
 
     fn offset(ordinal: u64) -> OffsetToken {

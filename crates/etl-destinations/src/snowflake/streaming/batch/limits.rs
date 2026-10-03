@@ -27,22 +27,21 @@ pub(crate) const FLUSH_INTERVAL_BYTES: usize = 128 * 1024;
 /// block (3 bytes), rounded up.
 pub(crate) const ZSTD_FRAME_OVERHEAD_BYTES: usize = 16;
 
-/// Compression level for the stream frame and the first row-frame attempt.
+/// Compression level for stream frames and row frames.
 pub(crate) const BASE_COMPRESSION_LEVEL: i32 = 3;
 
-/// Compression level for the row-frame retry.
+/// zstd window log for row frames: 32 MiB of compression history.
 ///
-/// Measured 24% smaller than level 3 on realistic text; long-distance matching
-/// added nothing on top of it.
-pub(crate) const ESCALATION_COMPRESSION_LEVEL: i32 = 19;
-
-/// Smallest zstd window log used by the row-frame retry (8 MiB).
-pub(crate) const ESCALATION_WINDOW_LOG_MIN: u32 = 23;
-
-/// Largest zstd window log used by the row-frame retry (32 MiB).
+/// Extends level 3's default 2 MiB history without a row-size counting pass.
+/// Matches within this distance are eligible; zstd need not find every match.
+/// Rows larger than the window can still fit [`REQUEST_LIMIT_BYTES`].
 ///
-/// Bounds retry memory. Snowflake decodes frames with this window (measured).
-pub(crate) const ESCALATION_WINDOW_LOG_MAX: u32 = 25;
+/// zstd 1.5.7 allocates about 33.5 MiB of compressor workspace per active row
+/// frame at this setting, separate from the caller's source and output buffers.
+/// Resident memory depends on the input and allocator, and concurrent large-row
+/// compressors multiply this cost. Each frame declares the 32 MiB window;
+/// Snowflake acceptance is covered by the credentialed integration tests.
+pub(crate) const ROW_FRAME_WINDOW_LOG: u32 = 25;
 
 /// Buffer between the JSON serializer and the zstd encoder on the row-frame
 /// path, so JSON fragments do not each cross into the compressor.
@@ -69,9 +68,6 @@ pub(crate) struct BatchLimits {
     pub(crate) small_row_limit: usize,
     /// Input written to the stream frame between flushes.
     pub(crate) flush_interval: usize,
-    /// Output cap for the first row-frame attempt. A frame that lands between
-    /// `request_limit` and this cap is retried at the escalation level.
-    pub(crate) escalation_cap: usize,
 }
 
 impl BatchLimits {
@@ -80,7 +76,6 @@ impl BatchLimits {
         request_limit: REQUEST_LIMIT_BYTES,
         small_row_limit: SMALL_ROW_LIMIT_BYTES,
         flush_interval: FLUSH_INTERVAL_BYTES,
-        escalation_cap: REQUEST_LIMIT_BYTES * 13 / 10,
     };
 
     /// Bytes reserved below `request_limit` when admitting a small row.
@@ -100,11 +95,9 @@ impl BatchLimits {
         self.request_limit - self.stream_headroom()
     }
 
-    /// Returns whether a request can always hold at least one small row and
-    /// the escalation cap is not below the request limit.
+    /// Returns whether a request can always hold at least one small row.
     pub(crate) const fn is_consistent(&self) -> bool {
         self.request_limit > self.stream_headroom() + self.small_row_limit
-            && self.escalation_cap >= self.request_limit
     }
 }
 
@@ -131,7 +124,6 @@ mod tests {
         assert_eq!(limits.request_limit, 4_194_304);
         assert_eq!(limits.small_row_limit, 262_144);
         assert_eq!(limits.flush_interval, 131_072);
-        assert_eq!(limits.escalation_cap, 5_452_595);
         assert_eq!(limits.stream_headroom(), 132_624);
         assert_eq!(limits.stream_admission_limit(), 4_061_680);
     }
@@ -142,10 +134,6 @@ mod tests {
         assert!(limits.is_consistent());
 
         limits.request_limit = limits.stream_headroom() + limits.small_row_limit;
-        assert!(!limits.is_consistent());
-
-        limits.request_limit = BatchLimits::SNOWFLAKE.request_limit;
-        limits.escalation_cap = limits.request_limit - 1;
         assert!(!limits.is_consistent());
     }
 }
