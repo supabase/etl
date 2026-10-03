@@ -65,9 +65,29 @@ needs. This lets ETL catch up after a temporary disconnect.
 **ETL creates its logical slots automatically.** Do not pre-create a slot for
 the pipeline. The apply worker uses `supabase_etl_apply_{pipeline_id}`; table
 sync workers create `supabase_etl_table_sync_{pipeline_id}_{table_id}` slots
-for initial sync and drop them after catch-up completes. These are persistent
-PostgreSQL slots with a short lifecycle, not session-scoped `TEMPORARY` slots;
-they can remain after a failed or interrupted sync.
+for initial sync and drop them after catch-up completes. By default, both use
+permanent PostgreSQL slots. Table-sync slots can remain after a failed or
+interrupted sync.
+
+### Temporary Slots
+
+For ephemeral pipelines, such as an in-memory cache rebuilt from Postgres on
+every start, use session-scoped slots:
+
+```yaml
+pipeline:
+  replication_slot:
+    persistence: temporary
+```
+
+This applies to both apply-worker and table-sync slots. PostgreSQL drops them
+on an error or when their creating sessions end. Omitted `persistence` defaults
+to `permanent`, including in existing configurations.
+
+Temporary slots cannot retain replication progress across a lost connection.
+Restart with a fresh store and destination so initial synchronization rebuilds
+the data. ETL rejects reusing stale table state or an existing apply slot in
+temporary mode. `failover: true` requires permanent slots.
 
 ### Viewing Replication Slots
 

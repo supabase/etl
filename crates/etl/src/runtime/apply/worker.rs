@@ -1,6 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use etl_config::shared::{InvalidatedSlotBehavior, PipelineConfig};
+use etl_config::shared::{
+    InvalidatedSlotBehavior, PipelineConfig, ReplicationSlotConfig, ReplicationSlotPersistence,
+};
 use etl_postgres::slots::EtlReplicationSlot;
 use metrics::counter;
 use tokio::sync::Semaphore;
@@ -27,7 +29,7 @@ use crate::{
         concurrency::{ShutdownResult, with_shutdown},
         error_policy::{RetryDirective, build_error_handling_policy},
     },
-    store::{PipelineStore, StateStore, TableStateLifecycleStore},
+    store::{PipelineStore, StateStore, TableStateLifecycleStore, TableStateType},
 };
 
 /// Handle for monitoring and controlling the apply worker.
@@ -261,7 +263,7 @@ where
                     &mut replication_client,
                     &self.store,
                     &self.config.invalidated_slot_behavior,
-                    self.config.replication_slot.failover,
+                    &self.config.replication_slot,
                 )
                 .await?;
                 Ok::<_, EtlError>((replication_client, start_lsn))
@@ -343,12 +345,14 @@ where
 /// When creating a new slot, this function warns if any tables already depend
 /// on the apply worker for replication. Those tables can miss changes between
 /// the previous slot stopping and the new slot being created.
+/// Temporary slots instead require fresh table state, since their WAL history
+/// ends with the creating session.
 async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &mut PgReplicationClient,
     store: &S,
     invalidated_slot_behavior: &InvalidatedSlotBehavior,
-    failover: bool,
+    replication_slot: &ReplicationSlotConfig,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
@@ -358,12 +362,24 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     // would leave a crash window where a later restart could pair the new slot
     // with old persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
+        Ok(_) if replication_slot.persistence == ReplicationSlotPersistence::Temporary => {
+            // A temporary slot can only be used by its creating session. This
+            // worker has a fresh connection, so any existing slot is either
+            // permanent or belongs to another session.
+            bail!(
+                ErrorKind::ConfigError,
+                "Temporary replication requires a new apply slot",
+                format!(
+                    "Replication slot '{slot_name}' already exists; use a different pipeline id"
+                )
+            );
+        }
         Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
-            warn_if_tables_may_have_missed_changes(store).await?;
+            validate_new_apply_slot_state(store, replication_slot.persistence).await?;
             store.delete_replication_checkpoint(worker_type).await?;
 
-            let slot = replication_client.create_slot(&slot_name, failover).await?;
+            let slot = replication_client.create_slot(&slot_name, replication_slot).await?;
             GetOrCreateSlotResult::CreateSlot(slot)
         }
         Err(err) => return Err(err),
@@ -402,7 +418,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
                 store,
                 &slot_name,
                 invalidated_slot_behavior,
-                failover,
+                replication_slot,
             )
             .await;
         }
@@ -411,7 +427,7 @@ async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
         // reuse so enabling failover does not leave it ineligible for standby
         // synchronization. Invalidated slots are handled above instead of
         // altered.
-        if failover {
+        if replication_slot.failover {
             replication_client.ensure_slot_failover(&slot_name).await?;
         }
     }
@@ -462,7 +478,7 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     store: &S,
     slot_name: &str,
     behavior: &InvalidatedSlotBehavior,
-    failover: bool,
+    replication_slot: &ReplicationSlotConfig,
 ) -> EtlResult<PgLsn> {
     counter!(ETL_SLOT_INVALIDATIONS_TOTAL).increment(1);
 
@@ -497,7 +513,7 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
 
             // We delete and recreate the main apply worker slot.
             replication_client.delete_slot_if_exists(slot_name).await?;
-            let create_result = replication_client.create_slot(slot_name, failover).await?;
+            let create_result = replication_client.create_slot(slot_name, replication_slot).await?;
 
             info!(
                 slot_name,
@@ -510,10 +526,23 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     }
 }
 
-/// Warns when a new apply slot may skip changes for tables that will not be
-/// recopied on restart.
-async fn warn_if_tables_may_have_missed_changes<S: StateStore>(store: &S) -> EtlResult<()> {
+/// Rejects reuse of table state after a temporary apply slot is lost, and warns
+/// when a new permanent slot may skip changes for already synchronized tables.
+async fn validate_new_apply_slot_state<S: StateStore>(
+    store: &S,
+    persistence: ReplicationSlotPersistence,
+) -> EtlResult<()> {
     let table_states = store.get_table_states().await?;
+
+    if persistence == ReplicationSlotPersistence::Temporary
+        && table_states.values().any(|state| state.as_type() != TableStateType::Init)
+    {
+        bail!(
+            ErrorKind::InvalidState,
+            "Cannot resume replication after a temporary apply slot is lost",
+            "Restart the pipeline with a fresh store and destination".to_owned()
+        );
+    }
 
     let tables_at_risk: Vec<_> = table_states
         .iter()

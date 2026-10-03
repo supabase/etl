@@ -1,3 +1,4 @@
+use etl_config::shared::{ReplicationSlotConfig, ReplicationSlotPersistence};
 use pg_escape::quote_identifier;
 use tokio_postgres::{SimpleQueryMessage, Transaction, error::SqlState, types::PgLsn};
 
@@ -13,8 +14,17 @@ use crate::{
 };
 
 /// Builds a `CREATE_REPLICATION_SLOT` command for a logical `pgoutput` slot.
-fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover: bool) -> String {
-    if failover {
+fn create_slot_query(
+    slot_name: &str,
+    snapshot_action: SnapshotAction,
+    config: &ReplicationSlotConfig,
+) -> String {
+    let temporary = match config.persistence {
+        ReplicationSlotPersistence::Permanent => "",
+        ReplicationSlotPersistence::Temporary => " TEMPORARY",
+    };
+
+    if config.failover {
         // PostgreSQL's legacy syntax accepts the snapshot action but has no
         // place for FAILOVER. The parenthesized PostgreSQL 17+ syntax combines
         // both.
@@ -23,8 +33,9 @@ fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover:
             SnapshotAction::NoExport => "'nothing'",
         };
         format!(
-            r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput (SNAPSHOT {}, FAILOVER)"#,
+            r#"CREATE_REPLICATION_SLOT {}{} LOGICAL pgoutput (SNAPSHOT {}, FAILOVER)"#,
             quote_identifier(slot_name),
+            temporary,
             snapshot_option
         )
     } else {
@@ -35,8 +46,9 @@ fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover:
             SnapshotAction::NoExport => "NOEXPORT_SNAPSHOT",
         };
         format!(
-            r#"CREATE_REPLICATION_SLOT {} LOGICAL pgoutput {}"#,
+            r#"CREATE_REPLICATION_SLOT {}{} LOGICAL pgoutput {}"#,
             quote_identifier(slot_name),
+            temporary,
             snapshot_option
         )
     }
@@ -60,13 +72,13 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
         self,
         slot_name: &str,
         snapshot_action: SnapshotAction,
-        failover: bool,
+        config: &ReplicationSlotConfig,
     ) -> EtlResult<CreateSlotResult> {
         // Do not convert the query or the options to lowercase, since the lexer
         // for replication commands (repl_scanner.l) in Postgres code expects
         // the commands in uppercase. This probably should be fixed in upstream,
         // but for now we will keep the commands in uppercase.
-        let query = create_slot_query(slot_name, snapshot_action, failover);
+        let query = create_slot_query(slot_name, snapshot_action, config);
         match self.transaction.simple_query(&query).await {
             Ok(results) => {
                 for result in results {
