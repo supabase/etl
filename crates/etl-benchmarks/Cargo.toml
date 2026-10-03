@@ -12,6 +12,10 @@ homepage.workspace = true
 test = false
 doctest = false
 
+[[bin]]
+name = "snowflake_encoder"
+required-features = ["snowflake"]
+
 [features]
 default = []
 bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
@@ -22,10 +26,6 @@ snowflake = [
     "etl-destinations/snowflake",
     "etl-destinations/test-utils",
 ]
-
-[[bin]]
-name = "snowflake_encoder"
-required-features = ["snowflake"]
 
 [dependencies]
 anyhow = { workspace = true }
