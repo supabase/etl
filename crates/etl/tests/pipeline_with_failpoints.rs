@@ -2,7 +2,7 @@
 
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -2677,6 +2677,14 @@ struct IdleDurabilityTest {
 impl IdleDurabilityTest {
     /// Starts an empty streaming table with controlled destination results.
     async fn start() -> Self {
+        Self::start_with_settle_interval(None).await
+    }
+
+    /// Starts like [`Self::start`], with an optional durability window.
+    ///
+    /// A configured window also shortens `wal_sender_timeout` so several
+    /// primary keepalives arrive before the window elapses.
+    async fn start_with_settle_interval(settle_durable_interval_ms: Option<u64>) -> Self {
         init_test_tracing();
         let database = spawn_source_database().await;
         let table_name = test_table_name("idle_durability");
@@ -2701,6 +2709,7 @@ impl IdleDurabilityTest {
             destination,
         )
         .with_table_sync_copy_config(TableSyncCopyConfig::SkipAllTables)
+        .with_settle_durable_interval_ms(settle_durable_interval_ms)
         .build();
         let synced = store.notify_on_table_sync_complete(table_id).await;
         pipeline.start().await.unwrap();
@@ -2775,6 +2784,50 @@ async fn idle_durability_settles_on_primary_keepalive() {
         Some(commit_lsn)
     );
     assert!(test.writes_rx.try_recv().is_err());
+}
+
+/// Later inserts are accepted during the settle window and remain undurable
+/// together with the earlier write.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_durability_allows_multiple_writes_during_settle_interval() {
+    const SETTLE_AFTER_MS: u64 = 3_000;
+    let mut test = IdleDurabilityTest::start_with_settle_interval(Some(SETTLE_AFTER_MS)).await;
+
+    test.insert(1).await;
+    let (first_lsn, first_result) = test.next_batch().await;
+    let accepted_at = Instant::now();
+    first_result.send(Ok(DestinationWriteStatus::Accepted));
+
+    let mut previous_lsn = first_lsn;
+    for value in [2, 3] {
+        test.insert(value).await;
+        let (lsn, result) = test.next_batch().await;
+        assert!(lsn > previous_lsn);
+        assert!(accepted_at.elapsed() < Duration::from_millis(SETTLE_AFTER_MS));
+        result.send(Ok(DestinationWriteStatus::Accepted));
+        previous_lsn = lsn;
+    }
+    assert!(test.confirmed_lsn().await < first_lsn);
+
+    let barrier = test.next_barrier().await;
+    assert!(accepted_at.elapsed() >= Duration::from_millis(SETTLE_AFTER_MS));
+    barrier.send(Ok(DestinationWriteStatus::Durable));
+    test.wait_for_flush(previous_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// Without a settle window, a later insert is overtaken by the durability
+/// barrier.
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "expected an event batch")]
+async fn idle_durability_disallows_multiple_writes_without_settle_interval() {
+    let mut test = IdleDurabilityTest::start().await;
+    test.insert(1).await;
+    let (_commit_lsn, result) = test.next_batch().await;
+    result.send(Ok(DestinationWriteStatus::Accepted));
+
+    test.insert(2).await;
+    test.next_batch().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

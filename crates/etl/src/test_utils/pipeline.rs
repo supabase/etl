@@ -107,6 +107,9 @@ pub struct PipelineBuilder<S, D> {
     /// The time between periodic table sync monitor checks. Default:
     /// [`PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS`].
     table_sync_monitor_refresh_interval_ms: u64,
+    /// Minimum age of an accepted write before an idle keepalive may force
+    /// durability. `None` allows any keepalive to force durability.
+    settle_durable_interval_ms: Option<u64>,
     /// Logical replication slot configuration.
     replication_slot: ReplicationSlotConfig,
 }
@@ -166,6 +169,7 @@ where
             },
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+            settle_durable_interval_ms: None,
             replication_slot: ReplicationSlotConfig::default(),
         }
     }
@@ -233,6 +237,16 @@ where
         self
     }
 
+    /// Sets the minimum age of an accepted write before an idle keepalive may
+    /// force durability.
+    ///
+    /// `None` allows forced durability at any keepalive. `Some` guarantees at
+    /// least that window before a later keepalive can force durability.
+    pub fn with_settle_durable_interval_ms(mut self, interval_ms: Option<u64>) -> Self {
+        self.settle_durable_interval_ms = interval_ms;
+        self
+    }
+
     /// Builds and returns the configured pipeline.
     ///
     /// This method consumes the builder and creates a `Pipeline` instance with
@@ -255,6 +269,7 @@ where
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
             table_sync_monitor_refresh_interval_ms: self.table_sync_monitor_refresh_interval_ms,
             memory_backpressure: Some(self.memory_backpressure),
+            settle_durable_interval_ms: self.settle_durable_interval_ms,
             run_source_migrations: true,
         };
 
