@@ -28,7 +28,11 @@ use pg_escape::quote_identifier;
 use tokio_postgres::{Client, types::PgLsn};
 use uuid::Uuid;
 
-use crate::{postgres::migrations, schema::TableName, test_utils::notify::DEFAULT_NOTIFY_TIMEOUT};
+use crate::{
+    postgres::migrations,
+    schema::{TableId, TableName},
+    test_utils::notify::DEFAULT_NOTIFY_TIMEOUT,
+};
 
 /// The schema name used for organizing test tables.
 ///
@@ -41,6 +45,7 @@ const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const READ_REPLICA_PORT_OFFSET: u16 = 1000;
+
 /// Creates a [`TableName`] in the test schema.
 ///
 /// This helper function constructs a [`TableName`] with the schema set to the
@@ -48,6 +53,52 @@ const READ_REPLICA_PORT_OFFSET: u16 = 1000;
 /// consistent table naming across test scenarios.
 pub fn test_table_name(name: &str) -> TableName {
     TableName { schema: TEST_DATABASE_SCHEMA.to_owned(), name: name.to_owned() }
+}
+
+/// Asserts that a table and its descendants have no conflicting relation locks.
+///
+/// Use an idle connection separate from the copy connections. PostgreSQL may
+/// still be processing disconnected copy sessions after local shutdown joins
+/// their tasks, so wait for lock release on the server. A lock timeout detects
+/// leaked locks; rollback releases the assertion's own locks.
+pub async fn assert_table_locks_released(client: &Client, table_name: &TableName) {
+    client
+        .batch_execute(&format!(
+            "begin; set local lock_timeout = '10s';
+             lock table {} in access exclusive mode; rollback",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+}
+
+/// Waits until PostgreSQL reports the requested relation-lock state.
+///
+/// PostgreSQL provides no lock-state notification, so polling uses a short
+/// backoff to avoid busy-looping against the source. The deadline detects a
+/// missing synchronization point; elapsed time never releases the barrier.
+pub async fn wait_for_table_lock(client: &Client, table_id: TableId, mode: &str, granted: bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = client
+                .query_one(
+                    "select exists (select 1 from pg_locks
+                     where relation = $1 and mode = $2 and granted = $3
+                       and database = (select oid from pg_database
+                                       where datname = current_database()))",
+                    &[&table_id, &mode, &granted],
+                )
+                .await
+                .unwrap();
+            if row.get::<_, bool>(0) {
+                return;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 /// Generates Postgres connection configuration for isolated test databases.

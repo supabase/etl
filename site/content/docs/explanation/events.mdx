@@ -278,6 +278,11 @@ column-list changes receive a new snapshot even when the full table schema is
 unchanged. No-op DDL can also advance the snapshot without changing columns;
 receiving a protocol relation alone does not create a new version.
 
+The source snapshot describes the table without a pipeline-specific column
+projection. Each pipeline uses its relation metadata to derive that projection,
+so publication column-list changes use the same logical schema-change path as
+table DDL. See [why snapshots and masks are separate](/explanation/schema-changes/#why-snapshots-and-replication-masks-are-separate).
+
 Destinations compare the snapshot and replication mask with applied metadata.
 An identical pair needs no schema transition. A newer snapshot must be
 validated even when its projected schema needs no physical DDL. An equal
@@ -295,6 +300,11 @@ schema version. The order matters only after the masks are applied: stored table
 schemas are also ordered by `attnum`, so
 `ReplicatedTableSchema::column_schemas()` becomes a positional view that matches
 the tuple payloads exactly, even when a publication filters columns.
+
+This requires the stored snapshot and relation metadata to describe the same
+schema state. A missing column can mean intentional publication filtering or
+an inconsistent snapshot; the mask alone cannot distinguish them. Schema-change
+handling remains in beta, with [known capture and relation-metadata limitations](/explanation/schema-changes/#current-limitations).
 
 For DDL behavior, including add/drop/rename semantics, default and nullability
 handling, and current limitations, see

@@ -143,7 +143,17 @@ Replication slots prevent Postgres from deleting WAL files until all consumers h
 - **Slow destinations:** High latency, large transactions, or outages can make
   ingestion fall behind source writes.
 - **Long initial copies:** Each active table copy retains WAL from its
-  consistent snapshot point.
+  consistent snapshot point. Its table-sync slot starts consuming changes
+  after the source copy finishes. Progress on the separate apply-worker slot
+  does not release WAL still needed by a table-sync slot.
+
+Retention covers PostgreSQL WAL files, including activity outside the copied
+table or publication. Size the budget using the server's WAL generation rate
+and the longest expected copy and catch-up duration. For example, a sustained
+20 MB/s over a two-day copy generates about 3.46 TB of WAL, before catch-up and
+additional headroom. This is an illustrative calculation, not a workload
+estimate. Multiple slots can retain overlapping WAL; do not add their lag
+values together to estimate physical disk usage.
 
 <Callout className="etl-callout" type="warn" title="Warning">
   `max_slot_wal_keep_size` limits slot-based WAL retention at checkpoint time.
@@ -153,6 +163,7 @@ Replication slots prevent Postgres from deleting WAL files until all consumers h
 
 ```ini title="postgresql.conf"
 # -1 = unlimited (dangerous for disk space)
+# Example only; size for your WAL rate, copy duration, and available disk.
 max_slot_wal_keep_size = 10GB
 ```
 
@@ -161,6 +172,55 @@ default and requires operator intervention. Set `invalidated_slot_behavior` to
 `recreate` to have ETL delete and recreate the slot, reset table states, and
 resynchronize eligible tables from scratch. Automatic recreation can repeat a
 large initial copy, so choose it deliberately and monitor destination capacity.
+
+### Planning Long Initial Copies
+
+ETL holds `ACCESS SHARE`, the same table-level lock used by an ordinary
+`SELECT`, throughout each copy unit. It also keeps an MVCC snapshot open for
+the parallel workers. A copy lasting hours or days therefore has the operating
+characteristics of a long-running read transaction. The lock is per relation,
+not per row; large partition trees increase lock bookkeeping, while the
+physical copy competes with application queries for CPU, I/O, cache, and
+network bandwidth.
+
+| Operation or resource | Effect while a copy is running |
+| --- | --- |
+| Ordinary reads, inserts, updates, and deletes | Compatible with the copy's read locks, but can slow down from resource contention or queued DDL |
+| DDL requiring `ACCESS EXCLUSIVE`, such as many `ALTER TABLE` operations and `TRUNCATE` | Waits for the copy locks; later application queries can queue behind the waiting DDL |
+| Ordinary vacuum and autovacuum | Can run, but the old snapshot prevents reclamation of row versions it might still need, including on other tables in the same database |
+| `CREATE INDEX CONCURRENTLY` | Uses a compatible table lock, but completion can wait for old snapshots, including a copy snapshot on another table |
+| WAL and obsolete row versions | Can accumulate for the lifetime of the copy; these retention costs come from slots and snapshots, independently of the explicit read locks |
+
+Vacuum can make reclaimed space reusable after the snapshot ends without
+shrinking the physical table file. Snapshot age also matters for transaction
+ID wraparound prevention; monitor `age(backend_xmin)` in `pg_stat_activity`
+and the ages of slot `xmin` and `catalog_xmin`, as well as disk usage. See
+PostgreSQL's [vacuum guidance](https://www.postgresql.org/docs/current/routine-vacuuming.html)
+and [concurrent index behavior](https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY).
+
+<Callout className="etl-callout" type="warn" title="Queued DDL can block application traffic">
+  Worker `NOWAIT` checks prevent ETL from joining a conflicting lock queue.
+  Once a worker holds its locks, those checks do not continuously detect new
+  DDL waiters. ETL does not automatically abort a running copy just because
+  application queries are queued behind DDL. Its 30-second lock timeout limits
+  ETL's acquisition waits, not lock lifetime or waits in other sessions.
+</Callout>
+
+Schedule incompatible DDL outside long copies, or give migration sessions a
+short `lock_timeout` so a blocked migration fails instead of holding up
+application traffic indefinitely. Monitor blocking with `pg_blocking_pids()`
+and `pg_stat_activity`. If availability requires stopping ETL to release its
+locks, the incomplete table copy must restart from a fresh snapshot; completed
+chunks are not a resumable checkpoint.
+
+Set copy concurrency to fit source and destination capacity. Fewer workers can
+reduce immediate load while extending snapshot and WAL retention. Slow
+destination writes also prolong the source copy's locks and snapshot. Plan
+storage and an operator response for stalled copies; neither a larger WAL
+budget nor faster WAL consumption removes the old snapshot's vacuum effects.
+See [Initial-copy schema protection](/explanation/schema-changes/#initial-copy-schema-protection)
+for partition scope, retry behavior, and the DDL changes these locks do not
+protect.
 
 ### Monitoring WAL Usage
 

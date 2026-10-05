@@ -29,6 +29,42 @@ Copy and change data capture (CDC) are replication paths, not customer-visible
 phases. See the [architecture overview](https://supabase.github.io/etl/explanation/architecture/)
 for the worker model.
 
+### Initial-copy locks and beta schema-change handling
+
+The parent copy transaction acquires `ACCESS SHARE` locks on the source table
+and its descendants **before** establishing the slot snapshot. It keeps them
+until all source copy workers finish. Workers import the same snapshot and use
+`NOWAIT` to acquire their own read locks before opening a source relation or
+deparsing a filter. Retaining those locks across chunks prevents a lock gap.
+Queued incompatible DDL causes a worker to fail rather than wait for DDL that
+is itself waiting for its parent. Incomplete copies restart from a fresh
+snapshot through the existing retry policy.
+
+Publication discovery determines the copy unit: a published root or subtree
+when `publish_via_partition_root = true`, or individual leaves when it is
+`false`. Locks cover that unit and its descendants; they do not climb to
+ancestors or cover sibling copy units.
+
+Ordinary DML and vacuum remain compatible with the locks. Exclusive DDL can
+wait for a long copy and delay later queries; other source lock waits retain
+the 30-second lock timeout. Copy protection ends before CDC catch-up and does
+not freeze every catalog object.
+
+Schema-change handling is in **public beta**. The trigger captures an
+unprojected table schema, and each pipeline combines the WAL-ordered snapshot
+with its relation-derived replication mask. This supports different column
+lists for the same table and treats publication column-list changes as logical
+schema changes without making ordinary table-DDL capture pipeline-specific.
+
+Known limitations include mixed visibility between MVCC catalog reads and
+PostgreSQL helper functions, stale snapshots in concurrent DDL transactions,
+and ambiguity between publication filtering and mismatched relation metadata.
+We are actively investigating these cases and expanding regression coverage.
+See [Schema Changes](../../site/content/docs/explanation/schema-changes.mdx)
+for the rationale, concrete concurrency example, supported operations, and
+recovery guidance; [source migration notes](migrations/README.md#schema-capture-contract-and-limitations)
+describe the trigger implementation boundary.
+
 ### Key Components
 
 - **Pipeline**: Main orchestrator that manages the replication process

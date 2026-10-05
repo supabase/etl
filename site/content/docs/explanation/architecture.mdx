@@ -46,10 +46,39 @@ When a pipeline starts, it copies existing rows from each table in the
 publication, then catches up changes that occurred while the copy was running.
 Multiple **Table Sync Workers** run in parallel. Each worker:
 
-1. Creates a replication slot to capture a consistent snapshot
-2. Copies existing rows with Postgres `COPY` and sends them via `write_table_rows()`
-3. Catches up later WAL changes via `write_events()` until the table is ready
-   for the apply worker
+1. Locks the table and its existing descendants in `ACCESS SHARE` mode
+2. Creates a replication slot to capture a consistent snapshot
+3. Copies existing rows with Postgres `COPY` and sends them via `write_table_rows()`
+4. Releases the copy locks and catches up later WAL changes via `write_events()`
+   until the table is ready for the apply worker
+
+The parent connection holds the locks throughout that table's copy, including
+all parallel chunks. This keeps the physical row layout consistent with the
+schema captured in the slot snapshot. Ordinary reads, inserts, updates,
+deletes, and vacuum can continue. Operations requiring `ACCESS EXCLUSIVE`,
+including many column changes, `TRUNCATE`, and table rewrites, wait until the
+copy releases its locks. A queued exclusive lock can also delay later queries
+against that table. Plan these operations outside long initial copies.
+
+Copy workers fail promptly if queued DDL prevents them from acquiring their
+own read locks. ETL retries the incomplete copy from a fresh snapshot under its
+bounded retry policy. Individual lock waits, including those during slot
+creation while holding copy locks, are limited to 30 seconds. This does not
+bound the total duration of slot creation or copying.
+See [Initial-copy schema protection](/explanation/schema-changes/#initial-copy-schema-protection)
+for the scope of this protection.
+
+The locks are the same `ACCESS SHARE` locks used by ordinary `SELECT` queries.
+For copies lasting hours or days, the retained snapshot can delay vacuum
+cleanup and concurrent index completion, while table-sync slots retain WAL.
+Queued DDL can also block application queries even though the copy's own locks
+are compatible with normal reads and writes. See
+[Planning long initial copies](/guides/configure-postgres/#planning-long-initial-copies)
+for capacity planning, monitoring, and the limits of `NOWAIT` protection.
+
+With `publish_via_partition_root = true`, a copy unit is the published root or
+subtree and its descendants. With `false`, each leaf is copied independently,
+with its own snapshot and lock lifetime.
 
 <Callout className="etl-callout" type="info" title="Note">
   During catch-up, `Begin` and `Commit` events may be delivered multiple times
@@ -73,12 +102,18 @@ the Postgres WAL. It:
 
 ### Schema Changes
 
-ETL supports simple column evolution from `ALTER TABLE` and supported
-`ALTER PUBLICATION` changes. A source-side event trigger emits internal schema
-messages for published permanent tables, ETL stores a new schema snapshot, and
-destinations observe the change through a fresh `Relation` event before
-following row events. See [Schema Changes](/explanation/schema-changes/) for
-the supported operations and limitations.
+Schema-change handling is in **public beta**. A source-side event trigger
+captures table-schema snapshots for supported `ALTER TABLE` and publication
+column-list changes. Each pipeline combines the stored snapshot with its
+`RELATION` column metadata to select the columns it actually replicates.
+Destinations observe the resulting logical schema through an ordered
+`Relation` event before following rows.
+
+Initial-copy locks protect table layout while copying; they do not resolve
+the known catalog-helper visibility, concurrent-DDL snapshot, or relation-mask
+ambiguity limitations of schema-change capture and replay. See
+[Schema Changes](/explanation/schema-changes/) for the design, beta limitations,
+and operating guidance.
 
 ## Core Components
 
