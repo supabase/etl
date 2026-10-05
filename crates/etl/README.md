@@ -31,39 +31,28 @@ for the worker model.
 
 ### Initial-copy locks and beta schema-change handling
 
-The parent copy transaction acquires `ACCESS SHARE` locks on the source table
-and its descendants **before** establishing the slot snapshot. It keeps them
-until all source copy workers finish. Workers import the same snapshot and use
-`NOWAIT` to acquire their own read locks before opening a source relation or
-deparsing a filter. Retaining those locks across chunks prevents a lock gap.
-Queued incompatible DDL causes a worker to fail rather than wait for DDL that
-is itself waiting for its parent. Incomplete copies restart from a fresh
-snapshot through the existing retry policy.
+The parent transaction locks each copy unit and its descendants in
+`ACCESS SHARE` mode **before** the slot snapshot and retains those locks until
+all source copy workers finish. Workers import the snapshot and acquire their
+own locks with `NOWAIT`, retaining them across chunks. A conflict starts a fresh
+copy under the configured retry policy.
 
-Publication discovery determines the copy unit: a published root or subtree
-when `publish_via_partition_root = true`, or individual leaves when it is
-`false`. Locks cover that unit and its descendants; they do not climb to
-ancestors or cover sibling copy units.
+For partitioned tables, the unit is the published root/subtree when
+`publish_via_partition_root = true`, otherwise an individual leaf. Ordinary
+tables are separate units. Locks never climb to ancestors.
 
-Ordinary DML and vacuum remain compatible with the locks. Exclusive DDL can
-wait for a long copy and delay later queries; other source lock waits retain
-the 30-second lock timeout. Copy protection ends before CDC catch-up and does
-not freeze every catalog object.
+On a primary, normal DML remains compatible, while `ACCESS EXCLUSIVE` DDL can
+wait and delay later queries. Ordinary vacuum can run, but the snapshot may
+prevent cleanup. On a standby, locks affect local WAL replay and can lead to
+recovery-conflict cancellation; they do not lock tables on the primary.
 
 Schema-change handling is in **public beta**. The trigger captures an
-unprojected table schema, and each pipeline combines the WAL-ordered snapshot
-with its relation-derived replication mask. This supports different column
-lists for the same table and treats publication column-list changes as logical
-schema changes without making ordinary table-DDL capture pipeline-specific.
-
-Known limitations include mixed visibility between MVCC catalog reads and
-PostgreSQL helper functions, stale snapshots in concurrent DDL transactions,
-and ambiguity between publication filtering and mismatched relation metadata.
-We are actively investigating these cases and expanding regression coverage.
-See [Schema Changes](../../site/content/docs/explanation/schema-changes.mdx)
-for the rationale, concrete concurrency example, supported operations, and
-recovery guidance; [source migration notes](migrations/README.md#schema-capture-contract-and-limitations)
-describe the trigger implementation boundary.
+unprojected schema; each pipeline combines it with its replication mask.
+This also turns publication column-list changes into logical schema changes.
+Copy locks do not fix catalog-helper visibility, stale concurrent-DDL snapshots,
+or relation-mask ambiguity. See [Schema Changes](../../site/content/docs/explanation/schema-changes.mdx)
+for guarantees, retries, and limitations, and the [source migration notes](migrations/README.md#schema-capture-contract-and-limitations)
+for the trigger boundary.
 
 ### Key Components
 

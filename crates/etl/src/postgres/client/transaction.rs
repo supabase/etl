@@ -28,8 +28,8 @@ use crate::{
 /// Enumerates a table's inheritance tree using the transaction's MVCC snapshot.
 ///
 /// `pg_partition_tree` uses current catalog metadata, which can include a
-/// partition attached after the copy snapshot. Pending concurrent detaches
-/// are excluded just as they are from normal partition scans.
+/// partition attached after the copy snapshot. Detach-pending entries visible
+/// in the copy snapshot are excluded.
 fn table_copy_relations_cte(table_id: TableId) -> String {
     format!(
         "with recursive copy_relations(oid) as (
@@ -883,9 +883,9 @@ impl<'a> PgReplicationTransaction<'a> {
 ///
 /// The transaction borrows the child connection for its full lifetime, ensuring
 /// no other commands can be issued on that connection until it is committed or
-/// dropped. The exported parent snapshot it imports must remain valid for the
-/// duration of the child transaction; this dependency is maintained by callers
-/// rather than by this type's lifetime.
+/// dropped. The parent must remain open for snapshot import and, under the copy
+/// protocol, retain its relation locks until all workers finish. Callers
+/// enforce that dependency; this type's lifetime does not.
 #[derive(Debug)]
 pub struct PgChildReplicationTransaction<'a> {
     /// Common transaction state and query helpers.

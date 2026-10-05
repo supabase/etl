@@ -426,14 +426,17 @@ impl PgReplicationClient {
     ///
     /// The table is a copy unit returned by
     /// [`Self::get_publication_table_ids`]: a published root or subtree
-    /// when publishing via the partition root, otherwise a leaf. Locking
-    /// descends from this table, never to ancestors.
+    /// when publishing via the partition root, otherwise a leaf. Ordinary
+    /// tables are separate copy units in either mode. Locking descends from
+    /// this table, never to ancestors.
     ///
-    /// `ACCESS SHARE` prevents changes to tuple layout and physical storage
-    /// while permitting ordinary writes and vacuum. The returned transaction
-    /// must remain open until every copy worker has finished. Slot creation
-    /// retains the normal lock timeout: an old writer can request DDL that
-    /// waits for our lock while slot creation waits for that writer.
+    /// `ACCESS SHARE` blocks table DDL requiring `ACCESS EXCLUSIVE`, including
+    /// heap rewrites, while permitting ordinary writes and vacuum scans. It
+    /// does not freeze referenced types or other independent catalog objects.
+    /// The returned transaction must remain open until every copy worker has
+    /// finished. Slot creation retains the normal lock timeout: an old writer
+    /// can request DDL that waits for our lock while slot creation waits for
+    /// that writer.
     /// Lock conflicts return [`ErrorKind::SourceTableCopyLockConflict`] so the
     /// caller can retry the entire copy with a fresh snapshot.
     pub async fn create_table_copy_slot(

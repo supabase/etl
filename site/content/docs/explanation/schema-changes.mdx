@@ -50,87 +50,84 @@ schema-change DDL.
 ## Initial-copy schema protection
 
 An MVCC snapshot determines which rows a copy can see. It does not freeze the
-relation metadata PostgreSQL uses to interpret those rows. ETL therefore uses
-the following protocol for each table:
+relation metadata PostgreSQL uses to interpret them. For each copy unit:
 
-1. The parent copy transaction acquires `ACCESS SHARE` locks on the table and
-   its existing descendants with `NOWAIT`, before creating the slot snapshot.
-2. ETL establishes the slot snapshot, verifies that every source relation
-   visible in it was already locked, and reads the initial schema.
-3. Copy workers import that same snapshot and acquire their own `ACCESS SHARE`
-   locks with `NOWAIT` before reading a source relation or deparsing its row
-   filter. Each worker keeps its locks across chunks.
-4. The parent retains its locks until all source copy workers have finished,
-   including workers that have not reached a particular partition yet.
+1. The parent transaction locks the table and its existing descendants in
+   `ACCESS SHARE` mode with `NOWAIT`, before creating the slot snapshot.
+2. ETL verifies that every source relation in the snapshot was already locked,
+   then reads the initial schema.
+3. Workers import the snapshot and acquire their own `ACCESS SHARE` locks with
+   `NOWAIT` before copying a relation or deparsing its row filter. They retain
+   these locks across chunks.
+4. The parent retains the whole copy unit's locks until all source copy workers
+   finish. Protection ends before CDC catch-up.
 
-The copy unit follows `publish_via_partition_root`. Publication discovery
-returns the published root or subtree root when this is `true`, and individual
-leaves when it is `false`; it does not return a root together with its covered
-descendants. Each copy unit gets its own snapshot and retry lifecycle:
+For partitioned tables, publication discovery determines the copy unit:
 
 | Publication mode | Copy-lock scope |
 | --- | --- |
-| `publish_via_partition_root = true` | The published root or subtree root and all its existing descendants |
-| `publish_via_partition_root = false` | Each leaf independently; locking does not climb to ancestors or cross to siblings |
+| `publish_via_partition_root = true` | The published root or subtree root and its existing descendants |
+| `publish_via_partition_root = false` | Each published leaf independently; locks do not climb to ancestors or cross to siblings |
 
-Workers retain their own locks across chunks, and the parent retains the full
-copy unit's locks even after an individual leaf finishes. A root containing a
-foreign-table partition is rejected because CTID copying requires local heap
-storage; ETL does not silently omit that partition.
+Ordinary tables are separate copy units in either mode. Each unit has its own
+snapshot and retry lifecycle. Discovery does not return a published root
+alongside the descendants it covers. A foreign-table partition causes a root
+copy to fail because ETL's CTID copying requires local storage.
 
-The continuous lock coverage prevents incompatible column-layout changes and
-physical rewrites from crossing the snapshot boundary or occurring between
-chunks. Acquiring the first lock only after the snapshot would leave a race
-with earlier DDL. This follows the leader/worker locking approach used by
-[`pg_dump` for parallel dumps](https://www.postgresql.org/docs/current/app-pgdump.html).
+This continuous coverage prevents table DDL requiring `ACCESS EXCLUSIVE`,
+including incompatible column-layout changes and heap rewrites, from crossing
+the snapshot boundary or running between chunks. It uses the same parent-lock
+and worker-`NOWAIT` pattern as
+[`pg_dump` parallel dumps](https://www.postgresql.org/docs/18/app-pgdump.html).
 
-`ACCESS SHARE` is the same table-level lock used by an ordinary `SELECT`.
-Ordinary reads, inserts, updates, deletes, and vacuum remain compatible with
-these locks. The retained snapshot can still prevent vacuum from reclaiming
-obsolete rows. DDL requiring `ACCESS EXCLUSIVE`, including many column changes,
-`TRUNCATE`, and table rewrites, waits until the copy releases its locks. An
-exclusive lock queued behind the copy can also delay later source queries,
-so schedule these operations outside long initial copies.
+On a primary, `ACCESS SHARE` is the same table lock as an ordinary `SELECT`.
+It is compatible with normal reads, inserts, updates, deletes, and ordinary
+vacuum. The snapshot can still prevent vacuum cleanup, and queued
+`ACCESS EXCLUSIVE` DDL can delay later application queries.
 
-`NOWAIT` prevents a worker from waiting behind DDL that is itself waiting for
-the parent copy transaction. A conflict fails the copy attempt with
-`SourceTableCopyLockConflict`; ETL discards the incomplete destination copy
-before retrying from a fresh snapshot under the configured retry policy.
-Other source lock waits retain the 30-second
-lock timeout, including slot creation while holding copy locks: old writers
-can otherwise wait for DDL while slot creation waits for those writers.
-PostgreSQL-detected slot-creation deadlocks are also retryable failures. This
-bounds individual lock waits, not the total duration of a copy or slot creation.
+On a read replica, these locks are local: they do not block primary DDL.
+Conflicting WAL replay can wait or cancel the copy's queries or sessions under
+PostgreSQL's [standby conflict rules](https://www.postgresql.org/docs/18/hot-standby.html#HOT-STANDBY-CONFLICT).
+See [Planning long initial copies](/guides/configure-postgres/#planning-long-initial-copies)
+for source impact and monitoring.
 
-`NOWAIT` checks happen when a worker acquires a relation's locks. They do not
-continuously detect later DDL waiters or automatically release already-held
-locks to protect application latency. For long copies, plan for queued DDL,
-snapshot age, and retained WAL as described in
-[Planning long initial copies](/guides/configure-postgres/#planning-long-initial-copies).
+### Lock conflicts and retries
 
-Automatic retries are managed by the running table-sync worker. If the
-pipeline stops while a table is persisted as `Errored`, restarting alone does
-not resume that table, even if it was waiting for a timed retry. Resolve the
-cause and explicitly reset the table for resynchronization. Exhausting the
-configured automatic retries also requires manual intervention.
+A worker's `NOWAIT` request avoids waiting behind DDL that is itself waiting
+for the parent. A conflict fails the attempt with `SourceTableCopyLockConflict`;
+the configured retry policy discards the incomplete destination copy and starts
+from a fresh snapshot. Already-held locks are reused: ETL does not continuously
+check for later DDL waiters or automatically abort a copy to unblock applications.
 
-`ACCESS SHARE` does not freeze every catalog object. ETL reads publication
-column lists, row filters, and partition membership from the copy's MVCC
-snapshot. Supported publication column-list changes can proceed and are
-handled in WAL order after copying. If a partition appears before the snapshot
-without having been locked, ETL retries the copy. Partitions attached after
-the snapshot are not added to the running copy's plan.
+Copy connections use a 30-second `lock_timeout` for other lock acquisitions,
+including waits for old writers during copy-slot creation. This breaks cycles
+where those writers depend on DDL blocked by the copy. PostgreSQL-detected
+deadlocks during copy-slot creation are also retryable. The timeout applies to
+each acquisition, not the total copy or slot-creation duration. Apply-slot
+creation temporarily disables it because that transaction holds no copy locks.
 
-This is table-level protection, not a database-wide DDL freeze. Changes to
-schema namespaces, user-defined types or functions, publication membership,
-row filters, and partition topology still require a controlled stop and
-resynchronization. For example, renaming an enum value does not take an
-`ACCESS EXCLUSIVE` lock on every table that uses that enum. Avoid these changes
-while an initial copy is running.
+Retries belong to the running table-sync worker. If the pipeline stops while a
+table is persisted as `Errored`, restarting alone does not resume it. Resolve
+the cause and reset the table for resynchronization. Exhausted retries also
+require manual intervention.
 
-Copy protection ends before CDC catch-up and ongoing replication. It does not
-fix the [schema-capture limitations](#current-limitations) of later DDL event
-triggers or repair an incorrectly captured schema snapshot.
+### What the locks do not protect
+
+`ACCESS SHARE` does not freeze all metadata. Publication column lists and
+partition membership are read from the copy's MVCC snapshot; row-filter
+expressions also come from that snapshot, but `pg_get_expr` deparses them using
+internal catalog lookups. The helper limitations below still apply.
+
+Supported publication column-list changes can proceed and are handled after
+copying. A partition attached before the snapshot without a pre-existing lock
+causes a retry; a partition attached after it is excluded from the running
+copy plan. Neither rule makes live partition-topology changes supported.
+
+Coordinate a stop and resynchronization for changes to namespaces,
+user-defined types or functions, publication membership, row filters, or
+partition topology. For example, an enum rename does not acquire
+`ACCESS EXCLUSIVE` on every table using the enum. Initial-copy locks also do
+not fix later event-trigger capture or the other [current limitations](#current-limitations).
 
 ## How schema changes reach a destination
 
@@ -383,7 +380,7 @@ paths agree. Initial-copy locks protect the relevant table layout during
 copying, but they do not freeze every referenced catalog object, and they are
 not held around later schema-change capture.
 
-We reproduced this on PostgreSQL 14 and 18 with a table using an enum. A
+We reproduced this on PostgreSQL 14.24 and 18.6 with a table using an enum. A
 repeatable-read transaction held `ACCESS SHARE` on the table while another
 session renamed the enum type and one of its values. In the first session,
 `pg_type.typname` and `pg_enum.enumlabel` still returned the old names, while
@@ -416,8 +413,8 @@ abort some schedules; `SERIALIZABLE` is not a fix for ETL's capture mechanism.
 The command ending, A acquiring a table lock, or A eventually committing does
 not retroactively refresh the schema description already emitted.
 
-We reproduced this with ETL's installed source trigger on PostgreSQL 14 and
-18. Starting with column `id`, B added `from_b`, then A added `from_a`:
+We reproduced this with ETL's installed source trigger on PostgreSQL 14.24 and
+18.6. Starting with column `id`, B added `from_b`, then A added `from_a`:
 
 | A's isolation level | Columns in A's committed WAL schema message | Live table after both commits |
 | --- | --- | --- |
@@ -428,9 +425,7 @@ We reproduced this with ETL's installed source trigger on PostgreSQL 14 and
 Both stronger-isolation cases committed successfully in this schedule. The
 transactional message contained an incomplete schema; WAL ordering did not
 repair it. These results demonstrate specific failures, not every possible
-DDL schedule. See the repository's
-[two-session reproductions](https://github.com/supabase/etl/blob/main/crates/etl/migrations/schema-visibility.md)
-for the commands and controls.
+DDL schedule.
 
 ### Relation metadata cannot distinguish every schema mismatch from filtering
 

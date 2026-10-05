@@ -49,11 +49,9 @@ Initial-copy relation locks live in the replication client, not these triggers.
 They protect table layout before the slot snapshot and throughout copying;
 they do not resolve later trigger-visibility or relation-metadata limitations.
 The public [schema-change documentation](../../../site/content/docs/explanation/schema-changes.mdx#current-limitations)
-contains the A/B transaction example and operating guidance. The
-[two-session reproductions](schema-visibility.md) demonstrate helper visibility
-and incomplete committed WAL payloads on PostgreSQL 14 and 18, with a
-read-committed control. Improvements here need focused concurrent-session
-coverage and a new migration; keep applied SQL migrations immutable.
+records the PostgreSQL 14.24 and 18.6 reproductions, including a read-committed
+control. Fixes need concurrent-session coverage and a new migration; keep
+applied SQL migrations immutable.
 
 ## Database history and compatibility
 

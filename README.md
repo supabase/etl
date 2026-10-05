@@ -73,10 +73,10 @@ Copy and change data capture (CDC) are replication paths, not customer-visible
 phases. Initial sync uses the copy path followed by CDC catch-up; ongoing
 replication uses the CDC path after the table is ready.
 
-Initial copies hold `ACCESS SHARE` locks from before snapshot creation until
-all copy workers finish. Ordinary DML can continue, while incompatible DDL
-waits; queued exclusive DDL can also delay later queries. Schema-change
-handling is in public beta, with known catalog-visibility, concurrent-DDL,
+Each table's initial copy holds `ACCESS SHARE` locks from before snapshot
+creation until its source copy workers finish. On a primary, ordinary DML can
+continue while `ACCESS EXCLUSIVE` DDL waits; queued DDL can delay later queries.
+Schema-change handling is in public beta, with known catalog-visibility, concurrent-DDL,
 and relation-metadata limitations. Read [Schema Changes](https://supabase.github.io/etl/explanation/schema-changes/)
 before planning migrations alongside a running pipeline.
 
