@@ -44,13 +44,21 @@ supported `ALTER TABLE` or publication column-list change:
 
 1. PostgreSQL emits a transactional schema snapshot in WAL order.
 2. ETL stores the new versioned table schema.
-3. PostgreSQL sends a fresh `RELATION` message before following row events.
+3. ETL combines the snapshot with column masks from PostgreSQL's `RELATION`
+   metadata. If no-op DDL produces no fresh relation, ETL reuses the previous
+   masks before the next insert, update, or delete.
 4. ETL sends the destination an ordered `Event::Relation` containing the new
-   `ReplicatedTableSchema`.
-5. The destination applies its supported DDL before writing following rows.
+   `ReplicatedTableSchema` before the affected data event. PostgreSQL supplies
+   a protocol relation before truncate.
+5. Destinations that support the transition apply any required DDL and record
+   the new snapshot before writing following rows.
 
-`Relation` is an ordered event, not a batch boundary. One `write_events()` call
-can contain several relation and row events, which must be processed in order.
+`Relation` is an ordered notification, not a batch boundary. One `write_events()`
+call can contain several relation and row events, which must be processed in
+order. Reconnects and maintenance can resend an unchanged snapshot and mask;
+that identical pair needs no schema transition. Supported publication
+column-list changes use a newer snapshot even when the full table schema is
+unchanged.
 
 ETL captures the complete schema after PostgreSQL has applied the DDL instead
 of replaying raw PostgreSQL SQL. It matches columns by PostgreSQL `attnum`, so a
@@ -154,6 +162,25 @@ and broader destination limitations.
 
 ## Recovery and safety
 
+Stored source schemas can be ahead of durable replication progress. For tables
+already in steady replication, restart selects the schema committed strictly
+before the
+[selected restart boundary](/explanation/traits/#replication-checkpoint-methods),
+then applies schema changes in replay order. A transaction whose
+commit record starts exactly at that boundary remains replayable. This keeps
+future schemas out of earlier rows without rewinding destination DDL. Tables
+still handing over from initial sync use their durable handoff state, which can
+be ahead of the apply worker's restart position.
+
+The initial table-copy schema uses `SnapshotId::initial()` (`0:0`), a sentinel
+without a schema-message commit position. It remains eligible even when the
+restart frontier is zero.
+
+A corrected restart boundary cannot recreate missing or previously pruned
+schema history. If a required historical schema is unavailable, resynchronize
+the table. The current source schema cannot substitute for the schema needed
+to decode earlier rows.
+
 Destination metadata records the target snapshot and replication mask. While a
 change is `Applying`, it also records the previous snapshot and previous
 replication mask as one logical recovery endpoint.
@@ -184,8 +211,16 @@ ETL does not infer missing recovery state:
 
 - Previous snapshot and mask values must be stored together.
 - Incomplete or stale recovery metadata fails during loading.
-- An older relation, or an equal snapshot with a different replication mask,
-  is rejected instead of rewinding destination DDL.
+- An equal snapshot with a different replication mask is rejected because it
+  has no valid schema ordering.
+
+Older relations never rewind destination DDL. ClickHouse, BigQuery, Snowflake,
+and Iceberg reject a replayed relation older than their applied destination
+snapshot. DuckLake skips older relations and uses durable per-table progress
+to discard already-applied rows and truncates before validating the remaining
+events against the applied schema. DuckLake commits that progress in the same
+transaction as the data changes; an older schema on an event outside that
+durable progress still fails validation.
 
 Before ETL batches a schema change, it waits until every earlier commit is
 durable at the destination and checkpointed. If the write that applies the
@@ -223,11 +258,13 @@ Resynchronize the affected table when recovery cannot prove a safe endpoint.
 
 ## Custom destinations
 
-Custom destinations receive schema transitions through `Event::Relation`.
+Custom destinations receive schema notifications through `Event::Relation`.
 They should:
 
 1. Process the batch in order and flush writes using the previous schema.
-2. Compare the applied and incoming logical schemas.
+2. Compare the incoming snapshot and replication mask with applied metadata;
+   an identical pair needs no transition. For a newer snapshot, compare the
+   projected logical schemas.
 3. Validate the complete plan before recording `Applying` or issuing DDL.
 4. Apply supported operations in the supplied order.
 5. Record `Applied` only after following rows can safely use the new schema.

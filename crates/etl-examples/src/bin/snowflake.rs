@@ -178,6 +178,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.sf_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
         table_sync_monitor_refresh_interval_ms: 10_000,
+        settle_durable_interval_ms: None,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

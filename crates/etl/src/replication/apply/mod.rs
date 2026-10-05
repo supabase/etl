@@ -354,16 +354,15 @@ impl HandleMessageResult {
 
 /// Returns the earliest safe schema-cleanup boundary.
 ///
-/// A persisted checkpoint at LSN `X` covers every transaction committed through
-/// `X`, including every DDL message within a transaction committed at exactly
-/// `X`. It therefore maps to `(X, u64::MAX)`, not `(X, 0)`. Taking the minimum
-/// of that inclusive frontier and the exact destination snapshot keeps both
-/// replay and destination recovery safe.
+/// A transaction whose commit record starts at the persisted checkpoint is
+/// still replayable. Retain its predecessor schema and every newer snapshot.
+/// Taking the minimum with the exact destination snapshot also preserves
+/// schemas needed to recover an interrupted destination change.
 fn schema_cleanup_retention_snapshot_id(
     persisted_checkpoint_lsn: PgLsn,
     destination_retention_snapshot_id: SnapshotId,
 ) -> SnapshotId {
-    SnapshotId::at_lsn(persisted_checkpoint_lsn).min(destination_retention_snapshot_id)
+    SnapshotId::before_lsn(persisted_checkpoint_lsn).min(destination_retention_snapshot_id)
 }
 
 /// A buffered batch of events waiting to be sent to the destination.
@@ -475,15 +474,18 @@ struct ApplyLoopState {
     /// durability interval without emitting one sample for every intermediate
     /// accepted result.
     pending_durability_interval: Option<PendingDurabilityInterval>,
-    /// Relation tables not yet covered by persisted commit-boundary progress.
+    /// Tables with relation events awaiting schema-cleanup evaluation.
     ///
-    /// This includes relations from `Accepted` writes and from durable
-    /// mid-transaction writes that carry no commit end LSN. A later durable
-    /// commit-bearing result covers them cumulatively and makes their tables
-    /// candidates for obsolete schema cleanup.
-    pending_relation_table_ids: HashSet<TableId>,
-    /// The LSN of the commit WAL entry of the transaction that is currently
-    /// being processed.
+    /// Accumulates table IDs from successfully completed batches, including
+    /// accepted writes. A later durable result also confirms earlier accepted
+    /// writes in the same apply-loop stream. Once its commit boundary is
+    /// persisted, these tables are evaluated for cleanup at that boundary.
+    /// Relations beyond that boundary remain protected by schema retention.
+    ///
+    /// Entries remain pending if evaluation fails or the cleanup queue is full.
+    pending_schema_cleanup_table_ids: HashSet<TableId>,
+    /// Start of the current transaction's COMMIT WAL record, reported by
+    /// pgoutput's synthesized `BEGIN` message.
     remote_final_lsn: Option<PgLsn>,
     /// The current replication progress tracking received and flushed LSN
     /// positions.
@@ -521,9 +523,9 @@ struct ApplyLoopState {
     /// Fallback snapshot used before a table establishes connection-local
     /// protocol state or receives stored table decoding state.
     ///
-    /// This is seeded from the worker start LSN as an inclusive
-    /// [`SnapshotId::at_lsn`] frontier, so a first `RELATION` message can
-    /// resolve the latest schema committed at or before the start point.
+    /// [`SnapshotId::before_lsn`] converts the exclusive worker start LSN to
+    /// this inclusive schema bound, so the first `RELATION` cannot select a
+    /// schema from a transaction that still needs to be replayed.
     bootstrap_snapshot_id: SnapshotId,
 }
 
@@ -539,7 +541,7 @@ impl ApplyLoopState {
             activity_handle,
             last_commit_end_lsn: None,
             pending_durability_interval: None,
-            pending_relation_table_ids: HashSet::new(),
+            pending_schema_cleanup_table_ids: HashSet::new(),
             remote_final_lsn: None,
             replication_progress,
             replication_lag_metrics,
@@ -636,8 +638,11 @@ impl ApplyLoopState {
     /// durable write proves the carried LSN safe.
     ///
     /// When no later batch arrives, a keepalive can dispatch an empty
-    /// required-durability write through the same pending-result path. The loop
-    /// remains non-quiescent until that result confirms durability.
+    /// required-durability write through the same pending-result path.
+    /// [`PipelineConfig::settle_durable_interval_ms`] of `None` allows forced
+    /// durability at any keepalive. `Some` guarantees at least that window
+    /// before a later keepalive can force durability. The loop remains
+    /// non-quiescent until that result confirms durability.
     fn is_quiescent(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
@@ -660,10 +665,10 @@ impl ApplyLoopState {
     /// handled, so the last received LSN is a safe replay frontier even if no
     /// destination write occurred. A logical keepalive can cross an open
     /// transaction still buffered by PostgreSQL; the slot retains its earlier
-    /// `restart_lsn` and rebuilds transactions that commit after the confirmed
-    /// checkpoint. While any client-side transaction, batch, or destination
-    /// write is unresolved, the checkpoint remains at the last completed
-    /// destination flush.
+    /// `restart_lsn` and rebuilds transactions whose commit record starts at
+    /// or after the confirmed checkpoint. While any client-side transaction,
+    /// batch, or destination write is unresolved, the checkpoint remains at
+    /// the last completed destination flush.
     ///
     /// Starting new work after a quiescent checkpoint can make this computed
     /// value lower than a value already reported on the connection. The
@@ -892,10 +897,10 @@ where
         };
         let ((replication_message_stream, feedback), wal_sender_timeout) = initialized?;
 
-        // A restart LSN is an inclusive WAL frontier, not an exact schema
-        // snapshot. Use the maximum message LSN so a restart at a transaction's
-        // commit LSN can select the last DDL within that committed transaction.
-        let bootstrap_snapshot_id = SnapshotId::at_lsn(start_lsn);
+        // PostgreSQL replays a transaction whose commit record starts exactly
+        // at the restart LSN. Its persisted DDL must not affect schema
+        // selection until this connection reaches that DDL again.
+        let bootstrap_snapshot_id = SnapshotId::before_lsn(start_lsn);
 
         let replication_progress = ReplicationProgress::new(start_lsn);
         let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
@@ -1293,20 +1298,19 @@ where
         }
     }
 
-    /// Tries to queue best-effort cleanup for relation tables covered by
-    /// durable progress.
+    /// Tries to queue schema cleanup for pending tables at persisted progress.
     ///
-    /// The persisted checkpoint row is deliberately reloaded here instead of
-    /// using the apply loop's in-memory flush position. Cleanup removes replay
-    /// state, so its boundary must survive a crash independently of this
-    /// process.
+    /// The store supplies its cached checkpoint confirmed by persistence.
+    /// Cleanup removes replay state, so the apply loop's in-memory flush
+    /// position alone cannot establish a boundary that survives a crash.
     ///
-    /// Pending candidates remain in [`ApplyLoopState`] when a transient failure
-    /// prevents evaluation or queueing, so the next durable result retries
-    /// them. They are cleared only after successful evaluation and, when
-    /// needed, successful queueing.
+    /// Evaluation errors and a full queue leave candidates pending for the
+    /// next durable commit-bearing result. Successful evaluation clears tables
+    /// that need no cleanup; successful queueing clears the others. If pruning
+    /// later fails in the cleanup worker, another relation event must trigger
+    /// a new attempt.
     async fn try_queue_schema_cleanup(&mut self) {
-        if self.state.pending_relation_table_ids.is_empty() {
+        if self.state.pending_schema_cleanup_table_ids.is_empty() {
             return;
         }
 
@@ -1356,7 +1360,7 @@ where
 
         // If there are no tables to try to prune, we don't want to attempt it.
         if retention_snapshot_ids.is_empty() {
-            self.state.pending_relation_table_ids.clear();
+            self.state.pending_schema_cleanup_table_ids.clear();
 
             return;
         }
@@ -1377,8 +1381,14 @@ where
             }
         }
 
+        // A queued boundary can precede a relation in a durable batch that ends
+        // mid-transaction. We still remove that table here, so later checkpoint
+        // progress alone will not retry cleanup. This deliberately keeps
+        // best-effort cleanup tracking to table IDs: extra schema versions may
+        // remain until another relation, including the first after restart,
+        // triggers a new check with a sufficiently advanced checkpoint.
         self.state
-            .pending_relation_table_ids
+            .pending_schema_cleanup_table_ids
             .retain(|table_id| deferred_table_ids.contains(table_id));
     }
 
@@ -1390,10 +1400,10 @@ where
     ///
     /// The cleanup boundary is the minimum of the persisted checkpoint frontier
     /// and the earliest snapshot still referenced by destination metadata. A
-    /// checkpoint at `X` becomes `(X, u64::MAX)` because it covers every schema
-    /// message in a transaction committed at `X`. The schema store resolves the
-    /// resulting boundary to the greatest stored snapshot at or below it,
-    /// preserving that snapshot and every newer version.
+    /// checkpoint at `X` excludes transactions whose commit record starts at
+    /// `X`, since they remain replayable. The schema store resolves the
+    /// boundary to the greatest stored snapshot at or below it, preserving
+    /// that snapshot and every newer version.
     ///
     /// Progress and metadata do not need to be read in one transaction. During
     /// normal replication both safe boundaries move forward, so taking their
@@ -1406,7 +1416,7 @@ where
     ) -> EtlResult<BTreeMap<TableId, SnapshotId>> {
         let mut retention_snapshot_ids = BTreeMap::new();
 
-        for &table_id in &self.state.pending_relation_table_ids {
+        for &table_id in &self.state.pending_schema_cleanup_table_ids {
             // Only prune snapshots for tables this worker would apply at this
             // checkpoint. This keeps table sync workers limited to their
             // assigned table while preserving apply worker ownership rules.
@@ -1494,16 +1504,15 @@ where
         let status = result?;
 
         if let Some(metadata) = metadata.as_ref() {
-            // Relation events are optimistic cleanup signals: the first
-            // relation after startup need not represent a schema change, while
-            // a real DDL is communicated downstream through one. Accumulate
-            // them until a durable result also carries a commit end LSN,
-            // because only then can persisted progress cover every preceding
-            // relation in this ordered apply-loop stream. This also makes
-            // cleanup self-healing across restarts: the first later relation
-            // rebuilds the candidate even though this in-memory set was lost.
+            // Relation events trigger cleanup checks even when the schema has
+            // not changed. Accumulate their table IDs across accepted writes
+            // until a durable result carries a commit boundary we can persist.
+            // That boundary may precede relations in the batch, so retention
+            // must preserve schemas needed to replay the unfinished
+            // transaction. The first relation after restart also triggers a
+            // new check if an earlier cleanup was missed.
             self.state
-                .pending_relation_table_ids
+                .pending_schema_cleanup_table_ids
                 .extend(metadata.relation_table_ids.iter().copied());
 
             if metadata.durability == WriteEventsDurability::RequireDurable
@@ -1613,9 +1622,8 @@ where
                         self.process_syncing_tables_after_flush(commit_end_lsn).await?;
 
                         // Progress and table-sync state are now durable. Freeze
-                        // cleanup boundaries for all cumulatively covered
-                        // relations before allowing their database deletion to
-                        // run asynchronously.
+                        // cleanup boundaries for pending tables using persisted
+                        // progress, which may precede relations in this batch.
                         self.try_queue_schema_cleanup().await;
                     }
                 }
@@ -1800,14 +1808,25 @@ where
     /// Later events may fill the next batch, but cannot be dispatched until
     /// this result completes. Shutdown never starts a new idle barrier.
     ///
-    /// Only incoming PostgreSQL keepalives trigger idle settlement. While
-    /// intake is backpressured, those messages wait, so no new idle barrier is
-    /// started and fresh feedback positions are not published through this
-    /// path. Existing destination results can still complete. The independent
-    /// feedback sender task keeps the connection alive by repeating the last
-    /// supplied safe positions until intake resumes.
+    /// Only incoming PostgreSQL keepalives trigger idle settlement.
+    /// [`PipelineConfig::settle_durable_interval_ms`] of `None` allows forced
+    /// durability at any keepalive. `Some` guarantees at least that window,
+    /// measured from when the apply loop observed `Accepted`, before a later
+    /// keepalive can force durability. While intake is backpressured, those
+    /// messages wait, so no new idle barrier is started and fresh feedback
+    /// positions are not
+    /// published through this path. Existing destination results can still
+    /// complete. The independent feedback sender task keeps the connection
+    /// alive by repeating the last supplied safe positions until intake
+    /// resumes.
     async fn maybe_settle_idle_durability(&mut self) -> EtlResult<()> {
         if !self.state.can_settle_idle_durability() {
+            return Ok(());
+        }
+        if let Some(minimum_ms) = self.config.settle_durable_interval_ms
+            && let Some(interval) = self.state.pending_durability_interval
+            && interval.accepted_at.elapsed() < Duration::from_millis(minimum_ms)
+        {
             return Ok(());
         }
 
@@ -2099,26 +2118,22 @@ where
     /// logical message is decoded and record the exact snapshot that any
     /// following relation must materialize.
     ///
-    /// This ordering matches how `pgoutput` produces the stream:
-    /// - `pgoutput_message()` writes logical `Message` records directly and
-    ///   does not inject `Relation` metadata.
-    /// - `Relation` records are synthesized lazily by `maybe_send_schema()`
-    ///   only when `pgoutput_change()` is about to emit a DML change.
-    /// - relcache invalidation from the DDL resets `schema_sent`, so the first
-    ///   post-DDL DML for the relation gets a fresh `Relation` message just
-    ///   before the row event.
+    /// Supported publication DDL also advances this cursor: a column-list
+    /// change needs an ordered snapshot for its new replication mask even
+    /// though the stored full-table columns can remain identical.
     ///
-    /// In other words, the protocol variant this code relies on is: `... -> ddl
-    /// Message -> Relation(new schema) -> Insert/Update/Delete ...`. Because
-    /// the DDL message itself is not a DML event, we must record the new schema
-    /// cursor here so the next `Relation` rebuilds the masks against that exact
-    /// snapshot. PostgreSQL omits the relation when the DDL did not invalidate
-    /// pgoutput's cached relation state. In that case the first row combines
-    /// the stored new table schema with the previous relation masks and
-    /// materializes `WithSchema`. The retained masks are only a fallback: a new
-    /// relation replaces them before any row is decoded. Without previous
-    /// masks, a table-sync worker cannot hand over this incomplete state until
-    /// a relation provides both masks.
+    /// `pgoutput_message()` emits the decoded logical message directly. A
+    /// protocol relation follows lazily before a row or truncate when
+    /// PostgreSQL's relation cache needs refreshing. This is independent of
+    /// ETL's snapshot lineage: maintenance can resend a relation without a
+    /// DDL message, and no-op DDL can emit a message without invalidating
+    /// the relation cache.
+    ///
+    /// When no relation follows DDL, the first row combines the pending schema
+    /// with the previous masks and emits a destination-facing relation event.
+    /// A received relation replaces those fallback masks before row decoding.
+    /// Without previous masks, a table-sync worker must wait for a relation
+    /// before handing over its decoding state.
     async fn handle_message(
         &mut self,
         message: &protocol::MessageBody,
@@ -2467,13 +2482,15 @@ where
                 RelationSchemaSelection::Exact(snapshot_id)
             }
             Some(TableDecodingState::WithSchema(schema)) => {
+                // A cache invalidation can resend the same schema. Preserve
+                // its lineage instead of selecting a newer preloaded snapshot.
                 RelationSchemaSelection::Exact(schema.inner().snapshot_id)
             }
             None => {
                 let bootstrap_snapshot_id = self.state.bootstrap_snapshot_id();
-                let schema_upper_bound = sync_done_lsn
-                    .map_or(bootstrap_snapshot_id, |sync_done_lsn| {
-                        bootstrap_snapshot_id.max(SnapshotId::at_lsn(sync_done_lsn))
+                let schema_upper_bound =
+                    sync_done_lsn.map_or(bootstrap_snapshot_id, |sync_done_lsn| {
+                        bootstrap_snapshot_id.max(SnapshotId::before_lsn(sync_done_lsn))
                     });
 
                 RelationSchemaSelection::AtOrBefore(schema_upper_bound)
@@ -2722,8 +2739,8 @@ where
     /// Materializing `PendingRelation` also returns a [`RelationEvent`] so the
     /// destination can apply the stored schema snapshot before the row.
     /// Restoring a complete `SyncDone` decoder does not, because that snapshot
-    /// was already applied during table sync. Truncate does not use this path:
-    /// pgoutput emits a protocol relation first.
+    /// was already applied during table sync. Truncate instead requires an
+    /// already materialized decoder.
     async fn get_replicated_table_schema(
         &mut self,
         table_id: TableId,
@@ -2790,9 +2807,9 @@ where
 
     /// Returns the complete decoder required to handle a truncate message.
     ///
-    /// pgoutput emits a protocol relation before truncate, so the connection
-    /// must already have [`TableDecodingState::WithSchema`]. A pending schema
-    /// snapshot or missing decoder means that relation did not arrive.
+    /// Requires [`TableDecodingState::WithSchema`]; unlike row handling, this
+    /// path does not materialize pending schemas. Pgoutput checks its relation
+    /// cache before truncate but can omit metadata already sent in the session.
     fn replicated_table_schema_for_truncate(
         &self,
         table_id: TableId,
@@ -3337,11 +3354,15 @@ mod apply_worker {
         fn is_state_ready_for_changes(state: TableState, remote_final_lsn: PgLsn) -> bool {
             match state {
                 TableState::Ready => true,
-                // Match PostgreSQL's table-sync boundary rule. SyncDone may point one byte past the
-                // initial slot's consistent-point WAL record, which is also the start of a COMMIT
-                // record whose transaction was excluded from the copied snapshot. BEGIN's final LSN
-                // can therefore equal SyncDone even though the apply worker, not the table-sync
-                // worker, must apply that transaction.
+                // SyncDone records an exclusive progress boundary. For example, table sync
+                // finishes A at A.end_lsn = 100, durably flushes, publishes SyncDone
+                // at 100, and stops before processing B. With adjacent COMMIT records,
+                // B.commit_lsn can also be 100 even though B's row WAL precedes it.
+                // Apply receives B on its own stream, where BEGIN's final LSN sets
+                // remote_final_lsn = B.commit_lsn = 100. Equality must admit B here:
+                // table sync did not apply B, so a strict comparison would lose it.
+                // The initial slot's consistent point can likewise equal the next
+                // COMMIT's start when that transaction was excluded from the copied snapshot.
                 TableState::SyncDone { lsn, .. } => lsn <= remote_final_lsn,
                 _ => false,
             }
@@ -4417,16 +4438,16 @@ mod tests {
     }
 
     #[test]
-    fn schema_cleanup_uses_inclusive_checkpoint_frontier() {
+    fn schema_cleanup_excludes_replayable_transaction_at_checkpoint() {
         let destination_snapshot_id = SnapshotId::new(PgLsn::from(300), PgLsn::from(100));
 
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(200), destination_snapshot_id),
-            SnapshotId::at_lsn(PgLsn::from(200))
+            test_snapshot_id(199, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(300), destination_snapshot_id),
-            destination_snapshot_id
+            test_snapshot_id(299, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(400), destination_snapshot_id),
@@ -4443,15 +4464,15 @@ mod tests {
                 PgLsn::from(u64::MAX - 1),
                 max_commit_first_message
             ),
-            SnapshotId::at_lsn(PgLsn::from(u64::MAX - 1))
+            test_snapshot_id(u64::MAX - 2, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(u64::MAX), max_commit_first_message),
-            max_commit_first_message
+            test_snapshot_id(u64::MAX - 1, u64::MAX)
         );
         assert_eq!(
             schema_cleanup_retention_snapshot_id(PgLsn::from(u64::MAX), SnapshotId::max()),
-            SnapshotId::max()
+            test_snapshot_id(u64::MAX - 1, u64::MAX)
         );
     }
 
@@ -4459,7 +4480,7 @@ mod tests {
     fn stored_sync_done_decoder_materializes_schema_and_masks() {
         let snapshot_id = test_snapshot_id(20_u64, 20_u64);
         let replicated_table_schema = replicated_schema(snapshot_id);
-        let table_state = TableState::sync_done(20.into(), &replicated_table_schema);
+        let table_state = TableState::sync_done(21.into(), &replicated_table_schema);
         let (sync_done_lsn, table_decoding_state) = sync_done_decoding_state(&table_state);
 
         let loaded_schema = table_decoding_state

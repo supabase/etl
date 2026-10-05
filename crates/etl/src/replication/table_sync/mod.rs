@@ -70,7 +70,7 @@ async fn get_existing_replicated_table_schema<S>(
     table_id: TableId,
 ) -> EtlResult<Option<(DestinationTableMetadata, ReplicatedTableSchema)>>
 where
-    S: StateStore + SchemaStore + Send + 'static,
+    S: StateStore + SchemaStore,
 {
     let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? else {
         return Ok(None);

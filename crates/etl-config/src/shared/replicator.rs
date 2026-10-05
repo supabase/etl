@@ -150,6 +150,7 @@ mod tests {
             memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+            settle_durable_interval_ms: None,
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),

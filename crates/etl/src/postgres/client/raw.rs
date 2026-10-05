@@ -699,7 +699,12 @@ impl PgReplicationClient {
     /// Starts a logical replication stream from the specified publication and
     /// slot.
     ///
-    /// The stream will begin reading changes from the provided `start_lsn`.
+    /// PostgreSQL uses the greater of `start_lsn` and the slot's current
+    /// confirmed flush position as the logical replay threshold. Transactions
+    /// whose COMMIT record starts at or after it remain eligible, including
+    /// their changes at earlier WAL positions. This is not a byte offset for
+    /// discarding individual row or schema messages.
+    ///
     /// Supplying `keep_alive_deadline_duration` enables status feedback and
     /// returns its independent handle and sender future for the caller to own
     /// and spawn. The reader does not own or submit feedback. `None` disables

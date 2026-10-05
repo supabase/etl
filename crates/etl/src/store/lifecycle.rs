@@ -7,7 +7,7 @@
 
 use std::future::Future;
 
-use crate::{error::EtlResult, schema::TableId};
+use crate::{error::EtlResult, schema::TableId, store::CachedStore};
 
 /// Lifecycle operation for ETL table state.
 ///
@@ -58,21 +58,16 @@ pub enum TableStateOperation {
 /// Provides primitives for table-copy preparation, reset-to-resync recovery,
 /// and publication removal. Implementations must keep persistent state and
 /// in-memory caches consistent for each operation.
-pub trait TableStateLifecycleStore: Sync {
+pub trait TableStateLifecycleStore: CachedStore {
     /// Applies a table state lifecycle `operation`.
     ///
     /// This is the single implementation point for lifecycle semantics. Prefer
     /// the focused convenience methods below at call sites unless the caller
-    /// needs to choose the operation dynamically. Returns the number of table
-    /// state entries affected by the operation:
-    /// - `0` for copy preparation because table state is preserved.
-    /// - The number of reset table states for pipeline resync.
-    /// - `1` when a table removal deletes an existing table state, otherwise
-    ///   `0`.
+    /// needs to choose the operation dynamically.
     fn apply_table_state_operation(
         &self,
         operation: TableStateOperation,
-    ) -> impl Future<Output = EtlResult<usize>> + Send;
+    ) -> impl Future<Output = EtlResult<()>> + Send;
 
     /// Prepares `table_id` for a fresh table copy.
     ///
@@ -85,12 +80,7 @@ pub trait TableStateLifecycleStore: Sync {
         &self,
         table_id: TableId,
     ) -> impl Future<Output = EtlResult<()>> + Send {
-        async move {
-            self.apply_table_state_operation(TableStateOperation::PrepareForCopy { table_id })
-                .await?;
-
-            Ok(())
-        }
+        self.apply_table_state_operation(TableStateOperation::PrepareForCopy { table_id })
     }
 
     /// Resets all current table states to [`crate::store::TableState::Init`]
@@ -101,10 +91,10 @@ pub trait TableStateLifecycleStore: Sync {
     /// durable table-sync progress so each table-sync worker can drop any
     /// existing destination object before clearing its own copy state.
     ///
-    /// Returns the number of table states reset. This is a convenience wrapper
-    /// around [`TableStateOperation::ResetForResync`].
-    fn reset_table_states_for_resync(&self) -> impl Future<Output = EtlResult<usize>> + Send {
-        async move { self.apply_table_state_operation(TableStateOperation::ResetForResync).await }
+    /// This is a convenience wrapper around
+    /// [`TableStateOperation::ResetForResync`].
+    fn reset_table_states_for_resync(&self) -> impl Future<Output = EtlResult<()>> + Send {
+        self.apply_table_state_operation(TableStateOperation::ResetForResync)
     }
 
     /// Deletes all stored ETL state for `table_id`.
@@ -116,10 +106,6 @@ pub trait TableStateLifecycleStore: Sync {
     /// Intended for use when a table is removed from the publication. This is a
     /// convenience wrapper around [`TableStateOperation::Delete`].
     fn delete_table_state(&self, table_id: TableId) -> impl Future<Output = EtlResult<()>> + Send {
-        async move {
-            self.apply_table_state_operation(TableStateOperation::Delete { table_id }).await?;
-
-            Ok(())
-        }
+        self.apply_table_state_operation(TableStateOperation::Delete { table_id })
     }
 }

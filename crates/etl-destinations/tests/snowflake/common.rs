@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use etl::store::DestinationStore;
 use etl_destinations::snowflake::{
     AuthManager, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient, SqlClient,
     StreamClient, test_utils,
@@ -37,7 +38,7 @@ pub async fn poll_destination_offset<S, T, C>(
     max_attempts: usize,
 ) -> Option<OffsetToken>
 where
-    S: etl::store::StateStore + etl::store::SchemaStore + Clone + Send + Sync + 'static,
+    S: DestinationStore,
     T: etl_destinations::snowflake::TokenProvider + 'static,
     C: StreamClient,
 {

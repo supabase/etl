@@ -146,9 +146,11 @@ pub trait Destination {
     /// Streaming batches are built from size and time limits, not schema change
     /// boundaries. A single call may contain zero, one, or many
     /// [`Event::Relation`] events, including multiple schema changes for the
-    /// same table. Implementations that apply destination DDL should process
-    /// events in order and update their active table schema each time a
-    /// relation event appears.
+    /// same table or repeated notifications for an unchanged schema. Process
+    /// them in order: compare the snapshot and replication mask with applied
+    /// metadata before deciding whether destination DDL is needed. Replayed
+    /// relations must not rewind destination DDL. See
+    /// [`crate::event::RelationEvent`] for snapshot and replay semantics.
     ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
@@ -199,9 +201,11 @@ pub trait Destination {
     ///
     /// When a keepalive observes an accepted commit with no open transaction,
     /// buffered events, or pending write result, ETL may issue an empty
-    /// required-durability write. It may buffer subsequent events while that
-    /// barrier is pending, but cannot dispatch them until the barrier
-    /// completes.
+    /// required-durability write. `None` for `settle_durable_interval_ms`
+    /// allows forced durability at any keepalive. `Some` guarantees at least
+    /// that window before a later keepalive can force durability. ETL may
+    /// buffer subsequent events while that barrier is pending, but cannot
+    /// dispatch them until the barrier completes.
     ///
     /// If no later streaming write is dispatched before shutdown, ETL normally
     /// exits without checkpointing accepted-but-not-durable work. Restart then

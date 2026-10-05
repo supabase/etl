@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use etl::{
     config::BatchConfig,
     error::ErrorKind,
@@ -5,13 +7,17 @@ use etl::{
     failpoints::APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
     pipeline::PipelineId,
     schema::ReplicatedTableSchema,
-    store::{SchemaStore, StateStore, TableStateType},
+    store::{
+        CachedStore, PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableState,
+        TableStateType, WorkerType,
+    },
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, has_relation_with_column},
         faults::FaultAction,
         notifying_store::NotifyingStore,
-        pipeline::{PipelineBuilder, create_pipeline},
+        pipeline::{PipelineBuilder, create_pipeline, wait_for_pipeline_error},
+        store::{wait_for_table_state_type, wait_for_table_sync_complete},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -30,6 +36,9 @@ use crate::support::{
     clickhouse::{AllTypesRow, BoundaryValuesRow, DateBoundariesRow, current_state_query},
     crypto::install_crypto_provider,
 };
+
+/// Deadline for a table to reach an expected durable state.
+const TABLE_STATE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// User-column projection for the all-types test, with `uuid_col` rendered as a
 /// canonical lowercase UUID string via `toString()`.
@@ -59,6 +68,11 @@ const DELETE_FLOW_TABLE: &str = "test_delete__flow";
 const RESTART_FLOW_TABLE: &str = "test_restart__flow";
 const RESET_COPY_TABLE: &str = "test_reset__copy";
 const TRUNCATE_FLOW_TABLE: &str = "test_truncate__flow";
+const DEFERRABLE_KEY_TABLE: &str = "test_deferrable__key";
+const DEFERRABLE_CHANGE_TABLE: &str = "test_deferrable__change";
+
+/// Description of the ClickHouse rejection of a deferrable primary key.
+const DEFERRABLE_KEY_REJECTION: &str = "ClickHouse requires a non-deferrable primary key";
 
 /// Days from 1970-01-01 to 2024-01-15 (used to verify the `date_col`
 /// round-trip).
@@ -514,6 +528,166 @@ async fn composite_key_changes_full_identity_merge_tree() {
 #[tokio::test(flavor = "multi_thread")]
 async fn composite_key_changes_full_identity_replacing_merge_tree() {
     composite_key_changes_inner(ClickHouseEngine::ReplacingMergeTree, true).await;
+}
+
+/// A deferrable primary key lets one statement move a row into a key before the
+/// key's previous row moves out, so a renumbering update such as `set id = id +
+/// 1` would emit old-key tombstones that hide the moved rows. The copy rejects
+/// the table before any row reaches ClickHouse.
+async fn deferrable_primary_key_is_rejected_inner(engine: ClickHouseEngine) {
+    // GIVEN: a table with a deferrable primary key and FULL identity, which
+    // PostgreSQL requires because a deferrable key cannot be the identity.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("deferrable_key");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[("id", "bigint not null"), ("value", "text not null")],
+        )
+        .await
+        .unwrap();
+    for statement in
+        ["add primary key (id) deferrable initially immediate", "replica identity full"]
+    {
+        database
+            .run_sql(&format!("alter table {} {statement}", table_name.as_quoted_identifier()))
+            .await
+            .unwrap();
+    }
+    let publication_name = "test_pub_deferrable_key";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value) values (1, 'a'), (2, 'b'), (3, 'c')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    // WHEN: the pipeline copies the table.
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination,
+    );
+    pipeline.start().await.unwrap();
+    // A regression would copy the table instead, so bound the wait.
+    wait_for_table_state_type(&store, table_id, TableStateType::Errored, TABLE_STATE_TIMEOUT)
+        .await
+        .unwrap();
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // THEN: the deferrable-key check errors the table for a manual fix, and
+    // ClickHouse holds no table for it.
+    let TableState::Errored { retry_policy, source_err, .. } =
+        store.get_table_state(table_id).await.unwrap().unwrap()
+    else {
+        panic!("a deferrable primary key should error the table");
+    };
+    assert!(matches!(retry_policy, TableRetryPolicy::ManualRetry));
+    assert_eq!(source_err.kind(), ErrorKind::SourceSchemaError);
+    assert_eq!(source_err.description(), Some(DEFERRABLE_KEY_REJECTION));
+    assert!(clickhouse_db.column_names(DEFERRABLE_KEY_TABLE).await.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deferrable_primary_key_is_rejected_merge_tree() {
+    deferrable_primary_key_is_rejected_inner(ClickHouseEngine::MergeTree).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deferrable_primary_key_is_rejected_replacing_merge_tree() {
+    deferrable_primary_key_is_rejected_inner(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// A primary key recreated as deferrable after the copy fails the schema change
+/// before ClickHouse writes any row under that schema.
+async fn primary_key_made_deferrable_is_rejected_inner(engine: ClickHouseEngine) {
+    // GIVEN: a copied table with an ordinary primary key and one row.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("deferrable_change");
+    let quoted_table_name = table_name.as_quoted_identifier();
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[("id", "bigint not null"), ("value", "text not null")],
+        )
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} add constraint deferrable_change_key primary key (id)"
+        ))
+        .await
+        .unwrap();
+    let publication_name = "test_pub_deferrable_change";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!("insert into {quoted_table_name} (id, value) values (1, 'a')"))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
+    let copied = store.notify_on_table_sync_complete(table_id).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store,
+        destination,
+    );
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+
+    // WHEN: the key becomes deferrable, which also needs FULL identity, and a
+    // later row carries the new schema.
+    database
+        .run_sql(&format!(
+            "alter table {quoted_table_name} drop constraint deferrable_change_key, add \
+             constraint deferrable_change_key primary key (id) deferrable initially immediate, \
+             replica identity full"
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("insert into {quoted_table_name} (id, value) values (2, 'b')"))
+        .await
+        .unwrap();
+
+    // THEN: the pipeline stops on the deferrable-key check, and ClickHouse
+    // holds only the row copied before the change.
+    let error = wait_for_pipeline_error(&pipeline).await;
+    assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+    assert_eq!(error.description(), Some(DEFERRABLE_KEY_REJECTION));
+
+    let query =
+        current_state_query(engine, DEFERRABLE_CHANGE_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&query).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].id, rows[0].value.as_str()), (1, "a"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn primary_key_made_deferrable_is_rejected_merge_tree() {
+    primary_key_made_deferrable_is_rejected_inner(ClickHouseEngine::MergeTree).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn primary_key_made_deferrable_is_rejected_replacing_merge_tree() {
+    primary_key_made_deferrable_is_rejected_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
 /// FULL identity forces comparison of NaN-bearing old keys even when only a
@@ -1295,41 +1469,26 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     assert_eq!(rows[0].value, "keep_me");
 }
 
-/// Tests that a pipeline restart resumes CDC streaming without re-running the
-/// initial table copy.
-///
-/// # GIVEN
-///
-/// A Postgres table with one row (`id=1, value='before_restart'`), copied to
-/// ClickHouse by a first pipeline run that then shuts down cleanly.
-///
-/// # WHEN
-///
-/// A new `ClickHouseDestination` and `Pipeline` are built with the same store
-/// and pipeline_id (simulating process restart), the pipeline is started, and a
-/// second row (`id=2, value='after_restart'`) is inserted into Postgres.
-///
-/// # THEN
-///
-/// ClickHouse contains exactly two rows:
-/// - `id=1` from the initial table copy (`cdc_lsn = 0`).
-/// - `id=2` from CDC streaming in the second run (`cdc_lsn > 0`).
-/// No duplicate `id=1` row exists -- table copy must not re-run.
+/// A fresh store and destination resume MergeTree replication without
+/// recopying.
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_restart_resumes_streaming_merge_tree() {
     pipeline_restart_resumes_streaming_inner(ClickHouseEngine::MergeTree).await;
 }
 
+/// A fresh store and destination resume ReplacingMergeTree replication without
+/// recopying.
 #[tokio::test(flavor = "multi_thread")]
 async fn pipeline_restart_resumes_streaming_replacing_merge_tree() {
     pipeline_restart_resumes_streaming_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
+/// Verifies source/destination equality across a restart from a durable
+/// checkpoint.
 async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
-    // --- GIVEN: first pipeline run copies one row ---
     let database = spawn_source_database().await;
     let table_name = test_table_name("restart_flow");
 
@@ -1343,42 +1502,66 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('before_restart')",
+            "insert into {} (value) values ('before_restart')",
             table_name.as_quoted_identifier(),
         ))
         .await
         .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
-    let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
-
-    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
         publication_name.to_owned(),
         store.clone(),
-        destination,
+        destination.clone(),
     );
 
     pipeline.start().await.unwrap();
-    table_sync_complete_notify.notified().await;
+    wait_for_table_sync_complete(&store, table_id, TABLE_STATE_TIMEOUT).await.unwrap();
+
+    // The first owned change materializes the decoder and lets SyncDone become
+    // Ready after its apply checkpoint is durable.
+    let update_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Update, table_id, 1)])
+        .await;
+
+    database
+        .run_sql("update test.restart_flow set value = 'checkpointed' where id = 1")
+        .await
+        .unwrap();
+
+    update_notify.notified().await;
+    wait_for_table_state_type(&store, table_id, TableStateType::Ready, TABLE_STATE_TIMEOUT)
+        .await
+        .unwrap();
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     // Verify first run produced exactly one row.
     let restart_query =
         || current_state_query(engine, RESTART_FLOW_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
     let rows: Vec<IdValueRow> = clickhouse_db.query(&restart_query()).await;
-    assert_eq!(rows.len(), 1, "first run should copy exactly one row");
+    assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, 1);
-    assert_eq!(rows[0].value, "before_restart");
+    assert_eq!(rows[0].value, "checkpointed");
 
-    // --- WHEN: rebuild destination and pipeline and stream a new insert ---
+    let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert!(checkpoint.is_some());
+    drop(destination);
+    drop(store);
+
+    let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+    store.load_cache().await.unwrap();
+
+    assert_eq!(store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -1399,7 +1582,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     database
         .run_sql(&format!(
-            "INSERT INTO {} (value) VALUES ('after_restart')",
+            "insert into {} (value) values ('after_restart')",
             table_name.as_quoted_identifier(),
         ))
         .await
@@ -1407,16 +1590,21 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
 
     events_notify.notified().await;
 
-    let rows: Vec<IdValueRow> = clickhouse_db.query(&restart_query()).await;
-
     pipeline.shutdown_and_wait().await.unwrap();
 
-    // --- THEN: exactly two rows in current state, no duplicate of id=1 ---
-    assert_eq!(rows.len(), 2, "expected original copied row plus one streamed insert");
-    assert_eq!(rows[0].id, 1);
-    assert_eq!(rows[0].value, "before_restart");
-    assert_eq!(rows[1].id, 2);
-    assert_eq!(rows[1].value, "after_restart");
+    assert_eq!(destination.write_table_rows_called().await, 0);
+    let rows: Vec<IdValueRow> = clickhouse_db.query(&restart_query()).await;
+    let source_rows = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query("select id, value from test.restart_flow order by id", &[])
+        .await
+        .unwrap();
+    let expected: Vec<(i64, String)> =
+        source_rows.iter().map(|row| (row.get(0), row.get(1))).collect();
+    let actual: Vec<_> = rows.into_iter().map(|row| (row.id, row.value)).collect();
+    assert_eq!(actual, expected);
 }
 
 #[tokio::test(flavor = "multi_thread")]

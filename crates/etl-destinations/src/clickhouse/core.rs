@@ -1507,8 +1507,8 @@ where
             })
     }
 
-    /// Handles a schema change event (Relation) by computing the diff and
-    /// applying ALTER TABLE statements.
+    /// Handles relation metadata, applying the schema diff for a new snapshot
+    /// or recovering an interrupted transition.
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
         validate_clickhouse_schema_capabilities(new_schema, self.inserter_config.engine)?;
 
@@ -2238,6 +2238,23 @@ fn validate_clickhouse_schema_capabilities(
             format!(
                 "Table '{}' has no primary-key columns; set `engine: merge_tree` or define a PK \
                  on the source table.",
+                replicated_table_schema.name()
+            )
+        ));
+    }
+
+    // Both engines derive current state per key: ReplacingMergeTree keeps the
+    // highest version and the MergeTree current-state query takes the latest
+    // event. A deferrable key lets one statement move a row into a key before
+    // the key's previous row moves out, so the later old-key tombstone would
+    // hide the moved row.
+    if replicated_table_schema.inner().primary_key_deferrable {
+        return Err(etl_error!(
+            ErrorKind::SourceSchemaError,
+            "ClickHouse requires a non-deferrable primary key",
+            format!(
+                "Table '{}' has a DEFERRABLE primary key. Recreate it as NOT DEFERRABLE, or \
+                 remove the table from the publication.",
                 replicated_table_schema.name()
             )
         ));
@@ -3581,6 +3598,38 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+    }
+
+    #[test]
+    fn validate_clickhouse_table_shape_rejects_deferrable_primary_key() {
+        // GIVEN: A keyed table whose primary key is DEFERRABLE. PostgreSQL
+        // cannot use a deferrable key as the replica identity, so the table
+        // publishes updates and deletes with FULL identity.
+        let table_schema = Arc::new(
+            TableSchema::new(
+                TableId::new(3),
+                TableName::new("public".to_owned(), "positions".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                ],
+            )
+            .with_primary_key_deferrable(true),
+        );
+        let replication_mask = ReplicationMask::all(&table_schema);
+        let identity_mask = IdentityMask::from_bytes(vec![1, 1]);
+        let schema =
+            ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+
+        for engine in [ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree] {
+            // WHEN: Either engine validates the table.
+            let err = validate_clickhouse_table_shape(&schema, engine).unwrap_err();
+
+            // THEN: The deferrable-key check rejects it.
+            assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
+            assert_eq!(err.description(), Some("ClickHouse requires a non-deferrable primary key"));
+        }
     }
 
     #[test]

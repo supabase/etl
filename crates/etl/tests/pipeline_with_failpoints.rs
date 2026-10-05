@@ -2,7 +2,7 @@
 
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{DateTime, Utc};
@@ -1558,6 +1558,84 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     assert_events_equal(inserts, &expected_inserts);
 }
 
+/// Rows whose WAL precedes idle feedback remain replayable if their transaction
+/// commits after the replication stream restarts.
+#[tokio::test(flavor = "multi_thread")]
+async fn quiescent_feedback_preserves_open_transaction_across_restart() {
+    init_test_tracing();
+
+    let (database, table_name, table_id, store, destination, pipeline, pipeline_id, publication) =
+        create_database_and_sync_done_pipeline_with_table(
+            "open_transaction_feedback",
+            &[("value", "int4 not null")],
+        )
+        .await;
+
+    let other_database = spawn_source_database().await;
+    let other_table = test_table_name("unrelated_wal");
+    other_database
+        .create_table(other_table.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+
+    let mut transaction_database = PgDatabase::try_connect(database.config.clone()).await.unwrap();
+    let transaction = transaction_database.begin_transaction().await;
+    transaction.insert_values(table_name, &["value"], &[&42_i32]).await.unwrap();
+    let open_transaction_wal: PgLsn = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one("select pg_current_wal_insert_lsn()", &[])
+        .await
+        .unwrap()
+        .get(0);
+
+    // A commit in another database flushes the open transaction's row WAL
+    // without emitting a transaction on this stream, allowing idle feedback.
+    other_database.insert_values(other_table.clone(), &["value"], &[&1_i32]).await.unwrap();
+    let target_lsn = other_database.current_wal_flush_lsn().await.unwrap();
+    let confirmed_lsn = wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    assert!(confirmed_lsn > open_transaction_wal);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let mut pipeline =
+        create_pipeline(&database.config, pipeline_id, publication, store, destination.clone());
+    pipeline.start().await.unwrap();
+
+    // Fresh feedback proves the new stream has started while the source
+    // transaction is still open; the old confirmed position cannot prove that.
+    other_database.insert_values(other_table, &["value"], &[&2_i32]).await.unwrap();
+    let restart_target = other_database.current_wal_flush_lsn().await.unwrap();
+    let restarted_lsn =
+        wait_for_apply_worker_to_reach(&database, pipeline_id, restart_target).await;
+    assert!(restarted_lsn > confirmed_lsn);
+
+    let insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    transaction.commit_transaction().await;
+
+    insert_notify.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let inserts = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                Some(insert)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inserts.len(), 1);
+    assert_eq!(inserts[0].table_row.values(), &[Cell::I64(1), Cell::I32(42)]);
+    assert!(inserts[0].commit_lsn >= restarted_lsn);
+}
+
 /// Whether the first replicated row precedes the first schema change.
 #[derive(Clone, Copy)]
 enum SchemaReplayOrder {
@@ -1726,6 +1804,22 @@ async fn run_schema_replay_scenario(
 
     let initial_events = collect_table_events(&events, table_id);
     let initial_table_schema_snapshots = table_schemas_snapshots.clone();
+
+    if matches!(transaction_scope, SchemaReplayTransactionScope::OneTransaction) {
+        // Adjacent commits can leave the previous transaction's end LSN equal
+        // to this transaction's commit LSN. Recreate that durable restart
+        // boundary with all of this transaction's schemas already stored.
+        let restart_lsn = table_schemas_snapshots[1].0.commit_lsn();
+        assert_eq!(restart_lsn, table_schemas_snapshots[2].0.commit_lsn());
+
+        let apply_slot_name: String =
+            EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        let (confirmed_flush_lsn, _) =
+            replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
+        assert!(confirmed_flush_lsn < restart_lsn);
+
+        store.upsert_replication_checkpoint(WorkerType::Apply, restart_lsn).await.unwrap();
+    }
 
     fail::remove(SEND_STATUS_UPDATE_FP);
     destination.clear_events().await;
@@ -2583,6 +2677,14 @@ struct IdleDurabilityTest {
 impl IdleDurabilityTest {
     /// Starts an empty streaming table with controlled destination results.
     async fn start() -> Self {
+        Self::start_with_settle_interval(None).await
+    }
+
+    /// Starts like [`Self::start`], with an optional durability window.
+    ///
+    /// A configured window also shortens `wal_sender_timeout` so several
+    /// primary keepalives arrive before the window elapses.
+    async fn start_with_settle_interval(settle_durable_interval_ms: Option<u64>) -> Self {
         init_test_tracing();
         let database = spawn_source_database().await;
         let table_name = test_table_name("idle_durability");
@@ -2607,6 +2709,7 @@ impl IdleDurabilityTest {
             destination,
         )
         .with_table_sync_copy_config(TableSyncCopyConfig::SkipAllTables)
+        .with_settle_durable_interval_ms(settle_durable_interval_ms)
         .build();
         let synced = store.notify_on_table_sync_complete(table_id).await;
         pipeline.start().await.unwrap();
@@ -2681,6 +2784,50 @@ async fn idle_durability_settles_on_primary_keepalive() {
         Some(commit_lsn)
     );
     assert!(test.writes_rx.try_recv().is_err());
+}
+
+/// Later inserts are accepted during the settle window and remain undurable
+/// together with the earlier write.
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_durability_allows_multiple_writes_during_settle_interval() {
+    const SETTLE_AFTER_MS: u64 = 3_000;
+    let mut test = IdleDurabilityTest::start_with_settle_interval(Some(SETTLE_AFTER_MS)).await;
+
+    test.insert(1).await;
+    let (first_lsn, first_result) = test.next_batch().await;
+    let accepted_at = Instant::now();
+    first_result.send(Ok(DestinationWriteStatus::Accepted));
+
+    let mut previous_lsn = first_lsn;
+    for value in [2, 3] {
+        test.insert(value).await;
+        let (lsn, result) = test.next_batch().await;
+        assert!(lsn > previous_lsn);
+        assert!(accepted_at.elapsed() < Duration::from_millis(SETTLE_AFTER_MS));
+        result.send(Ok(DestinationWriteStatus::Accepted));
+        previous_lsn = lsn;
+    }
+    assert!(test.confirmed_lsn().await < first_lsn);
+
+    let barrier = test.next_barrier().await;
+    assert!(accepted_at.elapsed() >= Duration::from_millis(SETTLE_AFTER_MS));
+    barrier.send(Ok(DestinationWriteStatus::Durable));
+    test.wait_for_flush(previous_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// Without a settle window, a later insert is overtaken by the durability
+/// barrier.
+#[tokio::test(flavor = "multi_thread")]
+#[should_panic(expected = "expected an event batch")]
+async fn idle_durability_disallows_multiple_writes_without_settle_interval() {
+    let mut test = IdleDurabilityTest::start().await;
+    test.insert(1).await;
+    let (_commit_lsn, result) = test.next_batch().await;
+    result.send(Ok(DestinationWriteStatus::Accepted));
+
+    test.insert(2).await;
+    test.next_batch().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

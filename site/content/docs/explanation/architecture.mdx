@@ -102,8 +102,12 @@ Three store traits persist the state needed to resume after restarts:
 - **SchemaStore**: Stores versioned table schema information (columns, types, primary keys, snapshot IDs) and prunes obsolete schema versions behind persisted checkpoints while preserving the retained boundary schema and newer versions
 - **TableStateLifecycleStore**: Prepares table-copy state, resets table states for resync, and deletes all ETL-owned state when a table leaves the publication
 
-See [Extension Points](/explanation/traits/#schemastore) for the cache and
-durability contracts.
+Use one store and its clones per pipeline to share cached state. External
+changes to ETL state or destination data are unsupported.
+
+Each store trait requires `CachedStore`, which loads all cache domains together
+during startup, before workers run. See [Extension Points](/explanation/traits/#cachedstore)
+for the cache and durability contracts.
 
 ## Delivery Guarantees
 
@@ -129,7 +133,7 @@ current-state tables, upsert by the destination's chosen row key so replayed
 events converge to the same state.
 
 The `commit_lsn` and `tx_ordinal` fields on sequenced events provide stable
-**ordering and checkpointing**. Destinations such as ClickHouse and BigQuery
+**ordering and replay detection**. Destinations such as ClickHouse and BigQuery
 use the pair to keep replayed events ordered. See [Event
 Types](/explanation/events/#understanding-event-sequence-keys) for details.
 
