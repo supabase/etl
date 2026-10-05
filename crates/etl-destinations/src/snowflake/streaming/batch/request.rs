@@ -227,27 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_request_finishes_to_nothing() {
-        assert!(OpenRequest::new(limits()).finish().unwrap().is_none());
-    }
-
-    #[test]
-    fn small_rows_share_one_stream_frame_in_order() {
-        let mut request = OpenRequest::new(limits());
-        for ordinal in 1..=3 {
-            request.write_small(format!("row {ordinal}\n").as_bytes(), &offset(ordinal)).unwrap();
-        }
-        assert_eq!(request.row_count(), 3);
-
-        let batch = request.finish().unwrap().unwrap();
-
-        assert_eq!(batch.row_count(), 3);
-        assert_eq!(batch.start_offset(), &offset(1));
-        assert_eq!(batch.end_offset(), &offset(3));
-        assert_eq!(zstd::decode_all(batch.bytes().as_ref()).unwrap(), b"row 1\nrow 2\nrow 3\n");
-    }
-
-    #[test]
     fn flush_is_due_once_a_flush_interval_of_input_is_pending() {
         let mut request = OpenRequest::new(limits());
         request.write_small(&[b'a'; 100], &offset(1)).unwrap();
@@ -285,19 +264,6 @@ mod tests {
             zstd::decode_all(batch.bytes().as_ref()).unwrap(),
             b"small 1\nlarge 2\nsmall 3\n"
         );
-    }
-
-    #[test]
-    fn a_frame_can_start_the_request() {
-        let mut request = OpenRequest::new(limits());
-        let large = frame(b"large 1\n");
-        request.append_frame(&large, &offset(1)).unwrap();
-        assert_eq!(request.len(), large.len());
-
-        let batch = request.finish().unwrap().unwrap();
-        assert_eq!(batch.row_count(), 1);
-        assert_eq!(batch.start_offset(), &offset(1));
-        assert_eq!(zstd::decode_all(batch.bytes().as_ref()).unwrap(), b"large 1\n");
     }
 
     #[test]

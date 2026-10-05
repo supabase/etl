@@ -12,20 +12,12 @@ homepage.workspace = true
 test = false
 doctest = false
 
-[[bin]]
-name = "snowflake_encoder"
-required-features = ["snowflake"]
-
 [features]
 default = []
 bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
 clickhouse = ["dep:etl-destinations", "etl-destinations/clickhouse"]
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
-snowflake = [
-    "dep:etl-destinations",
-    "etl-destinations/snowflake",
-    "etl-destinations/test-utils",
-]
+snowflake = ["dep:etl-destinations", "etl-destinations/snowflake"]
 
 [dependencies]
 anyhow = { workspace = true }

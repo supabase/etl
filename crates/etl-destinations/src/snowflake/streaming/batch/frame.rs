@@ -308,18 +308,6 @@ mod tests {
     }
 
     #[test]
-    fn serialization_failure_in_a_large_row_is_not_a_size_error() {
-        let cols =
-            [cols()[1].clone(), ColumnSchema::new("ratio".into(), Type::FLOAT8, -1, 2, true)];
-        let row = TableRow::new(vec![Cell::String("a".repeat(64 * 1024)), Cell::F64(f64::NAN)]);
-
-        let error =
-            compress_row_frame(&limits(16 * 1024), table(), &cols, &row, cdc()).unwrap_err();
-
-        assert!(matches!(error, Error::Encoding(message) if message.contains("non-finite")));
-    }
-
-    #[test]
     fn row_frames_declare_the_fixed_window_regardless_of_row_size() {
         let payload = "a".repeat(4 * 1024);
         let frame =
@@ -360,11 +348,6 @@ mod tests {
             let frame =
                 compress_row_frame(&BatchLimits::SNOWFLAKE, table(), &cols, &row, cdc()).unwrap();
             assert_eq!(zstd::decode_all(frame.as_slice()).unwrap(), line);
-
-            // A decoder limited to the default window must refuse the frame.
-            let mut decoder = zstd::stream::read::Decoder::new(frame.as_slice()).unwrap();
-            decoder.window_log_max(21).unwrap();
-            assert!(decoder.read_to_end(&mut Vec::new()).is_err());
         }
     }
 

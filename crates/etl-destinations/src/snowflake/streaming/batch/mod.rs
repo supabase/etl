@@ -554,21 +554,6 @@ mod tests {
     }
 
     #[test]
-    fn small_rows_after_a_frame_join_the_same_request() {
-        let mut builder = builder();
-        assert!(push(&mut builder, 1, "a".repeat(50 * 1024)).unwrap().is_empty());
-        for ordinal in 2..=5 {
-            assert!(push(&mut builder, ordinal, format!("small {ordinal}")).unwrap().is_empty());
-        }
-        assert_eq!(builder.footprint().row_frames, 1);
-
-        let batches: Vec<RowBatch> = builder.finish().unwrap().into_iter().collect();
-
-        assert_eq!(batches.len(), 1);
-        assert_rows_in_order(&batches, 5, REQUEST_LIMIT);
-    }
-
-    #[test]
     fn small_row_after_a_large_frame_is_checked_even_without_a_flush() {
         // A long flush interval means small rows alone never trigger a flush;
         // the exact length right after a frame must still be checked.

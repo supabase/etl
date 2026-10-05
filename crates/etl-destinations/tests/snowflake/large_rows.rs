@@ -385,6 +385,8 @@ async fn request_limit_accepts_exactly_four_mebibytes_and_rejects_one_more_byte(
     .await;
 }
 
+/// Verifies that one request can combine stream frames with a row frame whose
+/// repeated blocks need matches beyond level 3's default 2 MiB window.
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn multi_frame_request_lands_every_row_in_one_append() {
@@ -398,7 +400,7 @@ async fn multi_frame_request_lands_every_row_in_one_append() {
 
     // A small row, a row above the small-row limit, then a small row: the
     // body is a stream frame, a row frame, and a second stream frame.
-    let large = structured_text(1024 * 1024, 11, 88);
+    let large = random_text(3 * 1024 * 1024, 71).repeat(5);
     with_table_cleanup(&harness.sql, &[&sf_table], || async {
         let status = write_table_rows(
             &harness.destination,
@@ -621,37 +623,6 @@ async fn rejected_row_keeps_the_accepted_prefix_and_replay_skips_committed_rows(
         assert_eq!(rows.len(), 2);
         assert_stored(&rows[0], 1, &first, 0, "insert");
         assert_stored(&rows[1], 2, &second, 0, "insert");
-    })
-    .await;
-}
-
-/// Verifies that Snowflake decodes the larger window needed for repeats beyond
-/// level 3's default 2 MiB history and stores the complete source value.
-#[tokio::test]
-#[ignore = "requires Snowflake credentials"]
-async fn repeated_blocks_beyond_default_window_are_stored() {
-    let harness = Harness::new(NotifyingStore::new());
-    let src_table = unique_source_table();
-    let sf_table = snowflake_table_name("public", &src_table);
-    let table_id = TableId::new(1304);
-    let table_schema = large_row_schema(table_id, &src_table);
-    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
-    harness.store.store_table_schema(table_schema).await.unwrap();
-    let payload = random_text(3 * 1024 * 1024, 71).repeat(5);
-
-    with_table_cleanup(&harness.sql, &[&sf_table], || async {
-        let status = write_table_rows(&harness.destination, &schema, vec![row(1, &payload, 0)])
-            .await
-            .unwrap();
-        assert_eq!(status, DestinationWriteStatus::Accepted);
-        assert_eq!(harness.inserts(), 1);
-        let barrier = write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
-        assert_eq!(barrier, DestinationWriteStatus::Durable);
-
-        let copy_offset = OffsetToken::new(PgLsn::from(0_u64), 1);
-        let rows = harness.committed_rows(table_id, &sf_table, &copy_offset).await;
-        assert_eq!(rows.len(), 1);
-        assert_stored(&rows[0], 1, &payload, 0, "insert");
     })
     .await;
 }

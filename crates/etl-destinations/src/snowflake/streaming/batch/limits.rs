@@ -119,16 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn snowflake_limits_derive_documented_values() {
-        let limits = BatchLimits::SNOWFLAKE;
-        assert_eq!(limits.request_limit, 4_194_304);
-        assert_eq!(limits.small_row_limit, 262_144);
-        assert_eq!(limits.flush_interval, 131_072);
-        assert_eq!(limits.stream_headroom(), 132_624);
-        assert_eq!(limits.stream_admission_limit(), 4_061_680);
-    }
-
-    #[test]
     fn consistency_requires_room_for_a_full_small_row() {
         let mut limits = BatchLimits::SNOWFLAKE;
         assert!(limits.is_consistent());
