@@ -436,7 +436,10 @@ impl PgReplicationClient {
     /// The returned transaction must remain open until every copy worker has
     /// finished. Slot creation retains the normal lock timeout: an old writer
     /// can request DDL that waits for our lock while slot creation waits for
-    /// that writer.
+    /// that writer. The timeout bounds each lock acquisition, not the lifetime
+    /// of these locks. Queued exclusive DDL can block later application queries
+    /// until this transaction ends; the copy does not monitor those waiters.
+    ///
     /// Lock conflicts return [`ErrorKind::SourceTableCopyLockConflict`] so the
     /// caller can retry the entire copy with a fresh snapshot.
     pub async fn create_table_copy_slot(

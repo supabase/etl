@@ -5,19 +5,17 @@ icon: RefreshCw
 ---
 
 <Callout className="etl-callout" type="warn" title="Schema-change handling is in public beta">
-  We are actively investigating catalog-visibility and concurrent-DDL edge
-  cases, improving the implementation, and expanding regression coverage.
-  The supported operations below are subject to the
-  [current limitations](#current-limitations). Initial-copy locks and schema
-  validation do not make every DDL interleaving safe, and some inconsistencies
-  cannot yet be detected reliably.
+  Review the [schema-capture cautions](#current-limitations) before scheduling
+  concurrent DDL. Initial-copy locks protect table layout while copying, but
+  schema capture can still observe inconsistent catalog metadata. Schema
+  validation does not detect every inconsistency.
 </Callout>
 
 ETL automatically applies the simple column changes listed below when the
 destination can represent them safely. For unsupported destination changes,
 ETL either skips the destination DDL with a warning or rejects the change
 before applying it. These compatibility checks are separate from the source
-schema-capture limitations described below.
+schema-capture behavior described below.
 
 This page describes structural DDL compatibility. Row values are not validated
 against destination-specific value domains; see [Row value
@@ -32,7 +30,7 @@ handling](/reference/destinations/#row-value-handling).
 | Add, replace, or remove a column default | Supported literal defaults are translated on a best-effort basis |
 | Drop `NOT NULL` | Applied by BigQuery, ClickHouse, and DuckLake; Snowflake columns are already nullable |
 | Set `NOT NULL` | Detected, but not applied to existing destination columns |
-| Change a type or type modifier | Detected, but physical type DDL is skipped with a warning |
+| Change a type or type modifier | BigQuery, DuckLake, and Snowflake skip physical type DDL with a warning; ClickHouse rejects changes to its mapped type |
 | Publish an existing column | Added using the historical-value policy described below |
 | Stop publishing a column | The destination column is dropped |
 
@@ -93,8 +91,14 @@ for source impact and monitoring.
 
 ### Lock conflicts and retries
 
-A worker's `NOWAIT` request avoids waiting behind DDL that is itself waiting
-for the parent. A conflict fails the attempt with `SourceTableCopyLockConflict`;
+Consider a parent holding `ACCESS SHARE`, a DDL session waiting for
+`ACCESS EXCLUSIVE`, and a new copy worker requesting `ACCESS SHARE`. The worker
+can queue behind the DDL even though its lock is compatible with the parent's
+lock. The parent is waiting for the worker in ETL, outside PostgreSQL's lock
+manager, so PostgreSQL cannot detect this application-level deadlock.
+
+A worker's `NOWAIT` request fails instead of joining that queue. A conflict
+fails the attempt with `SourceTableCopyLockConflict`;
 the configured retry policy discards the incomplete destination copy and starts
 from a fresh snapshot. Already-held locks are reused: ETL does not continuously
 check for later DDL waiters or automatically abort a copy to unblock applications.
@@ -127,7 +131,7 @@ Coordinate a stop and resynchronization for changes to namespaces,
 user-defined types or functions, publication membership, row filters, or
 partition topology. For example, an enum rename does not acquire
 `ACCESS EXCLUSIVE` on every table using the enum. Initial-copy locks also do
-not fix later event-trigger capture or the other [current limitations](#current-limitations).
+not fix later event-trigger capture or the other [schema-capture cautions](#current-limitations).
 
 ## How schema changes reach a destination
 
@@ -359,11 +363,11 @@ Recovery then follows each destination's DDL guarantees:
 
 Resynchronize the affected table when recovery cannot prove a safe endpoint.
 
-## Current limitations
+## Schema-capture cautions [#current-limitations]
 
-The following are known limitations of beta schema-change handling. They
-affect whether ETL can obtain and select the correct source schema, even when
-the destination supports the requested column operation.
+Concurrent DDL and catalog visibility affect whether ETL can obtain and select
+the correct source schema, even when the destination supports the requested
+column operation. The following cases describe the current behavior.
 
 ### Catalog rows and PostgreSQL helper functions can see different metadata
 
@@ -438,22 +442,20 @@ metadata and the selected schema snapshot.
 This matters when schema history diverges or metadata is rebuilt during
 reconnect and replay. Some mismatches, such as an unknown relation column,
 can be rejected, but a valid-looking subset is not proof that the correct
-schema was selected. We are continuing to investigate the precise failure
-interleavings; the mask design does not provide a universal mismatch detector.
+schema was selected. The mask design does not detect every schema mismatch.
 
-A separate relation-availability limitation exists at table-sync handover:
-the worker fails closed when it cannot establish a complete decoding schema
+At table-sync handover, the worker fails closed when it cannot establish a complete decoding schema
 after schema activity during catch-up. Retry after schema activity settles or
 resynchronize the table. No-op DDL without a fresh protocol relation is handled
 when ETL has valid previous masks to reuse; a new relation is not required
 after every DDL statement.
 
-### Operating within the current limits
+### Planning schema changes [#operating-within-the-current-limits]
 
 Serialize schema changes affecting the same replicated tables and prefer
 short, fresh `READ COMMITTED` transactions for those changes. This reduces the
 stale-transaction-snapshot risk; it does not resolve every helper-function or
-relation-metadata limitation. For unsupported changes or schema history that
+relation-metadata inconsistency. For unsupported changes or schema history that
 cannot be trusted, coordinate a stop and table resynchronization. A restart
 alone does not repair an incorrectly captured snapshot.
 

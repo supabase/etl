@@ -18,6 +18,7 @@ use etl_postgres::{
     below_version, tokio::test_utils::connect_to_pg_database, version::POSTGRES_15,
 };
 use futures::StreamExt;
+use pg_escape::quote_identifier;
 use tokio::time::{sleep, timeout};
 use tokio_postgres::{Client, CopyOutStream, error::SqlState, types::Type};
 
@@ -207,7 +208,9 @@ async fn copy_worker_rejects_queued_ddl_and_releases_locks() {
         drop(transaction);
     };
     let (ddl, ()) = tokio::join!(
-        ddl_client.batch_execute("alter table test.copied alter column id type bigint"),
+        ddl_client.batch_execute(
+            "set lock_timeout = '10s'; alter table test.copied alter column id type bigint"
+        ),
         finish_copy,
     );
     ddl.unwrap();
@@ -299,37 +302,55 @@ async fn copy_rejects_partition_attached_before_snapshot() {
     assert_eq!(created.unwrap_err().kind(), ErrorKind::SourceTableCopyLockConflict);
 }
 
-/// Busy source tables fail before creating a slot or exposing a snapshot.
+/// A busy root or descendant fails before creating a slot, and releases any
+/// locks already acquired for the copy unit.
 #[tokio::test(flavor = "multi_thread")]
 async fn copy_rejects_busy_table_before_snapshot() {
     let database = spawn_source_database().await;
-    let table_id = database
-        .create_table(test_table_name("copied"), true, &[("age", "integer")])
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create table test.root (id int) partition by range (id);
+             create table test.leaf partition of test.root for values from (0) to (10)",
+        )
         .await
         .unwrap();
-    let client = database.client.as_ref().unwrap();
-    client.batch_execute("begin; lock table test.copied in access exclusive mode").await.unwrap();
+    let table_id: TableId =
+        client.query_one("select 'test.root'::regclass::oid", &[]).await.unwrap().get(0);
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("busy_table");
-    let error =
-        timeout(Duration::from_secs(2), parent.create_table_copy_slot(&slot_name, table_id, false))
+    for relation in ["root", "leaf"] {
+        client
+            .batch_execute(&format!(
+                "begin; lock table only test.{relation} in access exclusive mode"
+            ))
             .await
-            .unwrap()
-            .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::SourceTableCopyLockConflict);
-
-    let slot_exists: bool = client
-        .query_one(
-            "select exists (select 1 from pg_replication_slots where slot_name = $1)",
-            &[&slot_name],
+            .unwrap();
+        let error = timeout(
+            Duration::from_secs(2),
+            parent.create_table_copy_slot(&slot_name, table_id, false),
         )
         .await
         .unwrap()
-        .get(0);
-    assert!(!slot_exists);
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::SourceTableCopyLockConflict);
+        assert_eq!(postgres_error_code(&error), &SqlState::LOCK_NOT_AVAILABLE);
 
-    client.batch_execute("rollback").await.unwrap();
+        let slot_exists: bool = client
+            .query_one(
+                "select exists (select 1 from pg_replication_slots where slot_name = $1)",
+                &[&slot_name],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!slot_exists);
+
+        client.batch_execute("rollback").await.unwrap();
+
+        assert_table_locks_released(client, &test_table_name("root")).await;
+    }
 }
 
 /// Slot creation cannot wait indefinitely for a writer that is itself waiting
@@ -442,7 +463,9 @@ async fn copy_publication_metadata_uses_snapshot() {
     client
         .batch_execute(
             "insert into test.copied values (1, 10, 100), (2, 20, 200);
-             create publication copy_pub for table test.copied (id, age) where (age >= 18)",
+             create table test.unrelated (id int);
+             create publication copy_pub for table
+                 test.copied (id, age) where (age >= 18), test.unrelated",
         )
         .await
         .unwrap();
@@ -456,14 +479,23 @@ async fn copy_publication_metadata_uses_snapshot() {
 
     client
         .batch_execute(
-            "alter publication copy_pub set table test.copied (id, extra) where (extra >= 0)",
+            "alter publication copy_pub set table
+                 test.copied (id, extra) where (extra >= 0), test.unrelated;
+             begin; lock table test.unrelated in access exclusive mode",
         )
         .await
         .unwrap();
 
     let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
-    let columns =
-        transaction.get_replicated_column_names(table_id, &schema, "copy_pub").await.unwrap();
+    // Publication expansion would open unrelated tables and block on this
+    // session. The copy's catalog query must only inspect its own copy unit.
+    let columns = timeout(
+        Duration::from_secs(2),
+        transaction.get_replicated_column_names(table_id, &schema, "copy_pub"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(columns, ["id".to_owned(), "age".to_owned()].into_iter().collect());
 
     let column_schemas = schema
@@ -487,6 +519,114 @@ async fn copy_publication_metadata_uses_snapshot() {
 
     child_tx.commit().await.unwrap();
     transaction.commit().await.unwrap();
+    client.batch_execute("rollback").await.unwrap();
+}
+
+/// Snapshot catalog queries agree with PostgreSQL's publication expansion for
+/// roots, subtrees, leaves, schema membership, and ordinary inheritance.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_publication_columns_match_postgres() {
+    let database = spawn_source_database().await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        return;
+    }
+
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            r#"create schema copy_roots;
+               create schema copy_branches;
+               create schema copy_leaves;
+               create table copy_roots.root (id int, discarded int, "odd "" column" int)
+                   partition by range (id);
+               create table copy_branches.branch partition of copy_roots.root
+                   for values from (0) to (100) partition by range (id);
+               create table copy_leaves.leaf partition of copy_branches.branch
+                   for values from (0) to (100);
+               alter table copy_roots.root drop column discarded;
+               create table test.parent (id int, "odd "" column" int);
+               create table test.child () inherits (test.parent)"#,
+        )
+        .await
+        .unwrap();
+
+    let mut publications = Vec::new();
+    for via_root in [false, true] {
+        // PostgreSQL forbids column lists on partitioned tables unless they
+        // supply the published root identity.
+        let root_columns = if via_root { " (id)" } else { "" };
+        let branch_columns = if via_root { r#" ("odd "" column")"# } else { "" };
+        for (case, targets) in [
+            ("root", format!("table copy_roots.root{root_columns}, test.parent (id)")),
+            ("subtree", format!("table copy_branches.branch{branch_columns}")),
+            ("leaf", r#"table copy_leaves.leaf ("odd "" column")"#.to_owned()),
+            (
+                "overlap",
+                format!(
+                    r#"table copy_roots.root{root_columns}, copy_leaves.leaf ("odd "" column")"#
+                ),
+            ),
+            ("all", "all tables".to_owned()),
+            ("root_schema", "tables in schema copy_roots".to_owned()),
+            ("leaf_schema", "tables in schema copy_leaves".to_owned()),
+            (
+                "mixed_schema",
+                "table copy_leaves.leaf, test.parent, tables in schema copy_roots".to_owned(),
+            ),
+        ] {
+            let publication = format!("copy_{case}_{via_root}");
+            client
+                .batch_execute(&format!(
+                    "create publication {} for {targets}
+                     with (publish_via_partition_root = {via_root})",
+                    quote_identifier(&publication),
+                ))
+                .await
+                .unwrap();
+            publications.push(publication);
+        }
+    }
+
+    let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("publication_rules");
+    for relation in
+        ["copy_roots.root", "copy_branches.branch", "copy_leaves.leaf", "test.parent", "test.child"]
+    {
+        let table_id: TableId =
+            client.query_one("select $1::text::regclass::oid", &[&relation]).await.unwrap().get(0);
+        let (transaction, _) =
+            parent.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+        let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
+        for publication in &publications {
+            // Use the server's view as an independent oracle while this
+            // fixture's catalogs are stable.
+            let expected = client
+                .query_opt(
+                    "select pt.attnames::text[] from pg_publication_tables pt
+                     join pg_namespace n on n.nspname = pt.schemaname
+                     join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
+                     where pt.pubname = $1 and c.oid = $2",
+                    &[publication, &table_id],
+                )
+                .await
+                .unwrap();
+            let actual =
+                transaction.get_replicated_column_names(table_id, &schema, publication).await;
+            if let Some(expected) = expected {
+                let columns = expected.get::<_, Vec<String>>(0).into_iter().collect();
+                assert_eq!(actual.unwrap(), columns, "{publication}: {relation}");
+            } else {
+                assert_eq!(
+                    actual.unwrap_err().kind(),
+                    ErrorKind::ConfigError,
+                    "{publication}: {relation}"
+                );
+            }
+        }
+
+        transaction.commit().await.unwrap();
+        parent.delete_slot_if_exists(&slot_name).await.unwrap();
+    }
 }
 
 /// Later attachments cannot add unprotected physical sources to the plan.
@@ -619,7 +759,8 @@ async fn copy_worker_rejects_queued_root_ddl() {
         drop(transaction);
     };
     let (ddl, ()) = tokio::join!(
-        ddl_client.batch_execute("alter table test.root add column extra int"),
+        ddl_client
+            .batch_execute("set lock_timeout = '10s'; alter table test.root add column extra int"),
         fail_copy
     );
     ddl.unwrap();

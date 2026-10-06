@@ -511,6 +511,9 @@ impl<'a> PgReplicationTransactionCore<'a> {
     /// behind an exclusive locker here would create an application-level
     /// deadlock that PostgreSQL cannot detect. Locks remain held by the worker
     /// transaction across all of its CTID ranges.
+    /// Already-locked relations are reused by the caller, so this check does
+    /// not detect DDL queued after the worker acquired its lock.
+    ///
     /// Conflicts return [`ErrorKind::SourceTableCopyLockConflict`], requiring
     /// the entire copy attempt to restart.
     async fn lock_copy_relation(&self, table_id: TableId) -> EtlResult<()> {

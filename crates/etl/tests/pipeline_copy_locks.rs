@@ -39,6 +39,8 @@ fn integer_pair(row: &TableRow) -> (i32, i32) {
 async fn copy_converges_with_concurrent_writers() {
     let database = spawn_source_database().await;
     let client = database.client.as_ref().unwrap();
+    // Leave unclaimed CTID ranges after all four workers start, including on
+    // PostgreSQL builds with 32 KiB heap blocks.
     client
         .batch_execute(
             "create table test.copied (id integer primary key, value integer not null);
@@ -70,9 +72,9 @@ async fn copy_converges_with_concurrent_writers() {
     let copied = store.notify_on_table_sync_complete(table_id).await;
     let changes = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Insert, table_id, 1000),
-            EventCondition::TableCount(EventType::Update, table_id, 1000),
-            EventCondition::TableCount(EventType::Delete, table_id, 1000),
+            EventCondition::TableCount(EventType::Insert, table_id, 100),
+            EventCondition::TableCount(EventType::Update, table_id, 100),
+            EventCondition::TableCount(EventType::Delete, table_id, 100),
         ])
         .await;
 
@@ -82,25 +84,26 @@ async fn copy_converges_with_concurrent_writers() {
         hold.wait_reached().await;
     }
 
-    // Each writer owns disjoint keys. The four copy workers are paused at
-    // their first batch, with unread CTID ranges still in the shared plan.
+    // Spread each writer's disjoint keys across the table so writes also hit
+    // unclaimed CTID ranges while all four workers pause at their first batch.
     let connection_config = &database.config;
     let writers = (0..4).map(|writer| async move {
         let (writer_client, _) = connect_to_pg_database(connection_config).await;
-        for batch in 0..10 {
-            let start = (writer * 10 + batch) * 50 + 1;
-            writer_client
-                .batch_execute(&format!(
-                    "begin;
-                     update test.copied set value = -id where id between {start} and {start} + 24;
-                     delete from test.copied where id between {start} + 25 and {start} + 49;
-                     insert into test.copied
-                         select id + 10000, -id from generate_series({start}, {start} + 24) id;
-                     commit"
-                ))
-                .await
-                .unwrap();
-        }
+        let start = writer * 50 + 1;
+        writer_client
+            .batch_execute(&format!(
+                "begin;
+                 update test.copied set value = -id
+                     where id in (select {start} + n * 400 from generate_series(0, 24) n);
+                 delete from test.copied
+                     where id in (select {start} + 25 + n * 400 from generate_series(0, 24) n);
+                 insert into test.copied
+                     select {start} + n * 400 + 10000, -({start} + n * 400)
+                     from generate_series(0, 24) n;
+                 commit"
+            ))
+            .await
+            .unwrap();
     });
     // Copy remains paused until the writers commit. An incompatible copy lock
     // would deadlock this fixture, so bound the liveness assertion.
@@ -215,7 +218,8 @@ async fn copy_retries_queued_partition_ddl() {
     };
     let (ddl, ()) = tokio::join!(
         ddl_client.batch_execute(
-            "begin; truncate test.later; insert into test.later values (2001, -1); commit"
+            "set lock_timeout = '10s';
+             begin; truncate test.later; insert into test.later values (2001, -1); commit"
         ),
         resume_copy,
     );

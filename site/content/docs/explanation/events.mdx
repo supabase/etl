@@ -304,10 +304,10 @@ the tuple payloads exactly, even when a publication filters columns.
 This requires the stored snapshot and relation metadata to describe the same
 schema state. A missing column can mean intentional publication filtering or
 an inconsistent snapshot; the mask alone cannot distinguish them. Schema-change
-handling remains in beta, with [known capture and relation-metadata limitations](/explanation/schema-changes/#current-limitations).
+handling remains in beta, with [capture and relation-metadata cautions](/explanation/schema-changes/#current-limitations).
 
 For DDL behavior, including add/drop/rename semantics, default and nullability
-handling, and current limitations, see
+handling, and operating cautions, see
 [Schema Changes](/explanation/schema-changes/).
 
 ## Begin/Commit Behavior

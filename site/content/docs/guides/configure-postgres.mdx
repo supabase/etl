@@ -160,7 +160,9 @@ values together to estimate physical disk usage.
 <Callout className="etl-callout" type="warn" title="Warning">
   `max_slot_wal_keep_size` limits slot-based WAL retention at checkpoint time.
   If required WAL is removed, the slot becomes unusable and replication needs
-  recovery. This is not a hard cap on total WAL directory size:
+  recovery. Checkpoint timing, archiving, and other WAL retention requirements
+  can keep disk usage above this setting. Monitor free disk space separately
+  from slot lag.
 </Callout>
 
 ```ini title="postgresql.conf"
@@ -169,11 +171,24 @@ values together to estimate physical disk usage.
 max_slot_wal_keep_size = 10GB
 ```
 
+Increasing the setting cannot restore WAL that has already been removed.
+A lost table-sync slot requires resetting the affected table's state and
+restarting its initial sync. Invalidation detected during copying produces a
+manually retryable table error; restarting the pipeline alone does not reset
+that error. A new copy replaces the partial destination table and uses a fresh
+snapshot and slot, so it needs enough retention to complete again.
+
 If the main replication slot is invalidated, ETL fails pipeline startup by
 default and requires operator intervention. Set `invalidated_slot_behavior` to
 `recreate` to have ETL delete and recreate the slot, reset table states, and
 resynchronize eligible tables from scratch. Automatic recreation can repeat a
 large initial copy, so choose it deliberately and monitor destination capacity.
+
+Slots persist across disconnections and pipeline stops. Stopping ETL releases
+copy transactions and their locks after teardown, but does not release the WAL
+needed by retained slots. Continue monitoring storage and slot status during
+maintenance. Table-sync slots are persistent PostgreSQL slots, even though ETL
+removes them after successful synchronization.
 
 ### Planning Long Initial Copies
 
@@ -204,7 +219,8 @@ DDL conflicts. See [Read replicas](#read-replicas) and PostgreSQL's
 Vacuum can make reclaimed space reusable after the snapshot ends without
 necessarily shrinking the physical table file. Snapshot age also matters for transaction
 ID wraparound prevention; monitor `age(backend_xmin)` in `pg_stat_activity`
-and the ages of slot `xmin` and `catalog_xmin`, as well as disk usage. See
+and the ages of slot `xmin` and `catalog_xmin`, as well as disk usage.
+`max_slot_wal_keep_size` does not bound old-row retention or table bloat. See
 PostgreSQL's [vacuum guidance](https://www.postgresql.org/docs/current/routine-vacuuming.html)
 and [concurrent index behavior](https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-CONCURRENTLY).
 
@@ -229,6 +245,8 @@ reduce immediate load while extending snapshot and WAL retention. Slow
 destination writes also prolong the source copy's locks and snapshot. Plan
 storage and an operator response for stalled copies; neither a larger WAL
 budget nor faster WAL consumption removes the old snapshot's vacuum effects.
+Monitor each active copy as well as the apply slot: advancing the apply slot
+does not release another connection's copy locks, snapshot, or table-sync WAL.
 See [Initial-copy schema protection](/explanation/schema-changes/#initial-copy-schema-protection)
 for partition scope, retry behavior, and the DDL changes these locks do not
 protect.
@@ -266,7 +284,8 @@ available:
   and `wal_status`.
 - Interpret `safe_wal_size` together with `wal_status` and
   `max_slot_wal_keep_size`: `NULL` can mean a lost slot or unlimited retention,
-  while `0` means no remaining headroom. See
+  while a nonpositive value means no remaining headroom. This is WAL headroom,
+  not free disk space or a guaranteed time window. See
   [PostgreSQL's slot monitoring reference](https://www.postgresql.org/docs/18/view-pg-replication-slots.html).
 - Resolve errored tables promptly and size `max_table_sync_workers` to balance
   copy speed with resource use.

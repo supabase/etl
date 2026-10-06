@@ -97,8 +97,8 @@ Destinations observe the resulting logical schema through an ordered
 
 Initial-copy locks protect table layout while copying; they do not resolve
 the known catalog-helper visibility, concurrent-DDL snapshot, or relation-mask
-ambiguity limitations of schema-change capture and replay. See
-[Schema Changes](/explanation/schema-changes/) for the design, beta limitations,
+ambiguity risks in schema-change capture and replay. See
+[Schema Changes](/explanation/schema-changes/) for the design, capture behavior,
 and operating guidance.
 
 ## Core Components

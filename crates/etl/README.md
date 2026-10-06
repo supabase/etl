@@ -46,12 +46,22 @@ wait and delay later queries. Ordinary vacuum can run, but the snapshot may
 prevent cleanup. On a standby, locks affect local WAL replay and can lead to
 recovery-conflict cancellation; they do not lock tables on the primary.
 
+The 30-second copy lock timeout bounds individual lock acquisitions, not lock
+lifetime or how long migration sessions wait. ETL does not automatically stop a
+copy to release queued application traffic. Long copies and slow destinations
+extend snapshot and WAL retention; resuming an interrupted copy requires a fresh
+snapshot. `max_slot_wal_keep_size` bounds slot retention at checkpoints, not
+snapshot-related bloat or total disk usage. Losing a table-sync slot during
+copy requires a table reset and fresh initial sync. Retained slots continue
+holding WAL while the pipeline is stopped. See [Planning long initial copies](../../site/content/docs/guides/configure-postgres.mdx#planning-long-initial-copies)
+for migration scheduling, storage, and monitoring guidance.
+
 Schema-change handling is in **public beta**. The trigger captures an
 unprojected schema; each pipeline combines it with its replication mask.
 This also turns publication column-list changes into logical schema changes.
 Copy locks do not fix catalog-helper visibility, stale concurrent-DDL snapshots,
 or relation-mask ambiguity. See [Schema Changes](../../site/content/docs/explanation/schema-changes.mdx)
-for guarantees, retries, and limitations, and the [source migration notes](migrations/README.md#schema-capture-contract-and-limitations)
+for guarantees, retries, and operating cautions, and the [source migration notes](migrations/README.md#schema-capture-contract-and-limitations)
 for the trigger boundary.
 
 ### Key Components
