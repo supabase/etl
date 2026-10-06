@@ -224,9 +224,16 @@ state:
        modify column delivery_windows Array(Nullable(DateTime64(6, 'UTC')));
    ```
 
-3. For `ReplacingMergeTree`, recreate the `__current` view so it reports the
-   new type: run `show create table default.public_orders__current` and
-   re-run its statement as `create or replace view`.
+3. For `ReplacingMergeTree`, recreate the `__current` view, which keeps the
+   column types it was created with. `show create table` includes that column
+   list, so rebuild the view from its query alone:
+
+   ```sql
+   select as_select from system.tables
+   where database = 'default' and name = 'public_orders__current';
+   -- Run the returned query as:
+   create or replace view default.public_orders__current as <as_select>;
+   ```
 4. Restart the pipeline.
 
 ## Connection notes
