@@ -26,6 +26,8 @@ pub(super) const ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS: &str =
     "etl_snowflake_streaming_durability_wait_seconds";
 pub(super) const ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL: &str =
     "etl_snowflake_streaming_durability_wait_failures_total";
+pub(super) const ETL_SNOWFLAKE_ROW_FRAMES_TOTAL: &str = "etl_snowflake_row_frames_total";
+pub(super) const ROW_FRAME_OUTCOME_LABEL: &str = "outcome";
 
 pub(super) fn register_metrics() {
     REGISTER_METRICS.call_once(|| {
@@ -107,6 +109,13 @@ pub(super) fn register_metrics() {
             ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL,
             Unit::Count,
             "Total Snowflake streaming durability wait failures"
+        );
+
+        describe_counter!(
+            ETL_SNOWFLAKE_ROW_FRAMES_TOTAL,
+            Unit::Count,
+            "Total rows compressed into their own request frame, labeled by outcome: fit or \
+             rejected."
         );
     });
 }
