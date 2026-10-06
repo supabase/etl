@@ -594,31 +594,29 @@ impl<C: StreamClient> ChannelHandle<C> {
         self.refresh_status(deadline).await.map(|status| status.offset_token)
     }
 
-    /// Accepts table-copy batches into a bounded deferred-durability window.
+    /// Accepts one table-copy batch into a bounded deferred-durability window.
     ///
-    /// Each encoded batch retains its zero CDC sequence and receives the next
+    /// The encoded batch retains its zero CDC sequence and receives the next
     /// attempt-local `0/N` request offset. Before a batch would exceed the
     /// pending batch-count or byte limit, this method waits for the current
     /// cumulative target to become durable.
-    pub async fn accept_table_copy_batches(&mut self, batches: Vec<RowBatch>) -> Result<()> {
-        for batch in batches {
-            if self
-                .copy_durability_target
-                .as_ref()
-                .is_some_and(|target| target.would_exceed_limits(batch.size()))
-            {
-                self.wait_for_pending_copy_durability().await?;
-            }
+    pub async fn accept_table_copy_batch(&mut self, batch: RowBatch) -> Result<()> {
+        if self
+            .copy_durability_target
+            .as_ref()
+            .is_some_and(|target| target.would_exceed_limits(batch.size()))
+        {
+            self.wait_for_pending_copy_durability().await?;
+        }
 
-            let offset = self.reserve_copy_offset()?;
-            let batch = batch.with_request_offset(offset);
+        let offset = self.reserve_copy_offset()?;
+        let batch = batch.with_request_offset(offset);
 
-            if let Some(accepted) = self.accept_batch(&batch).await?.into_pending_batch() {
-                match &mut self.copy_durability_target {
-                    Some(target) => target.record(accepted)?,
-                    None => {
-                        self.copy_durability_target = Some(PendingDurabilityTarget::new(accepted));
-                    }
+        if let Some(accepted) = self.accept_batch(&batch).await?.into_pending_batch() {
+            match &mut self.copy_durability_target {
+                Some(target) => target.record(accepted)?,
+                None => {
+                    self.copy_durability_target = Some(PendingDurabilityTarget::new(accepted));
                 }
             }
         }
@@ -653,15 +651,15 @@ impl<C: StreamClient> ChannelHandle<C> {
         Ok(())
     }
 
-    /// Accepts streaming batches when no copy durability barrier is pending.
+    /// Accepts one streaming batch when no copy durability barrier is pending.
     ///
-    /// Returns metadata for newly accepted batches that are not yet durable;
-    /// already committed batches are omitted. Starting streaming retires the
-    /// completed copy offset sequence.
-    pub async fn accept_streaming_batches(
+    /// Returns metadata for a newly accepted batch that is not yet durable;
+    /// an already committed batch yields `None`. Starting streaming retires
+    /// the completed copy offset sequence.
+    pub async fn accept_streaming_batch(
         &mut self,
-        batches: Vec<RowBatch>,
-    ) -> Result<Vec<AcceptedRowBatch>> {
+        batch: &RowBatch,
+    ) -> Result<Option<AcceptedRowBatch>> {
         if self.copy_barrier_pending || self.copy_durability_target.is_some() {
             return Err(Error::Channel(
                 "Snowflake streaming cannot start before the table-copy durability barrier.".into(),
@@ -669,14 +667,7 @@ impl<C: StreamClient> ChannelHandle<C> {
         }
         self.copy_offset_ordinal = None;
 
-        let mut accepted = Vec::new();
-        for batch in &batches {
-            if let Some(batch) = self.accept_batch(batch).await?.into_pending_batch() {
-                accepted.push(batch);
-            }
-        }
-
-        Ok(accepted)
+        Ok(self.accept_batch(batch).await?.into_pending_batch())
     }
 
     /// Reserves the next attempt-local `0/N` copy offset and marks the terminal
@@ -934,7 +925,7 @@ mod tests {
 
     use etl::{
         data::{Cell, TableRow},
-        schema::{ColumnSchema, Type},
+        schema::{ColumnSchema, TableId, Type},
     };
 
     use super::*;
@@ -1104,10 +1095,10 @@ mod tests {
     }
 
     /// Creates one encoded row batch at `offset`.
-    fn one_row_batches(offset: &OffsetToken) -> Vec<RowBatch> {
+    fn one_row_batch(offset: &OffsetToken) -> RowBatch {
         let columns = [ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)];
-        let mut builder = RowBatchBuilder::new();
-        builder
+        let mut builder = RowBatchBuilder::new(TableId::new(1));
+        let completed = builder
             .push_row(
                 &columns,
                 &TableRow::new(vec![Cell::I32(1)]),
@@ -1115,7 +1106,8 @@ mod tests {
                 offset,
             )
             .unwrap();
-        builder.finish().unwrap()
+        assert!(completed.is_empty());
+        builder.finish().unwrap().into_iter().next().unwrap()
     }
 
     /// Creates a channel backed by `client`.
@@ -1196,10 +1188,10 @@ mod tests {
         let mut channel = test_channel(Arc::clone(&client));
         channel.open().await.unwrap();
 
-        let accepted = channel.accept_streaming_batches(one_row_batches(&offset)).await.unwrap();
+        let accepted =
+            channel.accept_streaming_batch(&one_row_batch(&offset)).await.unwrap().unwrap();
 
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].baseline_rows_inserted, 7);
+        assert_eq!(accepted.baseline_rows_inserted, 7);
         client.assert_finished();
     }
 
@@ -1222,7 +1214,7 @@ mod tests {
         channel.open().await.unwrap();
 
         let error = channel
-            .accept_streaming_batches(one_row_batches(&offset))
+            .accept_streaming_batch(&one_row_batch(&offset))
             .await
             .expect_err("recovery exhaustion should not accept the batch");
 
@@ -1269,13 +1261,13 @@ mod tests {
         let mut channel = test_channel(Arc::clone(&client));
         channel.open().await.unwrap();
 
-        let accepted = channel.accept_streaming_batches(one_row_batches(&offset)).await.unwrap();
+        let accepted =
+            channel.accept_streaming_batch(&one_row_batch(&offset)).await.unwrap().unwrap();
 
-        assert_eq!(accepted.len(), 1);
-        assert_eq!(accepted[0].target_offset, offset);
-        assert_eq!(accepted[0].baseline_rows_inserted, 0);
-        assert_eq!(accepted[0].rows, 1);
-        let target = PendingDurabilityTarget::new(accepted[0].clone());
+        assert_eq!(accepted.target_offset, offset);
+        assert_eq!(accepted.baseline_rows_inserted, 0);
+        assert_eq!(accepted.rows, 1);
+        let target = PendingDurabilityTarget::new(accepted.clone());
         assert!(
             !channel
                 .check_durability(&target, Instant::now() + Duration::from_secs(1))

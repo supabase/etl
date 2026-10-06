@@ -727,13 +727,9 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         channel.open().await.map(|_| ())
     }
 
-    /// Send table-copy row batches and retain their pending durability target.
-    pub async fn send_table_copy_batches(
-        &self,
-        table_id: TableId,
-        batches: Vec<RowBatch>,
-    ) -> Result<()> {
-        self.get_channel(table_id).await?.lock().await.accept_table_copy_batches(batches).await
+    /// Sends one table-copy request and retains its pending durability target.
+    pub async fn send_table_copy_batch(&self, table_id: TableId, batch: RowBatch) -> Result<()> {
+        self.get_channel(table_id).await?.lock().await.accept_table_copy_batch(batch).await
     }
 
     /// Wait until all accepted table-copy rows for one table are durable.
@@ -741,25 +737,19 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.get_channel(table_id).await?.lock().await.wait_for_table_copy_durability().await
     }
 
-    /// Send streaming row batches and record accepted-but-not-durable targets.
-    pub async fn send_streaming_batches(
-        &self,
-        table_id: TableId,
-        batches: Vec<RowBatch>,
-    ) -> Result<()> {
+    /// Sends one streaming request and records its accepted-but-not-durable
+    /// target.
+    pub async fn send_streaming_batch(&self, table_id: TableId, batch: RowBatch) -> Result<()> {
         let channel = self.get_channel(table_id).await?;
-        for batch in batches {
-            if self.pending_durability.lock().await.would_exceed_limits(batch.size()) {
-                self.wait_for_pending_durability().await?;
-            }
+        if self.pending_durability.lock().await.would_exceed_limits(batch.size()) {
+            self.wait_for_pending_durability().await?;
+        }
 
-            let mut channel = channel.lock().await;
-            let accepted = channel.accept_streaming_batches(vec![batch]).await?;
-            for accepted_batch in accepted {
-                let mut pending = self.pending_durability.lock().await;
-                pending.record(table_id, accepted_batch)?;
-                pending.observe_metrics();
-            }
+        let mut channel = channel.lock().await;
+        if let Some(accepted) = channel.accept_streaming_batch(&batch).await? {
+            let mut pending = self.pending_durability.lock().await;
+            pending.record(table_id, accepted)?;
+            pending.observe_metrics();
         }
 
         Ok(())
