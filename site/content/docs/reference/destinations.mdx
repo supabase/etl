@@ -231,11 +231,19 @@ destination. Drop the conflicting object or use another database.
 - A replicated `TRUNCATE` clears the destination table in either engine,
   including `MergeTree` event history.
 - A source type change that changes the mapped ClickHouse type, such as
-  `integer` to `bigint` or `timestamp` to `timestamptz`, fails the schema change
-  before ETL alters anything. Replication stops until you resynchronize the
-  table. Changes that keep the ClickHouse type, such as a longer `varchar`,
-  continue without DDL. Every insert names its columns and types, so ClickHouse
-  also rejects writes to a column whose type changed outside ETL.
+  `integer` to `bigint`, fails the schema change before ETL alters anything, as
+  does `timestamp` to `timestamptz`, which shares a ClickHouse type but
+  converts existing values through the session time zone. Replication stops
+  until you resynchronize the table. Changes that keep the ClickHouse type,
+  such as a longer `varchar`, continue without DDL. Every insert names its
+  columns and types, so ClickHouse also rejects writes to a column whose type
+  changed outside ETL.
+- PostgreSQL `timestamp` and `timestamptz` columns, and their arrays, map to
+  `DateTime64(6, 'UTC')`. A `timestamp` value reads back as its source
+  wall-clock value in any server or session time zone. Tables created by
+  earlier ETL versions use `DateTime64(6)` for `timestamp` and fail with a
+  column type mismatch; follow the upgrade steps in the ClickHouse destination
+  guide.
 - ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
   array cannot be encoded in RowBinary and fails the write; empty arrays and
   `NULL` array elements remain supported.

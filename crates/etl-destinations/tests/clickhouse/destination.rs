@@ -1621,7 +1621,8 @@ async fn type_changes_that_change_the_clickhouse_type_fail_before_applying_inner
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
     let timestamp = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_hms_opt(12, 0, 0).unwrap();
-    // Same byte width, a wider type, and the same bytes with another meaning.
+    // Same byte width, a wider type, and a time zone change that keeps the
+    // ClickHouse type but not the meaning of existing rows.
     let cases = [
         (4301, "amountfloat", Type::INT8, Cell::I64(12), Type::FLOAT8, Cell::F64(12.5)),
         (4302, "amountwide", Type::INT4, Cell::I32(12), Type::INT8, Cell::I64(12)),
@@ -1767,6 +1768,49 @@ async fn type_changes_that_keep_the_clickhouse_type_continue_replicating() {
     );
     let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert_eq!(metadata.snapshot_id(), test_snapshot_id(400, 400));
+}
+
+/// A `timestamp` column matches its source wall-clock value as a filter
+/// literal whatever the reader's session time zone.
+#[tokio::test(flavor = "multi_thread")]
+async fn timestamp_filters_match_source_values_in_any_session_time_zone() {
+    // GIVEN: one copied `timestamp` row with source value 2024-01-01 12:00:00.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_amount_schema(
+        &store,
+        TableId::new(4308),
+        "amountwall",
+        test_snapshot_id(100, 100),
+        Type::TIMESTAMP,
+        -1,
+    )
+    .await;
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let timestamp = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_hms_opt(12, 0, 0).unwrap();
+    destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::Timestamp(Timestamp::Value(timestamp))])],
+        )
+        .await
+        .unwrap();
+
+    // WHEN: a reader whose session time zone is not UTC queries the row.
+    // Drivers and BI tools set the time zone per session.
+    let matching = database
+        .db_client()
+        .query("select count() from public_amountwall where amount = '2024-01-01 12:00:00'")
+        .with_option("session_timezone", "America/New_York")
+        .fetch_all::<u64>()
+        .await
+        .unwrap();
+
+    // THEN: the source literal matches the row.
+    assert_eq!(matching, vec![1]);
 }
 
 /// A ClickHouse column whose type no longer matches ETL's schema fails writes
