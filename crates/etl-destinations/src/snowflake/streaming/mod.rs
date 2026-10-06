@@ -6,7 +6,9 @@ mod rest_client;
 
 use std::future::Future;
 
-pub use batch::{RowBatch, RowBatchBuilder};
+#[cfg(feature = "test-utils")]
+pub use batch::BuilderFootprint;
+pub use batch::{Completed, RowBatch, RowBatchBuilder};
 pub(crate) use channel::{
     AcceptedRowBatch, ChannelHandle, DEFAULT_COMMIT_POLL_INTERVAL, DEFAULT_COMMIT_WAIT_TIMEOUT,
     PendingDurabilityTarget,
