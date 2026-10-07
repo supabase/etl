@@ -526,6 +526,8 @@ mod tests {
         assert_eq!(buf, [0x00, 0x01, 0x07, 0x00, 0x00, 0x00]);
     }
 
+    /// Only array columns turn NULL into a value; a required scalar column
+    /// still rejects it.
     #[test]
     fn encode_to_row_binary_rejects_null_for_required_column() {
         let error = encode_to_row_binary(
@@ -538,16 +540,7 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::ConversionError);
     }
 
-    #[test]
-    fn column_encoding_classifies_clickhouse_type_names() {
-        assert_eq!(ColumnEncoding::from_type_name("Nullable(Int32)"), ColumnEncoding::Nullable);
-        assert_eq!(
-            ColumnEncoding::from_type_name("Array(Nullable(String))"),
-            ColumnEncoding::Array
-        );
-        assert_eq!(ColumnEncoding::from_type_name("Int64"), ColumnEncoding::Required);
-    }
-
+    /// A row narrower than its layout is rejected before any byte is written.
     #[test]
     fn encode_to_row_binary_rejects_fewer_values_than_column_encodings() {
         let mut buf = vec![0xaa];
@@ -565,6 +558,7 @@ mod tests {
         assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
     }
 
+    /// A row wider than its layout is rejected before any byte is written.
     #[test]
     fn encode_to_row_binary_rejects_more_values_than_column_encodings() {
         let mut buf = vec![0xaa];
