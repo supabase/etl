@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::clickhouse::{
     core::{ClickHouseClientConfig, ClickHouseOperationKind},
-    encoding::{ClickHouseValue, encode_to_row_binary, rb_varint},
+    encoding::{ClickHouseValue, ColumnEncoding, encode_to_row_binary, rb_varint},
     metrics::{
         ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
         ETL_CLICKHOUSE_DDL_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_BYTES,
@@ -195,8 +195,8 @@ pub(crate) struct RowBinaryLayout {
     column_list: String,
     /// Encoded header: column count, column names, then column types.
     header: Vec<u8>,
-    /// Per-column `Nullable(T)` markers, including the trailing CDC columns.
-    nullable_flags: Box<[bool]>,
+    /// Per-column RowBinary encodings, including the trailing CDC columns.
+    column_encodings: Box<[ColumnEncoding]>,
 }
 
 impl RowBinaryLayout {
@@ -218,17 +218,17 @@ impl RowBinaryLayout {
         Self {
             column_list: column_list.join(", "),
             header,
-            nullable_flags: columns
+            column_encodings: columns
                 .iter()
-                .map(|column| column.type_name.starts_with("Nullable("))
+                .map(|column| ColumnEncoding::from_type_name(&column.type_name))
                 .collect(),
         }
     }
 
-    /// Returns the per-column `Nullable(T)` markers.
+    /// Returns the per-column RowBinary encodings.
     #[cfg(test)]
-    pub(crate) fn nullable_flags(&self) -> &[bool] {
-        &self.nullable_flags
+    pub(crate) fn column_encodings(&self) -> &[ColumnEncoding] {
+        &self.column_encodings
     }
 }
 
@@ -744,7 +744,7 @@ impl ClickHouseClient {
             while bytes < max_bytes_per_insert {
                 let Some(row) = rows.next() else { break };
                 row_buf.clear();
-                encode_to_row_binary(row, &layout.nullable_flags, &mut row_buf).inspect_err(
+                encode_to_row_binary(row, &layout.column_encodings, &mut row_buf).inspect_err(
                     |_| {
                         metrics::counter!(
                             ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
@@ -1005,7 +1005,8 @@ mod tests {
         // WHEN: the layout is built.
         let layout = RowBinaryLayout::new(&columns);
 
-        // THEN: the SQL, header bytes, and null markers follow column order.
+        // THEN: the SQL, header bytes, and column encodings follow column
+        // order.
         assert_eq!(
             build_insert_rows_sql("table\"name", &layout),
             "INSERT INTO \"table\\\"name\" (\"id\", \"na\\\"me\") FORMAT \
@@ -1016,7 +1017,7 @@ mod tests {
             [&[2, 2][..], b"id", &[5], b"na\"me", &[5], b"Int64", &[16], b"Nullable(String)",]
                 .concat()
         );
-        assert_eq!(layout.nullable_flags(), [false, true]);
+        assert_eq!(layout.column_encodings(), [ColumnEncoding::Required, ColumnEncoding::Nullable]);
     }
 
     /// The client timeout is the server timeout plus the configured epsilon.

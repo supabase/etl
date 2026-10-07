@@ -38,6 +38,11 @@ pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 /// Names are ClickHouse's canonical spellings (`Bool`, not the `Boolean`
 /// alias), because `system.columns` reports them and the
 /// `RowBinaryWithNamesAndTypes` header check compares them literally.
+///
+/// `timestamp` and `timestamptz` both map to `DateTime64(6, 'UTC')`. ETL
+/// encodes a `timestamp` wall-clock value as if it were UTC, and a column
+/// without a timezone would render it in the reader's server or session
+/// timezone instead.
 fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
     match *typ {
         Type::BOOL => "Bool",
@@ -47,7 +52,7 @@ fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
         Type::FLOAT4 => "Float32",
         Type::FLOAT8 => "Float64",
         Type::DATE => "Date32",
-        Type::TIMESTAMP => "DateTime64(6)",
+        Type::TIMESTAMP => "DateTime64(6, 'UTC')",
         Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
         Type::UUID => "UUID",
         Type::OID => "UInt32",
@@ -65,7 +70,7 @@ fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
         Type::FLOAT4_ARRAY => "Float32",
         Type::FLOAT8_ARRAY => "Float64",
         Type::DATE_ARRAY => "Date32",
-        Type::TIMESTAMP_ARRAY => "DateTime64(6)",
+        Type::TIMESTAMP_ARRAY => "DateTime64(6, 'UTC')",
         Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
         Type::UUID_ARRAY => "UUID",
         Type::OID_ARRAY => "UInt32",
@@ -438,7 +443,10 @@ mod tests {
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIME), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMETZ), "String");
-        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP), "DateTime64(6)");
+        assert_eq!(
+            postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP),
+            "DateTime64(6, 'UTC')"
+        );
         assert_eq!(
             postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMPTZ),
             "DateTime64(6, 'UTC')"
