@@ -17,10 +17,11 @@
 //! failure replay knob.
 //!
 //! The generated envelope mirrors what the Postgres codec can produce (no NUL
-//! bytes in text, microsecond temporal precision) and stays inside the ranges
-//! the destination accepts, e.g. ClickHouse `Date32`'s
-//! `1900-01-01..=2299-12-31`. Out-of-range values are covered separately by the
-//! loud-rejection property.
+//! bytes in text, microsecond temporal precision) and stays inside ClickHouse
+//! `Date32`'s `1900-01-01..=2299-12-31` range. ClickHouse stores values outside
+//! that range exactly but reads them back clamped, so a roundtrip by display
+//! value cannot pass there. `out_of_range_timestamps_are_rejected_or_roundtrip`
+//! checks only that the raw stored ticks stay exact.
 
 use std::{
     sync::{
@@ -724,14 +725,14 @@ struct TimestampRejectRow {
     vtstz: Option<i64>,
 }
 
-/// Out-of-range writes must never silently change values: either the write
-/// fails loudly or the stored value reads back equal to what was written.
+/// Out-of-range writes must never silently change stored values: either the
+/// write fails loudly or the stored value reads back equal to what was written.
 ///
-/// Unlike dates, timestamps outside `DateTime64(6)`'s documented `1900..=2299`
-/// range have no local range check. Empirically ClickHouse accepts the raw
-/// microsecond ticks and reads them back bit-exact, so the values survive
-/// storage unchanged; this property pins that behavior and fails if either side
-/// ever starts mutating such values silently.
+/// ETL has no range check for dates or timestamps. ClickHouse accepts the raw
+/// ticks outside `DateTime64(6)`'s documented `1900..=2299` range and stores
+/// them bit-exact, but displays them clamped to the range limits. This property
+/// compares raw ticks, so it pins the stored value and does not see the
+/// clamped display.
 #[tokio::test(flavor = "multi_thread")]
 async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     let table = PropertyTable::create(
