@@ -629,6 +629,37 @@ mod tests {
         assert!(builder.finish().unwrap().is_empty());
     }
 
+    /// A rejected JSON array changes neither buffered rows nor their offsets,
+    /// on both the small-row and independent-frame paths.
+    #[test]
+    fn sql_null_json_array_element_does_not_advance_request() {
+        for padding in [0, SMALL_ROW_LIMIT * 2] {
+            let mut builder = builder();
+            assert!(push(&mut builder, 1, "accepted".to_owned()).unwrap().is_empty());
+            let columns = [
+                ColumnSchema::new("padding".to_owned(), Type::TEXT, -1, 1, true),
+                ColumnSchema::new("payload".to_owned(), Type::JSONB_ARRAY, -1, 2, true),
+            ];
+            // The size hint counts text cells, but deliberately ignores JSON.
+            let row = TableRow::new(vec![
+                Cell::String("x".repeat(padding)),
+                Cell::Array(etl::data::ArrayCell::Json(vec![Some(Value::Null), None])),
+            ]);
+            let rejected_offset = offset(2);
+            let error = builder
+                .push_row(
+                    &columns,
+                    &row,
+                    CdcMeta::new(CdcOperation::Update, rejected_offset.as_ref()),
+                    &rejected_offset,
+                )
+                .unwrap_err();
+            assert!(matches!(error, Error::NullJsonArrayElement { element_index: 1, .. }));
+            let batches: Vec<_> = builder.finish().unwrap().into_iter().collect();
+            assert_rows_in_order(&batches, 1, REQUEST_LIMIT);
+        }
+    }
+
     #[test]
     fn footprint_stays_within_the_limits() {
         let mut builder = builder();
