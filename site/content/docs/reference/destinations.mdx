@@ -244,6 +244,12 @@ destination. Drop the conflicting object or use another database.
   earlier ETL versions use `DateTime64(6)` for `timestamp` and fail with a
   column type mismatch; follow the upgrade steps in the ClickHouse destination
   guide.
+- ClickHouse `Date32` and `DateTime64` columns support 1900-01-01 through
+  2299-12-31. ETL writes dates and timestamps outside that range exactly, and
+  ClickHouse stores them, but reads them back clamped to the nearest limit,
+  without an error. For example, `1800-06-15` reads back as `1900-01-01`.
+  Filters match neither the source value nor the clamped one. Keep replicated
+  dates and timestamps inside this range.
 - ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
   array cannot be encoded in RowBinary and fails the write; empty arrays and
   `NULL` array elements remain supported.
