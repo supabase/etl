@@ -693,15 +693,121 @@ async fn array_values_roundtrip_through_destination() {
     });
 }
 
+/// One `id` and `bigint[]` value read back from ClickHouse.
+#[derive(Debug, PartialEq, clickhouse::Row, serde::Deserialize)]
+struct ArrayRow {
+    /// Source primary key.
+    id: i64,
+    /// Stored array value.
+    values: Vec<Option<i64>>,
+}
+
+/// Builds an expected [`ArrayRow`].
+fn array_row(id: i64, values: Vec<Option<i64>>) -> ArrayRow {
+    ArrayRow { id, values }
+}
+
+/// A top-level `NULL` array is stored as an empty array on both the initial
+/// copy and the change stream, and `NULL` elements inside an array survive.
 #[tokio::test(flavor = "multi_thread")]
-async fn nullable_array_columns_fail_only_for_top_level_null_values() {
+async fn null_arrays_are_stored_as_empty_arrays_on_copy_and_streaming() {
+    // GIVEN: a table with a nullable `bigint[]` column.
     let table = PropertyTable::create("nullablearray", &[("values", Type::INT8_ARRAY, true)]).await;
 
+    // WHEN: the copy writes an empty array, a NULL array, and an array with a
+    // NULL element, and the change stream inserts another NULL array.
     table.write(vec![Cell::Array(ArrayCell::I64(vec![]))]).await.unwrap();
-    let error = table.write(vec![Cell::Null]).await.unwrap_err();
+    table.write(vec![Cell::Null]).await.unwrap();
+    table.write(vec![Cell::Array(ArrayCell::I64(vec![None, Some(1)]))]).await.unwrap();
+    table
+        .destination
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(500),
+            tx_ordinal: 1,
+            replicated_table_schema: table.replicated_table_schema.clone(),
+            table_row: TableRow::new(vec![Cell::I64(4), Cell::Null]),
+        })])
+        .await
+        .unwrap();
 
-    assert_eq!(error.kind(), ErrorKind::ConversionError);
-    assert_eq!(error.description(), Some("NULL value for non-nullable ClickHouse column"));
+    // THEN: both NULL arrays read back as empty arrays.
+    assert_eq!(
+        table
+            .database
+            .query::<ArrayRow>(&format!(
+                "select id, values from {} order by id",
+                table.clickhouse_table
+            ))
+            .await,
+        vec![
+            array_row(1, vec![]),
+            array_row(2, vec![]),
+            array_row(3, vec![None, Some(1)]),
+            array_row(4, vec![]),
+        ]
+    );
+}
+
+/// An array column that enters the publication is added without a resync.
+/// Rows stored before it read as empty arrays, and later rows keep their value.
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_added_array_columns_read_empty_for_existing_rows() {
+    // GIVEN: one copied row while the publication omits the `tags` column.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    // A publication column-list change stores a new snapshot of the same
+    // columns.
+    let mut snapshots = Vec::new();
+    for snapshot_id in [test_snapshot_id(100, 100), test_snapshot_id(200, 200)] {
+        snapshots.push(
+            store
+                .store_table_schema(TableSchema::with_snapshot_id(
+                    TableId::new(4309),
+                    TableName::new("public".to_owned(), "maskarray".to_owned()),
+                    vec![
+                        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                            .with_primary_key(1),
+                        ColumnSchema::new("tags".to_owned(), Type::INT8_ARRAY, -1, 2, true),
+                    ],
+                    snapshot_id,
+                ))
+                .await
+                .unwrap(),
+        );
+    }
+    let before = ReplicatedTableSchema::from_mask(
+        Arc::clone(&snapshots[0]),
+        ReplicationMask::from_bytes(vec![1, 0]),
+    );
+    let after = ReplicatedTableSchema::from_mask(
+        Arc::clone(&snapshots[1]),
+        ReplicationMask::from_bytes(vec![1, 1]),
+    );
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination.write_table_rows(&before, vec![TableRow::new(vec![Cell::I64(1)])]).await.unwrap();
+
+    // WHEN: the publication adds `tags` and the source inserts a row.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+            amount_insert(&after, 2, Cell::Array(ArrayCell::I64(vec![Some(7)]))),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: the old row reads an empty array and the new row its value.
+    assert_eq!(
+        database
+            .query::<ArrayRow>(
+                "select id, tags as values from public_maskarray__current order by id"
+            )
+            .await,
+        vec![array_row(1, vec![]), array_row(2, vec![Some(7)])]
+    );
 }
 
 /// Dates legal in Postgres but outside ClickHouse `Date32`'s

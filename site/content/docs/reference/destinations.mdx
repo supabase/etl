@@ -250,9 +250,10 @@ destination. Drop the conflicting object or use another database.
   without an error. For example, `1800-06-15` reads back as `1900-01-01`.
   Filters match neither the source value nor the clamped one. Keep replicated
   dates and timestamps inside this range.
-- ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
-  array cannot be encoded in RowBinary and fails the write; empty arrays and
-  `NULL` array elements remain supported.
+- ClickHouse `Array` columns are non-nullable. As with BigQuery, ETL stores a
+  top-level PostgreSQL `NULL` array as an empty array, so the two source
+  values are indistinguishable in the destination. `NULL` array elements are
+  preserved.
 - ETL sends any value RowBinary can encode; ClickHouse applies its own
   conversion and rejection rules.
 - You may add `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` columns to a table ETL
