@@ -2185,8 +2185,12 @@ mod tests {
             ("simple_table_0", "simple_table", 0),
             ("test_table_18446744073709551615", "test_table", u64::MAX),
             ("a__b_c__d_42", "a__b_c__d", 42),
-            ("_ETL1_ME_L5RA_0", "_ETL1_ME_L5RA", 0),
-            ("_ETL1_ME_L5RA_18446744073709551615", "_ETL1_ME_L5RA", u64::MAX),
+            ("_0102_a__b_0", "_0102_a__b", 0),
+            ("_0102_a__b_18446744073709551615", "_0102_a__b", u64::MAX),
+            ("_0201_a__b_0", "_0201_a__b", 0),
+            ("_0101_____42", "_0101____", 42),
+            ("_0104_a__b_0_7", "_0104_a__b_0", 7),
+            ("_0102_a_b__7", "_0102_a_b_", 7),
         ] {
             let parsed = input.parse::<SequencedBigQueryTableId>().unwrap();
             assert_eq!(parsed.to_bigquery_table_id(), base);

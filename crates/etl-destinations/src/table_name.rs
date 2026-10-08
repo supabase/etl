@@ -1,4 +1,3 @@
-use data_encoding::BASE32_NOPAD;
 use etl::{
     bail,
     error::{ErrorKind, EtlResult},
@@ -6,10 +5,8 @@ use etl::{
     schema::TableName,
 };
 
-/// Prefix for names that cannot use the legacy underscore encoding.
-///
-/// Legacy names never start with `_`, even after destination case folding.
-pub(crate) const ENCODED_TABLE_NAME_PREFIX: &str = "_ETL1_";
+/// Largest component length representable by two decimal digits.
+const MAX_LENGTH_PREFIX_COMPONENT_BYTES: usize = 99;
 
 /// Validates the source components supported by destination table naming.
 fn validate_table_name_component(value: &str, component_name: &str) -> EtlResult<()> {
@@ -36,17 +33,21 @@ fn validate_table_name_component(value: &str, component_name: &str) -> EtlResult
     Ok(())
 }
 
-/// Converts a [`TableName`] into a collision-free destination identifier.
+/// Converts a [`TableName`] into a destination identifier.
 ///
 /// Preserves the legacy underscore encoding unless either component starts or
-/// ends with `_`. Those names use separately encoded, uppercase Base32 UTF-8
-/// components. Base32 contains no separator and preserves source case even in
-/// destinations that fold identifier case. Generated object suffixes cannot
-/// match a base name because they introduce additional separators.
+/// ends with `_`. Those names use `_SSTT_<schema>_<table>`, where `SS` and `TT`
+/// are two-digit byte lengths. Both components must contain only lowercase
+/// ASCII letters, digits, and underscores and fit in 99 bytes. Unsupported
+/// components return a validation error; there is no fallback encoding.
 ///
-/// Two PostgreSQL identifiers of at most 63 bytes produce at most 209 ASCII
-/// characters. Destination limits still apply, including generated object
-/// suffixes and ClickHouse's database-dependent filename budget.
+/// Legacy names never start with `_`. The lengths disambiguate new names and
+/// distinguish them from generated suffixes. Restricting new components to
+/// lowercase ASCII preserves their identity after destination case folding.
+///
+/// Two PostgreSQL identifiers of at most 63 bytes produce at most 133 ASCII
+/// characters in the length-prefixed form. Destination limits still apply,
+/// including generated object and channel names.
 pub(crate) fn try_stringify_table_name(table_name: &TableName) -> EtlResult<String> {
     validate_table_name_component(&table_name.schema, "schema name")?;
     validate_table_name_component(&table_name.name, "table name")?;
@@ -55,9 +56,41 @@ pub(crate) fn try_stringify_table_name(table_name: &TableName) -> EtlResult<Stri
         .into_iter()
         .any(|component| component.starts_with('_') || component.ends_with('_'))
     {
-        let schema = BASE32_NOPAD.encode(table_name.schema.as_bytes());
-        let table = BASE32_NOPAD.encode(table_name.name.as_bytes());
-        return Ok(format!("{ENCODED_TABLE_NAME_PREFIX}{schema}_{table}"));
+        for (value, component_name) in
+            [(&table_name.schema, "schema name"), (&table_name.name, "table name")]
+        {
+            if value.len() > MAX_LENGTH_PREFIX_COMPONENT_BYTES {
+                bail!(
+                    ErrorKind::ValidationError,
+                    "Destination table name component is too long for length-prefix encoding",
+                    format!(
+                        "{component_name} has {} bytes; names with leading or trailing \
+                         underscores require each component to fit in \
+                         {MAX_LENGTH_PREFIX_COMPONENT_BYTES} bytes",
+                        value.len()
+                    )
+                );
+            }
+
+            if !value.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_')) {
+                bail!(
+                    ErrorKind::ValidationError,
+                    "Destination table name requires lowercase ASCII components",
+                    format!(
+                        "{component_name} must contain only lowercase ASCII letters, digits, and \
+                         underscores when either component starts or ends with '_'"
+                    )
+                );
+            }
+        }
+
+        return Ok(format!(
+            "_{:02}{:02}_{}_{}",
+            table_name.schema.len(),
+            table_name.name.len(),
+            table_name.schema,
+            table_name.name
+        ));
     }
 
     let escaped_schema = table_name.schema.replace('_', "__");
@@ -70,11 +103,10 @@ pub(crate) fn try_stringify_table_name(table_name: &TableName) -> EtlResult<Stri
 mod tests {
     use std::collections::HashSet;
 
-    use data_encoding::BASE32_NOPAD;
     use etl::{error::ErrorKind, schema::TableName};
     use proptest::prelude::*;
 
-    use crate::table_name::{ENCODED_TABLE_NAME_PREFIX, try_stringify_table_name};
+    use crate::table_name::try_stringify_table_name;
 
     /// Locks legacy and boundary-underscore mappings, including ambiguous
     /// pairs.
@@ -85,13 +117,24 @@ mod tests {
             ("a_b", "c_d", "a__b_c__d"),
             ("a__b", "c__d", "a____b_c____d"),
             ("Mixed", "Case", "Mixed_Case"),
+            ("schéma", "用户", "schéma_用户"),
+            ("a$b", "c d", "a$b_c d"),
             ("a_b", "c", "a__b_c"),
             ("a", "b_c", "a_b__c"),
-            ("a", "_b", "_ETL1_ME_L5RA"),
-            ("a_", "b", "_ETL1_MFPQ_MI"),
-            ("a", "_B", "_ETL1_ME_L5BA"),
-            ("_", "_", "_ETL1_L4_L4"),
-            ("__", "__", "_ETL1_L5PQ_L5PQ"),
+            ("_public", "orders", "_0706__public_orders"),
+            ("public_", "orders", "_0706_public__orders"),
+            ("public", "_orders", "_0607_public__orders"),
+            ("public", "orders_", "_0607_public_orders_"),
+            ("_public", "_orders", "_0707__public__orders"),
+            ("a", "_b", "_0102_a__b"),
+            ("a_", "b", "_0201_a__b"),
+            ("a_", "_b", "_0202_a___b"),
+            ("__a_", "_b__", "_0404___a___b__"),
+            ("_", "_", "_0101____"),
+            ("__", "__", "_0202______"),
+            ("_1", "2_", "_0202__1_2_"),
+            ("a", "_b_0", "_0104_a__b_0"),
+            ("a", "_b__current", "_0111_a__b__current"),
         ] {
             let table_name = TableName::new(schema.to_owned(), table.to_owned());
             assert_eq!(try_stringify_table_name(&table_name).unwrap(), expected);
@@ -101,7 +144,22 @@ mod tests {
     /// Keeps new base names disjoint from existing names and generated objects.
     #[test]
     fn encoded_names_do_not_collide_with_legacy_names_or_generated_objects() {
-        let components = ["a", "A", "1", "_", "__", "a_", "_a", "a__", "__a", "_a_", "a_b"];
+        let components = [
+            "a",
+            "1",
+            "_",
+            "__",
+            "a_",
+            "_a",
+            "a__",
+            "__a",
+            "_a_",
+            "a_b",
+            "_a_0",
+            "_a__current",
+            "0102",
+            "_0102_a__b",
+        ];
         let mut encoded = HashSet::new();
         let mut legacy = HashSet::new();
         for schema in components {
@@ -125,37 +183,100 @@ mod tests {
         }
     }
 
-    /// Measures identifier lengths in source bytes, including generated
-    /// suffixes.
+    /// Covers decimal-width boundaries and the normal and representable limits
+    /// independently for both components.
     #[test]
-    fn encoded_name_lengths_account_for_utf8_bytes_and_generated_suffixes() {
-        for component in ["_".repeat(63), format!("_{}", "é".repeat(31))] {
-            assert_eq!(component.len(), 63);
-            let source = TableName::new(component.clone(), component);
-            let name = try_stringify_table_name(&source).unwrap();
-            assert!(name.is_ascii());
-            assert_eq!(name.len(), 209);
-            assert_eq!(format!("{name}-STREAMING").len(), 219);
-            assert_eq!(format!("{name}__current").len(), 218);
-            assert_eq!(format!("{name}_{}", u64::MAX).len(), 230);
+    fn length_prefixes_cover_component_boundaries() {
+        for (schema_length, schema_digits) in
+            [(1, "01"), (9, "09"), (10, "10"), (63, "63"), (99, "99")]
+        {
+            for (table_length, table_digits) in
+                [(1, "01"), (9, "09"), (10, "10"), (63, "63"), (99, "99")]
+            {
+                let schema = "_".repeat(schema_length);
+                let table = "a".repeat(table_length);
+                let source = TableName::new(schema.clone(), table.clone());
+                let name = try_stringify_table_name(&source).unwrap();
+                assert_eq!(name, format!("_{schema_digits}{table_digits}_{schema}_{table}"));
+                assert_eq!(name.len(), schema_length + table_length + 7);
+            }
         }
+
+        let source = TableName::new("_".repeat(63), "_".repeat(63));
+        let name = try_stringify_table_name(&source).unwrap();
+        assert_eq!(name.len(), 133);
+        assert_eq!(format!("{name}-STREAMING").len(), 143);
+        assert_eq!(format!("{name}__current").len(), 142);
+        assert_eq!(format!("{name}_{}", u64::MAX).len(), 154);
     }
 
     proptest! {
-        /// Recovers the original UTF-8 components after destination case folding.
+        /// Recovers both original components after destination case folding.
         #[test]
-        fn encoded_components_preserve_utf8_and_case(
-            schema in "[_a-zA-Z0-9é]{1,30}",
-            table in "[_a-zA-Z0-9é]{1,30}",
+        fn length_prefixed_components_roundtrip(
+            schema in "[a-z0-9_]{0,98}",
+            table in "[a-z0-9_]{1,99}",
         ) {
             let schema = format!("_{schema}");
             let source = TableName::new(schema.clone(), table.clone());
-            let name = try_stringify_table_name(&source).unwrap();
-            prop_assert_eq!(&name, &name.to_uppercase());
-            let (encoded_schema, encoded_table) = name
-                .strip_prefix(ENCODED_TABLE_NAME_PREFIX).unwrap().split_once('_').unwrap();
-            prop_assert_eq!(BASE32_NOPAD.decode(encoded_schema.as_bytes()).unwrap(), schema.as_bytes());
-            prop_assert_eq!(BASE32_NOPAD.decode(encoded_table.as_bytes()).unwrap(), table.as_bytes());
+            let name = try_stringify_table_name(&source).unwrap().to_uppercase();
+            prop_assert!(name.is_ascii());
+            prop_assert!(name.starts_with('_'));
+            let schema_length = name.get(1..3).unwrap().parse::<usize>().unwrap();
+            let table_length = name.get(3..5).unwrap().parse::<usize>().unwrap();
+            let components = name.get(5..).unwrap().strip_prefix('_').unwrap();
+            let (decoded_schema, rest) = components.split_at(schema_length);
+            let decoded_table = rest.strip_prefix('_').unwrap();
+            prop_assert_eq!(decoded_table.len(), table_length);
+            prop_assert_eq!(decoded_schema.to_ascii_lowercase(), schema);
+            prop_assert_eq!(decoded_table.to_ascii_lowercase(), table);
+        }
+    }
+
+    /// Rejects overflow in either field without changing legacy length
+    /// behavior.
+    #[test]
+    fn rejects_components_that_overflow_length_prefixes() {
+        for (schema, table) in [
+            ("_".repeat(100), "a".to_owned()),
+            ("a".to_owned(), "_".repeat(100)),
+            ("a".repeat(100), "_".to_owned()),
+            ("_".to_owned(), "a".repeat(100)),
+            ("_".repeat(100), "_".repeat(100)),
+            ("_".repeat(1000), "a".to_owned()),
+        ] {
+            let source = TableName::new(schema, table);
+            let error = try_stringify_table_name(&source).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValidationError);
+            assert_eq!(
+                error.description(),
+                Some("Destination table name component is too long for length-prefix encoding")
+            );
+        }
+
+        let source = TableName::new("a".repeat(100), "b".repeat(100));
+        assert_eq!(
+            try_stringify_table_name(&source).unwrap(),
+            format!("{}_{}", source.schema, source.name)
+        );
+    }
+
+    /// Rejects characters that cannot be preserved by the readable namespace,
+    /// including when only the other component has a boundary underscore.
+    #[test]
+    fn rejects_unsupported_length_prefixed_components() {
+        for component in
+            ["A", "aB", "é", "用户", "e\u{301}", "a b", "a-b", "a.b", "a$b", "a\n", "a\0", "😀"]
+        {
+            for (schema, table) in [(component, "_"), ("_", component)] {
+                let source = TableName::new(schema.to_owned(), table.to_owned());
+                let error = try_stringify_table_name(&source).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::ValidationError);
+                assert_eq!(
+                    error.description(),
+                    Some("Destination table name requires lowercase ASCII components")
+                );
+            }
         }
     }
 
@@ -164,6 +285,8 @@ mod tests {
         for (schema, table, description) in [
             ("", "users", "Destination table name component cannot be empty"),
             ("public", "", "Destination table name component cannot be empty"),
+            ("", "_", "Destination table name component cannot be empty"),
+            ("_", "", "Destination table name component cannot be empty"),
             (
                 "public",
                 "users\"quoted",
@@ -177,6 +300,11 @@ mod tests {
             (
                 "_schema",
                 "users;drop_",
+                "Destination table name contains an unsupported SQL identifier character",
+            ),
+            (
+                "_schema\"",
+                "users",
                 "Destination table name contains an unsupported SQL identifier character",
             ),
         ] {

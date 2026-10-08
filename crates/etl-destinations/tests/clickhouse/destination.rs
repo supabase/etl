@@ -91,10 +91,7 @@ async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
     let store = MemoryStore::new();
-    let mut cases = table_name_schemas();
-    // ClickHouse's filename budget also includes the database name. Its native
-    // rejection of the maximum-length fixture is exercised separately below.
-    cases.pop().unwrap();
+    let cases = table_name_schemas();
     let destination = database.build_destination_with_engine(store.clone(), engine).await;
     let mut original_metadata = Vec::new();
     for (schema, name) in &cases {
@@ -214,24 +211,29 @@ async fn boundary_underscore_names_survive_lifecycle_replacing_merge_tree() {
     boundary_underscore_names_survive_lifecycle(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-/// Preserves ClickHouse's native length error without truncating or hashing an
-/// encoded name to fit the database's metadata filename budget.
+/// Preserves ClickHouse's native length error without truncating or hashing a
+/// length-prefixed name to fit the database's metadata filename budget.
 #[tokio::test(flavor = "multi_thread")]
 async fn overlong_encoded_names_preserve_native_clickhouse_error() {
     init_test_tracing();
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
     let store = MemoryStore::new();
-    let (schema, name) = table_name_schemas().pop().unwrap();
+    // Model a source with a raised identifier limit. The components still fit
+    // the two-digit prefix, but exceed this database's native filename budget.
+    let component = "_".repeat(99);
+    let name = format!("_9999_{component}_{component}");
+    let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+        TableId::new(1),
+        TableName::new(component.clone(), component),
+        vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+    )));
     store.store_table_schema(schema.inner().clone()).await.unwrap();
     let destination = database.build_destination(store).await;
-    let error = write_table_rows_via_trait(
-        &destination,
-        &schema,
-        vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
-    )
-    .await
-    .unwrap_err();
+    let error =
+        write_table_rows_via_trait(&destination, &schema, vec![TableRow::new(vec![Cell::I32(1)])])
+            .await
+            .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
     assert!(error.source().unwrap().to_string().contains("max length of table name"));
     destination.shutdown().await.unwrap();
@@ -244,6 +246,56 @@ async fn overlong_encoded_names_preserve_native_clickhouse_error() {
             .await
             .is_empty()
     );
+}
+
+/// Rejects unsupported names consistently before copy, CDC, or reset creates
+/// destination objects or ownership metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_boundary_names_fail_before_destination_setup() {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let destination = database.build_destination(store.clone()).await;
+    for (index, (source_schema, source_table)) in [
+        ("public".to_owned(), "_Orders".to_owned()),
+        ("schéma".to_owned(), "_orders".to_owned()),
+        ("_public".to_owned(), "order items".to_owned()),
+        ("_".repeat(100), "orders".to_owned()),
+        ("public".to_owned(), "_".repeat(100)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(u32::try_from(index + 1).unwrap()),
+            TableName::new(source_schema, source_table),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+        )));
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        for rows in [vec![], vec![TableRow::new(vec![Cell::I32(1)])]] {
+            let error = write_table_rows_via_trait(&destination, &schema, rows).await.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValidationError);
+        }
+        let error = write_events_via_trait(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(10_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(1)]),
+            })],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValidationError);
+        let error = drop_table_for_copy_via_trait(&destination, &schema).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValidationError);
+        assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
+    }
+    destination.shutdown().await.unwrap();
+    assert!(database.query::<String>("show tables").await.is_empty());
 }
 
 /// One ClickHouse table receiving generated rows through the production

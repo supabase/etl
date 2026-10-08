@@ -44,7 +44,6 @@ ducklake = [
     "dep:url",
 ]
 bigquery = [
-    "dep:data-encoding",
     "dep:gcp-bigquery-client",
     "dep:serde_json",
     "dep:prost",
@@ -55,7 +54,6 @@ bigquery = [
     "dep:metrics",
 ]
 iceberg = [
-    "dep:data-encoding",
     "dep:iceberg",
     "dep:iceberg-catalog-rest",
     "dep:arrow",
@@ -69,7 +67,6 @@ iceberg = [
     "dep:serde_json",
 ]
 clickhouse = [
-    "dep:data-encoding",
     "dep:clickhouse",
     "dep:metrics",
     "dep:hyper-rustls",
@@ -85,7 +82,6 @@ clickhouse = [
     "dep:uuid",
 ]
 snowflake = [
-    "dep:data-encoding",
     "dep:base64",
     "dep:bytes",
     "dep:jsonwebtoken",
@@ -116,7 +112,6 @@ base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 chrono = { workspace = true, features = ["serde"] }
 clickhouse = { workspace = true, optional = true, features = ["inserter", "lz4", "rustls-tls"] }
-data-encoding = { workspace = true, optional = true }
 duckdb = { workspace = true, optional = true, features = ["appender-arrow", "bundled", "json", "parquet", "r2d2"] }
 etl = { workspace = true }
 etl-config = { workspace = true }
