@@ -354,12 +354,16 @@ fn build_rename_column_sql(table_name: &str, old_name: &str, new_name: &str) -> 
 }
 
 /// Builds the SQL used to relax a scalar column to `Nullable`.
+///
+/// Returns `None` when there is nothing to do: the column is already
+/// `Nullable(...)`, or it is an `Array(...)`. ClickHouse cannot wrap an array
+/// in `Nullable`, and ETL already writes a NULL source array as an empty array.
 fn build_drop_not_null_sql(
     table_name: &str,
     column_name: &str,
     physical_type: &str,
 ) -> Option<String> {
-    if physical_type.starts_with("Nullable(") {
+    if physical_type.starts_with("Nullable(") || physical_type.starts_with("Array(") {
         return None;
     }
 
@@ -727,7 +731,7 @@ impl ClickHouseClient {
             )
         })?;
         let Some(sql) = build_drop_not_null_sql(table_name, column_name, &column.type_name) else {
-            debug!(table_name, column_name, "clickhouse column is already nullable");
+            debug!(table_name, column_name, "clickhouse column needs no nullability change");
             return Ok(());
         };
 
@@ -1036,6 +1040,9 @@ mod tests {
             )
         );
         assert_eq!(build_drop_not_null_sql("test_table", "value", "Nullable(Int32)"), None);
+        // ClickHouse rejects Nullable(Array(...)), so arrays are left as they
+        // are.
+        assert_eq!(build_drop_not_null_sql("test_table", "tags", "Array(Nullable(Int32))"), None);
     }
 
     #[test]

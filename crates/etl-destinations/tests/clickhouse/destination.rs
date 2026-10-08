@@ -1815,6 +1815,83 @@ async fn type_changes_that_change_the_clickhouse_type_fail_before_applying_repla
     .await;
 }
 
+/// Stores one version of `public.arraynull` whose `tags` array column has the
+/// given nullability.
+async fn store_array_nullability_schema(
+    store: &MemoryStore,
+    snapshot_id: SnapshotId,
+    nullable: bool,
+) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(
+        store
+            .store_table_schema(TableSchema::with_snapshot_id(
+                TableId::new(4308),
+                TableName::new("public".to_owned(), "arraynull".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("tags".to_owned(), Type::INT4_ARRAY, -1, 2, nullable),
+                ],
+                snapshot_id,
+            ))
+            .await
+            .unwrap(),
+    )
+}
+
+/// `DROP NOT NULL` on an array column applies without DDL, because ClickHouse
+/// arrays cannot be `Nullable`, and replication continues.
+#[tokio::test(flavor = "multi_thread")]
+async fn array_column_drop_not_null_continues_replicating() {
+    // GIVEN: one copied row in a table with a NOT NULL array column.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let before = store_array_nullability_schema(&store, test_snapshot_id(100, 100), false).await;
+    let after = store_array_nullability_schema(&store, test_snapshot_id(400, 400), true).await;
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &before,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::Array(ArrayCell::I32(vec![Some(1)]))])],
+        )
+        .await
+        .unwrap();
+
+    // WHEN: the source drops NOT NULL on the array and inserts a NULL array.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+            amount_insert(&after, 2, Cell::Null),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: the column type is unchanged, the metadata reached the new
+    // snapshot, and the NULL array is stored as an empty array.
+    assert_eq!(
+        database.column_types("public_arraynull").await,
+        vec![
+            ("id".to_owned(), "Int64".to_owned()),
+            ("tags".to_owned(), "Array(Nullable(Int32))".to_owned()),
+        ]
+    );
+    let metadata = store.get_destination_table_metadata(TableId::new(4308)).await.unwrap().unwrap();
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id(), test_snapshot_id(400, 400));
+    assert_eq!(
+        database
+            .query::<(i64, String)>(
+                "select id, toString(tags) from public_arraynull__current order by id"
+            )
+            .await,
+        vec![(1, "[1]".to_owned()), (2, "[]".to_owned())]
+    );
+}
+
 /// A source type change that keeps the ClickHouse column type, such as a
 /// longer `varchar`, is applied without DDL and replication continues.
 #[tokio::test(flavor = "multi_thread")]
