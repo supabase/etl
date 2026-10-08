@@ -2,7 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use etl::{
     data::{ArrayCell, Cell, OldTableRow, TableRow, UpdatedTableRow},
-    destination::{DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability},
+    destination::{
+        Destination as _, DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability,
+    },
     error::ErrorKind,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     pipeline::PipelineId,
@@ -10,10 +12,11 @@ use etl::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
     },
-    store::{SchemaStore, StateStore},
+    store::{SchemaStore, StateStore, TableStateLifecycleStore},
     test_utils::{
         destination::{
-            write_events as invoke_write_events, write_table_rows as invoke_write_table_rows,
+            drop_table_for_copy, write_events as invoke_write_events,
+            write_table_rows as invoke_write_table_rows,
         },
         notifying_store::NotifyingStore,
     },
@@ -26,7 +29,10 @@ use etl_destinations::snowflake::{
 use futures::FutureExt;
 use serde_json::{Value, json};
 
-use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
+use crate::{
+    snowflake::common::{build_auth, poll_destination_offset, with_table_cleanup},
+    support::table_name::table_name_schemas,
+};
 
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
@@ -241,6 +247,116 @@ async fn assert_status_default_absent(
         default.is_null() || default.as_str() == Some(""),
         "{context}: status should not have a default"
     );
+}
+
+/// Checks name isolation, metadata reuse, and generated pipe/channel lengths
+/// through copy, CDC, restart, truncate, and reset.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn boundary_underscore_names_survive_destination_lifecycle() {
+    let harness = TestHarness::with_pipeline_id(u64::MAX);
+    let cases = table_name_schemas();
+    let names: Vec<_> = cases.iter().map(|(_, name)| name.to_uppercase()).collect();
+    let cleanup_names: Vec<_> = names.iter().map(String::as_str).collect();
+
+    with_table_cleanup(&harness.sql, &cleanup_names, || async {
+        let mut original_metadata = Vec::new();
+        for ((schema, _), name) in cases.iter().zip(&names) {
+            harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
+            write_table_copy_and_wait(
+                &harness.destination,
+                schema,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
+            )
+            .await;
+            let metadata =
+                harness.store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+            assert_eq!(metadata.table_id(), name);
+            original_metadata.push(metadata);
+        }
+        harness.destination.shutdown().await.unwrap();
+
+        let restarted =
+            Destination::new(Client::new(build_auth(), u64::MAX), harness.store.clone());
+        for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
+            invoke_write_events(
+                &restarted,
+                WriteEventsDurability::RequireDurable,
+                vec![Event::Insert(InsertEvent {
+                    commit_lsn: PgLsn::from(10_u64),
+                    tx_ordinal: 1,
+                    replicated_table_schema: schema.clone(),
+                    table_row: TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("streamed".to_owned()),
+                    ]),
+                })],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                harness.store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
+                Some(metadata)
+            );
+        }
+        for name in &names {
+            let rows = query_rows(
+                &harness.sql,
+                &format!("select \"id\", \"name\" from \"{name}\" order by \"id\""),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    vec![serde_json::json!("1"), serde_json::json!("copied")],
+                    vec![serde_json::json!("2"), serde_json::json!("streamed")]
+                ]
+            );
+        }
+
+        let schema = &cases[0].0;
+        invoke_write_events(
+            &restarted,
+            WriteEventsDurability::RequireDurable,
+            truncate_replay_events(schema),
+        )
+        .await
+        .unwrap();
+        let rows = query_rows(&harness.sql, &format!("select \"name\" from \"{}\"", names[0]))
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![vec![serde_json::json!("after")]]);
+
+        drop_table_for_copy(&restarted, schema).await.unwrap();
+        assert!(!harness.sql.table_exists(&names[0]).await.unwrap());
+        harness.store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+        harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
+        write_table_copy_and_wait(
+            &restarted,
+            schema,
+            vec![TableRow::new(vec![Cell::I32(3), Cell::String("recopied".to_owned())])],
+        )
+        .await;
+        restarted.shutdown().await.unwrap();
+        let rows = query_rows(&harness.sql, &format!("select \"name\" from \"{}\"", names[0]))
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![vec![serde_json::json!("recopied")]]);
+        for name in names.iter().skip(1) {
+            let rows = query_rows(
+                &harness.sql,
+                &format!("select \"name\" from \"{name}\" order by \"id\""),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!("copied")], vec![serde_json::json!("streamed")]]
+            );
+        }
+    })
+    .await;
 }
 
 #[tokio::test]

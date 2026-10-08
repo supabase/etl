@@ -63,7 +63,14 @@ replicator's `destination.engine` setting:
 
 Table names are `<schema>_<table>` with underscores in either part doubled:
 `public.orders` → `public_orders`, `my_schema.t` → `my__schema_t`.
-Schema and table names cannot start or end with `_`, or contain `"` or `;`.
+If either component starts or ends with `_`, the name is
+`_ETL1_<base32-schema>_<base32-table>`, using uppercase, unpadded Base32 of each
+component's UTF-8 bytes. Existing names retain their original mapping. Schema
+and table names cannot contain `"` or `;`.
+
+ClickHouse enforces a database-dependent table-name length limit, including
+room for the `__current` view suffix. Names that exceed the server's limit
+return its native error; ETL does not truncate or hash them.
 
 ### ReplacingMergeTree (default)
 

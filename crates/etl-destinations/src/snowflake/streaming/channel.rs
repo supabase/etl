@@ -5,15 +5,19 @@ use metrics::{counter, histogram};
 use tokio::time::{Instant, sleep};
 use tracing::warn;
 
-use crate::snowflake::{
-    Error, OffsetToken, Result, RowBatch, SnowpipeError, StreamClient,
-    metrics::{
-        ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL, ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL,
-        ETL_SNOWFLAKE_APPEND_DURATION_SECONDS, ETL_SNOWFLAKE_BATCH_BYTES, ETL_SNOWFLAKE_BATCH_SIZE,
-        ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL, ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL,
-        ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL, FAILURE_TYPE_LABEL,
+use crate::{
+    snowflake::{
+        Error, OffsetToken, Result, RowBatch, SnowpipeError, StreamClient,
+        metrics::{
+            ETL_SNOWFLAKE_ACCEPTED_BATCHES_TOTAL, ETL_SNOWFLAKE_ACCEPTED_ROWS_TOTAL,
+            ETL_SNOWFLAKE_APPEND_DURATION_SECONDS, ETL_SNOWFLAKE_BATCH_BYTES,
+            ETL_SNOWFLAKE_BATCH_SIZE, ETL_SNOWFLAKE_CHANNEL_RECOVERIES_TOTAL,
+            ETL_SNOWFLAKE_INSERT_ERRORS_TOTAL, ETL_SNOWFLAKE_REJECTED_ROWS_TOTAL,
+            FAILURE_TYPE_LABEL,
+        },
+        streaming::ChannelStatusResponse,
     },
-    streaming::ChannelStatusResponse,
+    table_name::ENCODED_TABLE_NAME_PREFIX,
 };
 
 /// Interval between Snowflake channel commit-status checks.
@@ -391,7 +395,14 @@ impl<C: StreamClient> ChannelHandle<C> {
         schema: String,
         table: String,
     ) -> Self {
-        let channel = format!("supabase_etl_{pipeline}_{schema}_{table}_ch0");
+        // Channels are scoped to a pipe. New encoded names need no schema or
+        // table in the channel name; retaining the legacy formula preserves
+        // existing channels and their committed offsets.
+        let channel = if table.starts_with(ENCODED_TABLE_NAME_PREFIX) {
+            format!("supabase_etl_{pipeline}_ch0")
+        } else {
+            format!("supabase_etl_{pipeline}_{schema}_{table}_ch0")
+        };
         Self {
             client,
             database,
@@ -1052,6 +1063,37 @@ mod tests {
     }
 
     const CHANNEL_CREATED_ON_MS: u64 = 100;
+
+    /// Keeps legacy channel identities and bounds channels for encoded tables.
+    #[test]
+    fn channel_names_preserve_legacy_offsets_and_bound_encoded_names() {
+        let client = Arc::new(ScriptedStreamClient::new([]));
+        let legacy = ChannelHandle::new(
+            Arc::clone(&client),
+            42,
+            "DB".to_owned(),
+            "SCHEMA".to_owned(),
+            "PUBLIC_USERS".to_owned(),
+        );
+        assert_eq!(legacy.channel, "supabase_etl_42_SCHEMA_PUBLIC_USERS_ch0");
+
+        let table = crate::table_name::try_stringify_table_name(&etl::schema::TableName::new(
+            "_".repeat(63),
+            "_".repeat(63),
+        ))
+        .unwrap();
+        let encoded = ChannelHandle::new(
+            Arc::clone(&client),
+            u64::MAX,
+            "DB".to_owned(),
+            "S".repeat(255),
+            table.clone(),
+        );
+        assert_eq!(encoded.channel, "supabase_etl_18446744073709551615_ch0");
+        assert_eq!(encoded.table, table);
+        let other_pipeline = ChannelHandle::new(client, 1, "DB".to_owned(), "S".repeat(255), table);
+        assert_ne!(encoded.channel, other_pipeline.channel);
+    }
 
     /// Creates a successful channel status at `offset`.
     fn channel_status(offset: Option<OffsetToken>, rows_inserted: u64) -> ChannelStatusResponse {

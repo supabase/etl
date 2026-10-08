@@ -24,6 +24,7 @@
 //! checks only that the raw stored ticks stay exact.
 
 use std::{
+    error::Error as _,
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
@@ -78,7 +79,172 @@ use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
 
-use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
+use crate::support::{
+    clickhouse::current_state_query, crypto::install_crypto_provider,
+    table_name::table_name_schemas,
+};
+
+/// Checks name and view isolation across copy, CDC, restart, truncate, and
+/// reset.
+async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let mut cases = table_name_schemas();
+    // ClickHouse's filename budget also includes the database name. Its native
+    // rejection of the maximum-length fixture is exercised separately below.
+    cases.pop().unwrap();
+    let destination = database.build_destination_with_engine(store.clone(), engine).await;
+    let mut original_metadata = Vec::new();
+    for (schema, name) in &cases {
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        write_table_rows_via_trait(
+            &destination,
+            schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
+        )
+        .await
+        .unwrap();
+        let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+        assert_eq!(metadata.table_id(), name);
+        original_metadata.push(metadata);
+    }
+    destination.shutdown().await.unwrap();
+
+    let restarted = database.build_destination_with_engine(store.clone(), engine).await;
+    for ((schema, name), metadata) in cases.iter().zip(&original_metadata) {
+        write_events_via_trait(
+            &restarted,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(10_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("streamed".to_owned())]),
+            })],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
+            Some(metadata)
+        );
+        let query = current_state_query(engine, name, "id, name", &["id"], "id");
+        assert_eq!(
+            database.query::<(i32, String)>(&query).await,
+            vec![(1, "copied".to_owned()), (2, "streamed".to_owned())]
+        );
+        if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+            assert_eq!(
+                database
+                    .query::<i32>(&format!("select id from \"{name}__current\" order by id"))
+                    .await,
+                vec![1, 2]
+            );
+        }
+    }
+
+    let (schema, name) = &cases[0];
+    write_events_via_trait(
+        &restarted,
+        WriteEventsDurability::RequireDurable,
+        vec![
+            Event::Truncate(TruncateEvent {
+                commit_lsn: PgLsn::from(20_u64),
+                tx_ordinal: 1,
+                options: 0,
+                truncated_tables: vec![schema.clone()],
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(20_u64),
+                tx_ordinal: 2,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(3), Cell::String("after".to_owned())]),
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    let query = current_state_query(engine, name, "id, name", &["id"], "id");
+    assert_eq!(database.query::<(i32, String)>(&query).await, vec![(3, "after".to_owned())]);
+
+    drop_table_for_copy_via_trait(&restarted, schema).await.unwrap();
+    assert_eq!(
+        database
+            .query::<u64>(&format!(
+                "select count() from system.tables where database = currentDatabase() and name in \
+                 ('{name}', '{name}__current')"
+            ))
+            .await,
+        vec![0]
+    );
+    store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+    store.store_table_schema(schema.inner().clone()).await.unwrap();
+    write_table_rows_via_trait(
+        &restarted,
+        schema,
+        vec![TableRow::new(vec![Cell::I32(4), Cell::String("recopied".to_owned())])],
+    )
+    .await
+    .unwrap();
+    restarted.shutdown().await.unwrap();
+    for (index, (_, name)) in cases.iter().enumerate() {
+        let query = current_state_query(engine, name, "id, name", &["id"], "id");
+        assert_eq!(
+            database.query::<(i32, String)>(&query).await,
+            if index == 0 {
+                vec![(4, "recopied".to_owned())]
+            } else {
+                vec![(1, "copied".to_owned()), (2, "streamed".to_owned())]
+            }
+        );
+    }
+}
+
+/// Exercises the naming lifecycle with MergeTree history queries.
+#[tokio::test(flavor = "multi_thread")]
+async fn boundary_underscore_names_survive_lifecycle_merge_tree() {
+    boundary_underscore_names_survive_lifecycle(ClickHouseEngine::MergeTree).await;
+}
+
+/// Exercises the naming lifecycle with ReplacingMergeTree current-state views.
+#[tokio::test(flavor = "multi_thread")]
+async fn boundary_underscore_names_survive_lifecycle_replacing_merge_tree() {
+    boundary_underscore_names_survive_lifecycle(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// Preserves ClickHouse's native length error without truncating or hashing an
+/// encoded name to fit the database's metadata filename budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn overlong_encoded_names_preserve_native_clickhouse_error() {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let (schema, name) = table_name_schemas().pop().unwrap();
+    store.store_table_schema(schema.inner().clone()).await.unwrap();
+    let destination = database.build_destination(store).await;
+    let error = write_table_rows_via_trait(
+        &destination,
+        &schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+    assert!(error.source().unwrap().to_string().contains("max length of table name"));
+    destination.shutdown().await.unwrap();
+    assert!(
+        database
+            .query::<String>(&format!(
+                "select name from system.tables where database = currentDatabase() and name in \
+                 ('{name}', '{name}__current')"
+            ))
+            .await
+            .is_empty()
+    );
+}
 
 /// One ClickHouse table receiving generated rows through the production
 /// destination write path.
