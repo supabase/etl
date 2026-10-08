@@ -66,7 +66,8 @@ fn floor_secs(d: Duration) -> String {
 }
 
 /// Runs `fut` under `tokio::time::timeout` using the client-side timeout for
-/// `op` from `config`. Inner ClickHouse errors map onto `op.failed_kind()`;
+/// `op` from `config`. Inner ClickHouse errors map onto `op.failed_kind()`,
+/// which depends on whether the error [`is_retryable`](ClickHouseErrorExt);
 /// client-side deadlines map onto [`ErrorKind::DestinationTimeout`].
 /// `context`, when present, is appended to the error detail (e.g.
 /// `"table: foo"`) so call-site-specific diagnostic info is preserved.
@@ -90,7 +91,7 @@ where
     match tokio::time::timeout(client_timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(etl_error!(
-            op.failed_kind(),
+            op.failed_kind(err.is_retryable()),
             "ClickHouse call failed",
             detail(op, "failed", context),
             source: err
@@ -134,6 +135,80 @@ fn clickhouse_error_code(message: &str) -> Option<u32> {
         return None;
     }
     digits.parse().ok()
+}
+
+/// Classifies a failed ClickHouse call.
+pub(crate) trait ClickHouseErrorExt {
+    /// Returns whether the same call may succeed if it is sent again later.
+    ///
+    /// True for lost connections and for server errors that mean "busy" or
+    /// "temporarily unavailable". False for errors that would repeat, such as
+    /// a rejected statement or a local encoding failure.
+    fn is_retryable(&self) -> bool;
+}
+
+impl ClickHouseErrorExt for clickhouse::error::Error {
+    fn is_retryable(&self) -> bool {
+        use clickhouse::error::Error;
+
+        match self {
+            // The public-address guard rejects private DNS answers at connect
+            // time with `PermissionDenied`. That repeats on every attempt.
+            Error::Network(source) => !is_permission_denied(source.as_ref()),
+            Error::TimedOut => true,
+            Error::BadResponse(message) => is_retryable_server_response(message),
+            // The other variants are local request, encode, or decode errors.
+            // Sending the same request again gives the same error.
+            _ => false,
+        }
+    }
+}
+
+/// Returns whether an error chain contains a `PermissionDenied` I/O error.
+///
+/// Walks `source()` links and also the error inside each `io::Error`, because
+/// `io::Error::source()` skips the error it wraps.
+fn is_permission_denied(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            if io_error.kind() == std::io::ErrorKind::PermissionDenied {
+                return true;
+            }
+            if let Some(inner) = io_error.get_ref() {
+                current = Some(inner);
+                continue;
+            }
+        }
+        current = error.source();
+    }
+    false
+}
+
+/// Returns whether a ClickHouse error response is temporary.
+fn is_retryable_server_response(message: &str) -> bool {
+    match clickhouse_error_code(message) {
+        // TIMEOUT_EXCEEDED, TOO_MANY_SIMULTANEOUS_QUERIES, SOCKET_TIMEOUT,
+        // NETWORK_ERROR, MEMORY_LIMIT_EXCEEDED, TABLE_IS_READ_ONLY (replica
+        // lost Keeper), TOO_MANY_PARTS, CANNOT_SCHEDULE_TASK, KEEPER_EXCEPTION.
+        Some(159 | 202 | 209 | 210 | 241 | 242 | 252 | 439 | 999) => true,
+        Some(_) => false,
+        // No ClickHouse code: the crate reports the bare HTTP status, for
+        // example from a proxy. Retry server-side (5xx) statuses only.
+        None => http_status(message).is_some_and(|status| (500..600).contains(&status)),
+    }
+}
+
+/// Parses a leading three-digit HTTP status, such as `503 Service Unavailable`.
+fn http_status(message: &str) -> Option<u16> {
+    let status = message.get(..3)?;
+    let rest = message.get(3..)?;
+    if !status.bytes().all(|byte| byte.is_ascii_digit())
+        || !(rest.is_empty() || rest.starts_with(' '))
+    {
+        return None;
+    }
+    status.parse().ok()
 }
 
 /// Failure of a [`ClickHouseClient::insert_rows`] call.
@@ -507,9 +582,17 @@ impl ClickHouseClient {
     /// construction to gate engine-specific feature requirements (e.g.
     /// ReplacingMergeTree needs >= 23.5).
     pub(crate) async fn server_version(&self) -> EtlResult<(u32, u32)> {
-        let raw = self.inner.query("SELECT version()").fetch_one::<String>().await.map_err(
-            |err| etl_error!(ErrorKind::Unknown, "ClickHouse version query failed", source: err),
-        )?;
+        let query = self
+            .inner
+            .query("SELECT version()")
+            .with_option("max_execution_time", floor_secs(self.config.connectivity_check_timeout));
+        let raw = timeout_call(
+            ClickHouseOperationKind::ConnectivityCheck,
+            &self.config,
+            Some("server version"),
+            query.fetch_one::<String>(),
+        )
+        .await?;
 
         let mut parts = raw.split('.');
         let major = parts.next().and_then(|s| s.parse::<u32>().ok());
@@ -545,22 +628,20 @@ impl ClickHouseClient {
     /// Returns the ClickHouse engine name for a table, or `None` if the table
     /// does not exist in the current database.
     pub(crate) async fn table_engine(&self, table_name: &str) -> EtlResult<Option<String>> {
-        let rows: Vec<String> = self
+        let query = self
             .inner
             .query(
                 "SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = ?",
             )
-            .bind(table_name)
-            .fetch_all::<String>()
-            .await
-            .map_err(|err| {
-                etl_error!(
-                    ErrorKind::Unknown,
-                    "ClickHouse engine lookup failed",
-                    format!("table: {table_name}"),
-                    source: err
-                )
-            })?;
+            .with_option("max_execution_time", floor_secs(self.config.schema_query_timeout))
+            .bind(table_name);
+        let rows = timeout_call(
+            ClickHouseOperationKind::SchemaQuery,
+            &self.config,
+            Some(&format!("table: {table_name}")),
+            query.fetch_all::<String>(),
+        )
+        .await?;
 
         Ok(rows.into_iter().next())
     }
@@ -1203,22 +1284,128 @@ mod tests {
     /// Each operation kind maps to the error kind that drives its retry policy.
     #[test]
     fn operation_kind_failed_kind_per_bucket() {
-        // GIVEN: each operation kind.
+        use ClickHouseOperationKind::{ConnectivityCheck, Ddl, Insert, SchemaQuery};
+
+        // GIVEN: each operation kind, with a retryable and a permanent error.
         // WHEN: its failed kind is queried.
-        // THEN: it maps to the retry bucket for that operation.
-        assert_eq!(
-            ClickHouseOperationKind::ConnectivityCheck.failed_kind(),
-            ErrorKind::DestinationConnectionFailed
-        );
-        assert_eq!(
-            ClickHouseOperationKind::SchemaQuery.failed_kind(),
-            ErrorKind::DestinationQueryFailed
-        );
-        assert_eq!(ClickHouseOperationKind::Ddl.failed_kind(), ErrorKind::DestinationQueryFailed);
-        assert_eq!(
-            ClickHouseOperationKind::Insert.failed_kind(),
-            ErrorKind::DestinationAtomicBatchRetryable
-        );
+        // THEN: DDL and schema queries retry only retryable errors;
+        // connectivity checks and inserts keep their timed-retry kinds
+        // either way.
+        for retryable in [true, false] {
+            assert_eq!(
+                ConnectivityCheck.failed_kind(retryable),
+                ErrorKind::DestinationConnectionFailed
+            );
+            assert_eq!(Insert.failed_kind(retryable), ErrorKind::DestinationAtomicBatchRetryable);
+        }
+        for op in [SchemaQuery, Ddl] {
+            assert_eq!(op.failed_kind(true), ErrorKind::DestinationConnectionFailed);
+            assert_eq!(op.failed_kind(false), ErrorKind::DestinationQueryFailed);
+        }
+    }
+
+    /// Lost connections and temporary server errors are retryable; rejected
+    /// statements and local errors are not.
+    #[test]
+    fn clickhouse_errors_classify_retryability() {
+        use clickhouse::error::Error;
+
+        let bad_response = |message: &str| Error::BadResponse(message.to_owned());
+
+        // GIVEN: lost connections, temporary server errors, and 5xx statuses.
+        // THEN: they are retryable.
+        for error in [
+            Error::Network("connection reset".into()),
+            Error::TimedOut,
+            bad_response("Code: 159. DB::Exception: Timeout exceeded. (TIMEOUT_EXCEEDED)"),
+            bad_response("Code: 210. DB::NetException: Connection refused. (NETWORK_ERROR)"),
+            bad_response(
+                "Code: 242. DB::Exception: Table is in readonly mode. (TABLE_IS_READ_ONLY)",
+            ),
+            bad_response("Code: 999"),
+            bad_response("503 Service Unavailable"),
+        ] {
+            assert!(error.is_retryable(), "{error}");
+        }
+
+        // GIVEN: rejected statements, client-side statuses, and local errors.
+        // THEN: they are not retryable.
+        for error in [
+            bad_response("Code: 36. DB::Exception: Bad arguments. (BAD_ARGUMENTS)"),
+            bad_response("Code: 43. DB::Exception: Nested type ... (ILLEGAL_TYPE_OF_ARGUMENT)"),
+            bad_response("Code: 60. DB::Exception: Unknown table. (UNKNOWN_TABLE)"),
+            bad_response("400 Bad Request"),
+            bad_response("5000 rows"),
+            bad_response(""),
+            Error::NotEnoughData,
+            Error::RowNotFound,
+        ] {
+            assert!(!error.is_retryable(), "{error}");
+        }
+    }
+
+    /// A connect-time public-address rejection is not retryable, however deeply
+    /// the connector wraps it, while other connection errors still are.
+    #[test]
+    fn public_address_rejection_is_not_retryable() {
+        use std::io;
+
+        use clickhouse::error::Error;
+
+        /// Stand-in for a connector error that exposes its cause as `source()`.
+        #[derive(Debug)]
+        struct ConnectError(io::Error);
+
+        impl std::fmt::Display for ConnectError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("dns error")
+            }
+        }
+
+        impl std::error::Error for ConnectError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let denied = || io::Error::new(io::ErrorKind::PermissionDenied, "non-public IP address");
+
+        // GIVEN: the guard's rejection, bare, behind a `source()` link, and
+        // wrapped inside another `io::Error`.
+        // THEN: none of them is retryable.
+        for error in [
+            Error::Network(Box::new(denied())),
+            Error::Network(Box::new(ConnectError(denied()))),
+            Error::Network(Box::new(io::Error::other(denied()))),
+        ] {
+            assert!(!error.is_retryable(), "{error:?}");
+        }
+
+        // GIVEN: a refused connection behind the same wrapper.
+        // THEN: it is still retryable.
+        let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
+        assert!(Error::Network(Box::new(ConnectError(refused))).is_retryable());
+    }
+
+    /// A temporary server error on DDL becomes a timed-retry error kind, and a
+    /// rejected statement stays a manual one.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_call_classifies_ddl_errors_by_error() {
+        async fn ddl_failure(message: &str) -> EtlError {
+            let config = ClickHouseClientConfig::default();
+            let error = clickhouse::error::Error::BadResponse(message.to_owned());
+            let fut = async move { Err::<(), _>(error) };
+            timeout_call(ClickHouseOperationKind::Ddl, &config, None, fut).await.unwrap_err()
+        }
+
+        // GIVEN: a server timeout and a rejected statement during DDL.
+        // WHEN: each passes through `timeout_call`.
+        let timeout = ddl_failure("Code: 159. DB::Exception: Timeout exceeded.").await;
+        let rejected = ddl_failure("Code: 43. DB::Exception: Illegal type.").await;
+
+        // THEN: only the timeout gets a timed-retry kind.
+        assert_eq!(timeout.kind(), ErrorKind::DestinationConnectionFailed);
+        assert_eq!(rejected.kind(), ErrorKind::DestinationQueryFailed);
     }
 
     /// `floor_secs` renders whole seconds with a floor of `"1"`, so zero and
