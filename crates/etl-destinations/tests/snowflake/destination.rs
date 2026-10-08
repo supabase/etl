@@ -274,6 +274,29 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
             assert_eq!(metadata.table_id(), name);
             original_metadata.push(metadata);
         }
+
+        // Case-only collisions with an already-created table use the existing
+        // ownership rejection in both naming formats.
+        for index in [0, 3] {
+            let source_name = cases[index].0.name();
+            let schema = ReplicatedTableSchema::all(Arc::new(make_table_schema(
+                u32::try_from(100 + index).unwrap(),
+                &source_name.schema,
+                &source_name.name.to_ascii_uppercase(),
+            )));
+            harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
+            let error = invoke_write_table_rows(
+                &harness.destination,
+                &schema,
+                vec![TableRow::new(vec![Cell::I32(99), Cell::String("collision".to_owned())])],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+            assert!(
+                harness.store.get_destination_table_metadata(schema.id()).await.unwrap().is_none()
+            );
+        }
         harness.destination.shutdown().await.unwrap();
 
         let restarted =

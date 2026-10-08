@@ -63,11 +63,12 @@ replicator's `destination.engine` setting:
 
 Table names are `<schema>_<table>` with underscores in either part doubled:
 `public.orders` → `public_orders`, `my_schema.t` → `my__schema_t`.
-If either component starts or ends with `_`, names containing only lowercase
-ASCII letters, digits, and underscores use
+If either component starts or ends with `_`, names containing only ASCII
+letters (either case), digits, and underscores use
 `_SSTT_<schema>_<table>`, where `SS` and `TT` are the respective byte lengths,
 each written as two decimal digits. For example,
-`_public.orders` → `_0706__public_orders`. The lengths make the boundary
+`_public.orders` → `_0706__public_orders` and
+`Public._Orders` → `_0607_Public__Orders`. The lengths make the boundary
 unambiguous while keeping the original names readable. Each component must fit
 in 99 bytes; unsupported characters or lengths produce a validation error.
 

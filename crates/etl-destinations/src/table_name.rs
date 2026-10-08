@@ -37,13 +37,13 @@ fn validate_table_name_component(value: &str, component_name: &str) -> EtlResult
 ///
 /// Preserves the legacy underscore encoding unless either component starts or
 /// ends with `_`. Those names use `_SSTT_<schema>_<table>`, where `SS` and `TT`
-/// are two-digit byte lengths. Both components must contain only lowercase
-/// ASCII letters, digits, and underscores and fit in 99 bytes. Unsupported
+/// are two-digit byte lengths. Both components must contain only ASCII
+/// letters, digits, and underscores and fit in 99 bytes. Unsupported
 /// components return a validation error; there is no fallback encoding.
 ///
 /// Legacy names never start with `_`. The lengths disambiguate new names and
-/// distinguish them from generated suffixes. Restricting new components to
-/// lowercase ASCII preserves their identity after destination case folding.
+/// distinguish them from generated suffixes. Source case is preserved here;
+/// destination case folding and its case-only collisions remain unchanged.
 ///
 /// Two PostgreSQL identifiers of at most 63 bytes produce at most 133 ASCII
 /// characters in the length-prefixed form. Destination limits still apply,
@@ -72,12 +72,12 @@ pub(crate) fn try_stringify_table_name(table_name: &TableName) -> EtlResult<Stri
                 );
             }
 
-            if !value.bytes().all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_')) {
+            if !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
                 bail!(
                     ErrorKind::ValidationError,
-                    "Destination table name requires lowercase ASCII components",
+                    "Destination table name requires ASCII letters, digits, and underscores",
                     format!(
-                        "{component_name} must contain only lowercase ASCII letters, digits, and \
+                        "{component_name} must contain only ASCII letters, digits, and \
                          underscores when either component starts or ends with '_'"
                     )
                 );
@@ -126,6 +126,13 @@ mod tests {
             ("public", "_orders", "_0607_public__orders"),
             ("public", "orders_", "_0607_public_orders_"),
             ("_public", "_orders", "_0707__public__orders"),
+            ("_Public", "Orders", "_0706__Public_Orders"),
+            ("Public_", "Orders", "_0706_Public__Orders"),
+            ("Public", "_Orders", "_0607_Public__Orders"),
+            ("Public", "Orders_", "_0607_Public_Orders_"),
+            ("_PUBLIC", "_ORDERS", "_0707__PUBLIC__ORDERS"),
+            ("A", "_", "_0101_A__"),
+            ("_", "aB", "_0102___aB"),
             ("a", "_b", "_0102_a__b"),
             ("a_", "b", "_0201_a__b"),
             ("a_", "_b", "_0202_a___b"),
@@ -138,6 +145,27 @@ mod tests {
         ] {
             let table_name = TableName::new(schema.to_owned(), table.to_owned());
             assert_eq!(try_stringify_table_name(&table_name).unwrap(), expected);
+        }
+    }
+
+    /// Preserves source case without changing destination case-folding
+    /// limitations in either naming format.
+    #[test]
+    fn preserves_case_before_destination_case_folding() {
+        for (schema, table, other_schema, other_table) in [
+            ("a", "b", "a", "B"),
+            ("a", "b", "A", "b"),
+            ("a", "_b", "a", "_B"),
+            ("a_", "b", "A_", "b"),
+            ("a", "b_", "A", "b_"),
+            ("_a", "b", "_a", "B"),
+        ] {
+            let source = TableName::new(schema.to_owned(), table.to_owned());
+            let other = TableName::new(other_schema.to_owned(), other_table.to_owned());
+            let name = try_stringify_table_name(&source).unwrap();
+            let other_name = try_stringify_table_name(&other).unwrap();
+            assert_ne!(name, other_name);
+            assert_eq!(name.to_ascii_uppercase(), other_name.to_ascii_uppercase());
         }
     }
 
@@ -159,6 +187,9 @@ mod tests {
             "_a__current",
             "0102",
             "_0102_a__b",
+            "Mixed",
+            "Case_",
+            "_TABLE",
         ];
         let mut encoded = HashSet::new();
         let mut legacy = HashSet::new();
@@ -211,25 +242,31 @@ mod tests {
     }
 
     proptest! {
-        /// Recovers both original components after destination case folding.
+        /// Recovers exact components before case folding and their uppercase
+        /// forms afterward, without losing component boundaries.
         #[test]
         fn length_prefixed_components_roundtrip(
-            schema in "[a-z0-9_]{0,98}",
-            table in "[a-z0-9_]{1,99}",
+            schema in "[a-zA-Z0-9_]{0,98}",
+            table in "[a-zA-Z0-9_]{1,99}",
         ) {
             let schema = format!("_{schema}");
             let source = TableName::new(schema.clone(), table.clone());
-            let name = try_stringify_table_name(&source).unwrap().to_uppercase();
-            prop_assert!(name.is_ascii());
-            prop_assert!(name.starts_with('_'));
-            let schema_length = name.get(1..3).unwrap().parse::<usize>().unwrap();
-            let table_length = name.get(3..5).unwrap().parse::<usize>().unwrap();
-            let components = name.get(5..).unwrap().strip_prefix('_').unwrap();
-            let (decoded_schema, rest) = components.split_at(schema_length);
-            let decoded_table = rest.strip_prefix('_').unwrap();
-            prop_assert_eq!(decoded_table.len(), table_length);
-            prop_assert_eq!(decoded_schema.to_ascii_lowercase(), schema);
-            prop_assert_eq!(decoded_table.to_ascii_lowercase(), table);
+            let name = try_stringify_table_name(&source).unwrap();
+            for (name, schema, table) in [
+                (name.clone(), schema.clone(), table.clone()),
+                (name.to_ascii_uppercase(), schema.to_ascii_uppercase(), table.to_ascii_uppercase()),
+            ] {
+                prop_assert!(name.is_ascii());
+                prop_assert!(name.starts_with('_'));
+                let schema_length = name.get(1..3).unwrap().parse::<usize>().unwrap();
+                let table_length = name.get(3..5).unwrap().parse::<usize>().unwrap();
+                let components = name.get(5..).unwrap().strip_prefix('_').unwrap();
+                let (decoded_schema, rest) = components.split_at(schema_length);
+                let decoded_table = rest.strip_prefix('_').unwrap();
+                prop_assert_eq!(decoded_table.len(), table_length);
+                prop_assert_eq!(decoded_schema, schema);
+                prop_assert_eq!(decoded_table, table);
+            }
         }
     }
 
@@ -265,8 +302,7 @@ mod tests {
     /// including when only the other component has a boundary underscore.
     #[test]
     fn rejects_unsupported_length_prefixed_components() {
-        for component in
-            ["A", "aB", "é", "用户", "e\u{301}", "a b", "a-b", "a.b", "a$b", "a\n", "a\0", "😀"]
+        for component in ["é", "用户", "e\u{301}", "a b", "a-b", "a.b", "a$b", "a\n", "a\0", "😀"]
         {
             for (schema, table) in [(component, "_"), ("_", component)] {
                 let source = TableName::new(schema.to_owned(), table.to_owned());
@@ -274,7 +310,7 @@ mod tests {
                 assert_eq!(error.kind(), ErrorKind::ValidationError);
                 assert_eq!(
                     error.description(),
-                    Some("Destination table name requires lowercase ASCII components")
+                    Some("Destination table name requires ASCII letters, digits, and underscores")
                 );
             }
         }

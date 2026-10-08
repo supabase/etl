@@ -2191,6 +2191,7 @@ mod tests {
             ("_0101_____42", "_0101____", 42),
             ("_0104_a__b_0_7", "_0104_a__b_0", 7),
             ("_0102_a_b__7", "_0102_a_b_", 7),
+            ("_0607_Public__Orders_42", "_0607_Public__Orders", 42),
         ] {
             let parsed = input.parse::<SequencedBigQueryTableId>().unwrap();
             assert_eq!(parsed.to_bigquery_table_id(), base);

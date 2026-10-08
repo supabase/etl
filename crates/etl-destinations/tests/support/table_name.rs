@@ -5,7 +5,8 @@ use std::sync::Arc;
 use etl::schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type};
 
 /// Returns an ambiguous legacy pair, repeated boundary underscores, an
-/// unchanged legacy name, and maximum-length standard PostgreSQL identifiers.
+/// unchanged legacy name, mixed-case names, and maximum-length standard
+/// PostgreSQL identifiers.
 pub(crate) fn table_name_schemas() -> Vec<(ReplicatedTableSchema, String)> {
     // Snowflake tests share a schema, so every invocation owns unique names.
     let namespace = format!("n{}", uuid::Uuid::new_v4().simple());
@@ -18,6 +19,12 @@ pub(crate) fn table_name_schemas() -> Vec<(ReplicatedTableSchema, String)> {
         (trailing_namespace.clone(), "b".to_owned(), format!("_3401_{trailing_namespace}_b")),
         (namespace.clone(), "__b__".to_owned(), format!("_3305_{namespace}___b__")),
         (namespace.clone(), "legacy".to_owned(), format!("{namespace}_legacy")),
+        (
+            namespace.to_ascii_uppercase(),
+            "_Orders".to_owned(),
+            format!("_3307_{}__Orders", namespace.to_ascii_uppercase()),
+        ),
+        (namespace.clone(), "Orders_".to_owned(), format!("_3307_{namespace}_Orders_")),
         (
             long_ascii_schema.clone(),
             long_table.clone(),

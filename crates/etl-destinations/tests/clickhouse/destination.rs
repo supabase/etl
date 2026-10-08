@@ -258,7 +258,7 @@ async fn unsupported_boundary_names_fail_before_destination_setup() {
     let store = MemoryStore::new();
     let destination = database.build_destination(store.clone()).await;
     for (index, (source_schema, source_table)) in [
-        ("public".to_owned(), "_Orders".to_owned()),
+        ("public".to_owned(), "_café".to_owned()),
         ("schéma".to_owned(), "_orders".to_owned()),
         ("_public".to_owned(), "order items".to_owned()),
         ("_".repeat(100), "orders".to_owned()),
