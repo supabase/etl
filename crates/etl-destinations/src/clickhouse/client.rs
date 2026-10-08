@@ -152,13 +152,37 @@ impl ClickHouseErrorExt for clickhouse::error::Error {
         use clickhouse::error::Error;
 
         match self {
-            Error::Network(_) | Error::TimedOut => true,
+            // The public-address guard rejects private DNS answers at connect
+            // time with `PermissionDenied`. That repeats on every attempt.
+            Error::Network(source) => !is_permission_denied(source.as_ref()),
+            Error::TimedOut => true,
             Error::BadResponse(message) => is_retryable_server_response(message),
             // The other variants are local request, encode, or decode errors.
             // Sending the same request again gives the same error.
             _ => false,
         }
     }
+}
+
+/// Returns whether an error chain contains a `PermissionDenied` I/O error.
+///
+/// Walks `source()` links and also the error inside each `io::Error`, because
+/// `io::Error::source()` skips the error it wraps.
+fn is_permission_denied(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            if io_error.kind() == std::io::ErrorKind::PermissionDenied {
+                return true;
+            }
+            if let Some(inner) = io_error.get_ref() {
+                current = Some(inner);
+                continue;
+            }
+        }
+        current = error.source();
+    }
+    false
 }
 
 /// Returns whether a ClickHouse error response is temporary.
@@ -1311,6 +1335,49 @@ mod tests {
         ] {
             assert!(!error.is_retryable(), "{error}");
         }
+    }
+
+    /// A connect-time public-address rejection is not retryable, however deeply
+    /// the connector wraps it, while other connection errors still are.
+    #[test]
+    fn public_address_rejection_is_not_retryable() {
+        use std::io;
+
+        use clickhouse::error::Error;
+
+        /// Stand-in for a connector error that exposes its cause as `source()`.
+        #[derive(Debug)]
+        struct ConnectError(io::Error);
+
+        impl std::fmt::Display for ConnectError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("dns error")
+            }
+        }
+
+        impl std::error::Error for ConnectError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let denied = || io::Error::new(io::ErrorKind::PermissionDenied, "non-public IP address");
+
+        // GIVEN: the guard's rejection, bare, behind a `source()` link, and
+        // wrapped inside another `io::Error`.
+        // THEN: none of them is retryable.
+        for error in [
+            Error::Network(Box::new(denied())),
+            Error::Network(Box::new(ConnectError(denied()))),
+            Error::Network(Box::new(io::Error::other(denied()))),
+        ] {
+            assert!(!error.is_retryable(), "{error:?}");
+        }
+
+        // GIVEN: a refused connection behind the same wrapper.
+        // THEN: it is still retryable.
+        let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
+        assert!(Error::Network(Box::new(ConnectError(refused))).is_retryable());
     }
 
     /// A temporary server error on DDL becomes a timed-retry error kind, and a
