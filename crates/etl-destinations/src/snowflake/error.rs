@@ -49,6 +49,19 @@ pub enum Error {
     #[error("Encoding error: {0}")]
     Encoding(String),
 
+    /// A PostgreSQL JSON array contains a SQL-null element with no faithful
+    /// representation in the Snowpipe JSON request.
+    #[error(
+        "SQL NULL at index {element_index} in JSON array column '{column_name}' cannot be encoded \
+         without becoming JSON null"
+    )]
+    NullJsonArrayElement {
+        /// Source column containing the array.
+        column_name: String,
+        /// Zero-based position of the first SQL-null element.
+        element_index: usize,
+    },
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -145,7 +158,7 @@ impl Error {
             | Self::Channel(_) => AppendFailureType::Channel,
             Self::Snowpipe(SnowpipeError::ApiStatus { .. }) => AppendFailureType::SnowpipeApi,
             Self::Snowpipe(SnowpipeError::HttpStatus { .. }) => AppendFailureType::Provider,
-            Self::Encoding(_) => AppendFailureType::Encoding,
+            Self::Encoding(_) | Self::NullJsonArrayElement { .. } => AppendFailureType::Encoding,
             Self::RowTooLarge { .. } => AppendFailureType::RowTooLarge,
             Self::Config(_)
             | Self::MissingTableColumn { .. }
@@ -173,6 +186,14 @@ impl From<Error> for EtlError {
             );
         }
 
+        if matches!(&err, Error::NullJsonArrayElement { .. }) {
+            return etl::etl_error!(
+                ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                "Snowflake cannot preserve SQL NULL elements in JSON arrays",
+                source: err
+            );
+        }
+
         let (kind, description) = match &err {
             Error::HttpTransport(_) => {
                 (ErrorKind::DestinationError, "Snowflake HTTP transport error")
@@ -189,8 +210,9 @@ impl From<Error> for EtlError {
             Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
             Error::MissingTableColumn { .. }
             | Error::UnexpectedTableColumn { .. }
-            | Error::RowTooLarge { .. } => {
-                unreachable!("schema and row size errors return above")
+            | Error::RowTooLarge { .. }
+            | Error::NullJsonArrayElement { .. } => {
+                unreachable!("schema and unsupported value errors return above")
             }
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
@@ -295,6 +317,17 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+
+    /// Unsupported array elements retain their typed cause and stable kind.
+    #[test]
+    fn json_array_null_error_is_preserved() {
+        let error =
+            Error::NullJsonArrayElement { column_name: "payload".to_owned(), element_index: 2 };
+        assert_eq!(error.append_failure_type(), AppendFailureType::Encoding);
+        let error = EtlError::from(error);
+        assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        assert!(std::error::Error::source(&error).is_some());
+    }
 
     #[test]
     fn table_schema_error_is_preserved() {

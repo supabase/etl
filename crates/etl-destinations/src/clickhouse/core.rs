@@ -671,13 +671,20 @@ pub(crate) enum ClickHouseOperationKind {
 impl ClickHouseOperationKind {
     /// Error kind used when the inner future returns a
     /// `clickhouse::error::Error`.
-    pub(crate) fn failed_kind(self) -> ErrorKind {
-        match self {
-            ClickHouseOperationKind::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
-            ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl => {
+    ///
+    /// `retryable` says whether that error may succeed when sent again. DDL and
+    /// schema queries then get a timed retry instead of stopping for an
+    /// operator. Connectivity checks and inserts already get a timed retry.
+    pub(crate) fn failed_kind(self, retryable: bool) -> ErrorKind {
+        match (self, retryable) {
+            (ClickHouseOperationKind::Insert, _) => ErrorKind::DestinationAtomicBatchRetryable,
+            (ClickHouseOperationKind::ConnectivityCheck, _)
+            | (ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl, true) => {
+                ErrorKind::DestinationConnectionFailed
+            }
+            (ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl, false) => {
                 ErrorKind::DestinationQueryFailed
             }
-            ClickHouseOperationKind::Insert => ErrorKind::DestinationAtomicBatchRetryable,
         }
     }
 }

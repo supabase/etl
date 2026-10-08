@@ -79,6 +79,18 @@ pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
 
 /// Returns the Snowflake default clause for a column, if supported.
 pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
+    // PostgreSQL already applies source defaults before replication. VARIANT
+    // defaults would replace the omitted fields used to represent SQL NULL.
+    if is_json_type(&column_schema.typ) {
+        if column_schema.default_expression.is_some() {
+            warn!(
+                column_name = %column_schema.name,
+                "omitting snowflake json column default to preserve sql null; postgres applies the source default before replication"
+            );
+        }
+        return None;
+    }
+
     let default_clause = column_schema
         .default_expression
         .as_deref()
@@ -178,9 +190,6 @@ fn render_snowflake_default_expression(
         DefaultExpression::IntervalLiteral(expression) if matches!(typ, &Type::INTERVAL) => {
             snowflake_string_literal(expression)
         }
-        DefaultExpression::JsonLiteral(expression) if is_json_type(typ) => {
-            snowflake_string_literal(expression).map(|literal| format!("PARSE_JSON({literal})"))
-        }
         _ => None,
     }
 }
@@ -218,7 +227,7 @@ fn is_snowflake_text_default_type(typ: &Type) -> bool {
 }
 
 /// Returns whether a Postgres type is a Snowflake VARIANT JSON column.
-fn is_json_type(typ: &Type) -> bool {
+pub(super) fn is_json_type(typ: &Type) -> bool {
     matches!(typ, &Type::JSON | &Type::JSONB)
 }
 
@@ -357,12 +366,12 @@ mod tests {
             (
                 ColumnSchema::new("jsonb_col".to_owned(), Type::JSONB, -1, 13, true)
                     .with_default_expression(r#"'{"source": "base"}'::jsonb"#.to_owned()),
-                r#""jsonb_col" VARIANT DEFAULT PARSE_JSON('{"source": "base"}')"#,
+                r#""jsonb_col" VARIANT"#,
             ),
             (
                 ColumnSchema::new("json_col".to_owned(), Type::JSON, -1, 14, true)
                     .with_default_expression(r#"'{"source": "base"}'::json"#.to_owned()),
-                r#""json_col" VARIANT DEFAULT PARSE_JSON('{"source": "base"}')"#,
+                r#""json_col" VARIANT"#,
             ),
         ];
         let (columns, mut expected): (Vec<_>, Vec<_>) = cases.into_iter().unzip();
@@ -438,10 +447,7 @@ mod tests {
             .with_default_expression(r#"'{"pattern":"\d"}'::jsonb"#.to_owned());
 
         assert_eq!(default_clause(&text_column).as_deref(), Some(r#" DEFAULT 'path\\d'"#));
-        assert_eq!(
-            default_clause(&json_column).as_deref(),
-            Some(r#" DEFAULT PARSE_JSON('{"pattern":"\\d"}')"#)
-        );
+        assert_eq!(default_clause(&json_column), None);
     }
 
     #[test]

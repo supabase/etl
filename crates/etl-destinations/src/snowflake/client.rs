@@ -467,7 +467,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(())
     }
 
-    /// Validates a table before opening or reopening its streaming channel.
+    /// Validates a table and removes conflicting JSON defaults before opening
+    /// or reopening its streaming channel.
     ///
     /// Physical validation intentionally runs only at channel lifecycle
     /// boundaries, not during ordinary writes.
@@ -477,7 +478,14 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             .map(|column| column.name.as_str())
             .chain([schema::CDC_OPERATION_COLUMN, schema::CDC_SEQUENCE_COLUMN])
             .collect::<Vec<_>>();
-        self.sql_client.validate_table_schema(table_name, &expected_column_names).await
+        let json_column_names = columns
+            .iter()
+            .filter(|column| schema::is_json_type(&column.typ))
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>();
+        self.sql_client
+            .prepare_table_schema(table_name, &expected_column_names, &json_column_names)
+            .await
     }
 
     /// Translates a validated schema plan into Snowflake DDL in the supplied

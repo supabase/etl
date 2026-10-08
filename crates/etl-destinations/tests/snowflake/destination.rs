@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
-    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
+    data::{ArrayCell, Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability},
     error::ErrorKind,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
@@ -23,6 +23,8 @@ use etl_destinations::snowflake::{
     SqlClient,
     test_utils::{load_test_config, query_rows},
 };
+use futures::FutureExt;
+use serde_json::{Value, json};
 
 use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
 
@@ -1744,4 +1746,321 @@ async fn schema_evolution_interleaved_ddl_dml() {
         assert!(!columns.iter().any(|column| column == "name"), "name column should be renamed");
     })
     .await;
+}
+
+/// Builds a synthetic row with the same scalar in each JSON column.
+fn json_null_row(id: i32, scalar: Cell, array: Cell) -> TableRow {
+    TableRow::new(vec![Cell::I32(id), scalar.clone(), scalar.clone(), scalar, array])
+}
+
+/// Compares provider predicates and JSON values with the source null kinds.
+fn assert_json_null_observation(row: &Value, scalar: &Cell, array: &Cell) {
+    for label in ["json", "jsonb", "defaulted"] {
+        let observed = &row[label];
+        match scalar {
+            Cell::Null => {
+                assert_eq!(observed["sql_null"], true);
+                assert!(observed["json_null"].is_null());
+                assert!(observed["json"].is_null());
+            }
+            Cell::Json(value) => {
+                assert_eq!(observed["sql_null"], false);
+                assert_eq!(observed["json_null"], value.is_null());
+                assert_eq!(
+                    serde_json::from_str::<Value>(observed["json"].as_str().unwrap()).unwrap(),
+                    *value
+                );
+            }
+            _ => unreachable!("test scalar fixtures contain only SQL NULL or JSON"),
+        }
+    }
+    match array {
+        Cell::Null => assert_eq!(row["array"]["sql_null"], true),
+        Cell::Array(ArrayCell::Json(elements)) => {
+            assert_eq!(row["array"]["sql_null"], false);
+            assert_eq!(row["array"]["length"], elements.len());
+            assert_eq!(
+                serde_json::from_str::<Value>(row["array"]["json"].as_str().unwrap()).unwrap(),
+                json!(elements)
+            );
+            for (index, element) in elements.iter().enumerate() {
+                assert_eq!(row["array"]["elements"][index]["sql_null"], false);
+                assert_eq!(
+                    row["array"]["elements"][index]["json_null"],
+                    element.as_ref().unwrap().is_null()
+                );
+            }
+        }
+        _ => unreachable!("test array fixtures contain only SQL NULL or JSON arrays"),
+    }
+}
+
+/// Preserves scalar null kinds after migrating legacy defaults, across copy
+/// and restart, and rejects SQL-null JSON-array elements before ingestion.
+///
+/// Uses one synthetic table, two small writes and one classification readback.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials; bounded JSON-null regression"]
+async fn json_null_preservation_and_legacy_defaults() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_JSON_NULL_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+    let table_schema = TableSchema::new(
+        TableId::new(19001),
+        TableName::new("public".to_owned(), src_table),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("j".to_owned(), Type::JSON, -1, 2, true),
+            ColumnSchema::new("jb".to_owned(), Type::JSONB, -1, 3, true),
+            ColumnSchema::new("jd".to_owned(), Type::JSONB, -1, 4, true)
+                .with_default_expression(r#"'{"default":true}'::jsonb"#.to_owned()),
+            ColumnSchema::new("a".to_owned(), Type::JSONB_ARRAY, -1, 5, true),
+        ],
+    );
+    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+    harness.store.store_table_schema(table_schema).await.unwrap();
+    let restarted = Destination::new(Client::new(build_auth(), 1), harness.store.clone());
+    let fqn = format!(
+        "\"{}\".\"{}\".\"{sf_table}\"",
+        harness.config.database().replace('"', "\"\""),
+        harness.config.schema().replace('"', "\"\"")
+    );
+
+    let test = async {
+        // Reproduce the schema created by earlier ETL versions, including
+        // ownership metadata required to reopen an existing table.
+        harness
+            .sql
+            .execute_ddl(&format!(
+                r#"create table {fqn} (
+                "id" integer, "j" variant, "jb" variant,
+                "jd" variant default parse_json('{{"default":true}}'), "a" array,
+                "_cdc_operation" varchar not null, "_cdc_sequence_number" varchar not null
+            )"#
+            ))
+            .await
+            .unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(
+                schema.id(),
+                DestinationTableMetadata::new_applied(
+                    sf_table.clone(),
+                    SnapshotId::initial(),
+                    schema.replication_mask().clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let cases = [
+            (None, None),
+            (Some(json!(null)), Some(vec![json!(null)])),
+            (Some(json!("null")), Some(vec![json!("null")])),
+            (
+                Some(json!({"nested": null})),
+                Some(vec![json!(null), json!({"nested": null}), json!("null")]),
+            ),
+            (Some(json!([null])), Some(vec![])),
+            (Some(json!({"ordinary": 1})), Some(vec![json!({"ordinary": 1})])),
+            (Some(json!(42)), Some(vec![json!(42)])),
+            (Some(json!(true)), Some(vec![json!(true)])),
+            (Some(json!("ordinary")), Some(vec![json!("ordinary")])),
+        ]
+        .map(|(scalar, array)| {
+            (
+                scalar.map_or(Cell::Null, Cell::Json),
+                array.map_or(Cell::Null, |elements| {
+                    Cell::Array(ArrayCell::Json(elements.into_iter().map(Some).collect()))
+                }),
+            )
+        });
+        let rows = cases
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (scalar, array))| {
+                json_null_row(i32::try_from(index).unwrap() + 1, scalar, array)
+            })
+            .collect();
+        write_table_copy_and_wait(&harness.destination, &schema, rows).await;
+        let invalid_row = json_null_row(
+            11,
+            Cell::Null,
+            Cell::Array(ArrayCell::Json(vec![Some(Value::Null), None])),
+        );
+        let error =
+            invoke_write_table_rows(&harness.destination, &schema, vec![invalid_row.clone()])
+                .await
+                .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        etl::destination::Destination::shutdown(&harness.destination).await.unwrap();
+
+        // A fresh client must validate the already migrated schema again.
+        // Neither failed inserts nor updates may advance the durable offset.
+        for event in [
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(9_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                table_row: invalid_row.clone(),
+            }),
+            Event::Update(UpdateEvent {
+                commit_lsn: PgLsn::from(9_u64),
+                tx_ordinal: 2,
+                replicated_table_schema: schema.clone(),
+                updated_table_row: UpdatedTableRow::Full(invalid_row),
+                old_table_row: None,
+            }),
+        ] {
+            let error =
+                invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, vec![event])
+                    .await
+                    .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        }
+        assert_eq!(
+            restarted.fetch_committed_offset(schema.id()).await.unwrap(),
+            Some(first_copy_request_offset())
+        );
+        let commit_lsn = PgLsn::from(10_u64);
+        let cdc_cases = [
+            ("insert", Cell::Null, Cell::Null),
+            ("update", cases[1].0.clone(), cases[1].1.clone()),
+            ("update", Cell::Json(json!({"updated": true})), Cell::Array(ArrayCell::Json(vec![]))),
+            ("update", Cell::Null, Cell::Null),
+            ("delete", Cell::Null, Cell::Null),
+        ];
+        let events = cdc_cases
+            .iter()
+            .enumerate()
+            .map(|(index, (operation, scalar, array))| {
+                let tx_ordinal = u64::try_from(index).unwrap() + 1;
+                let row = json_null_row(10, scalar.clone(), array.clone());
+                match *operation {
+                    "insert" => Event::Insert(InsertEvent {
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: schema.clone(),
+                        table_row: row,
+                    }),
+                    "update" => Event::Update(UpdateEvent {
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: schema.clone(),
+                        updated_table_row: UpdatedTableRow::Full(row),
+                        old_table_row: None,
+                    }),
+                    "delete" => Event::Delete(DeleteEvent {
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: schema.clone(),
+                        old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(10)]))),
+                    }),
+                    _ => unreachable!("CDC fixtures contain only insert, update and delete"),
+                }
+            })
+            .collect();
+        let status = invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, events)
+            .await
+            .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        etl::destination::Destination::shutdown(&restarted).await.unwrap();
+        let scalar_fields = [("json", "j"), ("jsonb", "jb"), ("defaulted", "jd")]
+            .into_iter()
+            .map(|(label, column)| {
+                format!(
+                    "'{label}', object_construct_keep_null('sql_null', \"{column}\" is null, \
+                     'json_null', is_null_value(\"{column}\"), 'type', typeof(\"{column}\"), \
+                     'json', to_json(\"{column}\"))"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let elements = (0..3)
+            .map(|index| {
+                format!(
+                    "object_construct_keep_null('sql_null', \"a\"[{index}] is null, 'json_null', \
+                     is_null_value(\"a\"[{index}]))"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            r#"
+                with samples as (
+                    select 'stream' as origin, "id", "_cdc_operation", "_cdc_sequence_number", "j", "jb", "jd", "a" from {fqn}
+                    union all
+                    select 'sql_control', 0, 'control', '0', null::variant, parse_json('null'), parse_json('"null"'), array_construct(null, parse_json('null'), 'null')
+                )
+                select object_construct_keep_null(
+                    'origin', origin, 'id', "id", 'operation', "_cdc_operation", 'sequence', "_cdc_sequence_number",
+                    {scalar_fields},
+                    'array', object_construct_keep_null('sql_null', "a" is null, 'length', array_size("a"), 'json', to_json("a"), 'elements', array_construct({elements}))
+                ) from samples order by origin, "id", "_cdc_sequence_number"
+            "#
+        );
+        let rows = query_rows(&harness.sql, &query).await.unwrap();
+        let observations: Vec<Value> = rows
+            .into_iter()
+            .map(|row| {
+                let value = row.into_iter().next().unwrap();
+                match value {
+                    Value::String(text) => serde_json::from_str(&text).unwrap(),
+                    value => value,
+                }
+            })
+            .collect();
+        assert_eq!(observations.len(), cases.len() + cdc_cases.len() + 1);
+        let control = observations.iter().find(|row| row["origin"] == "sql_control").unwrap();
+        assert_eq!(control["json"]["sql_null"], true);
+        assert_eq!(control["jsonb"]["json_null"], true);
+        assert_eq!(control["defaulted"]["type"], "VARCHAR");
+        assert_eq!(control["array"]["elements"][0]["sql_null"], true);
+        assert_eq!(control["array"]["elements"][1]["json_null"], true);
+        let streamed: Vec<_> =
+            observations.iter().filter(|row| row["origin"] == "stream").collect();
+        assert_eq!(streamed.len(), cases.len() + cdc_cases.len());
+        for (index, (scalar, array)) in cases.iter().enumerate() {
+            let row = streamed[index];
+            assert_eq!(row["id"], i32::try_from(index).unwrap() + 1);
+            assert_eq!(row["operation"], "insert");
+            assert_eq!(row["sequence"], OffsetToken::zero().as_ref());
+            assert_json_null_observation(row, scalar, array);
+        }
+        for (index, (row, (operation, scalar, array))) in
+            streamed[cases.len()..].iter().zip(&cdc_cases).enumerate()
+        {
+            assert_eq!(row["id"], 10);
+            assert_eq!(row["operation"], *operation);
+            assert_eq!(
+                row["sequence"],
+                OffsetToken::new(commit_lsn, u64::try_from(index).unwrap() + 1).as_ref()
+            );
+            assert_json_null_observation(row, scalar, array);
+        }
+    };
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(120), test).await.unwrap();
+    })
+    .catch_unwind()
+    .await;
+
+    // Cleanup is attempted after success, panic, or the bounded probe timeout.
+    let mut shutdown_ok = true;
+    for destination in [&harness.destination, &restarted] {
+        shutdown_ok &= tokio::time::timeout(
+            Duration::from_secs(15),
+            etl::destination::Destination::shutdown(destination),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+    }
+    let dropped = harness.sql.drop_table(&sf_table).await;
+    let absent = harness.sql.table_exists(&sf_table).await.map(|exists| !exists);
+    assert!(shutdown_ok);
+    assert!(dropped.is_ok());
+    assert!(absent.unwrap());
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }
