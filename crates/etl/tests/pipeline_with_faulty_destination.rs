@@ -5,25 +5,27 @@ use etl::{
     error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
-    schema::{TableId, TableName},
+    schema::{SnapshotId, TableId, TableName},
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{
             WalsenderTermination, replication_slot_state, spawn_source_database,
-            terminate_active_walsender, terminate_walsender, wait_for_new_walsender,
+            terminate_active_walsender, terminate_walsender, test_table_name,
+            wait_for_new_walsender,
         },
-        event::{EventCondition, group_events_by_type_and_table_id},
+        event::{EventCondition, group_events_by_type_and_table_id, has_relation_with_column},
         faults::{FaultAction, FaultyOp},
         materialize::{FromTableRow, materialize_events},
         memory_destination::MemoryDestination,
         notify::{DEFAULT_NOTIFY_TIMEOUT, TimedNotify},
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{PipelineBuilder, create_pipeline},
         property::{block_on, run_expensive_property},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
     },
 };
+use etl_config::shared::BatchConfig;
 use etl_postgres::{slots::EtlReplicationSlot, tokio::test_utils::PgDatabase};
 use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
@@ -37,6 +39,19 @@ fn table_insert_commit_lsns(events: &[Event], table_id: TableId) -> Vec<PgLsn> {
         .filter_map(|event| match event {
             Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
                 Some(insert.commit_lsn)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Returns the schema snapshot ids of the table's relation events, in order.
+fn table_relation_snapshot_ids(events: &[Event], table_id: TableId) -> Vec<SnapshotId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
+                Some(relation.replicated_table_schema.inner().snapshot_id)
             }
             _ => None,
         })
@@ -642,6 +657,141 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
             vec![Cell::I64(2), Cell::String("after".to_owned())],
         ]
     );
+}
+
+/// Verifies that a timed retry after a lost write acknowledgement never sends
+/// the destination an older schema snapshot than one it already applied.
+///
+/// Three separate source transactions run: a pre-DDL insert, an `add column`,
+/// and a post-DDL insert. The write that carries the new schema is applied but
+/// reported as a timeout. Every destination that tracks its applied schema
+/// treats a decreasing snapshot id as a rewind, so this invariant is
+/// destination-agnostic.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_after_schema_change_never_rewinds_destination_schema() {
+    init_test_tracing();
+
+    // GIVEN: a Ready table, a batch window wide enough to hold three source
+    // transactions, a timed retry, and a lost acknowledgement for the write
+    // that carries the new schema.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("retry_after_schema_change");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[("id", "bigint primary key"), ("value", "text not null")],
+        )
+        .await
+        .unwrap();
+    database.insert_values(table_name.clone(), &["id", "value"], &[&0i64, &"seed"]).await.unwrap();
+    let publication_name = format!("pub_{}", random::<u32>());
+    database
+        .create_publication(&publication_name, std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+
+    let store = NotifyingStore::new();
+    let memory_destination = MemoryDestination::new(store.clone());
+    let destination = TestDestinationWrapper::wrap(memory_destination.clone());
+
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name,
+        store.clone(),
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 5000,
+        memory_budget_ratio: 0.2,
+        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+    })
+    .with_retry_config(1000, 2)
+    .build();
+
+    // A copied table becomes Ready only after the apply worker decodes and
+    // flushes a change for it, so a warm-up delete of the copied seed row
+    // follows the copy and precedes the scenario.
+    let sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    pipeline.start().await.unwrap();
+    sync_complete_notify.notified().await;
+    database
+        .run_sql(&format!("delete from {} where id = 0", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    ready_notify.notified().await;
+
+    destination.clear_events().await;
+    destination
+        .inject_write_events_fault_when(
+            move |events| has_relation_with_column(events, table_id, "note"),
+            FaultAction::fail_after_write(
+                ErrorKind::DestinationTimeout,
+                "injected lost write acknowledgement",
+            ),
+        )
+        .await;
+    let inserts_acknowledged_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    // WHEN: three separate transactions commit in quick succession.
+    database
+        .insert_values(table_name.clone(), &["id", "value"], &[&1i64, &"before"])
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter table {} add column note text", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .insert_values(table_name.clone(), &["id", "value", "note"], &[&2i64, &"after", &"note"])
+        .await
+        .unwrap();
+
+    let waiting = pipeline.wait();
+    tokio::pin!(waiting);
+    tokio::select! {
+        biased;
+
+        result = &mut waiting => {
+            panic!("pipeline stopped before the retry delivered both inserts: {result:?}");
+        }
+
+        () = inserts_acknowledged_notify.notified() => {}
+    }
+    pipeline.shutdown();
+    waiting.await.unwrap();
+
+    // THEN: the retry delivered both inserts, and the destination never
+    // received an older schema snapshot after a newer one.
+    let delivered_events = memory_destination.events().await;
+    let acknowledged_events = destination.get_events().await;
+
+    let acknowledged_inserts = acknowledged_events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                Some(insert.table_row.values().to_vec())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        acknowledged_inserts,
+        vec![
+            vec![Cell::I64(1), Cell::String("before".to_owned())],
+            vec![Cell::I64(2), Cell::String("after".to_owned()), Cell::String("note".to_owned())],
+        ]
+    );
+
+    let snapshots = table_relation_snapshot_ids(&delivered_events, table_id);
+    let mut sorted_snapshots = snapshots.clone();
+    sorted_snapshots.sort();
+    assert_eq!(snapshots, sorted_snapshots);
 }
 
 #[tokio::test(flavor = "multi_thread")]

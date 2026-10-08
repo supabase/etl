@@ -13,7 +13,8 @@ use etl::{
     },
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::EventCondition,
+        event::{EventCondition, has_relation_with_column},
+        faults::FaultAction,
         notifying_store::NotifyingStore,
         pipeline::{PipelineBuilder, create_pipeline, wait_for_pipeline_error},
         store::{wait_for_table_state_type, wait_for_table_sync_complete},
@@ -2961,5 +2962,179 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         final_metadata.snapshot_id(),
         applied_snapshot_id,
         "metadata must stay at the newer snapshot"
+    );
+}
+
+/// Current-state row for the retry-after-schema-change test.
+#[derive(clickhouse::Row, serde::Deserialize, Debug, PartialEq, Eq)]
+struct RetryAfterSchemaChangeRow {
+    id: i64,
+    value: String,
+    note: Option<String>,
+}
+
+/// Tests that a timed retry after a lost acknowledgement resumes streaming
+/// when the lost batch contained a schema change.
+///
+/// # GIVEN
+///
+/// A Ready table `(id bigint primary key, value text not null)` replicated to
+/// ClickHouse (ReplacingMergeTree) through a [`TestDestinationWrapper`]. The
+/// batch window is long enough for three quick transactions to share one apply
+/// batch, a timed retry is configured, and the first `write_events` call that
+/// carries the post-DDL relation is armed to apply its batch and then report
+/// `DestinationTimeout`.
+///
+/// # WHEN
+///
+/// Three separate source transactions commit in quick succession: insert id 1,
+/// `ADD COLUMN note text`, insert id 2 with a note.
+///
+/// # THEN
+///
+/// The retry recovers without manual action: the pipeline keeps running until
+/// both inserts are acknowledged, and after shutdown ClickHouse holds row 1
+/// with a null `note` and row 2 with its note.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_after_schema_change_resumes_without_resync() {
+    init_test_tracing();
+    install_crypto_provider();
+
+    // GIVEN: a copied table with one seed row, used only to reach Ready.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("schema_retry");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[("id", "bigint primary key"), ("value", "text not null")],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub_ch_schema_retry";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value) values (0, 'seed')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    let clickhouse_db = setup_clickhouse_database().await;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(
+        clickhouse_db
+            .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+            .await,
+    );
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let table_ready_notify =
+        store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        random::<PipelineId>(),
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 5_000,
+        memory_budget_ratio: BatchConfig::DEFAULT_MEMORY_BUDGET_RATIO,
+        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+    })
+    .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 2)
+    .build();
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    // A freshly copied table moves from SyncDone to Ready only after this
+    // connection decodes CDC for it, so a warm-up delete of the seed row gets
+    // it there and leaves no current-state row behind.
+    let warm_up_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Delete, table_id, 1)])
+        .await;
+    database
+        .run_sql(&format!("delete from {} where id = 0", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    warm_up_applied.notified().await;
+    table_ready_notify.notified().await;
+    destination.clear_events().await;
+
+    // The write that carries the new schema is applied by ClickHouse but
+    // reported as a timeout.
+    destination
+        .inject_write_events_fault_when(
+            move |events| has_relation_with_column(events, table_id, "note"),
+            FaultAction::fail_after_write(
+                ErrorKind::DestinationTimeout,
+                "injected lost acknowledgement",
+            ),
+        )
+        .await;
+    let both_inserts_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    // WHEN: three separate transactions commit in quick succession.
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value) values (1, 'before')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter table {} add column note text", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value, note) values (2, 'after', 'hello')",
+            table_name.as_quoted_identifier(),
+        ))
+        .await
+        .unwrap();
+
+    // THEN: the pipeline keeps running until both inserts are acknowledged.
+    let wait = pipeline.wait();
+    tokio::pin!(wait);
+    tokio::select! {
+        biased;
+
+        result = &mut wait => {
+            panic!("pipeline stopped before both inserts were acknowledged: {result:?}");
+        }
+
+        () = both_inserts_applied.notified() => {}
+    }
+    pipeline.shutdown();
+    wait.await.unwrap();
+
+    let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+    let clickhouse_table_name = metadata.table_id().to_owned();
+    assert_eq!(
+        clickhouse_db.column_names(&clickhouse_table_name).await,
+        vec!["id", "value", "note"]
+    );
+    let query = current_state_query(
+        ClickHouseEngine::ReplacingMergeTree,
+        &clickhouse_table_name,
+        "id, value, note",
+        &["id"],
+        "id",
+    );
+    let rows: Vec<RetryAfterSchemaChangeRow> = clickhouse_db.query(&query).await;
+    assert_eq!(
+        rows,
+        vec![
+            RetryAfterSchemaChangeRow { id: 1, value: "before".to_owned(), note: None },
+            RetryAfterSchemaChangeRow {
+                id: 2,
+                value: "after".to_owned(),
+                note: Some("hello".to_owned()),
+            },
+        ]
     );
 }
