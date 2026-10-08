@@ -305,6 +305,20 @@ Snowflake uses direct Snowpipe Streaming and key-pair authentication.
   translate safely at table creation or column addition are applied. Later
   existing-column default changes are skipped because Snowflake default
   provenance cannot be inferred safely.
+- `json` and `jsonb` use native `VARIANT` storage and preserve SQL `NULL`
+  separately from JSON `null`. ETL omits destination defaults for these columns
+  and removes existing defaults before opening or refreshing their streaming
+  channels. PostgreSQL still applies source defaults before replication. If a
+  destination default cannot be removed, channel setup fails before writing.
+  Existing destination columns mapped from `json` or `jsonb` must have physical
+  type `VARIANT`; incompatible types are rejected during channel setup.
+- PostgreSQL `json[]` and `jsonb[]` arrays containing SQL `NULL` elements are
+  rejected during encoding because the ingestion format cannot distinguish
+  them from JSON `null` elements. JSON `null` elements, empty arrays, and a
+  whole SQL `NULL` array are supported.
+- Earlier versions could merge SQL `NULL` and JSON `null`. The encoding fix
+  does not repair existing rows; restoring that distinction requires the
+  source data or a fresh copy.
 - Validate channel recovery, committed offsets, and account-specific resource
   limits before production use.
 
