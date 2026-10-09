@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{
-    retry::{ClassifiedError, RetryPolicy, retry_with_backoff},
+    retry::{RetryPolicy, retry_with_backoff},
     snowflake::{
         Config, Error, Result,
         auth::TokenProvider,
@@ -276,7 +276,7 @@ impl<T: TokenProvider> SqlClient<T> {
 
         retry_with_backoff(
             SQL_RETRY_POLICY,
-            |error: &Error| error.retryability().into(),
+            |_| false,
             |d| d,
             |attempt| {
                 warn!(

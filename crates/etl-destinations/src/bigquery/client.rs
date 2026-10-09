@@ -1642,7 +1642,7 @@ impl BigQueryClient {
         let requires_new_request_id = AtomicBool::new(false);
         let query_response = retry_with_backoff(
             QUERY_RETRY_POLICY,
-            |error: &BQError| error.retryability().into(),
+            |_| false,
             retry_delay_with_jitter,
             |attempt| {
                 requires_new_request_id

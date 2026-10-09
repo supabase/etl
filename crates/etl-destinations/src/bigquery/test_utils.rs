@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     bigquery::{BigQueryDestination, table_name_to_bigquery_table_id},
-    retry::{ClassifiedError, RetryPolicy, retry_with_backoff},
+    retry::{RetryPolicy, retry_with_backoff},
 };
 
 /// Maximum number of times we re-run a verification query.
@@ -61,7 +61,7 @@ where
 {
     retry_with_backoff(
         BIGQUERY_TEST_RETRY_POLICY,
-        |error: &BQError| error.retryability().into(),
+        |_| false,
         |delay| delay,
         |attempt| {
             eprintln!(

@@ -6,7 +6,7 @@ use tokio::sync::OnceCell;
 use tracing::{debug, warn};
 
 use crate::{
-    retry::{ClassifiedError, RetryPolicy, retry_with_backoff},
+    retry::{RetryPolicy, retry_with_backoff},
     snowflake::{
         Error, Result, SnowpipeError,
         auth::TokenProvider,
@@ -147,7 +147,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            |error: &Error| error.retryability().into(),
+            |_| false,
             |d| d,
             |attempt| {
                 warn!(
@@ -222,7 +222,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            |error: &Error| error.retryability().into(),
+            |_| false,
             |d| d,
             |attempt| {
                 warn!(
@@ -279,7 +279,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            |error: &Error| error.retryability().into(),
+            |_| false,
             |d| d,
             |attempt| {
                 warn!(
@@ -329,7 +329,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            |error: &Error| error.retryability().into(),
+            |_| false,
             |d| d,
             |attempt| {
                 warn!(
@@ -541,9 +541,12 @@ mod tests {
     };
 
     use super::*;
-    use crate::snowflake::{
-        encoding::{CdcMeta, CdcOperation, serialize_row},
-        streaming::{OffsetToken, RowBatchBuilder},
+    use crate::{
+        retry::ClassifiedError,
+        snowflake::{
+            encoding::{CdcMeta, CdcOperation, serialize_row},
+            streaming::{OffsetToken, RowBatchBuilder},
+        },
     };
 
     /// Token provider that names each token after how often it was invalidated.

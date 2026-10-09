@@ -59,9 +59,7 @@ use crate::{
         replay_epoch::LEGACY_REPLAY_EPOCH,
         sql::{qualified_lake_table_name, quote_identifier},
     },
-    retry::{
-        ClassifiedError, EtlErrorExt, RetryAttempt, RetryDecision, RetryPolicy, retry_with_backoff,
-    },
+    retry::{ClassifiedError, EtlErrorExt, RetryAttempt, RetryPolicy, retry_with_backoff},
 };
 
 /// Maximum number of rows per SQL `INSERT ... VALUES` batch when nested values
@@ -171,19 +169,6 @@ const INITIAL_RETRY_DELAY_MS: u64 = 50;
 const MAX_RETRY_DELAY_MS: u64 = 2_000;
 /// Minimum retry delay for transient delete-file visibility failures.
 const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
-
-/// Decides whether DuckLake-owned retry loops should retry one failure.
-///
-/// Stops on a shutdown request and otherwise follows the failure's
-/// classification. Write attempts mark their failures retryable with
-/// [`retryable_until_classified`].
-fn ducklake_retry_decision(error: &etl::error::EtlError) -> RetryDecision {
-    if is_ducklake_shutdown_requested_error(error) {
-        RetryDecision::Stop
-    } else {
-        error.retryability().into()
-    }
-}
 
 /// Event-level table mutations that must be applied in order.
 pub(super) enum TableMutation {
@@ -663,7 +648,7 @@ pub(super) async fn apply_table_batches_with_retry(
             initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
             max_delay: Duration::from_millis(MAX_RETRY_DELAY_MS),
         },
-        ducklake_retry_decision,
+        is_ducklake_shutdown_requested_error,
         jitter_ducklake_retry_delay,
         |attempt: RetryAttempt<'_, etl::error::EtlError>| {
             counter!(
@@ -738,7 +723,7 @@ pub(super) async fn apply_table_batch_with_retry(
                 MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
             ),
         },
-        ducklake_retry_decision,
+        is_ducklake_shutdown_requested_error,
         jitter_ducklake_retry_delay,
         |attempt: RetryAttempt<'_, etl::error::EtlError>| {
             counter!(
