@@ -21,7 +21,7 @@ use tracing::{Instrument, debug, error, info};
 
 use super::{
     child::ChildPgReplicationClient,
-    query::PgReplicationQueryTarget,
+    query::{PgReplicationQueryTarget, classify_table_copy_error},
     transaction::PgReplicationTransaction,
     types::{CreateSlotResult, GetSlotResult, PostgresConnectionUpdate, SlotState, SnapshotAction},
     utils::get_row_value,
@@ -52,8 +52,8 @@ const APP_NAME_REPLICATOR_REPLICATION: &str = "supabase_etl_replicator_replicati
 /// Builds connection options for logical replication connections.
 ///
 /// Leaves statement and idle-in-transaction timeouts disabled for long-running
-/// replication and copy work. Lock waits are bounded except during slot
-/// creation, which temporarily disables the lock timeout in its transaction.
+/// replication and copy work. Slot creation without table-copy locks can
+/// temporarily disable the lock timeout; protected copies retain the bound.
 fn replication_options(application_name: String) -> PgConnectionOptions {
     PgConnectionOptions::builder(application_name)
         .statement_timeout(0)
@@ -422,47 +422,90 @@ impl PgReplicationClient {
         )
     }
 
-    /// Creates a new logical replication slot with the specified name and a
-    /// transaction pinned to the slot's snapshot.
+    /// Locks a table and its descendants before establishing its copy snapshot.
     ///
-    /// A `REPEATABLE READ` transaction is begun first, then the slot is created
-    /// with `USE_SNAPSHOT` which pins the transaction to the slot's consistent
-    /// snapshot. The transaction must be kept open for the duration of any
-    /// operations that depend on this snapshot (e.g. schema fetches, table
-    /// copies, or `pg_export_snapshot()` calls for child connections).
+    /// The table is a copy unit returned by
+    /// [`Self::get_publication_table_ids`]: a published root or subtree
+    /// when publishing via the partition root, otherwise a leaf. Ordinary
+    /// tables are separate copy units in either mode. Locking descends from
+    /// this table, never to ancestors.
     ///
-    /// `failover` requests PostgreSQL 17+ standby synchronization for this
-    /// slot. The option applies only to this creation operation and is not
-    /// retained by the client.
-    pub async fn create_slot_with_transaction(
+    /// `ACCESS SHARE` blocks table DDL requiring `ACCESS EXCLUSIVE`, including
+    /// heap rewrites, while permitting ordinary writes and vacuum scans. It
+    /// does not freeze referenced types or other independent catalog objects.
+    /// The returned transaction must remain open until every copy worker has
+    /// finished. Slot creation retains the normal lock timeout: an old writer
+    /// can request DDL that waits for our lock while slot creation waits for
+    /// that writer. The timeout bounds each lock acquisition, not the lifetime
+    /// of these locks. Queued exclusive DDL can block later application queries
+    /// until this transaction ends; the copy does not monitor those waiters.
+    ///
+    /// Lock conflicts return [`ErrorKind::SourceTableCopyLockConflict`] so the
+    /// caller can retry the entire copy with a fresh snapshot.
+    pub async fn create_table_copy_slot(
         &mut self,
         slot_name: &str,
+        table_id: TableId,
         failover: bool,
     ) -> EtlResult<(PgReplicationTransaction<'_>, CreateSlotResult)> {
         self.validate_replication_slot_failover_support(failover)?;
 
+        // Resolve names outside the transaction: a catalog query inside it
+        // would establish a snapshot before CREATE_REPLICATION_SLOT can do so.
+        let query = format!(
+            "select n.nspname as schema_name, c.relname as table_name
+             from pg_catalog.pg_class c
+             join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+             where c.oid = {table_id}"
+        );
+        let mut table_name = None;
+        for message in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = message {
+                table_name = Some(TableName::new(
+                    get_row_value(&row, "schema_name", "pg_namespace")?,
+                    get_row_value(&row, "table_name", "pg_class")?,
+                ));
+            }
+        }
+        let table_name = table_name.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::SourceSchemaError,
+                "Table not found before acquiring copy locks",
+                format!("Table ID: {table_id}")
+            )
+        })?;
+
         let connection_config = self.connection_config.clone();
         let server_version = self.server_version;
         let connection_updates_rx = self.connection_updates_rx();
+        let transaction = self.begin_tx().await?;
 
-        let transaction = self.begin_slot_creation_transaction().await?;
+        // LOCK is a snapshot-free utility statement. Lock descendants too,
+        // since parallel copy opens each physical leaf independently.
+        transaction
+            .simple_query(&format!(
+                "lock table {} in access share mode nowait",
+                table_name.as_quoted_identifier(),
+            ))
+            .await
+            .map_err(classify_table_copy_error)?;
         let slot = PgReplicationQueryTarget::new(&transaction)
             .create_slot(slot_name, SnapshotAction::Use, failover)
-            .await?;
+            .await
+            .map_err(classify_table_copy_error)?;
 
-        // Only slot creation needs unlimited lock waits; schema and copy
-        // queries do not.
-        transaction.simple_query("set local lock_timeout = default").await?;
+        let transaction = PgReplicationTransaction::new(
+            transaction,
+            connection_config,
+            server_version,
+            connection_updates_rx,
+        );
+        // A rename/replacement can race name resolution, and ATTACH can add a
+        // descendant without conflicting with ACCESS SHARE. Reject any snapshot
+        // relation not already protected before the snapshot.
+        transaction.validate_table_copy_locks(table_id).await?;
 
-        Ok((
-            PgReplicationTransaction::new(
-                transaction,
-                connection_config,
-                server_version,
-                connection_updates_rx,
-            ),
-            slot,
-        ))
+        Ok((transaction, slot))
     }
 
     /// Creates a new logical replication slot with the specified name and no
@@ -598,20 +641,46 @@ impl PgReplicationClient {
         Ok(())
     }
 
-    /// Deletes a replication slot with the specified name.
+    /// Deletes a replication slot if it exists, waiting for active use to end.
     ///
-    /// Returns an error if the slot doesn't exist or if there are any issues
-    /// with the deletion.
-    pub async fn delete_slot(&self, slot_name: &str) -> EtlResult<()> {
-        self.delete_slot_internal(slot_name, true).await
-    }
-
-    /// Deletes a replication slot with the specified name if it exists.
-    ///
-    /// This method returns `Ok(())` when the slot is missing and propagates any
-    /// other error from [`PgReplicationClient::delete_slot`].
+    /// A missing slot is already deleted. Other failures preserve the source
+    /// error, and deletion waits are bounded by [`DELETE_SLOT_TIMEOUT`].
     pub async fn delete_slot_if_exists(&self, slot_name: &str) -> EtlResult<()> {
-        self.delete_slot_internal(slot_name, false).await
+        debug!(slot_name, "deleting replication slot");
+
+        // PostgreSQL requires uppercase keywords in replication protocol
+        // commands.
+        let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
+
+        let Ok(delete_result) =
+            tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
+        else {
+            bail!(
+                ErrorKind::ReplicationSlotDeletionTimeout,
+                "Replication slot deletion timed out",
+                format!(
+                    "Timed out after {:?} while deleting replication slot '{}'",
+                    DELETE_SLOT_TIMEOUT, slot_name
+                )
+            )
+        };
+
+        match delete_result {
+            Ok(_) => {
+                info!(slot_name, "deleted replication slot");
+
+                Ok(())
+            }
+            Err(err) => {
+                if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
+                    info!(slot_name, "replication slot not found, skipping deletion");
+
+                    return Ok(());
+                }
+
+                Err(err.into())
+            }
+        }
     }
 
     /// Checks if a publication with the given name exists.
@@ -627,29 +696,6 @@ impl PgReplicationClient {
         }
 
         Ok(false)
-    }
-
-    /// Retrieves the names of all tables included in a publication.
-    pub async fn get_publication_table_names(
-        &self,
-        publication_name: &str,
-    ) -> EtlResult<Vec<TableName>> {
-        let publication_query = format!(
-            "select schemaname, tablename from pg_publication_tables where pubname = {};",
-            quote_literal(publication_name)
-        );
-
-        let mut table_names = vec![];
-        for msg in self.client.simple_query(&publication_query).await? {
-            if let SimpleQueryMessage::Row(row) = msg {
-                let schema = get_row_value::<String>(&row, "schemaname", "pg_publication_tables")?;
-                let name = get_row_value::<String>(&row, "tablename", "pg_publication_tables")?;
-
-                table_names.push(TableName { schema, name });
-            }
-        }
-
-        Ok(table_names)
     }
 
     /// Retrieves the OIDs of all tables included in a publication.
@@ -757,12 +803,11 @@ impl PgReplicationClient {
         Ok(transaction)
     }
 
-    /// Begins a transaction that lets slot creation wait for old writers.
+    /// Begins an apply-slot transaction that can wait for old writers.
     ///
     /// The local override is reset when the transaction ends, including when an
-    /// error drops the transaction and queues a rollback. Setting a GUC does
-    /// not acquire a snapshot, so `USE_SNAPSHOT` can still establish it
-    /// afterwards.
+    /// error drops the transaction and queues a rollback. Apply-slot creation
+    /// holds no copy locks that could block those writers.
     async fn begin_slot_creation_transaction(&mut self) -> EtlResult<Transaction<'_>> {
         let transaction = self.begin_tx().await?;
         transaction.simple_query("set local lock_timeout = 0").await?;
@@ -781,58 +826,6 @@ impl PgReplicationClient {
         }
 
         Ok(())
-    }
-
-    /// Deletes a replication slot, optionally failing when the slot does not
-    /// exist.
-    async fn delete_slot_internal(&self, slot_name: &str, fail_if_missing: bool) -> EtlResult<()> {
-        debug!(slot_name, "deleting replication slot");
-
-        // PostgreSQL requires uppercase keywords in replication protocol
-        // commands.
-        let query = format!(r#"DROP_REPLICATION_SLOT {} WAIT;"#, quote_identifier(slot_name));
-
-        let Ok(delete_result) =
-            tokio::time::timeout(DELETE_SLOT_TIMEOUT, self.client.simple_query(&query)).await
-        else {
-            bail!(
-                ErrorKind::ReplicationSlotDeletionTimeout,
-                "Replication slot deletion timed out",
-                format!(
-                    "Timed out after {:?} while deleting replication slot '{}'",
-                    DELETE_SLOT_TIMEOUT, slot_name
-                )
-            )
-        };
-
-        match delete_result {
-            Ok(_) => {
-                info!(slot_name, "deleted replication slot");
-
-                Ok(())
-            }
-            Err(err) => {
-                if let Some(&SqlState::UNDEFINED_OBJECT) = err.code() {
-                    if fail_if_missing {
-                        bail!(
-                            ErrorKind::ReplicationSlotNotFound,
-                            "Replication slot not found",
-                            format!(
-                                "Replication slot '{}' not found in database while attempting its \
-                                 deletion",
-                                slot_name
-                            )
-                        );
-                    }
-
-                    info!(slot_name, "replication slot not found, skipping deletion");
-
-                    return Ok(());
-                }
-
-                Err(err.into())
-            }
-        }
     }
 }
 

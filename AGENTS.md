@@ -328,13 +328,19 @@ intent in a preceding comment. Prefer assertions without custom messages. A
 message is justified only for non-sensitive runtime context the default output
 lacks (table-driven case ids). Add or update tests when behavior changes.
 Reuse `crates/etl/src/test_utils/` and nearby helpers before inventing setup.
+Move helpers used by multiple test files into the appropriate shared test
+module; keep file-specific helpers at the top of their test file.
 
 Register `NotifyingStore::notify_on_*` and `TestDestinationWrapper::wait_for_*`
-**before** the producer can fire (they only arm on later updates):
+**before** the producer can fire (they only arm on later updates). Separate
+notification registration, triggering work, and notification waits with blank
+lines so the synchronization phases are clear:
 
 ```rust
 let ready = store.notify_on_table_state_type(id, Ready).await;
+
 pipeline.start().await.unwrap();
+
 ready.notified().await;
 ```
 

@@ -46,10 +46,25 @@ When a pipeline starts, it copies existing rows from each table in the
 publication, then catches up changes that occurred while the copy was running.
 Multiple **Table Sync Workers** run in parallel. Each worker:
 
-1. Creates a replication slot to capture a consistent snapshot
-2. Copies existing rows with Postgres `COPY` and sends them via `write_table_rows()`
-3. Catches up later WAL changes via `write_events()` until the table is ready
-   for the apply worker
+1. Locks the table and its existing descendants in `ACCESS SHARE` mode
+2. Creates a replication slot to capture a consistent snapshot
+3. Copies existing rows with Postgres `COPY` and sends them via `write_table_rows()`
+4. Releases the copy locks and catches up later WAL changes via `write_events()`
+   until the table is ready for the apply worker
+
+The parent retains each copy unit's locks across all parallel chunks. Workers
+import its snapshot and acquire their own locks with `NOWAIT`. A conflict fails
+the incomplete attempt; the configured retry policy starts a fresh copy.
+
+On a primary, these ordinary `SELECT` locks permit normal reads and writes but
+block `ACCESS EXCLUSIVE` DDL. Queued DDL can delay application queries. On a
+standby, they protect local reads against conflicting WAL replay, which may
+cancel copy sessions; they do not block DDL on the primary.
+
+Long copies retain WAL and old row versions, and can delay concurrent index
+completion. See [Planning long initial copies](/guides/configure-postgres/#planning-long-initial-copies)
+for operating costs and [Initial-copy schema protection](/explanation/schema-changes/#initial-copy-schema-protection)
+for partition scope, timeouts, and retry limits.
 
 <Callout className="etl-callout" type="info" title="Note">
   During catch-up, `Begin` and `Commit` events may be delivered multiple times
@@ -73,12 +88,18 @@ the Postgres WAL. It:
 
 ### Schema Changes
 
-ETL supports simple column evolution from `ALTER TABLE` and supported
-`ALTER PUBLICATION` changes. A source-side event trigger emits internal schema
-messages for published permanent tables, ETL stores a new schema snapshot, and
-destinations observe the change through a fresh `Relation` event before
-following row events. See [Schema Changes](/explanation/schema-changes/) for
-the supported operations and limitations.
+Schema-change handling is in **public beta**. A source-side event trigger
+captures table-schema snapshots for supported `ALTER TABLE` and publication
+column-list changes. Each pipeline combines the stored snapshot with its
+`RELATION` column metadata to select the columns it actually replicates.
+Destinations observe the resulting logical schema through an ordered
+`Relation` event before following rows.
+
+Initial-copy locks protect table layout while copying; they do not resolve
+the known catalog-helper visibility, concurrent-DDL snapshot, or relation-mask
+ambiguity risks in schema-change capture and replay. See
+[Schema Changes](/explanation/schema-changes/) for the design, capture behavior,
+and operating guidance.
 
 ## Core Components
 

@@ -1,13 +1,21 @@
 ---
 title: Schema Changes
-description: How Supabase ETL handles DDL and evolving table schemas.
+description: How beta schema-change handling uses snapshots and publication masks, protects initial copies, and where its guarantees stop.
 icon: RefreshCw
 ---
 
-Schema-change support is in public beta. ETL automatically applies the simple
-column changes listed below when the destination can represent them safely.
-When it cannot, ETL either skips the destination DDL with a warning or rejects
-the change before applying it.
+<Callout className="etl-callout" type="warn" title="Schema-change handling is in public beta">
+  Review the [schema-capture cautions](#current-limitations) before scheduling
+  concurrent DDL. Initial-copy locks protect table layout while copying, but
+  schema capture can still observe inconsistent catalog metadata. Schema
+  validation does not detect every inconsistency.
+</Callout>
+
+ETL automatically applies the simple column changes listed below when the
+destination can represent them safely. For unsupported destination changes,
+ETL either skips the destination DDL with a warning or rejects the change
+before applying it. These compatibility checks are separate from the source
+schema-capture behavior described below.
 
 This page describes structural DDL compatibility. Row values are not validated
 against destination-specific value domains; see [Row value
@@ -22,7 +30,7 @@ handling](/reference/destinations/#row-value-handling).
 | Add, replace, or remove a column default | Supported literal defaults are translated on a best-effort basis |
 | Drop `NOT NULL` | Applied by BigQuery, ClickHouse, and DuckLake; Snowflake columns are already nullable |
 | Set `NOT NULL` | Detected, but not applied to existing destination columns |
-| Change a type or type modifier | Detected, but physical type DDL is skipped with a warning |
+| Change a type or type modifier | BigQuery, DuckLake, and Snowflake skip physical type DDL with a warning; ClickHouse rejects changes to its mapped type |
 | Publish an existing column | Added using the historical-value policy described below |
 | Stop publishing a column | The destination column is dropped |
 
@@ -37,12 +45,102 @@ schema-change DDL.
   Resynchronize the table after changing a replicated column type.
 </Callout>
 
+## Initial-copy schema protection
+
+An MVCC snapshot determines which rows a copy can see. It does not freeze the
+relation metadata PostgreSQL uses to interpret them. For each copy unit:
+
+1. The parent transaction locks the table and its existing descendants in
+   `ACCESS SHARE` mode with `NOWAIT`, before creating the slot snapshot.
+2. ETL verifies that every source relation in the snapshot was already locked,
+   then reads the initial schema.
+3. Workers import the snapshot and acquire their own `ACCESS SHARE` locks with
+   `NOWAIT` before copying a relation or deparsing its row filter. They retain
+   these locks across chunks.
+4. The parent retains the whole copy unit's locks until all source copy workers
+   finish. Protection ends before CDC catch-up.
+
+For partitioned tables, publication discovery determines the copy unit:
+
+| Publication mode | Copy-lock scope |
+| --- | --- |
+| `publish_via_partition_root = true` | The published root or subtree root and its existing descendants |
+| `publish_via_partition_root = false` | Each published leaf independently; locks do not climb to ancestors or cross to siblings |
+
+Ordinary tables are separate copy units in either mode. Each unit has its own
+snapshot and retry lifecycle. Discovery does not return a published root
+alongside the descendants it covers. A foreign-table partition causes a root
+copy to fail because ETL's CTID copying requires local storage.
+
+This continuous coverage prevents table DDL requiring `ACCESS EXCLUSIVE`,
+including incompatible column-layout changes and heap rewrites, from crossing
+the snapshot boundary or running between chunks. It uses the same parent-lock
+and worker-`NOWAIT` pattern as
+[`pg_dump` parallel dumps](https://www.postgresql.org/docs/18/app-pgdump.html).
+
+On a primary, `ACCESS SHARE` is the same table lock as an ordinary `SELECT`.
+It is compatible with normal reads, inserts, updates, deletes, and ordinary
+vacuum. The snapshot can still prevent vacuum cleanup, and queued
+`ACCESS EXCLUSIVE` DDL can delay later application queries.
+
+On a read replica, these locks are local: they do not block primary DDL.
+Conflicting WAL replay can wait or cancel the copy's queries or sessions under
+PostgreSQL's [standby conflict rules](https://www.postgresql.org/docs/18/hot-standby.html#HOT-STANDBY-CONFLICT).
+See [Planning long initial copies](/guides/configure-postgres/#planning-long-initial-copies)
+for source impact and monitoring.
+
+### Lock conflicts and retries
+
+Consider a parent holding `ACCESS SHARE`, a DDL session waiting for
+`ACCESS EXCLUSIVE`, and a new copy worker requesting `ACCESS SHARE`. The worker
+can queue behind the DDL even though its lock is compatible with the parent's
+lock. The parent is waiting for the worker in ETL, outside PostgreSQL's lock
+manager, so PostgreSQL cannot detect this application-level deadlock.
+
+A worker's `NOWAIT` request fails instead of joining that queue. A conflict
+fails the attempt with `SourceTableCopyLockConflict`;
+the configured retry policy discards the incomplete destination copy and starts
+from a fresh snapshot. Already-held locks are reused: ETL does not continuously
+check for later DDL waiters or automatically abort a copy to unblock applications.
+
+Copy connections use a 30-second `lock_timeout` for other lock acquisitions,
+including waits for old writers during copy-slot creation. This breaks cycles
+where those writers depend on DDL blocked by the copy. PostgreSQL-detected
+deadlocks during copy-slot creation are also retryable. The timeout applies to
+each acquisition, not the total copy or slot-creation duration. Apply-slot
+creation temporarily disables it because that transaction holds no copy locks.
+
+Retries belong to the running table-sync worker. If the pipeline stops while a
+table is persisted as `Errored`, restarting alone does not resume it. Resolve
+the cause and reset the table for resynchronization. Exhausted retries also
+require manual intervention.
+
+### What the locks do not protect
+
+`ACCESS SHARE` does not freeze all metadata. Publication column lists and
+partition membership are read from the copy's MVCC snapshot; row-filter
+expressions also come from that snapshot, but `pg_get_expr` deparses them using
+internal catalog lookups. The helper limitations below still apply.
+
+Supported publication column-list changes can proceed and are handled after
+copying. A partition attached before the snapshot without a pre-existing lock
+causes a retry; a partition attached after it is excluded from the running
+copy plan. Neither rule makes live partition-topology changes supported.
+
+Coordinate a stop and resynchronization for changes to namespaces,
+user-defined types or functions, publication membership, row filters, or
+partition topology. For example, an enum rename does not acquire
+`ACCESS EXCLUSIVE` on every table using the enum. Initial-copy locks also do
+not fix later event-trigger capture or the other [schema-capture cautions](#current-limitations).
+
 ## How schema changes reach a destination
 
 ETL installs a PostgreSQL event trigger for published permanent tables. After a
 supported `ALTER TABLE` or publication column-list change:
 
-1. PostgreSQL emits a transactional schema snapshot in WAL order.
+1. ETL's `ddl_command_end` trigger describes the table after the command and
+   emits a transactional schema snapshot into WAL, before the transaction
+   commits. A rollback discards the message with the DDL.
 2. ETL stores the new versioned table schema.
 3. ETL combines the snapshot with column masks from PostgreSQL's `RELATION`
    metadata. If no-op DDL produces no fresh relation, ETL reuses the previous
@@ -60,10 +158,41 @@ that identical pair needs no schema transition. Supported publication
 column-list changes use a newer snapshot even when the full table schema is
 unchanged.
 
-ETL captures the complete schema after PostgreSQL has applied the DDL instead
-of replaying raw PostgreSQL SQL. It matches columns by PostgreSQL `attnum`, so a
-rename keeps its logical identity while a drop and re-add becomes a drop plus
-an add.
+ETL captures an unprojected table-schema description instead of replaying raw
+PostgreSQL SQL. It matches columns by PostgreSQL `attnum`, so a rename keeps its
+logical identity while a drop and re-add becomes a drop plus an add. The
+description is intended to represent the post-command schema; the visibility
+limitations below explain why it is not always a faithful description of the
+live catalog state.
+
+### Why snapshots and replication masks are separate
+
+A table schema and a pipeline's view of that schema are different things. One
+publication might expose `id, email`, while another exposes `id, status` from
+the same table. The source trigger captures the table's columns without
+projecting them separately for every pipeline. Each pipeline selects the
+stored schema version at its position in the stream, then uses its
+`RELATION` column metadata to build a **replication mask**: which columns from
+that version are actually replicated. An identity mask separately describes
+the columns PostgreSQL uses to identify rows.
+
+This keeps pipeline-specific projection out of ordinary table-DDL capture.
+The trigger reports that a table changed and supplies its schema snapshot;
+each interested pipeline derives its own `ReplicatedTableSchema`. Snapshot
+selection follows WAL ordering and recovery state; ETL does not select an
+arbitrary historical version merely because its column names match.
+
+The same mechanism makes a publication column-list change a logical schema
+change for a destination, even when the physical table has not changed.
+Supported column-list changes emit a new snapshot version, and the pipeline's
+new mask produces the projected add/drop transition using the same ordered
+schema-planning path as table DDL.
+
+The trigger still checks whether a table is published. Ordinary `ALTER TABLE`
+snapshots are not scoped to one publication; `ALTER PUBLICATION` snapshots
+include a publication scope so unrelated pipelines can ignore them. That
+scope does not replace the per-pipeline mask or mean that live publication
+membership changes are supported.
 
 ### Ordered schema plans
 
@@ -235,16 +364,107 @@ Recovery then follows each destination's DDL guarantees:
 
 Resynchronize the affected table when recovery cannot prove a safe endpoint.
 
-## Current limitations
+## Schema-capture cautions [#current-limitations]
+
+Concurrent DDL and catalog visibility affect whether ETL can obtain and select
+the correct source schema, even when the destination supports the requested
+column operation. The following cases describe the current behavior.
+
+### Catalog rows and PostgreSQL helper functions can see different metadata
+
+Ordinary SQL reads of `pg_catalog` rows follow the query's MVCC snapshot.
+Schema extraction also calls PostgreSQL helpers such as `pg_get_expr` and
+`format_type`. Their internal C implementations can use catalog caches,
+relation caches, and other catalog access paths; they are not a general API
+for reconstructing every object as of the caller's MVCC snapshot.
+
+Consequently, snapshot-visible catalog rows and metadata reconstructed by a
+helper can describe different schema states when DDL occurs concurrently.
+Running the extraction in one transaction does not by itself make those
+paths agree. Initial-copy locks protect the relevant table layout during
+copying, but they do not freeze every referenced catalog object, and they are
+not held around later schema-change capture.
+
+We reproduced this on PostgreSQL 14.24 and 18.6 with a table using an enum. A
+repeatable-read transaction held `ACCESS SHARE` on the table while another
+session renamed the enum type and one of its values. In the first session,
+`pg_type.typname` and `pg_enum.enumlabel` still returned the old names, while
+`format_type` and `pg_get_expr` returned the new names. The table lock did not
+block those independent type changes.
+
+### Concurrent DDL can outlive the capturing transaction's snapshot
+
+The [`ddl_command_end` event](https://www.postgresql.org/docs/current/event-trigger-definition.html#EVENT-TRIGGER-DDL_COMMAND_END)
+fires after a DDL command has executed and before its transaction commits. It
+makes the command's own changes visible to the trigger, but does not give the
+trigger a fresh view of every other transaction's committed catalog changes.
+
+For example, consider this ordering for a table `C`:
+
+1. Transaction A uses `REPEATABLE READ` or `SERIALIZABLE` and establishes its
+   snapshot by reading unrelated data, without locking `C`.
+2. Transaction B alters `C` and commits.
+3. A alters `C`. If PostgreSQL allows the command to complete, ETL's event
+   trigger runs inside A before A commits.
+4. The trigger's ordinary catalog reads can retain A's earlier snapshot while
+   also seeing A's own changes. They can therefore omit B's committed changes
+   and produce a schema description that differs from the live relation.
+
+Starting A with `BEGIN` alone is not enough for this example: its snapshot
+must already have been established before B commits. PostgreSQL's
+[transaction isolation rules](https://www.postgresql.org/docs/current/transaction-iso.html#XACT-REPEATABLE-READ)
+preserve that snapshot at these isolation levels. Serialization failures can
+abort some schedules; `SERIALIZABLE` is not a fix for ETL's capture mechanism.
+The command ending, A acquiring a table lock, or A eventually committing does
+not retroactively refresh the schema description already emitted.
+
+We reproduced this with ETL's installed source trigger on PostgreSQL 14.24 and
+18.6. Starting with column `id`, B added `from_b`, then A added `from_a`:
+
+| A's isolation level | Columns in A's committed WAL schema message | Live table after both commits |
+| --- | --- | --- |
+| `READ COMMITTED` | `id, from_b, from_a` | `id, from_b, from_a` |
+| `REPEATABLE READ` | `id, from_a` | `id, from_b, from_a` |
+| `SERIALIZABLE` | `id, from_a` | `id, from_b, from_a` |
+
+Both stronger-isolation cases committed successfully in this schedule. The
+transactional message contained an incomplete schema; WAL ordering did not
+repair it. These results demonstrate specific failures, not every possible
+DDL schedule.
+
+### Relation metadata cannot distinguish every schema mismatch from filtering
+
+ETL relies on the stored table snapshot and the `RELATION` column set describing
+the same schema state. A column present in the stored schema but absent from
+`RELATION` is treated as publication column filtering. That absence alone
+cannot distinguish intentional filtering from a mismatch between relation
+metadata and the selected schema snapshot.
+
+This matters when schema history diverges or metadata is rebuilt during
+reconnect and replay. Some mismatches, such as an unknown relation column,
+can be rejected, but a valid-looking subset is not proof that the correct
+schema was selected. The mask design does not detect every schema mismatch.
+
+At table-sync handover, the worker fails closed when it cannot establish a complete decoding schema
+after schema activity during catch-up. Retry after schema activity settles or
+resynchronize the table. No-op DDL without a fresh protocol relation is handled
+when ETL has valid previous masks to reuse; a new relation is not required
+after every DDL statement.
+
+### Planning schema changes [#operating-within-the-current-limits]
+
+Serialize schema changes affecting the same replicated tables and prefer
+short, fresh `READ COMMITTED` transactions for those changes. This reduces the
+stale-transaction-snapshot risk; it does not resolve every helper-function or
+relation-metadata inconsistency. For unsupported changes or schema history that
+cannot be trusted, coordinate a stop and table resynchronization. A restart
+alone does not repair an incorrectly captured snapshot.
 
 - Table creation, removal, and rename are pipeline lifecycle operations, not
   live schema changes.
 - General constraints, identity changes, replica-identity changes, and indexes
   are not portable destination DDL operations. Destinations may reject key
   changes required by their write model.
-- A table-sync worker can fail closed if schema activity occurs during catch-up
-  without a complete following relation before handover. Retry after schema
-  activity settles or resynchronize the table.
 - Destination default and add-column behavior is not a historical-data
   migration contract. Resynchronize when exact historical values matter.
 

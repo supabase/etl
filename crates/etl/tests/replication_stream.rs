@@ -2,7 +2,10 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use etl::{
     data::{ArrayCell, Cell, Date, PgNumeric, PgTime, PgTimeTz, TableRow, Timestamp},
     error::EtlResult,
-    postgres::{ReplicationMessageStream, client::PgReplicationClient},
+    postgres::{
+        ReplicationMessageStream,
+        client::{CtidPartition, PgReplicationClient},
+    },
     schema::{ColumnSchema, SnapshotId, TableId, TableName},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -1145,15 +1148,25 @@ async fn table_copy_stream_converts_postgres_type_matrix() {
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = client
-        .create_slot_with_transaction(&test_slot_name("copy_type_matrix"), false)
+        .create_table_copy_slot(&test_slot_name("copy_type_matrix"), table_id, false)
         .await
         .unwrap();
-    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
-    let stream = transaction
-        .get_table_copy_stream(table_id, &table_schema.column_schemas, None)
+    let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
+    let snapshot = transaction.export_snapshot().await.unwrap();
+    let mut copy_child = transaction.fork_child().await.unwrap();
+    let mut copy_transaction = copy_child.begin_transaction(&snapshot).await.unwrap();
+    let stream = copy_transaction
+        .get_table_copy_stream_with_ctid_partition(
+            table_id,
+            table_id,
+            &table_schema.column_schemas,
+            None,
+            &CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() },
+        )
         .await
         .unwrap();
     let rows = collect_copy_rows(stream, &table_schema.column_schemas).await;
+    copy_transaction.commit().await.unwrap();
     transaction.commit().await.unwrap();
 
     assert_eq!(rows.len(), 1);
@@ -1170,8 +1183,9 @@ async fn logical_replication_stream_converts_postgres_type_matrix() {
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("cdc_type_matrix");
-    let (transaction, slot) = client.create_slot_with_transaction(&slot_name, false).await.unwrap();
-    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+    let (transaction, slot) =
+        client.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+    let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
     transaction.commit().await.unwrap();
 
     let (stream, _) = client
@@ -1188,7 +1202,7 @@ async fn logical_replication_stream_converts_postgres_type_matrix() {
 async fn table_copy_stream_handles_temporal_boundaries() {
     init_test_tracing();
     let database = spawn_source_database().await;
-    let mut tables = Vec::new();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
     let cases = temporal_parser_cases();
     for (index, case) in cases.iter().enumerate() {
@@ -1199,19 +1213,21 @@ async fn table_copy_stream_handles_temporal_boundaries() {
         )
         .await;
         insert_single_value_row(&database, &table_name, case.expression).await;
-        tables.push((case, table_id));
-    }
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let (transaction, _) = client
-        .create_slot_with_transaction(&test_slot_name("copy_unsupported"), false)
-        .await
-        .unwrap();
-
-    for (case, table_id) in tables {
-        let table_schema = transaction.get_table_schema(table_id).await.unwrap();
-        let stream = transaction
-            .get_table_copy_stream(table_id, &table_schema.column_schemas, None)
+        let slot_name = test_slot_name(&format!("copy_unsupported_{index}"));
+        let (transaction, _) =
+            client.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+        let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
+        let snapshot = transaction.export_snapshot().await.unwrap();
+        let mut copy_child = transaction.fork_child().await.unwrap();
+        let mut copy_transaction = copy_child.begin_transaction(&snapshot).await.unwrap();
+        let stream = copy_transaction
+            .get_table_copy_stream_with_ctid_partition(
+                table_id,
+                table_id,
+                &table_schema.column_schemas,
+                None,
+                &CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() },
+            )
             .await
             .unwrap();
         let result = collect_single_copy_parse_result(stream, &table_schema.column_schemas).await;
@@ -1222,9 +1238,11 @@ async fn table_copy_stream_handles_temporal_boundaries() {
             }
             None => assert!(result.is_err(), "{}", case.name),
         }
-    }
 
-    transaction.commit().await.unwrap();
+        copy_transaction.commit().await.unwrap();
+        transaction.commit().await.unwrap();
+        client.delete_slot_if_exists(&slot_name).await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1249,8 +1267,8 @@ async fn logical_replication_stream_handles_temporal_boundaries() {
         let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
         let slot_name = test_slot_name(&format!("cdc_unsupported_{index}"));
         let (transaction, slot) =
-            client.create_slot_with_transaction(&slot_name, false).await.unwrap();
-        let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+            client.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+        let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
         transaction.commit().await.unwrap();
 
         let (stream, _) = client

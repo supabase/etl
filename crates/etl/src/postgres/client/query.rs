@@ -7,10 +7,26 @@ use super::{
 };
 use crate::{
     bail,
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     schema::TableId,
 };
+
+/// Classifies lock failures at copy boundaries while preserving their cause.
+///
+/// Other query failures retain their existing classification and retry policy.
+pub(super) fn classify_table_copy_error(error: impl Into<EtlError>) -> EtlError {
+    let error = error.into();
+    if error.kind() == ErrorKind::SourceLockTimeout {
+        etl_error!(
+            ErrorKind::SourceTableCopyLockConflict,
+            "Source lock conflict interrupted table copy"
+        )
+        .with_source(error)
+    } else {
+        error
+    }
+}
 
 /// Builds a `CREATE_REPLICATION_SLOT` command for a logical `pgoutput` slot.
 fn create_slot_query(slot_name: &str, snapshot_action: SnapshotAction, failover: bool) -> String {
@@ -83,6 +99,13 @@ impl<'a, 'tx> PgReplicationQueryTarget<'a, 'tx> {
                 }
             }
             Err(err) => {
+                if err.code() == Some(&SqlState::T_R_DEADLOCK_DETECTED) {
+                    return Err(etl_error!(
+                        ErrorKind::SourceLockTimeout,
+                        "Replication slot creation conflicted with source DDL"
+                    )
+                    .with_source(err));
+                }
                 if let Some(code) = err.code()
                     && *code == SqlState::DUPLICATE_OBJECT
                 {
