@@ -42,7 +42,7 @@ use etl::{
         TableCopyAttemptId, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult, Retryability},
     event::{Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
@@ -1495,8 +1495,9 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
         .await
         .unwrap_err();
 
-    // THEN: the failure is retryable and only the unaffected row remains.
-    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    // THEN: the constraint rejection is permanent and only the unaffected row
+    // remains.
+    assert_eq!(error.retryability(), Retryability::Permanent);
     drop(destination);
 
     assert_eq!(
@@ -2252,10 +2253,11 @@ async fn clickhouse_column_type_drift_fails_writes() {
         .await
         .unwrap();
 
-    // THEN: ClickHouse rejects the cached layout's insert header.
+    // THEN: ClickHouse rejects the cached layout's insert header, and the
+    // failure is retryable because the next write reloads the layout.
     let error =
         cached.write_events(vec![amount_insert(&schema, 2, Cell::I64(13))]).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    assert_eq!(error.retryability(), Retryability::Retryable);
 
     // THEN: the retried write reloads the layout and reports the drift.
     let error =
@@ -2369,7 +2371,8 @@ async fn non_layout_insert_failure_keeps_cached_layout() {
     // its header instead of a reload reporting the drift.
     let error =
         destination.write_events(vec![amount_insert(&schema, 3, Cell::I64(14))]).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+    assert_eq!(error.retryability(), Retryability::Retryable);
 }
 
 /// Builds a replicated `public.<table>` schema with one integer primary key.
@@ -3218,9 +3221,10 @@ async fn write_events_reports_insert_failure_through_async_result() {
     .await
     .unwrap();
 
-    // THEN: the failure carried the typed insert error and later admission
-    // still succeeded.
-    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    // THEN: the failure carried the permanent insert rejection and later
+    // admission still succeeded.
+    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+    assert_eq!(error.retryability(), Retryability::Permanent);
     assert_eq!(status, DestinationWriteStatus::Durable);
     assert_eq!(clickhouse_db.query::<i64>("select id from \"public_rejected\"").await, vec![1]);
 }
@@ -3588,7 +3592,7 @@ async fn table_reset_succeeds_after_failed_write() {
     )
     .await
     .unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
 
     // WHEN: the failed table is reset and a bystander write follows.
     let reset_result = drop_table_for_copy_via_trait(&destination, &failing_schema).await;

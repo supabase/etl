@@ -9,7 +9,7 @@ use std::{
 
 use clickhouse::Client;
 use etl::{
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlResult, Retryability},
     etl_error,
 };
 use hyper_rustls::HttpsConnectorBuilder;
@@ -18,7 +18,7 @@ use hyper_util::{
         Client as HyperClient,
         connect::{
             HttpConnector,
-            dns::{GaiFuture, GaiResolver, Name},
+            dns::{GaiFuture, GaiResolver, InvalidNameError, Name},
         },
     },
     rt::TokioExecutor,
@@ -26,11 +26,27 @@ use hyper_util::{
 use tower_service::Service;
 use url::{Host, Url};
 
+use crate::retry::{ClassifiedError, EtlErrorExt};
+
 /// TCP keepalive interval used by the ClickHouse HTTP connector.
 const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 
 /// Maximum time an idle ClickHouse connection remains pooled.
 const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// TLS configuration fails the same way until the configuration changes.
+impl ClassifiedError for rustls::Error {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
+
+/// An invalid host name fails the same way until the URL changes.
+impl ClassifiedError for InvalidNameError {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
 
 /// DNS resolver that returns only fully validated public address sets.
 #[derive(Clone, Debug)]
@@ -99,11 +115,8 @@ pub(super) async fn new_public_client(
     let connector = HttpsConnectorBuilder::new()
         .with_provider_and_webpki_roots(rustls::crypto::aws_lc_rs::default_provider())
         .map_err(|error| {
-            etl_error!(
-                ErrorKind::ConfigError,
-                "ClickHouse TLS client configuration failed",
-                source: error
-            )
+            etl_error!(ErrorKind::ConfigError, "ClickHouse TLS client configuration failed")
+                .caused_by(error)
         })?
         .https_only()
         .enable_http1()
@@ -127,39 +140,30 @@ async fn ensure_public_https_url(url: &Url, resolution_timeout: Duration) -> Etl
 
     match host {
         Host::Ipv4(address) => ensure_public_ip(IpAddr::V4(address)).map_err(|error| {
-            etl_error!(
-                ErrorKind::ConfigError,
-                "ClickHouse URL host is not publicly routable",
-                source: error
-            )
+            etl_error!(ErrorKind::ConfigError, "ClickHouse URL host is not publicly routable")
+                .caused_by(error)
         }),
         Host::Ipv6(address) => ensure_public_ip(IpAddr::V6(address)).map_err(|error| {
-            etl_error!(
-                ErrorKind::ConfigError,
-                "ClickHouse URL host is not publicly routable",
-                source: error
-            )
+            etl_error!(ErrorKind::ConfigError, "ClickHouse URL host is not publicly routable")
+                .caused_by(error)
         }),
         Host::Domain(domain) => {
             let name = domain.parse::<Name>().map_err(|error| {
-                etl_error!(
-                    ErrorKind::ConfigError,
-                    "ClickHouse URL host is invalid",
-                    source: error
-                )
+                etl_error!(ErrorKind::ConfigError, "ClickHouse URL host is invalid")
+                    .caused_by(error)
             })?;
             let mut resolver = PublicDnsResolver::new();
             match tokio::time::timeout(resolution_timeout, resolver.call(name)).await {
                 Ok(Ok(_)) => Ok(()),
                 Ok(Err(error)) => Err(etl_error!(
                     ErrorKind::ConfigError,
-                    "ClickHouse URL host could not be resolved safely",
-                    source: error
-                )),
-                Err(error) => Err(etl_error!(
+                    "ClickHouse URL host could not be resolved safely"
+                )
+                .caused_by(error)),
+                Err(_) => Err(etl_error!(
                     ErrorKind::ConfigError,
                     "ClickHouse URL host resolution timed out",
-                    source: error
+                    format!("resolution did not finish within {resolution_timeout:?}")
                 )),
             }
         }

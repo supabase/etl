@@ -1,9 +1,11 @@
-//! Shared retry helpers for destination-owned retry loops.
+//! Exponential backoff for destination-owned retry loops.
 //!
-//! This module centralizes exponential backoff mechanics while leaving retry
-//! classification, logging, and metrics at the destination call site.
+//! This module owns attempt counting, delay growth, and sleeping, while
+//! logging and metrics stay at the destination call site.
 
 use std::{future::Future, time::Duration};
+
+use etl::error::Retryability;
 
 /// Retry policy for one destination-owned operation.
 ///
@@ -25,6 +27,16 @@ pub(crate) enum RetryDecision {
     Retry,
     /// Stop retrying and return the error immediately.
     Stop,
+}
+
+/// Retries an error only when the failed call may succeed again.
+impl From<Retryability> for RetryDecision {
+    fn from(retryability: Retryability) -> Self {
+        match retryability {
+            Retryability::Retryable => RetryDecision::Retry,
+            Retryability::Permanent => RetryDecision::Stop,
+        }
+    }
 }
 
 /// Retry metadata emitted before one sleep.

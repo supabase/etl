@@ -7,27 +7,30 @@ use std::{
 use clickhouse::Client;
 use etl::{
     destination::TableCopyBatchId,
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
 };
 use futures::TryFutureExt;
 use tracing::debug;
 use url::Url;
 
-use crate::clickhouse::{
-    core::{ClickHouseClientConfig, ClickHouseOperationKind},
-    encoding::{ClickHouseValue, ColumnEncoding, encode_to_row_binary, rb_varint},
-    metrics::{
-        ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_DURATION_SECONDS,
-        ETL_CLICKHOUSE_DDL_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_BYTES,
-        ETL_CLICKHOUSE_INSERT_DURATION_SECONDS, ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL,
-        ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ROWS,
-        ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS, ETL_CLICKHOUSE_STATEMENTS_PER_BATCH,
-        REPLICATION_PATH_LABEL,
+use crate::{
+    clickhouse::{
+        core::{ClickHouseClientConfig, ClickHouseOperationKind},
+        encoding::{ClickHouseValue, ColumnEncoding, encode_to_row_binary, rb_varint},
+        metrics::{
+            ETL_CLICKHOUSE_CONNECTIVITY_CHECK_DURATION_SECONDS,
+            ETL_CLICKHOUSE_DDL_DURATION_SECONDS, ETL_CLICKHOUSE_DDL_ERRORS_TOTAL,
+            ETL_CLICKHOUSE_INSERT_BYTES, ETL_CLICKHOUSE_INSERT_DURATION_SECONDS,
+            ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL, ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL,
+            ETL_CLICKHOUSE_INSERT_ROWS, ETL_CLICKHOUSE_SCHEMA_QUERY_DURATION_SECONDS,
+            ETL_CLICKHOUSE_STATEMENTS_PER_BATCH, REPLICATION_PATH_LABEL,
+        },
+        network::new_public_client,
+        schema::{clickhouse_column_type, clickhouse_default_clause},
+        sql::quote_identifier,
     },
-    network::new_public_client,
-    schema::{clickhouse_column_type, clickhouse_default_clause},
-    sql::quote_identifier,
+    retry::{ClassifiedError, EtlErrorExt},
 };
 
 /// Returns the `outcome` label for an error returned by [`timeout_call`]:
@@ -66,11 +69,11 @@ fn floor_secs(d: Duration) -> String {
 }
 
 /// Runs `fut` under `tokio::time::timeout` using the client-side timeout for
-/// `op` from `config`. Inner ClickHouse errors map onto `op.failed_kind()`,
-/// which depends on whether the error [`is_retryable`](ClickHouseErrorExt);
-/// client-side deadlines map onto [`ErrorKind::DestinationTimeout`].
-/// `context`, when present, is appended to the error detail (e.g.
-/// `"table: foo"`) so call-site-specific diagnostic info is preserved.
+/// `op` from `config`. Inner ClickHouse errors map onto `op.failed_kind()` and
+/// keep their own [`ClassifiedError::retryability`]; client-side deadlines map
+/// onto [`ErrorKind::DestinationTimeout`], which is retryable. `context`, when
+/// present, is appended to the error detail (e.g. `"table: foo"`) so
+/// call-site-specific diagnostic info is preserved.
 async fn timeout_call<T, F>(
     op: ClickHouseOperationKind,
     config: &ClickHouseClientConfig,
@@ -91,11 +94,11 @@ where
     match tokio::time::timeout(client_timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(err)) => Err(etl_error!(
-            op.failed_kind(err.is_retryable()),
+            op.failed_kind(),
             "ClickHouse call failed",
-            detail(op, "failed", context),
-            source: err
-        )),
+            detail(op, "failed", context)
+        )
+        .caused_by(err)),
         Err(_) => Err(etl_error!(
             ErrorKind::DestinationTimeout,
             "ClickHouse call timed out",
@@ -137,29 +140,24 @@ fn clickhouse_error_code(message: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Classifies a failed ClickHouse call.
-pub(crate) trait ClickHouseErrorExt {
-    /// Returns whether the same call may succeed if it is sent again later.
-    ///
-    /// True for lost connections and for server errors that mean "busy" or
-    /// "temporarily unavailable". False for errors that would repeat, such as
-    /// a rejected statement or a local encoding failure.
-    fn is_retryable(&self) -> bool;
-}
-
-impl ClickHouseErrorExt for clickhouse::error::Error {
-    fn is_retryable(&self) -> bool {
+/// Lost connections and server errors that mean "busy" or "temporarily
+/// unavailable" may succeed when sent again. Errors that would repeat, such as
+/// a rejected statement or a local encoding failure, are permanent.
+impl ClassifiedError for clickhouse::error::Error {
+    fn retryability(&self) -> Retryability {
         use clickhouse::error::Error;
 
         match self {
             // The public-address guard rejects private DNS answers at connect
             // time with `PermissionDenied`. That repeats on every attempt.
-            Error::Network(source) => !is_permission_denied(source.as_ref()),
-            Error::TimedOut => true,
-            Error::BadResponse(message) => is_retryable_server_response(message),
+            Error::Network(source) if is_permission_denied(source.as_ref()) => {
+                Retryability::Permanent
+            }
+            Error::Network(_) | Error::TimedOut => Retryability::Retryable,
+            Error::BadResponse(message) => server_response_retryability(message),
             // The other variants are local request, encode, or decode errors.
             // Sending the same request again gives the same error.
-            _ => false,
+            _ => Retryability::Permanent,
         }
     }
 }
@@ -185,17 +183,21 @@ fn is_permission_denied(error: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
-/// Returns whether a ClickHouse error response is temporary.
-fn is_retryable_server_response(message: &str) -> bool {
+/// Classifies a ClickHouse error response: temporary server conditions are
+/// retryable.
+fn server_response_retryability(message: &str) -> Retryability {
     match clickhouse_error_code(message) {
         // TIMEOUT_EXCEEDED, TOO_MANY_SIMULTANEOUS_QUERIES, SOCKET_TIMEOUT,
         // NETWORK_ERROR, MEMORY_LIMIT_EXCEEDED, TABLE_IS_READ_ONLY (replica
         // lost Keeper), TOO_MANY_PARTS, CANNOT_SCHEDULE_TASK, KEEPER_EXCEPTION.
-        Some(159 | 202 | 209 | 210 | 241 | 242 | 252 | 439 | 999) => true,
-        Some(_) => false,
+        Some(159 | 202 | 209 | 210 | 241 | 242 | 252 | 439 | 999) => Retryability::Retryable,
+        Some(_) => Retryability::Permanent,
         // No ClickHouse code: the crate reports the bare HTTP status, for
         // example from a proxy. Retry server-side (5xx) statuses only.
-        None => http_status(message).is_some_and(|status| (500..600).contains(&status)),
+        None if http_status(message).is_some_and(|status| (500..600).contains(&status)) => {
+            Retryability::Retryable
+        }
+        None => Retryability::Permanent,
     }
 }
 
@@ -1249,7 +1251,7 @@ mod tests {
             .unwrap_err();
 
         // THEN: the error has the failed kind, the context, and the source.
-        assert_eq!(err.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+        assert_eq!(err.kind(), ErrorKind::DestinationQueryFailed);
         assert!(
             err.detail().is_some_and(|d| d.contains("insert failed") && d.contains("table: users")),
             "unexpected detail: {:?}",
@@ -1281,29 +1283,6 @@ mod tests {
         );
     }
 
-    /// Each operation kind maps to the error kind that drives its retry policy.
-    #[test]
-    fn operation_kind_failed_kind_per_bucket() {
-        use ClickHouseOperationKind::{ConnectivityCheck, Ddl, Insert, SchemaQuery};
-
-        // GIVEN: each operation kind, with a retryable and a permanent error.
-        // WHEN: its failed kind is queried.
-        // THEN: DDL and schema queries retry only retryable errors;
-        // connectivity checks and inserts keep their timed-retry kinds
-        // either way.
-        for retryable in [true, false] {
-            assert_eq!(
-                ConnectivityCheck.failed_kind(retryable),
-                ErrorKind::DestinationConnectionFailed
-            );
-            assert_eq!(Insert.failed_kind(retryable), ErrorKind::DestinationAtomicBatchRetryable);
-        }
-        for op in [SchemaQuery, Ddl] {
-            assert_eq!(op.failed_kind(true), ErrorKind::DestinationConnectionFailed);
-            assert_eq!(op.failed_kind(false), ErrorKind::DestinationQueryFailed);
-        }
-    }
-
     /// Lost connections and temporary server errors are retryable; rejected
     /// statements and local errors are not.
     #[test]
@@ -1325,7 +1304,7 @@ mod tests {
             bad_response("Code: 999"),
             bad_response("503 Service Unavailable"),
         ] {
-            assert!(error.is_retryable(), "{error}");
+            assert_eq!(error.retryability(), Retryability::Retryable, "{error}");
         }
 
         // GIVEN: rejected statements, client-side statuses, and local errors.
@@ -1340,7 +1319,7 @@ mod tests {
             Error::NotEnoughData,
             Error::RowNotFound,
         ] {
-            assert!(!error.is_retryable(), "{error}");
+            assert_eq!(error.retryability(), Retryability::Permanent, "{error}");
         }
     }
 
@@ -1378,34 +1357,40 @@ mod tests {
             Error::Network(Box::new(ConnectError(denied()))),
             Error::Network(Box::new(io::Error::other(denied()))),
         ] {
-            assert!(!error.is_retryable(), "{error:?}");
+            assert_eq!(error.retryability(), Retryability::Permanent, "{error:?}");
         }
 
         // GIVEN: a refused connection behind the same wrapper.
         // THEN: it is still retryable.
         let refused = io::Error::new(io::ErrorKind::ConnectionRefused, "refused");
-        assert!(Error::Network(Box::new(ConnectError(refused))).is_retryable());
+        assert_eq!(
+            Error::Network(Box::new(ConnectError(refused))).retryability(),
+            Retryability::Retryable
+        );
     }
 
-    /// A temporary server error on DDL becomes a timed-retry error kind, and a
-    /// rejected statement stays a manual one.
+    /// A failed call is classified by its error, not by which call failed: a
+    /// temporary server error is retryable and a rejected statement is
+    /// permanent, for DDL and inserts alike.
     #[tokio::test(start_paused = true)]
-    async fn timeout_call_classifies_ddl_errors_by_error() {
-        async fn ddl_failure(message: &str) -> EtlError {
+    async fn timeout_call_classifies_errors_by_error() {
+        async fn failure(op: ClickHouseOperationKind, message: &str) -> EtlError {
             let config = ClickHouseClientConfig::default();
             let error = clickhouse::error::Error::BadResponse(message.to_owned());
             let fut = async move { Err::<(), _>(error) };
-            timeout_call(ClickHouseOperationKind::Ddl, &config, None, fut).await.unwrap_err()
+            timeout_call(op, &config, None, fut).await.unwrap_err()
         }
 
-        // GIVEN: a server timeout and a rejected statement during DDL.
-        // WHEN: each passes through `timeout_call`.
-        let timeout = ddl_failure("Code: 159. DB::Exception: Timeout exceeded.").await;
-        let rejected = ddl_failure("Code: 43. DB::Exception: Illegal type.").await;
+        for op in [ClickHouseOperationKind::Ddl, ClickHouseOperationKind::Insert] {
+            // GIVEN: a server timeout and a rejected statement.
+            // WHEN: each passes through `timeout_call`.
+            let timeout = failure(op, "Code: 159. DB::Exception: Timeout exceeded.").await;
+            let rejected = failure(op, "Code: 43. DB::Exception: Illegal type.").await;
 
-        // THEN: only the timeout gets a timed-retry kind.
-        assert_eq!(timeout.kind(), ErrorKind::DestinationConnectionFailed);
-        assert_eq!(rejected.kind(), ErrorKind::DestinationQueryFailed);
+            // THEN: only the timeout is retryable.
+            assert_eq!(timeout.retryability(), Retryability::Retryable, "{op}");
+            assert_eq!(rejected.retryability(), Retryability::Permanent, "{op}");
+        }
     }
 
     /// `floor_secs` renders whole seconds with a floor of `"1"`, so zero and
