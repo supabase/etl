@@ -1,8 +1,27 @@
 use arrow::error::ArrowError;
 use etl::{
-    error::{ErrorKind, EtlError},
+    error::{ErrorKind, EtlError, Retryability},
     etl_error,
 };
+
+use crate::retry::{ClassifiedError, EtlErrorExt};
+
+/// Iceberg marks the errors that may succeed when retried, such as commit
+/// conflicts. It leaves a commit whose outcome is unknown unmarked, because
+/// retrying that commit could apply it twice.
+impl ClassifiedError for iceberg::Error {
+    fn retryability(&self) -> Retryability {
+        if self.retryable() { Retryability::Retryable } else { Retryability::Permanent }
+    }
+}
+
+/// Arrow errors come from encoding rows and fail the same way for the same
+/// rows.
+impl ClassifiedError for ArrowError {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
 
 /// Converts iceberg errors to ETL errors with appropriate classification.
 ///
@@ -35,7 +54,7 @@ pub(crate) fn iceberg_error_to_etl_error(err: iceberg::Error) -> EtlError {
         _ => (ErrorKind::Unknown, "Unknown iceberg error"),
     };
 
-    etl_error!(kind, description, source: err)
+    etl_error!(kind, description).caused_by(err)
 }
 
 /// Converts Arrow errors to ETL errors with appropriate classification.
@@ -73,5 +92,33 @@ pub(crate) fn arrow_error_to_etl_error(err: ArrowError) -> EtlError {
         }
     };
 
-    etl_error!(kind, description, source: err)
+    etl_error!(kind, description).caused_by(err)
+}
+
+#[cfg(test)]
+mod tests {
+    use etl::error::{ErrorKind, Retryability};
+
+    use crate::iceberg::error::iceberg_error_to_etl_error;
+
+    /// Errors iceberg marks retryable, such as commit conflicts, are retryable
+    /// after conversion; unmarked errors are permanent.
+    #[test]
+    fn iceberg_errors_keep_their_retryable_flag() {
+        let conflict =
+            iceberg::Error::new(iceberg::ErrorKind::CatalogCommitConflicts, "Commit conflict")
+                .with_retryable(true);
+        let unknown_commit =
+            iceberg::Error::new(iceberg::ErrorKind::CatalogCommitConflicts, "Commit unknown");
+        let invalid = iceberg::Error::new(iceberg::ErrorKind::DataInvalid, "Invalid data");
+
+        let conflict = iceberg_error_to_etl_error(conflict);
+        assert_eq!(conflict.kind(), ErrorKind::DestinationError);
+        assert_eq!(conflict.retryability(), Retryability::Retryable);
+        assert_eq!(
+            iceberg_error_to_etl_error(unknown_commit).retryability(),
+            Retryability::Permanent
+        );
+        assert_eq!(iceberg_error_to_etl_error(invalid).retryability(), Retryability::Permanent);
+    }
 }
