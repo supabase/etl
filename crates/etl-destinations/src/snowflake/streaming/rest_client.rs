@@ -6,7 +6,7 @@ use tokio::sync::OnceCell;
 use tracing::{debug, warn};
 
 use crate::{
-    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
+    retry::{ClassifiedError, RetryPolicy, retry_with_backoff},
     snowflake::{
         Error, Result, SnowpipeError,
         auth::TokenProvider,
@@ -90,6 +90,41 @@ impl<T: TokenProvider> RestStreamClient<T> {
     }
 }
 
+/// Sends one Snowpipe request with the cached token and returns its successful
+/// response.
+///
+/// When Snowflake rejects the token, with a 401 or an expired-token status, the
+/// token is invalidated and the request is sent once more with a fresh token.
+/// A second rejection is returned as a permanent error, so a bad credential
+/// stops for an operator instead of retrying.
+async fn send_authenticated<T: TokenProvider>(
+    auth: &T,
+    request: impl Fn(&str) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response> {
+    let mut refreshed = false;
+    loop {
+        let token = auth.get_token().await?;
+        let response = request(&token).send().await.map_err(Error::HttpTransport)?;
+        let status = response.status();
+        if status == StatusCode::OK {
+            return Ok(response);
+        }
+
+        let body = response.text().await.unwrap_or_default();
+        let error = SnowpipeError::from_response(status, body);
+        if status != StatusCode::UNAUTHORIZED && !error.is_authentication_expired() {
+            return Err(error.into());
+        }
+
+        warn!(status = %status, "snowpipe streaming api rejected the token, invalidating it");
+        auth.invalidate_token().await;
+        if refreshed {
+            return Err(error.into());
+        }
+        refreshed = true;
+    }
+}
+
 impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
     async fn discover_ingest_host(&self) -> Result<String> {
         self.get_or_discover_host().await.map(ToOwned::to_owned)
@@ -112,7 +147,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            should_retry,
+            |error: &Error| error.retryability().into(),
             |d| d,
             |attempt| {
                 warn!(
@@ -130,26 +165,14 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 let body = &request_body;
 
                 async move {
-                    let token = auth.get_token().await?;
-                    let resp = http
-                        .put(&url)
-                        .bearer_auth(&token)
-                        .header("User-Agent", USER_AGENT)
-                        .header("Content-Type", "application/json")
-                        .json(body)
-                        .send()
-                        .await
-                        .map_err(Error::HttpTransport)?;
-
-                    let status = resp.status();
-                    if status != StatusCode::OK {
-                        let body = resp.text().await.unwrap_or_default();
-                        if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from snowpipe streaming api, invalidating token");
-                            auth.invalidate_token().await;
-                        }
-                        return Err(SnowpipeError::from_response(status, body).into());
-                    }
+                    let resp = send_authenticated(auth.as_ref(), |token| {
+                        http.put(&url)
+                            .bearer_auth(token)
+                            .header("User-Agent", USER_AGENT)
+                            .header("Content-Type", "application/json")
+                            .json(body)
+                    })
+                    .await?;
 
                     let response: OpenChannelApiResponse = resp.json().await.map_err(|e| {
                         Error::Encoding(format!("failed to parse open_channel response: {e}"))
@@ -199,12 +222,9 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            should_retry,
+            |error: &Error| error.retryability().into(),
             |d| d,
             |attempt| {
-                if matches!(attempt.error, Error::Snowpipe(SnowpipeError::AuthenticationExpired)) {
-                    debug!("auth error on insert_rows, token will be refreshed on retry");
-                }
                 warn!(
                     retry = attempt.retry_index,
                     max = attempt.max_retries,
@@ -220,32 +240,16 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 let http = http.clone();
                 let compressed = compressed.clone();
                 async move {
-                    let token = auth.get_token().await?;
-                    let resp = http
-                        .post(&base_url)
-                        .query(&query_params)
-                        .bearer_auth(&token)
-                        .header("User-Agent", USER_AGENT)
-                        .header("Content-Type", "application/x-ndjson")
-                        .header("Content-Encoding", "zstd")
-                        .body(compressed)
-                        .send()
-                        .await
-                        .map_err(Error::HttpTransport)?;
-
-                    let status = resp.status();
-                    if status != StatusCode::OK {
-                        let body = resp.text().await.unwrap_or_default();
-                        let error = SnowpipeError::from_response(status, body);
-                        if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from snowpipe streaming api, invalidating token");
-                            auth.invalidate_token().await;
-                        }
-                        if error.is_authentication_expired() {
-                            auth.invalidate_token().await;
-                        }
-                        return Err(error.into());
-                    }
+                    let resp = send_authenticated(auth.as_ref(), |token| {
+                        http.post(&base_url)
+                            .query(&query_params)
+                            .bearer_auth(token)
+                            .header("User-Agent", USER_AGENT)
+                            .header("Content-Type", "application/x-ndjson")
+                            .header("Content-Encoding", "zstd")
+                            .body(compressed.clone())
+                    })
+                    .await?;
 
                     let response: InsertRowsApiResponse = resp.json().await.map_err(|e| {
                         Error::Encoding(format!("failed to parse insert_rows response: {e}"))
@@ -275,7 +279,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            should_retry,
+            |error: &Error| error.retryability().into(),
             |d| d,
             |attempt| {
                 warn!(
@@ -292,25 +296,13 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 let http = http.clone();
                 let body = &request_body;
                 async move {
-                    let token = auth.get_token().await?;
-                    let resp = http
-                        .delete(&url)
-                        .bearer_auth(&token)
-                        .header("User-Agent", USER_AGENT)
-                        .json(body)
-                        .send()
-                        .await
-                        .map_err(Error::HttpTransport)?;
-
-                    let status = resp.status();
-                    if status != StatusCode::OK {
-                        let body = resp.text().await.unwrap_or_default();
-                        if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from snowpipe streaming api, invalidating token");
-                            auth.invalidate_token().await;
-                        }
-                        return Err(SnowpipeError::from_response(status, body).into());
-                    }
+                    send_authenticated(auth.as_ref(), |token| {
+                        http.delete(&url)
+                            .bearer_auth(token)
+                            .header("User-Agent", USER_AGENT)
+                            .json(body)
+                    })
+                    .await?;
                     Ok(())
                 }
             },
@@ -337,7 +329,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
-            should_retry,
+            |error: &Error| error.retryability().into(),
             |d| d,
             |attempt| {
                 warn!(
@@ -355,25 +347,13 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
                 let body = &request_body;
                 let requested_channel = requested_channel.clone();
                 async move {
-                    let token = auth.get_token().await?;
-                    let resp = http
-                        .post(&url)
-                        .bearer_auth(&token)
-                        .header("User-Agent", USER_AGENT)
-                        .json(body)
-                        .send()
-                        .await
-                        .map_err(Error::HttpTransport)?;
-
-                    let status = resp.status();
-                    if status != StatusCode::OK {
-                        let body = resp.text().await.unwrap_or_default();
-                        if status == StatusCode::UNAUTHORIZED {
-                            warn!("received 401 from snowpipe streaming api, invalidating token");
-                            auth.invalidate_token().await;
-                        }
-                        return Err(SnowpipeError::from_response(status, body).into());
-                    }
+                    let resp = send_authenticated(auth.as_ref(), |token| {
+                        http.post(&url)
+                            .bearer_auth(token)
+                            .header("User-Agent", USER_AGENT)
+                            .json(body)
+                    })
+                    .await?;
 
                     let mut response: BulkStatusApiResponse = resp.json().await.map_err(|e| {
                         Error::Encoding(format!("failed to parse channel_status response: {e}"))
@@ -425,39 +405,6 @@ fn insert_query_params(batch: &RowBatch, continuation_token: &str) -> [(&'static
         ("startOffsetToken", batch.start_offset().as_ref().to_owned()),
         ("endOffsetToken", batch.end_offset().as_ref().to_owned()),
     ]
-}
-
-fn should_retry(error: &Error) -> RetryDecision {
-    match error {
-        Error::Snowpipe(error) => match error {
-            SnowpipeError::AuthenticationExpired => RetryDecision::Retry,
-            SnowpipeError::StaleContinuation
-            | SnowpipeError::ChannelInvalidated
-            | SnowpipeError::ChannelHasUncommittedRows
-            | SnowpipeError::ChannelNotFound => RetryDecision::Stop,
-            SnowpipeError::ApiStatus { status_code, .. } => match *status_code {
-                0 | 2 | 4 => RetryDecision::Stop,
-                1 | 3 | 5 | 6 => RetryDecision::Retry,
-                _ => RetryDecision::Retry,
-            },
-            SnowpipeError::HttpStatus { status, .. } => http_status_retry_decision(*status),
-        },
-        Error::HttpTransport(_) => RetryDecision::Retry,
-        Error::HttpStatus { status, .. } => http_status_retry_decision(*status),
-        _ => RetryDecision::Stop,
-    }
-}
-
-fn http_status_retry_decision(status: StatusCode) -> RetryDecision {
-    if status == StatusCode::UNAUTHORIZED
-        || status == StatusCode::REQUEST_TIMEOUT
-        || status == StatusCode::TOO_MANY_REQUESTS
-        || status.is_server_error()
-    {
-        RetryDecision::Retry
-    } else {
-        RetryDecision::Stop
-    }
 }
 
 #[derive(Deserialize)]
@@ -579,11 +526,19 @@ fn parse_optional_offset_token(token: Option<String>) -> Result<Option<OffsetTok
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use etl::{
         data::{Cell, TableRow},
+        error::Retryability,
         schema::{ColumnSchema, TableId, Type},
     };
     use serde_json::json;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
 
     use super::*;
     use crate::snowflake::{
@@ -591,38 +546,98 @@ mod tests {
         streaming::{OffsetToken, RowBatchBuilder},
     };
 
-    #[test]
-    fn should_retry_decision() {
-        let snowpipe = |code| {
-            Error::Snowpipe(SnowpipeError::ApiStatus { status_code: code, message: "test".into() })
-        };
+    /// Token provider that names each token after how often it was invalidated.
+    #[derive(Default)]
+    struct CountingTokenProvider {
+        /// Number of invalidations so far.
+        invalidations: AtomicUsize,
+    }
 
-        assert_eq!(should_retry(&snowpipe(0)), RetryDecision::Stop);
-        assert_eq!(should_retry(&snowpipe(1)), RetryDecision::Retry);
-        assert_eq!(should_retry(&snowpipe(2)), RetryDecision::Stop);
-        assert_eq!(should_retry(&snowpipe(3)), RetryDecision::Retry);
-        assert_eq!(should_retry(&snowpipe(4)), RetryDecision::Stop);
-        assert_eq!(should_retry(&snowpipe(5)), RetryDecision::Retry);
-        assert_eq!(should_retry(&snowpipe(6)), RetryDecision::Retry);
-        assert_eq!(should_retry(&snowpipe(99)), RetryDecision::Retry);
+    impl TokenProvider for CountingTokenProvider {
+        async fn get_token(&self) -> Result<String> {
+            Ok(format!("token-{}", self.invalidations.load(Ordering::SeqCst)))
+        }
 
-        let http = |status: StatusCode| Error::HttpStatus { status, body: "test".into() };
+        async fn invalidate_token(&self) {
+            self.invalidations.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 
-        assert_eq!(should_retry(&http(StatusCode::INTERNAL_SERVER_ERROR)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(StatusCode::TOO_MANY_REQUESTS)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(StatusCode::REQUEST_TIMEOUT)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(StatusCode::UNAUTHORIZED)), RetryDecision::Retry);
-        assert_eq!(should_retry(&http(StatusCode::BAD_REQUEST)), RetryDecision::Stop);
+    /// Answers one connection per scripted `(status, body)` response.
+    ///
+    /// Returns the server URL and a handle that yields the bearer token of
+    /// each answered request.
+    async fn serve_responses(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut tokens = Vec::new();
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                let mut chunk = [0; 1024];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0);
+                    head.extend_from_slice(&chunk[..read]);
+                }
+                let head = String::from_utf8(head).unwrap();
+                tokens.extend(head.lines().find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("authorization: bearer ")
+                        .map(str::to_owned)
+                }));
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\ncontent-length: {}\r\nconnection: \
+                     close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            tokens
+        });
 
-        assert_eq!(
-            should_retry(&Error::Snowpipe(SnowpipeError::AuthenticationExpired)),
-            RetryDecision::Retry
-        );
-        assert_eq!(
-            should_retry(&Error::Snowpipe(SnowpipeError::StaleContinuation)),
-            RetryDecision::Stop
-        );
-        assert_eq!(should_retry(&Error::Auth("expired".into())), RetryDecision::Stop);
+        (url, server)
+    }
+
+    /// A rejected token is refreshed, and the request is resent once.
+    #[tokio::test]
+    async fn rejected_token_is_refreshed_and_resent_once() {
+        // GIVEN: Snowflake rejects the first token and accepts the next
+        // request.
+        let (url, server) = serve_responses(vec![(401, "{}"), (200, "{}")]).await;
+        let auth = CountingTokenProvider::default();
+        let http = Client::builder().no_proxy().build().unwrap();
+
+        // WHEN: one request is sent.
+        let response =
+            send_authenticated(&auth, |token| http.get(&url).bearer_auth(token)).await.unwrap();
+
+        // THEN: it succeeds with the refreshed token.
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(server.await.unwrap(), vec!["token-0", "token-1"]);
+    }
+
+    /// A token rejected again after one refresh, by a 401 or an expired-token
+    /// status, is a permanent error.
+    #[tokio::test]
+    async fn token_rejected_after_refresh_is_permanent() {
+        // GIVEN: Snowflake reports an expired token, then rejects the refreshed
+        // one.
+        let (url, server) = serve_responses(vec![(400, r#"{"status_code":3}"#), (401, "{}")]).await;
+        let auth = CountingTokenProvider::default();
+        let http = Client::builder().no_proxy().build().unwrap();
+
+        // WHEN: one request is sent.
+        let error =
+            send_authenticated(&auth, |token| http.get(&url).bearer_auth(token)).await.unwrap_err();
+
+        // THEN: the request was resent once, and the error is permanent.
+        assert_eq!(error.retryability(), Retryability::Permanent);
+        assert_eq!(server.await.unwrap(), vec!["token-0", "token-1"]);
+        assert_eq!(auth.invalidations.load(Ordering::SeqCst), 2);
     }
 
     #[test]

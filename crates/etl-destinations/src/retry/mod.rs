@@ -10,8 +10,10 @@
 mod backoff;
 mod classify;
 
-#[cfg(any(feature = "ducklake", feature = "snowflake"))]
+#[cfg(any(feature = "bigquery", feature = "ducklake"))]
+pub(crate) use backoff::RetryAttempt;
+#[cfg(feature = "ducklake")]
 pub(crate) use backoff::RetryDecision;
 #[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
-pub(crate) use backoff::{RetryAttempt, RetryPolicy, retry_with_backoff};
+pub(crate) use backoff::{RetryPolicy, retry_with_backoff};
 pub(crate) use classify::{ClassifiedError, EtlErrorExt};

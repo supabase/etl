@@ -1,11 +1,14 @@
 use etl::{
-    error::{ErrorKind, EtlError},
+    error::{ErrorKind, EtlError, Retryability},
     schema::TableId,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::snowflake::encoding::CdcOperation;
+use crate::{
+    retry::{ClassifiedError, EtlErrorExt},
+    snowflake::encoding::CdcOperation,
+};
 
 /// Name and serialized length of the largest column in a rejected row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,29 +172,67 @@ impl Error {
     }
 }
 
+/// Request timeouts, rate limits, and server errors may succeed when sent
+/// again. A 401 is permanent because the client already refreshed its token
+/// and resent the request once.
+fn http_status_retryability(status: StatusCode) -> Retryability {
+    if status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        Retryability::Retryable
+    } else {
+        Retryability::Permanent
+    }
+}
+
+/// Transport failures, retryable HTTP statuses, and retryable Snowpipe
+/// responses may succeed when sent again. Authentication, SQL, channel,
+/// encoding, configuration, and schema errors repeat until something changes.
+impl ClassifiedError for Error {
+    fn retryability(&self) -> Retryability {
+        match self {
+            Self::HttpTransport(_) => Retryability::Retryable,
+            Self::HttpStatus { status, .. } => http_status_retryability(*status),
+            Self::Snowpipe(error) => error.retryability(),
+            Self::Auth(_)
+            | Self::Sql { .. }
+            | Self::Channel(_)
+            | Self::Encoding(_)
+            | Self::NullJsonArrayElement { .. }
+            | Self::Config(_)
+            | Self::MissingTableColumn { .. }
+            | Self::UnexpectedTableColumn { .. }
+            | Self::DatabaseNotFound(_)
+            | Self::SchemaNotFound { .. }
+            | Self::RowTooLarge { .. } => Retryability::Permanent,
+        }
+    }
+}
+
 impl From<Error> for EtlError {
     fn from(err: Error) -> Self {
         if matches!(&err, Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. }) {
             return etl::etl_error!(
                 ErrorKind::CorruptedTableSchema,
-                "Snowflake table schema is incompatible",
-                source: err
-            );
+                "Snowflake table schema is incompatible"
+            )
+            .caused_by(err);
         }
         if matches!(&err, Error::RowTooLarge { .. }) {
             return etl::etl_error!(
                 ErrorKind::UnsupportedValueInDestination,
-                "Snowflake cannot accept a row of this size",
-                source: err
-            );
+                "Snowflake cannot accept a row of this size"
+            )
+            .caused_by(err);
         }
 
         if matches!(&err, Error::NullJsonArrayElement { .. }) {
             return etl::etl_error!(
                 ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                "Snowflake cannot preserve SQL NULL elements in JSON arrays",
-                source: err
-            );
+                "Snowflake cannot preserve SQL NULL elements in JSON arrays"
+            )
+            .caused_by(err);
         }
 
         let (kind, description) = match &err {
@@ -217,7 +258,7 @@ impl From<Error> for EtlError {
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
         };
-        etl::etl_error!(kind, description, err.to_string())
+        etl::etl_error!(kind, description).caused_by(err)
     }
 }
 
@@ -298,6 +339,24 @@ impl SnowpipeError {
     /// Returns whether this error is an authentication failure.
     pub fn is_authentication_expired(&self) -> bool {
         matches!(self, Self::AuthenticationExpired)
+    }
+}
+
+/// Snowpipe API statuses other than 0, 2, and 4 may succeed when sent again.
+/// Channel errors need the channel reopened first, and an expired token stays
+/// expired after the client refreshes it and resends the request once.
+impl ClassifiedError for SnowpipeError {
+    fn retryability(&self) -> Retryability {
+        match self {
+            Self::StaleContinuation
+            | Self::ChannelInvalidated
+            | Self::ChannelHasUncommittedRows
+            | Self::ChannelNotFound
+            | Self::AuthenticationExpired
+            | Self::ApiStatus { status_code: 0 | 2 | 4, .. } => Retryability::Permanent,
+            Self::ApiStatus { .. } => Retryability::Retryable,
+            Self::HttpStatus { status } => http_status_retryability(*status),
+        }
     }
 }
 
@@ -459,5 +518,58 @@ mod tests {
 
             assert!(matches, "{case}: {error:?}");
         }
+    }
+
+    /// Transport failures, request timeouts, rate limits, server errors, and
+    /// transient Snowpipe statuses are retryable. A token that was already
+    /// refreshed once, a rejected request, and channel errors are not.
+    #[test]
+    fn errors_classify_retryability() {
+        let http = |status: StatusCode| Error::HttpStatus { status, body: String::new() };
+        let api_status = |status_code| {
+            Error::Snowpipe(SnowpipeError::ApiStatus { status_code, message: String::new() })
+        };
+
+        for error in [
+            http(StatusCode::REQUEST_TIMEOUT),
+            http(StatusCode::TOO_MANY_REQUESTS),
+            http(StatusCode::SERVICE_UNAVAILABLE),
+            api_status(1),
+            api_status(99),
+            Error::Snowpipe(SnowpipeError::HttpStatus { status: StatusCode::BAD_GATEWAY }),
+        ] {
+            assert_eq!(error.retryability(), Retryability::Retryable, "{error:?}");
+        }
+        for error in [
+            http(StatusCode::UNAUTHORIZED),
+            http(StatusCode::BAD_REQUEST),
+            api_status(0),
+            api_status(2),
+            Error::Snowpipe(SnowpipeError::AuthenticationExpired),
+            Error::Snowpipe(SnowpipeError::StaleContinuation),
+            Error::Auth("expired".to_owned()),
+            Error::Sql { statement_handle: None, message: String::new() },
+        ] {
+            assert_eq!(error.retryability(), Retryability::Permanent, "{error:?}");
+        }
+    }
+
+    /// The converted ETL error keeps the Snowflake error as its source and
+    /// carries its retryability.
+    #[test]
+    fn conversion_records_retryability_and_source() {
+        let unavailable = EtlError::from(Error::HttpStatus {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: String::new(),
+        });
+        let unauthorized = EtlError::from(Error::HttpStatus {
+            status: StatusCode::UNAUTHORIZED,
+            body: String::new(),
+        });
+
+        assert_eq!(unavailable.kind(), ErrorKind::DestinationError);
+        assert_eq!(unavailable.retryability(), Retryability::Retryable);
+        assert!(unavailable.source().is_some());
+        assert_eq!(unauthorized.retryability(), Retryability::Permanent);
     }
 }

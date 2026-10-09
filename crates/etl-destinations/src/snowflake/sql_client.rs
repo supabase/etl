@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{
-    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
+    retry::{ClassifiedError, RetryPolicy, retry_with_backoff},
     snowflake::{
         Config, Error, Result,
         auth::TokenProvider,
@@ -14,7 +14,8 @@ use crate::{
     },
 };
 
-/// Retry policy for transient HTTP errors (408, 429, 5xx) during SQL API calls.
+/// Retry policy for retryable SQL API errors, such as transport failures and
+/// 408, 429, and 5xx statuses.
 const SQL_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_retries: 3,
     initial_delay: Duration::from_millis(500),
@@ -275,7 +276,7 @@ impl<T: TokenProvider> SqlClient<T> {
 
         retry_with_backoff(
             SQL_RETRY_POLICY,
-            classify_for_retry,
+            |error: &Error| error.retryability().into(),
             |d| d,
             |attempt| {
                 warn!(
@@ -586,23 +587,6 @@ fn validate_column_names(
     Ok(())
 }
 
-fn classify_for_retry(error: &Error) -> RetryDecision {
-    match error {
-        Error::HttpTransport(_) => RetryDecision::Retry,
-        Error::HttpStatus { status, .. } => {
-            if *status == StatusCode::REQUEST_TIMEOUT
-                || *status == StatusCode::TOO_MANY_REQUESTS
-                || status.is_server_error()
-            {
-                RetryDecision::Retry
-            } else {
-                RetryDecision::Stop
-            }
-        }
-        _ => RetryDecision::Stop,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -812,35 +796,6 @@ mod tests {
             Error::Sql { message, .. }
                 if message == "SHOW COLUMNS returned 1 rows, but metadata declared 2 total rows"
         ));
-    }
-
-    #[test]
-    fn classify_for_retry_cases() {
-        let cases = [
-            (
-                Error::HttpStatus {
-                    status: StatusCode::INTERNAL_SERVER_ERROR,
-                    body: String::new(),
-                },
-                RetryDecision::Retry,
-            ),
-            (
-                Error::HttpStatus { status: StatusCode::TOO_MANY_REQUESTS, body: String::new() },
-                RetryDecision::Retry,
-            ),
-            (
-                Error::HttpStatus { status: StatusCode::REQUEST_TIMEOUT, body: String::new() },
-                RetryDecision::Retry,
-            ),
-            (
-                Error::HttpStatus { status: StatusCode::BAD_REQUEST, body: String::new() },
-                RetryDecision::Stop,
-            ),
-            (Error::Sql { statement_handle: None, message: String::new() }, RetryDecision::Stop),
-        ];
-        for (error, expected) in cases {
-            assert_eq!(classify_for_retry(&error), expected, "error: {error:?}");
-        }
     }
 
     /// Request-aware statement URLs carry Snowflake's retry parameters.
