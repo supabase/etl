@@ -114,8 +114,6 @@ pub enum ErrorKind {
     SourceQueryFailed,
     /// A query or write against the destination failed.
     DestinationQueryFailed,
-    /// A destination atomic batch failed with a retryable error.
-    DestinationAtomicBatchRetryable,
     /// A source query failed because a lock could not be acquired in time.
     SourceLockTimeout,
     /// A destination operation exceeded its timeout.
@@ -259,7 +257,6 @@ impl ErrorKind {
             // persistent failures still require intervention.
             ErrorKind::SourceConnectionFailed
             | ErrorKind::DestinationConnectionFailed
-            | ErrorKind::DestinationAtomicBatchRetryable
             | ErrorKind::SourceLockTimeout
             | ErrorKind::DestinationTimeout
             | ErrorKind::ReplicationFeedbackUnavailable
