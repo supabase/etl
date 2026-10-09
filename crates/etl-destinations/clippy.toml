@@ -1,0 +1,5 @@
+# Clippy reads only the nearest clippy.toml. A workspace-level file added
+# later must repeat these settings, or this file must include them.
+disallowed-methods = [
+    { path = "etl::error::EtlError::with_source", reason = "use EtlErrorExt::caused_by, which records the source's retryability" },
+]

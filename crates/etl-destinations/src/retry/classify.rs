@@ -1,4 +1,10 @@
 //! Classification of failed destination calls by retryability.
+//!
+//! Every error type a destination attaches to an [`EtlError`] implements
+//! [`ClassifiedError`], and [`EtlErrorExt::caused_by`] is the only way to
+//! attach it: this crate's `clippy.toml` forbids [`EtlError::with_source`].
+//! An unclassified source type therefore fails to compile instead of falling
+//! back to the default for its error kind.
 
 use std::{error::Error, io, num::TryFromIntError, str::Utf8Error};
 
@@ -30,6 +36,10 @@ pub(crate) trait EtlErrorExt {
 }
 
 impl EtlErrorExt for EtlError {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one sanctioned source attachment records the source's retryability"
+    )]
     fn caused_by<E>(self, source: E) -> EtlError
     where
         E: ClassifiedError + Error + Send + Sync + 'static,
