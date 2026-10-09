@@ -6,7 +6,7 @@ use pg_escape::quote_identifier;
 use rand::Rng;
 use sqlx::{AssertSqlSafe, PgPool};
 
-use crate::ducklake::DuckLakeTableName;
+use crate::{ducklake::DuckLakeTableName, retry::EtlErrorExt};
 
 /// Replay epoch assigned to rows written before epoch tracking existed.
 pub(super) const LEGACY_REPLAY_EPOCH: &str = "__legacy__";
@@ -41,11 +41,8 @@ pub(super) async fn ensure_replay_epoch_table_exists(
     );
 
     sqlx::query(AssertSqlSafe(sql)).execute(pool).await.map_err(|source| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake replay epoch table creation failed",
-            source: source
-        )
+        etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake replay epoch table creation failed")
+            .caused_by(source)
     })?;
 
     // Older catalogs only have the committed replay epoch. Adding the pending
@@ -56,9 +53,9 @@ pub(super) async fn ensure_replay_epoch_table_exists(
     sqlx::query(AssertSqlSafe(sql)).execute(pool).await.map_err(|source| {
         etl_error!(
             ErrorKind::DestinationQueryFailed,
-            "DuckLake pending replay epoch column creation failed",
-            source: source
+            "DuckLake pending replay epoch column creation failed"
         )
+        .caused_by(source)
     })?;
 
     Ok(())
@@ -82,9 +79,9 @@ pub(super) async fn read_table_replay_epoch(
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake replay epoch lookup failed",
-                format!("table={table_id}"),
-                source: source
+                format!("table={table_id}")
             )
+            .caused_by(source)
         })?
         .unwrap_or_else(|| LEGACY_REPLAY_EPOCH.to_owned());
 
@@ -124,9 +121,9 @@ pub(super) async fn begin_table_replay_epoch_transition(
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake replay epoch transition failed to begin",
-                format!("table={table_id}"),
-                source: source
+                format!("table={table_id}")
             )
+            .caused_by(source)
         })?;
 
     Ok(pending_replay_epoch)
@@ -161,9 +158,9 @@ pub(super) async fn complete_table_replay_epoch_transition(
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake replay epoch transition failed to complete",
-                format!("table={table_id}"),
-                source: source
+                format!("table={table_id}")
             )
+            .caused_by(source)
         })?;
 
     if completed_replay_epoch.is_none() {

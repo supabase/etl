@@ -12,7 +12,7 @@ use std::{
 
 use duckdb::Config;
 use etl::{
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
 };
 use metrics::histogram;
@@ -24,12 +24,15 @@ use tokio::{
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{info, trace, warn};
 
-use crate::ducklake::{
-    config::{DuckLakeSetupPlan, DuckLakeSetupStep},
-    metrics::{
-        ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS, ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS,
-        ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+use crate::{
+    ducklake::{
+        config::{DuckLakeSetupPlan, DuckLakeSetupStep},
+        metrics::{
+            ETL_DUCKLAKE_BLOCKING_OPERATION_DURATION_SECONDS,
+            ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
+        },
     },
+    retry::{ClassifiedError, EtlErrorExt},
 };
 
 /// Monotonic identifier assigned to each DuckLake connection setup attempt.
@@ -454,9 +457,9 @@ impl DuckLakeConnectionProvider for Arc<r2d2::Pool<DuckLakeConnectionManager>> {
             } else {
                 etl_error!(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to check out DuckLake connection",
-                    source: error
+                    "Failed to check out DuckLake connection"
                 )
+                .caused_by(error)
             }
         })?;
         histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
@@ -497,9 +500,9 @@ impl DuckLakeConnectionProvider for DuckLakeDedicatedConnection {
                 } else {
                     etl_error!(
                         ErrorKind::DestinationConnectionFailed,
-                        "Failed to check out dedicated DuckLake connection",
-                        source: error
+                        "Failed to check out dedicated DuckLake connection"
                     )
+                    .caused_by(error)
                 }
             })?;
             histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
@@ -568,6 +571,63 @@ impl fmt::Display for DuckLakeConnectionError {
 
 impl error::Error for DuckLakeConnectionError {}
 
+/// Opening a connection reaches the lake's catalog and data storage, which may
+/// be temporarily unreachable. DuckLake cannot yet tell those failures from
+/// configuration errors, so it retries them.
+impl ClassifiedError for DuckLakeConnectionError {
+    fn retryability(&self) -> Retryability {
+        Retryability::Retryable
+    }
+}
+
+/// The pool reports an error when it cannot open or check out a connection in
+/// time, which may succeed later.
+impl ClassifiedError for r2d2::Error {
+    fn retryability(&self) -> Retryability {
+        Retryability::Retryable
+    }
+}
+
+/// DuckLake cannot yet tell transient DuckDB errors from permanent ones, so it
+/// treats them as permanent. Call sites that retry any failure override this
+/// with [`retryable_until_classified`].
+impl ClassifiedError for duckdb::Error {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
+
+/// DuckLake reads its Postgres catalog through sqlx and cannot yet tell
+/// transient catalog errors from permanent ones, so it treats them as
+/// permanent.
+impl ClassifiedError for sqlx::Error {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
+
+/// A closed connection or an I/O failure follows the I/O error's
+/// classification. Other errors, such as an invalid connection string or a
+/// rejected statement, are permanent.
+impl ClassifiedError for tokio_postgres::Error {
+    fn retryability(&self) -> Retryability {
+        if self.is_closed() {
+            return Retryability::Retryable;
+        }
+
+        error::Error::source(self)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .map_or(Retryability::Permanent, ClassifiedError::retryability)
+    }
+}
+
+/// An invalid catalog URL fails the same way until the configuration changes.
+impl ClassifiedError for etl_config::DuckLakeCatalogConnectOptionsError {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
+
 impl DuckLakeConnectionManager {
     /// Creates a manager anchored to one initialized in-memory DuckDB database.
     pub(super) async fn new(
@@ -585,9 +645,9 @@ impl DuckLakeConnectionManager {
             .map_err(|error| {
                 etl_error!(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to initialize shared DuckLake DuckDB instance",
-                    source: error
+                    "Failed to initialize shared DuckLake DuckDB instance"
                 )
+                .caused_by(error)
             })
         }))
         .await
@@ -745,9 +805,9 @@ impl DuckLakeConnectionManager {
                 let setup_error = |error| {
                     etl_error!(
                         ErrorKind::DestinationConnectionFailed,
-                        "Failed to recreate shared DuckLake DuckDB instance",
-                        source: error
+                        "Failed to recreate shared DuckLake DuckDB instance"
                     )
+                    .caused_by(error)
                 };
                 check_admission(watchdog)?;
                 let conn = Self::open_duckdb_instance(manager.disable_extension_autoload)
@@ -866,9 +926,9 @@ pub(super) async fn build_warm_ducklake_pool(
             .map_err(|e| {
                 etl_error!(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to build DuckLake connection pool",
-                    source: e
+                    "Failed to build DuckLake connection pool"
                 )
+                .caused_by(e)
             })?;
 
         let mut warmed_connections = Vec::with_capacity(pool_size as usize);
@@ -876,9 +936,9 @@ pub(super) async fn build_warm_ducklake_pool(
             let conn = pool.get().map_err(|e| {
                 etl_error!(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to warm DuckLake connection pool",
-                    source: e
+                    "Failed to warm DuckLake connection pool"
                 )
+                .caused_by(e)
             })?;
             warmed_connections.push(conn);
         }
@@ -962,6 +1022,21 @@ pub(super) fn ducklake_shutdown_requested_error() -> EtlError {
 pub(super) fn is_ducklake_shutdown_requested_error(error: &EtlError) -> bool {
     error.kind() == ErrorKind::DestinationConnectionFailed
         && error.description() == Some(DUCKLAKE_SHUTDOWN_REQUESTED)
+}
+
+/// Marks a DuckLake failure retryable, whatever caused it.
+///
+/// DuckLake cannot yet classify DuckDB errors, so the writes, copies, and
+/// inlining changes it retries on any failure stay retryable through this
+/// function: locally first, then by the pipeline once local retries run out. A
+/// shutdown request keeps its own classification. Replace callers with a DuckDB
+/// error classifier.
+pub(super) fn retryable_until_classified(error: EtlError) -> EtlError {
+    if is_ducklake_shutdown_requested_error(&error) {
+        return error;
+    }
+
+    error.with_retryability(Retryability::Retryable)
 }
 
 fn abort_stuck_duckdb_blocking_operation(timeout: Duration, abort_grace: Duration) -> ! {
@@ -1226,6 +1301,32 @@ mod tests {
         }
     }
 
+    /// DuckDB errors are permanent until DuckLake can classify them, except
+    /// where DuckLake retries any failure, and connection setup errors are
+    /// retryable. A shutdown request keeps its own classification.
+    #[test]
+    fn ducklake_errors_classify_retryability() {
+        let duckdb_error = duckdb::Connection::open_in_memory()
+            .unwrap()
+            .execute_batch("select * from missing_table")
+            .unwrap_err();
+        let failed_query = etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake query failed")
+            .caused_by(duckdb_error);
+        assert_eq!(failed_query.retryability(), Retryability::Permanent);
+        assert_eq!(
+            retryable_until_classified(failed_query).retryability(),
+            Retryability::Retryable
+        );
+
+        let failed_setup = etl_error!(ErrorKind::DestinationConnectionFailed, "Setup failed")
+            .caused_by(DuckLakeConnectionError::shared_instance("Setup failed"));
+        assert_eq!(failed_setup.retryability(), Retryability::Retryable);
+
+        let shutdown =
+            ducklake_shutdown_requested_error().with_retryability(Retryability::Permanent);
+        assert_eq!(retryable_until_classified(shutdown).retryability(), Retryability::Permanent);
+    }
+
     #[tokio::test]
     async fn shared_connections_see_database_and_isolate_temporary_tables() {
         let manager = make_blocking_test_manager();
@@ -1474,9 +1575,9 @@ mod tests {
                 conn.query_row("SELECT 1;", [], |row| row.get::<_, i64>(0)).map_err(|source| {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
-                        "DuckLake timeout verification query failed",
-                        source: source
+                        "DuckLake timeout verification query failed"
                     )
+                    .caused_by(source)
                 })
             },
         )
@@ -2134,9 +2235,9 @@ mod tests {
                         .map_err(|source| {
                             etl_error!(
                                 ErrorKind::DestinationQueryFailed,
-                                "DuckLake interrupt test query failed",
-                                source: source
+                                "DuckLake interrupt test query failed"
                             )
+                            .caused_by(source)
                         })?;
                         Ok(())
                     },

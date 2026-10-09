@@ -1,8 +1,11 @@
 //! Classification of failed destination calls by retryability.
 
-use std::{error::Error, io};
+use std::{error::Error, io, num::TryFromIntError, str::Utf8Error};
 
-use etl::error::{EtlError, Retryability};
+use etl::{
+    config::ValidationError,
+    error::{EtlError, Retryability},
+};
 
 /// An error that knows whether the failed call may succeed if it runs again.
 ///
@@ -60,6 +63,28 @@ impl ClassifiedError for io::Error {
             | io::ErrorKind::Interrupted => Retryability::Retryable,
             _ => Retryability::Permanent,
         }
+    }
+}
+
+/// Invalid UTF-8 input fails the same way every time.
+impl ClassifiedError for Utf8Error {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
+
+/// A value that does not fit its target integer type fails the same way every
+/// time.
+impl ClassifiedError for TryFromIntError {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
+
+/// Invalid configuration fails the same way until the configuration changes.
+impl ClassifiedError for ValidationError {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
     }
 }
 

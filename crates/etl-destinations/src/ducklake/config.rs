@@ -17,7 +17,7 @@ use tokio_postgres::{
 };
 use url::Url;
 
-use crate::ducklake::LAKE_CATALOG;
+use crate::{ducklake::LAKE_CATALOG, retry::EtlErrorExt};
 
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
@@ -345,11 +345,7 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
     }
 
     let config = PgConfig::from_str(catalog_url.as_str()).map_err(|e| {
-        etl_error!(
-            ErrorKind::ConfigError,
-            "Invalid DuckLake PostgreSQL catalog URL",
-            source: e
-        )
+        etl_error!(ErrorKind::ConfigError, "Invalid DuckLake PostgreSQL catalog URL").caused_by(e)
     })?;
     let explicit_query_options = explicit_query_options(catalog_url);
     reject_unsupported_query_options(&explicit_query_options)?;
@@ -391,9 +387,9 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         let password = std::str::from_utf8(password).map_err(|e| {
             etl_error!(
                 ErrorKind::ConfigError,
-                "DuckLake PostgreSQL catalog URL contains non-utf8 password",
-                source: e
+                "DuckLake PostgreSQL catalog URL contains non-utf8 password"
             )
+            .caused_by(e)
         })?;
         push_conninfo_pair(&mut parts, "password", password);
     }
@@ -407,9 +403,9 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         let ssl_cert = std::str::from_utf8(ssl_cert).map_err(|e| {
             etl_error!(
                 ErrorKind::ConfigError,
-                "DuckLake PostgreSQL catalog URL contains non-utf8 sslcert",
-                source: e
+                "DuckLake PostgreSQL catalog URL contains non-utf8 sslcert"
             )
+            .caused_by(e)
         })?;
         push_conninfo_pair(&mut parts, "sslcert", ssl_cert);
     }
@@ -417,9 +413,9 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         let ssl_key = std::str::from_utf8(ssl_key).map_err(|e| {
             etl_error!(
                 ErrorKind::ConfigError,
-                "DuckLake PostgreSQL catalog URL contains non-utf8 sslkey",
-                source: e
+                "DuckLake PostgreSQL catalog URL contains non-utf8 sslkey"
             )
+            .caused_by(e)
         })?;
         push_conninfo_pair(&mut parts, "sslkey", ssl_key);
     }
@@ -427,9 +423,9 @@ pub(super) fn catalog_conninfo_from_url(catalog_url: &Url) -> EtlResult<String> 
         let ssl_root_cert = std::str::from_utf8(ssl_root_cert).map_err(|e| {
             etl_error!(
                 ErrorKind::ConfigError,
-                "DuckLake PostgreSQL catalog URL contains non-utf8 sslrootcert",
-                source: e
+                "DuckLake PostgreSQL catalog URL contains non-utf8 sslrootcert"
             )
+            .caused_by(e)
         })?;
         push_conninfo_pair(&mut parts, "sslrootcert", ssl_root_cert);
     }

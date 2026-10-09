@@ -18,13 +18,24 @@ use etl::{
         ArrayCell, Cell, Date, PgTime, TableRow, Timestamp, format_date, format_timestamp,
         format_timestamptz,
     },
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
 };
 use pg_escape::quote_literal;
 
-use crate::ducklake::DUCKLAKE_COLUMN_NAME_MAPPING;
+use crate::{
+    ducklake::DUCKLAKE_COLUMN_NAME_MAPPING,
+    retry::{ClassifiedError, EtlErrorExt},
+};
+
+/// Arrow errors come from encoding rows and fail the same way for the same
+/// rows.
+impl ClassifiedError for duckdb::arrow::error::ArrowError {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
 
 /// Prepared row payload reused across retry attempts.
 pub(super) enum PreparedRows {
@@ -340,11 +351,8 @@ fn copy_rows_to_arrow_record_batch(
     let arrays = column_values.into_iter().map(ArrowColumnValues::into_array).collect::<Vec<_>>();
 
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|error| {
-        etl_error!(
-            ErrorKind::ConversionError,
-            "DuckLake Arrow copy conversion failed",
-            source: error
-        )
+        etl_error!(ErrorKind::ConversionError, "DuckLake Arrow copy conversion failed")
+            .caused_by(error)
     })
 }
 
