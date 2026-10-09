@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     bigquery::{BigQueryDestination, table_name_to_bigquery_table_id},
-    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
+    retry::{ClassifiedError, RetryPolicy, retry_with_backoff},
 };
 
 /// Maximum number of times we re-run a verification query.
@@ -35,9 +35,6 @@ const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 600;
 const BIGQUERY_NO_ROWS_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
-/// BigQuery response reasons that are transient even when surfaced with a 4xx
-/// status code.
-const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &["backendError", "jobBackendError"];
 /// Environment variable name for the BigQuery project ID.
 pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
@@ -53,25 +50,7 @@ const BIGQUERY_TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_delay: Duration::from_secs(4),
 };
 
-/// Returns whether a `BQError` is transient and worth retrying.
-fn is_transient_bq_error(err: &BQError) -> RetryDecision {
-    match err {
-        BQError::RequestError(_) => RetryDecision::Retry,
-        BQError::ResponseError { error } if error.error.code >= 500 => RetryDecision::Retry,
-        BQError::ResponseError { error }
-            if error.error.errors.iter().any(|nested_error| {
-                nested_error.get("reason").is_some_and(|reason| {
-                    TRANSIENT_BIGQUERY_RESPONSE_REASONS.contains(&reason.as_str())
-                })
-            }) =>
-        {
-            RetryDecision::Retry
-        }
-        _ => RetryDecision::Stop,
-    }
-}
-
-/// Runs a raw BigQuery test operation with transient-error retries.
+/// Runs a raw BigQuery test operation, retrying errors that are retryable.
 async fn retry_bigquery_test_operation<T, AttemptFn, AttemptFut>(
     operation: &'static str,
     attempt_fn: AttemptFn,
@@ -82,7 +61,7 @@ where
 {
     retry_with_backoff(
         BIGQUERY_TEST_RETRY_POLICY,
-        is_transient_bq_error,
+        |error: &BQError| error.retryability().into(),
         |delay| delay,
         |attempt| {
             eprintln!(
