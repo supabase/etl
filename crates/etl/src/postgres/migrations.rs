@@ -21,6 +21,18 @@ const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations
 static MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_REPLICATOR_MIGRATIONS).build());
 
+/// Advisory lock key that serializes creation of the `etl` schema.
+///
+/// `create schema if not exists` is not safe to run concurrently: two sessions
+/// can both find the schema missing and both insert it into `pg_namespace`, and
+/// the second insert fails with a unique violation. ETL holds this
+/// transaction-level advisory lock around the statement, so pipelines that
+/// start together against a fresh database bootstrap it once. Applications that
+/// create the schema themselves while a pipeline may be starting should hold
+/// the same lock. Advisory locks are scoped to a database, so the fixed key
+/// cannot clash across databases.
+pub const ETL_SCHEMA_LOCK_ID: i64 = 0x6574_6c5f_7363_6865;
+
 /// Creates a PostgreSQL connection prepared for ETL migrations.
 async fn create_migration_connection(
     connection_config: &PgConnectionConfig,
@@ -33,8 +45,16 @@ async fn create_migration_connection(
     // events.
     conn.execute("set client_min_messages = warning;").await?;
 
-    // Create the `etl` schema if it doesn't exist.
-    conn.execute("create schema if not exists etl;").await?;
+    // Create the `etl` schema if it doesn't exist. The advisory lock is
+    // transaction-level: a concurrent session waits for the commit and then
+    // finds the schema in place.
+    let mut tx = conn.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(ETL_SCHEMA_LOCK_ID)
+        .execute(&mut *tx)
+        .await?;
+    tx.execute("create schema if not exists etl;").await?;
+    tx.commit().await?;
 
     // Set the `search_path` to `etl` so that the `_sqlx_migrations` metadata
     // table is created inside that schema instead of the public schema.
