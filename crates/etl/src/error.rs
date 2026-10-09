@@ -3,7 +3,8 @@
 //! Provides a comprehensive error system with classification, aggregation, and
 //! captured diagnostic metadata for ETL pipeline operations. The [`EtlError`]
 //! type supports single errors, errors with additional detail, and multiple
-//! aggregated errors for complex failure scenarios.
+//! aggregated errors for complex failure scenarios. Every error records its
+//! [`Retryability`], which alone decides whether the pipeline retries it.
 
 use std::{
     backtrace::Backtrace,
@@ -30,6 +31,8 @@ pub type EtlResult<T> = Result<T, EtlError>;
 #[derive(Debug, Clone)]
 struct ErrorPayload {
     kind: ErrorKind,
+    /// Whether the failed operation may succeed if it runs again.
+    retryability: Retryability,
     description: Cow<'static, str>,
     detail: Option<Cow<'static, str>>,
     source: Option<Arc<dyn error::Error + Send + Sync>>,
@@ -40,12 +43,13 @@ impl ErrorPayload {
     /// Creates a new payload with optional dynamic detail.
     fn new(
         kind: ErrorKind,
+        retryability: Retryability,
         description: Cow<'static, str>,
         detail: Option<Cow<'static, str>>,
         source: Option<Arc<dyn error::Error + Send + Sync>>,
         backtrace: Arc<Backtrace>,
     ) -> Self {
-        Self { kind, description, detail, source, backtrace }
+        Self { kind, retryability, description, detail, source, backtrace }
     }
 }
 
@@ -54,7 +58,8 @@ impl ErrorPayload {
 /// [`EtlError`] provides a comprehensive error system that can represent single
 /// errors, errors with additional detail, or multiple aggregated errors. The
 /// design allows for rich error information while maintaining ergonomic usage
-/// patterns.
+/// patterns. Each error records its [`Retryability`], which decides whether
+/// the pipeline retries the failed work automatically.
 #[derive(Debug, Clone)]
 pub struct EtlError {
     repr: ErrorRepr,
@@ -73,6 +78,21 @@ enum ErrorRepr {
     ///
     /// This variant is mainly useful to capture multiple workers failures.
     Many { errors: Vec<EtlError> },
+}
+
+/// Whether a failed operation may succeed if it runs again without operator
+/// action.
+///
+/// The pipeline retries [`Retryability::Retryable`] errors automatically and
+/// stops for an operator on [`Retryability::Permanent`] errors. Variants are
+/// ordered from least to most retryable, so a group of errors is only as
+/// retryable as its least retryable member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Retryability {
+    /// Running the operation again fails the same way until something changes.
+    Permanent,
+    /// Running the operation again later may succeed.
+    Retryable,
 }
 
 /// Specific categories of errors that can occur during ETL operations.
@@ -94,8 +114,6 @@ pub enum ErrorKind {
     SourceQueryFailed,
     /// A query or write against the destination failed.
     DestinationQueryFailed,
-    /// A destination atomic batch failed with a retryable error.
-    DestinationAtomicBatchRetryable,
     /// A source query failed because a lock could not be acquired in time.
     SourceLockTimeout,
     /// A destination operation exceeded its timeout.
@@ -226,6 +244,79 @@ pub enum ErrorKind {
     WithTimedRetry,
 }
 
+impl ErrorKind {
+    /// Returns the [`Retryability`] of an error of this kind that was not
+    /// classified where it happened.
+    ///
+    /// ETL's own errors rely on this default. The match is exhaustive so that
+    /// every new kind makes an explicit retry decision.
+    fn default_retryability(self) -> Retryability {
+        match self {
+            // Keep this list narrow: transient connectivity or capacity failures, source lock
+            // contention, and loss of replication feedback. Retry attempts are bounded;
+            // persistent failures still require intervention.
+            ErrorKind::SourceConnectionFailed
+            | ErrorKind::DestinationConnectionFailed
+            | ErrorKind::SourceLockTimeout
+            | ErrorKind::DestinationTimeout
+            | ErrorKind::ReplicationFeedbackUnavailable
+            | ErrorKind::SourceDatabaseInRecovery
+            | ErrorKind::SourceDatabaseShutdown => Retryability::Retryable,
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithTimedRetry => Retryability::Retryable,
+
+            ErrorKind::SourceQueryFailed
+            | ErrorKind::DestinationQueryFailed
+            | ErrorKind::SourceOperationCanceled
+            | ErrorKind::SourceSchemaError
+            | ErrorKind::MissingTableSchema
+            | ErrorKind::CorruptedTableSchema
+            | ErrorKind::DestinationTableNameInvalid
+            | ErrorKind::DestinationNamespaceAlreadyExists
+            | ErrorKind::DestinationTableAlreadyExists
+            | ErrorKind::DestinationNamespaceMissing
+            | ErrorKind::DestinationTableMissing
+            | ErrorKind::DestinationSchemaRewind
+            | ErrorKind::ConversionError
+            | ErrorKind::InvalidData
+            | ErrorKind::ValidationError
+            | ErrorKind::NullValuesNotSupportedInArrayInDestination
+            | ErrorKind::UnsupportedValueInDestination
+            | ErrorKind::ConfigError
+            | ErrorKind::SourceConfigurationLimitExceeded
+            | ErrorKind::IoError
+            | ErrorKind::SourceIoError
+            | ErrorKind::DestinationIoError
+            | ErrorKind::SerializationError
+            | ErrorKind::DeserializationError
+            | ErrorKind::EncryptionError
+            | ErrorKind::SourceAuthenticationError
+            | ErrorKind::DestinationAuthenticationError
+            | ErrorKind::PermissionDenied
+            | ErrorKind::InvalidState
+            | ErrorKind::TaskPanic
+            | ErrorKind::TaskCancelled
+            | ErrorKind::ApplyWorkerPanic
+            | ErrorKind::ApplyWorkerCancelled
+            | ErrorKind::TableSyncWorkerPanic
+            | ErrorKind::TableSyncWorkerCancelled
+            | ErrorKind::StateRollbackError
+            | ErrorKind::ReplicationSlotNotFound
+            | ErrorKind::ReplicationSlotAlreadyExists
+            | ErrorKind::ReplicationSlotNotCreated
+            | ErrorKind::ReplicationSlotInvalidated
+            | ErrorKind::ReplicationSlotDeletionTimeout
+            | ErrorKind::SourceReplicaIdentityError
+            | ErrorKind::SourceSnapshotTooOld
+            | ErrorKind::SourceError
+            | ErrorKind::DestinationError
+            | ErrorKind::Unknown => Retryability::Permanent,
+            #[cfg(feature = "failpoints")]
+            ErrorKind::WithNoRetry | ErrorKind::WithManualRetry => Retryability::Permanent,
+        }
+    }
+}
+
 impl EtlError {
     /// Returns the [`ErrorKind`] of this error.
     ///
@@ -315,6 +406,31 @@ impl EtlError {
         self
     }
 
+    /// Returns whether the failed operation may succeed if it runs again.
+    ///
+    /// Returns the classification recorded where the error happened, or the
+    /// default for its [`ErrorKind`]. An aggregate is only as retryable as its
+    /// least retryable error; an empty aggregate is permanent.
+    pub fn retryability(&self) -> Retryability {
+        match &self.repr {
+            ErrorRepr::Single(payload) => payload.retryability,
+            ErrorRepr::Many { errors } => {
+                errors.iter().map(EtlError::retryability).min().unwrap_or(Retryability::Permanent)
+            }
+        }
+    }
+
+    /// Records whether the failed operation may succeed if it runs again, and
+    /// returns the modified instance.
+    ///
+    /// Classify an error where it happens, when the failed call knows more than
+    /// the error's [`ErrorKind`]. For aggregated errors, applies to every
+    /// contained error.
+    pub fn with_retryability(mut self, retryability: Retryability) -> Self {
+        self.set_retryability(retryability);
+        self
+    }
+
     /// Creates an [`EtlError`] from its components.
     fn from_components(
         kind: ErrorKind,
@@ -327,6 +443,7 @@ impl EtlError {
         EtlError {
             repr: ErrorRepr::Single(ErrorPayload::new(
                 kind,
+                kind.default_retryability(),
                 description,
                 detail,
                 source,
@@ -339,6 +456,18 @@ impl EtlError {
     fn set_source(&mut self, source: Option<Arc<dyn error::Error + Send + Sync>>) {
         if let ErrorRepr::Single(ref mut payload) = self.repr {
             payload.source = source;
+        }
+    }
+
+    /// Sets the retryability of this error and of every error it aggregates.
+    fn set_retryability(&mut self, retryability: Retryability) {
+        match &mut self.repr {
+            ErrorRepr::Single(payload) => payload.retryability = retryability,
+            ErrorRepr::Many { errors } => {
+                for error in errors {
+                    error.set_retryability(retryability);
+                }
+            }
         }
     }
 }
@@ -1156,6 +1285,49 @@ mod tests {
         assert_eq!(err.kind(), ErrorKind::SourceQueryFailed);
         assert_eq!(err.detail(), Some("Table 'users' doesn't exist"));
         assert_eq!(err.kinds(), vec![ErrorKind::SourceQueryFailed]);
+    }
+
+    /// An unclassified error is as retryable as its kind; a classification
+    /// recorded where the error happened replaces that default.
+    #[test]
+    fn retryability_defaults_to_the_kind_until_classified() {
+        let lost_connection = EtlError::from((ErrorKind::DestinationConnectionFailed, "Lost"));
+        let rejected = EtlError::from((ErrorKind::DestinationQueryFailed, "Rejected"));
+        assert_eq!(lost_connection.retryability(), Retryability::Retryable);
+        assert_eq!(rejected.retryability(), Retryability::Permanent);
+
+        let blocked = lost_connection.with_retryability(Retryability::Permanent);
+        assert_eq!(blocked.retryability(), Retryability::Permanent);
+        assert_eq!(blocked.kind(), ErrorKind::DestinationConnectionFailed);
+    }
+
+    /// An aggregate is only as retryable as its least retryable error, and
+    /// classifying an aggregate classifies every error it contains.
+    #[test]
+    fn aggregate_is_only_as_retryable_as_its_least_retryable_error() {
+        let timeout = || EtlError::from((ErrorKind::DestinationTimeout, "Timed out"));
+        let invalid = || EtlError::from((ErrorKind::InvalidData, "Bad row"));
+
+        assert_eq!(
+            EtlError::from(vec![timeout(), timeout()]).retryability(),
+            Retryability::Retryable
+        );
+        assert_eq!(
+            EtlError::from(vec![timeout(), invalid()]).retryability(),
+            Retryability::Permanent
+        );
+        assert_eq!(EtlError::from(Vec::<EtlError>::new()).retryability(), Retryability::Permanent);
+
+        let reclassified =
+            EtlError::from(vec![timeout(), invalid()]).with_retryability(Retryability::Retryable);
+        assert_eq!(reclassified.retryability(), Retryability::Retryable);
+        assert!(
+            reclassified
+                .errors()
+                .unwrap()
+                .iter()
+                .all(|error| error.retryability() == Retryability::Retryable)
+        );
     }
 
     #[test]

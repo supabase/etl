@@ -728,11 +728,11 @@ where
             Ok::<_, EtlError>((task_guard, detached))
         })
         .await
-        .map_err(|error| {
+        .map_err(|_| {
             etl_error!(
                 ErrorKind::DestinationTimeout,
                 "Snowflake table reset preparation timed out",
-                source: error
+                format!("reset preparation did not finish within {RESET_PREPARATION_TIMEOUT:?}")
             )
         })??;
 

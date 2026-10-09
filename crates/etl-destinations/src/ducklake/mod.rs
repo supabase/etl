@@ -13,12 +13,14 @@ mod sql;
 use std::fmt;
 
 use etl::{
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     schema::{ColumnNameMapping, TableName},
 };
 pub use etl_config::shared::DuckLakeWriterConfig;
 use serde::{Deserialize, Serialize};
+
+use crate::retry::{ClassifiedError, EtlErrorExt};
 
 /// The DuckDB catalog alias used in every `lake.<table>` qualified name.
 pub(super) const LAKE_CATALOG: &str = "lake";
@@ -29,6 +31,13 @@ pub(super) const LAKE_CATALOG: &str = "lake";
 /// mapping. Changing it for existing tables requires compatibility handling or
 /// a resync.
 const DUCKLAKE_COLUMN_NAME_MAPPING: ColumnNameMapping = ColumnNameMapping::AsciiLowercase;
+
+/// Destination metadata serializes and parses the same way every time.
+impl ClassifiedError for serde_json::Error {
+    fn retryability(&self) -> Retryability {
+        Retryability::Permanent
+    }
+}
 
 /// A table reference inside the DuckLake catalog.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Deserialize, Serialize)]
@@ -68,9 +77,9 @@ impl DuckLakeTableName {
         serde_json::to_string(self).map_err(|source| {
             etl_error!(
                 ErrorKind::InvalidState,
-                "DuckLake destination table metadata serialization failed",
-                source: source
+                "DuckLake destination table metadata serialization failed"
             )
+            .caused_by(source)
         })
     }
 
@@ -80,9 +89,9 @@ impl DuckLakeTableName {
             etl_error!(
                 ErrorKind::InvalidState,
                 "DuckLake destination table metadata is invalid",
-                format!("destination_table_id={value}"),
-                source: source
+                format!("destination_table_id={value}")
             )
+            .caused_by(source)
         })
     }
 

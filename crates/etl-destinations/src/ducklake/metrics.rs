@@ -16,9 +16,12 @@ use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
-use crate::ducklake::{
-    DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
-    inline_size::DuckLakePendingInlineSizeSampler,
+use crate::{
+    ducklake::{
+        DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
+        inline_size::DuckLakePendingInlineSizeSampler,
+    },
+    retry::EtlErrorExt,
 };
 
 static REGISTER_METRICS: Once = Once::new();
@@ -473,9 +476,9 @@ pub(super) async fn query_table_storage_metrics(
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake table storage metrics query failed",
-                format!("table={table_name}, metadata_schema={metadata_schema}"),
-                source: source
+                format!("table={table_name}, metadata_schema={metadata_schema}")
             )
+            .caused_by(source)
         })?;
 
     Ok(DuckLakeTableStorageMetrics {
@@ -509,9 +512,9 @@ pub(super) async fn query_catalog_maintenance_metrics(
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake catalog maintenance metrics query failed",
-                format!("metadata_schema={metadata_schema}"),
-                source: source
+                format!("metadata_schema={metadata_schema}")
             )
+            .caused_by(source)
         })?;
 
     Ok(DuckLakeCatalogMaintenanceMetrics {
@@ -644,9 +647,9 @@ pub(super) fn resolve_ducklake_metadata_schema_blocking(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake metadata schema query failed",
-            format_query_error_detail(&sql),
-            source: err
+            format_query_error_detail(&sql)
         )
+        .caused_by(err)
     })
 }
 

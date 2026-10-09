@@ -5,6 +5,8 @@ use etl::{
 };
 use prost::bytes;
 
+use crate::retry::EtlErrorExt;
+
 /// Encodes a finite timestamp in BigQuery's integer wire representation.
 fn timestamp_micros(value: &Timestamp<chrono::DateTime<chrono::Utc>>) -> EtlResult<i64> {
     match value {
@@ -43,9 +45,9 @@ impl BigQueryTableRow {
                 etl_error!(
                     err.kind(),
                     "Cell encoding failed for BigQuery",
-                    format!("Cell at index {} could not be encoded", index - 1),
-                    source: err
+                    format!("Cell at index {} could not be encoded", index - 1)
                 )
+                .caused_by(err)
             })?;
         }
 

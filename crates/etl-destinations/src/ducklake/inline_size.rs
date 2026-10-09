@@ -6,9 +6,12 @@ use metrics::gauge;
 use pg_escape::{quote_identifier, quote_literal};
 use sqlx::{AssertSqlSafe, PgPool};
 
-use crate::ducklake::{
-    DuckLakeTableName,
-    metrics::{ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL},
+use crate::{
+    ducklake::{
+        DuckLakeTableName,
+        metrics::{ETL_DUCKLAKE_TABLE_ACTIVE_INLINED_DATA_BYTES, TABLE_LABEL},
+    },
+    retry::EtlErrorExt,
 };
 
 /// Pending inlined bytes sampled from the Postgres DuckLake catalog.
@@ -44,9 +47,9 @@ impl DuckLakePendingInlineSizeSampler {
             .map_err(|source| {
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
-                    "DuckLake inline-size sampler query failed",
-                    source: source
+                    "DuckLake inline-size sampler query failed"
                 )
+                .caused_by(source)
             })?;
         Ok(record_pending_inline_data_sizes(inlined_bytes, &table_name.id()))
     }
