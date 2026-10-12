@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use etl::{
     data::{Cell, Date, TableRow},
-    destination::WriteEventsDurability,
-    event::{Event, InsertEvent, RelationEvent},
+    destination::{Destination as _, WriteEventsDurability},
+    event::{Event, InsertEvent, RelationEvent, TruncateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
         Type,
@@ -23,6 +23,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use crate::support::{
     bigquery::{BigQueryUser, parse_bigquery_table_rows},
     crypto::install_crypto_provider,
+    table_name::table_name_schemas,
 };
 
 fn make_users_schema(table_name: &str) -> TableSchema {
@@ -45,6 +46,114 @@ fn make_users_schema_with_id(table_id: u32, table_name: &str) -> TableSchema {
 fn test_snapshot_id(value: u64) -> SnapshotId {
     let lsn = PgLsn::from(value);
     SnapshotId::new(lsn, lsn)
+}
+
+/// Checks physical generations and logical views retain distinct names across
+/// copy, CDC, restart, truncate, and reset.
+#[tokio::test(flavor = "multi_thread")]
+async fn boundary_underscore_names_survive_destination_lifecycle() {
+    install_crypto_provider();
+    init_test_tracing();
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+    let database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let cases = table_name_schemas();
+    let destination = database.build_destination(1, store.clone()).await;
+    let mut original_metadata = Vec::new();
+    for (schema, name) in &cases {
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        destination
+            .write_table_rows_for_tests(
+                schema,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
+            )
+            .await
+            .unwrap();
+        let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+        assert_eq!(metadata.table_id(), format!("{name}_0"));
+        original_metadata.push(metadata);
+    }
+    destination.shutdown().await.unwrap();
+
+    let restarted = database.build_destination(1, store.clone()).await;
+    for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
+        write_events(
+            &restarted,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(10_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("streamed".to_owned())]),
+            })],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
+            Some(metadata)
+        );
+        let rows = database.query_table(schema.name().clone()).await.unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+    let (schema, name) = &cases[0];
+    write_events(
+        &restarted,
+        WriteEventsDurability::RequireDurable,
+        vec![
+            Event::Truncate(TruncateEvent {
+                commit_lsn: PgLsn::from(20_u64),
+                tx_ordinal: 1,
+                options: 0,
+                truncated_tables: vec![schema.clone()],
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(20_u64),
+                tx_ordinal: 2,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(3), Cell::String("after".to_owned())]),
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    // Join generation cleanup before checking or resetting the physical tables.
+    restarted.shutdown().await.unwrap();
+    let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+    assert_eq!(metadata.table_id(), format!("{name}_1"));
+    assert!(database.get_table_metadata_by_id(&format!("{name}_0")).await.is_none());
+    let rows = database.query_table(schema.name().clone()).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        parse_table_cell::<String>(rows[0].columns.as_ref().unwrap()[1].clone()).unwrap(),
+        "after"
+    );
+
+    let reset = database.build_destination(1, store.clone()).await;
+    reset.drop_table_for_copy_for_tests(schema).await.unwrap();
+    assert!(database.get_table_metadata_by_id(name).await.is_none());
+    assert!(database.get_table_metadata_by_id(metadata.table_id()).await.is_none());
+    store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+    store.store_table_schema(schema.inner().clone()).await.unwrap();
+    reset
+        .write_table_rows_for_tests(
+            schema,
+            vec![TableRow::new(vec![Cell::I32(4), Cell::String("recopied".to_owned())])],
+        )
+        .await
+        .unwrap();
+    reset.shutdown().await.unwrap();
+    for (index, (schema, _)) in cases.iter().enumerate() {
+        let rows = database.query_table(schema.name().clone()).await.unwrap();
+        let mut names: Vec<String> = rows
+            .into_iter()
+            .map(|row| parse_table_cell(row.columns.unwrap()[1].clone()).unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, if index == 0 { vec!["recopied"] } else { vec!["copied", "streamed"] });
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

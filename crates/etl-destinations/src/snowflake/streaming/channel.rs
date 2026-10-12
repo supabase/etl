@@ -1053,6 +1053,30 @@ mod tests {
 
     const CHANNEL_CREATED_ON_MS: u64 = 100;
 
+    /// Keeps the existing channel formula for legacy and length-prefixed
+    /// tables.
+    #[test]
+    fn channel_names_preserve_table_identity() {
+        let client = Arc::new(ScriptedStreamClient::new([]));
+        for (pipeline, schema, table, expected) in [
+            (42, "SCHEMA", "PUBLIC_USERS", "supabase_etl_42_SCHEMA_PUBLIC_USERS_ch0"),
+            (42, "SCHEMA", "_0102_A__B", "supabase_etl_42_SCHEMA__0102_A__B_ch0"),
+            (42, "SCHEMA", "_0201_A__B", "supabase_etl_42_SCHEMA__0201_A__B_ch0"),
+            (43, "SCHEMA", "_0102_A__B", "supabase_etl_43_SCHEMA__0102_A__B_ch0"),
+            (42, "OTHER", "_0102_A__B", "supabase_etl_42_OTHER__0102_A__B_ch0"),
+            (u64::MAX, "S", "_0101____", "supabase_etl_18446744073709551615_S__0101_____ch0"),
+        ] {
+            let handle = ChannelHandle::new(
+                Arc::clone(&client),
+                pipeline,
+                "DB".to_owned(),
+                schema.to_owned(),
+                table.to_owned(),
+            );
+            assert_eq!(handle.channel, expected);
+        }
+    }
+
     /// Creates a successful channel status at `offset`.
     fn channel_status(offset: Option<OffsetToken>, rows_inserted: u64) -> ChannelStatusResponse {
         ChannelStatusResponse {

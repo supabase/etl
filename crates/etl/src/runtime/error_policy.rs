@@ -61,6 +61,14 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
             ErrorHandlingPolicy::new(RetryDirective::Timed, None)
         }
 
+        ErrorKind::SourceTableCopyLockConflict => ErrorHandlingPolicy::new(
+            RetryDirective::Timed,
+            Some(
+                "Allow conflicting source DDL to finish before retrying the entire table copy \
+                 with a fresh snapshot. Schedule DDL outside initial copy if conflicts persist.",
+            ),
+        ),
+
         // Manual retry errors with explicit operator guidance.
         ErrorKind::SourceAuthenticationError => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
@@ -171,6 +179,7 @@ mod tests {
             (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
             (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
             (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
+            (ErrorKind::SourceTableCopyLockConflict, RetryDirective::Timed),
             (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
             (ErrorKind::ReplicationSlotInUse, RetryDirective::Timed),
             (ErrorKind::ReplicationSlotInvalidated, RetryDirective::Manual),

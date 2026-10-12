@@ -7,7 +7,6 @@ mod stream;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod client;
 #[cfg(not(any(test, feature = "test-utils")))]
-#[expect(dead_code)]
 pub(crate) mod client;
 pub(crate) mod codec;
 pub mod migrations;

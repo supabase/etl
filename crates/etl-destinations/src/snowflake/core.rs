@@ -158,9 +158,14 @@ where
                     ErrorKind::DestinationTableAlreadyExists,
                     "Snowflake destination table already exists",
                     format!(
-                        "Table {table_name} exists, but this pipeline has no destination metadata \
-                         proving ownership. Remove the table or use another destination schema \
-                         before retrying."
+                        "Cannot create destination table '{table_name}' for source table '{}': \
+                         the destination already exists and is not registered to this source \
+                         table. If it belongs to another renamed source table, resynchronize that \
+                         table first and wait for completion, then retry this one. \
+                         Resynchronization deletes previous destination data and history; source \
+                         rows are copied again only when initial copying is enabled. Otherwise, \
+                         use a new pipeline targeting an unused destination schema.",
+                        table_schema.name()
                     )
                 );
             }
@@ -713,12 +718,28 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let table_name = try_stringify_table_name(replicated_table_schema.name())?.to_uppercase();
         let (task_guard, detached) = timeout(RESET_PREPARATION_TIMEOUT, async {
             // Acquire the task registry before any client lock. Event tasks
             // have no registry access, so they can finish while reset waits for
             // them.
             let task_guard = self.tasks.drain().await?;
+
+            // A source rename changes the schema name but not the destination
+            // this table owns. Use the same durable target for channel and
+            // table deletion, including when no channel is cached
+            // after a restart.
+            let metadata = self
+                .writer
+                .store
+                .get_destination_table_metadata(replicated_table_schema.id())
+                .await?;
+            let table_name = metadata.as_ref().map_or_else(
+                || {
+                    try_stringify_table_name(replicated_table_schema.name())
+                        .map(|name| name.to_uppercase())
+                },
+                |metadata| Ok(metadata.table_id().to_owned()),
+            )?;
             let detached = self
                 .writer
                 .client

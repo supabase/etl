@@ -5,55 +5,18 @@ use etl::{
     schema::TableName,
 };
 
-/// Converts a [`TableName`] into a single underscore-escaped identifier.
-///
-/// The current underscore-based encoding uses `_` as a separator and `__` as an
-/// escape sequence. Leading or trailing underscores would make downstream
-/// parsing ambiguous, so those are rejected. For example, `schema = "a"` and
-/// `table = "_b"` would encode to `a___b`, which cannot be unambiguously
-/// distinguished from other schema/table combinations under this format.
-pub(crate) fn try_stringify_table_name(table_name: &TableName) -> EtlResult<String> {
-    let escaped_schema = stringify_table_name_component(&table_name.schema, "schema name")?;
-    let escaped_table = stringify_table_name_component(&table_name.name, "table name")?;
+/// Largest component length representable by two decimal digits.
+const MAX_LENGTH_PREFIX_COMPONENT_BYTES: usize = 99;
 
-    Ok(format!("{escaped_schema}_{escaped_table}"))
-}
-
-/// Escapes underscores in a table name component after validating it can be
-/// encoded safely.
-fn stringify_table_name_component(value: &str, component_name: &str) -> EtlResult<String> {
-    validate_table_name_component_for_underscore_encoding(value, component_name)?;
-
-    Ok(value.replace('_', "__"))
-}
-
-/// Validates that a table name component can be encoded with underscore
-/// escaping.
-fn validate_table_name_component_for_underscore_encoding(
-    value: &str,
-    component_name: &str,
-) -> EtlResult<()> {
+/// Validates the source components supported by destination table naming.
+fn validate_table_name_component(value: &str, component_name: &str) -> EtlResult<()> {
     const UNSUPPORTED_SQL_IDENTIFIER_CHARS: [char; 2] = ['"', ';'];
-
-    if value.starts_with('_') || value.ends_with('_') {
-        bail!(
-            ErrorKind::ValidationError,
-            "Destination table name cannot use leading or trailing underscores",
-            format!(
-                "{component_name} '{value}' cannot start or end with '_' because underscore-based \
-                 destination table naming would be ambiguous"
-            )
-        );
-    }
 
     if value.is_empty() {
         return Err(etl_error!(
             ErrorKind::ValidationError,
             "Destination table name component cannot be empty",
-            format!(
-                "{component_name} cannot be empty when building an underscore-escaped destination \
-                 table name"
-            )
+            format!("{component_name} cannot be empty when building a destination table name")
         ));
     }
 
@@ -70,46 +33,296 @@ fn validate_table_name_component_for_underscore_encoding(
     Ok(())
 }
 
+/// Converts a [`TableName`] into a destination identifier.
+///
+/// Preserves the legacy underscore encoding unless either component starts or
+/// ends with `_`. Those names use `_SSTT_<schema>_<table>`, where `SS` and `TT`
+/// are two-digit byte lengths. Both components must contain only ASCII
+/// letters, digits, and underscores and fit in 99 bytes. Unsupported
+/// components return a validation error; there is no fallback encoding.
+///
+/// Legacy names never start with `_`. The lengths disambiguate new names and
+/// distinguish them from generated suffixes. Source case is preserved here;
+/// destination case folding and its case-only collisions remain unchanged.
+///
+/// Two PostgreSQL identifiers of at most 63 bytes produce at most 133 ASCII
+/// characters in the length-prefixed form. Destination limits still apply,
+/// including generated object and channel names.
+pub(crate) fn try_stringify_table_name(table_name: &TableName) -> EtlResult<String> {
+    validate_table_name_component(&table_name.schema, "schema name")?;
+    validate_table_name_component(&table_name.name, "table name")?;
+
+    if [&table_name.schema, &table_name.name]
+        .into_iter()
+        .any(|component| component.starts_with('_') || component.ends_with('_'))
+    {
+        for (value, component_name) in
+            [(&table_name.schema, "schema name"), (&table_name.name, "table name")]
+        {
+            if value.len() > MAX_LENGTH_PREFIX_COMPONENT_BYTES {
+                bail!(
+                    ErrorKind::ValidationError,
+                    "Destination table name component is too long for length-prefix encoding",
+                    format!(
+                        "{component_name} has {} bytes; names with leading or trailing \
+                         underscores require each component to fit in \
+                         {MAX_LENGTH_PREFIX_COMPONENT_BYTES} bytes",
+                        value.len()
+                    )
+                );
+            }
+
+            if !value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+                bail!(
+                    ErrorKind::ValidationError,
+                    "Destination table name requires ASCII letters, digits, and underscores",
+                    format!(
+                        "{component_name} must contain only ASCII letters, digits, and \
+                         underscores when either component starts or ends with '_'"
+                    )
+                );
+            }
+        }
+
+        return Ok(format!(
+            "_{:02}{:02}_{}_{}",
+            table_name.schema.len(),
+            table_name.name.len(),
+            table_name.schema,
+            table_name.name
+        ));
+    }
+
+    let escaped_schema = table_name.schema.replace('_', "__");
+    let escaped_table = table_name.name.replace('_', "__");
+
+    Ok(format!("{escaped_schema}_{escaped_table}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashSet;
 
+    use etl::{error::ErrorKind, schema::TableName};
+    use proptest::prelude::*;
+
+    use crate::table_name::try_stringify_table_name;
+
+    /// Locks legacy and boundary-underscore mappings, including ambiguous
+    /// pairs.
     #[test]
-    fn stringifies_valid_table_names() {
-        for (schema, table, expected) in
-            [("a_b", "c_d", "a__b_c__d"), ("a__b", "c__d", "a____b_c____d")]
-        {
+    fn stringifies_table_names() {
+        for (schema, table, expected) in [
+            ("public", "users", "public_users"),
+            ("a_b", "c_d", "a__b_c__d"),
+            ("a__b", "c__d", "a____b_c____d"),
+            ("Mixed", "Case", "Mixed_Case"),
+            ("schéma", "用户", "schéma_用户"),
+            ("a$b", "c d", "a$b_c d"),
+            ("a_b", "c", "a__b_c"),
+            ("a", "b_c", "a_b__c"),
+            ("_public", "orders", "_0706__public_orders"),
+            ("public_", "orders", "_0706_public__orders"),
+            ("public", "_orders", "_0607_public__orders"),
+            ("public", "orders_", "_0607_public_orders_"),
+            ("_public", "_orders", "_0707__public__orders"),
+            ("_Public", "Orders", "_0706__Public_Orders"),
+            ("Public_", "Orders", "_0706_Public__Orders"),
+            ("Public", "_Orders", "_0607_Public__Orders"),
+            ("Public", "Orders_", "_0607_Public_Orders_"),
+            ("_PUBLIC", "_ORDERS", "_0707__PUBLIC__ORDERS"),
+            ("A", "_", "_0101_A__"),
+            ("_", "aB", "_0102___aB"),
+            ("a", "_b", "_0102_a__b"),
+            ("a_", "b", "_0201_a__b"),
+            ("a_", "_b", "_0202_a___b"),
+            ("__a_", "_b__", "_0404___a___b__"),
+            ("_", "_", "_0101____"),
+            ("__", "__", "_0202______"),
+            ("_1", "2_", "_0202__1_2_"),
+            ("a", "_b_0", "_0104_a__b_0"),
+            ("a", "_b__current", "_0111_a__b__current"),
+        ] {
             let table_name = TableName::new(schema.to_owned(), table.to_owned());
             assert_eq!(try_stringify_table_name(&table_name).unwrap(), expected);
         }
     }
 
+    /// Preserves source case without changing destination case-folding
+    /// limitations in either naming format.
     #[test]
-    fn prevents_collisions_between_schema_and_table_underscores() {
-        let table_name1 = TableName::new("a_b".to_owned(), "c".to_owned());
-        let table_name2 = TableName::new("a".to_owned(), "b_c".to_owned());
+    fn preserves_case_before_destination_case_folding() {
+        for (schema, table, other_schema, other_table) in [
+            ("a", "b", "a", "B"),
+            ("a", "b", "A", "b"),
+            ("a", "_b", "a", "_B"),
+            ("a_", "b", "A_", "b"),
+            ("a", "b_", "A", "b_"),
+            ("_a", "b", "_a", "B"),
+        ] {
+            let source = TableName::new(schema.to_owned(), table.to_owned());
+            let other = TableName::new(other_schema.to_owned(), other_table.to_owned());
+            let name = try_stringify_table_name(&source).unwrap();
+            let other_name = try_stringify_table_name(&other).unwrap();
+            assert_ne!(name, other_name);
+            assert_eq!(name.to_ascii_uppercase(), other_name.to_ascii_uppercase());
+        }
+    }
 
-        let id1 = try_stringify_table_name(&table_name1).unwrap();
-        let id2 = try_stringify_table_name(&table_name2).unwrap();
+    /// Keeps new base names disjoint from existing names and generated objects.
+    #[test]
+    fn encoded_names_do_not_collide_with_legacy_names_or_generated_objects() {
+        let components = [
+            "a",
+            "1",
+            "_",
+            "__",
+            "a_",
+            "_a",
+            "a__",
+            "__a",
+            "_a_",
+            "a_b",
+            "_a_0",
+            "_a__current",
+            "0102",
+            "_0102_a__b",
+            "Mixed",
+            "Case_",
+            "_TABLE",
+        ];
+        let mut encoded = HashSet::new();
+        let mut legacy = HashSet::new();
+        for schema in components {
+            for table in components {
+                let source = TableName::new(schema.to_owned(), table.to_owned());
+                let name = try_stringify_table_name(&source).unwrap().to_uppercase();
+                if [schema, table].iter().any(|part| part.starts_with('_') || part.ends_with('_')) {
+                    assert!(encoded.insert(name));
+                } else {
+                    // Existing destination case folding is intentionally
+                    // unchanged.
+                    legacy.insert(name);
+                }
+            }
+        }
+        assert!(encoded.is_disjoint(&legacy));
+        for name in encoded.iter().chain(&legacy) {
+            for suffix in ["_0", "_18446744073709551615", "__CURRENT", "-STREAMING", "_CHANGELOG"] {
+                assert!(!encoded.contains(&format!("{name}{suffix}")));
+            }
+        }
+    }
 
-        assert_eq!(id1, "a__b_c");
-        assert_eq!(id2, "a_b__c");
-        assert_ne!(id1, id2);
+    /// Covers decimal-width boundaries and the normal and representable limits
+    /// independently for both components.
+    #[test]
+    fn length_prefixes_cover_component_boundaries() {
+        for (schema_length, schema_digits) in
+            [(1, "01"), (9, "09"), (10, "10"), (63, "63"), (99, "99")]
+        {
+            for (table_length, table_digits) in
+                [(1, "01"), (9, "09"), (10, "10"), (63, "63"), (99, "99")]
+            {
+                let schema = "_".repeat(schema_length);
+                let table = "a".repeat(table_length);
+                let source = TableName::new(schema.clone(), table.clone());
+                let name = try_stringify_table_name(&source).unwrap();
+                assert_eq!(name, format!("_{schema_digits}{table_digits}_{schema}_{table}"));
+                assert_eq!(name.len(), schema_length + table_length + 7);
+            }
+        }
+
+        let source = TableName::new("_".repeat(63), "_".repeat(63));
+        let name = try_stringify_table_name(&source).unwrap();
+        assert_eq!(name.len(), 133);
+        assert_eq!(format!("{name}-STREAMING").len(), 143);
+        assert_eq!(format!("{name}__current").len(), 142);
+        assert_eq!(format!("{name}_{}", u64::MAX).len(), 154);
+    }
+
+    proptest! {
+        /// Recovers exact components before case folding and their uppercase
+        /// forms afterward, without losing component boundaries.
+        #[test]
+        fn length_prefixed_components_roundtrip(
+            schema in "[a-zA-Z0-9_]{0,98}",
+            table in "[a-zA-Z0-9_]{1,99}",
+        ) {
+            let schema = format!("_{schema}");
+            let source = TableName::new(schema.clone(), table.clone());
+            let name = try_stringify_table_name(&source).unwrap();
+            for (name, schema, table) in [
+                (name.clone(), schema.clone(), table.clone()),
+                (name.to_ascii_uppercase(), schema.to_ascii_uppercase(), table.to_ascii_uppercase()),
+            ] {
+                prop_assert!(name.is_ascii());
+                prop_assert!(name.starts_with('_'));
+                let schema_length = name.get(1..3).unwrap().parse::<usize>().unwrap();
+                let table_length = name.get(3..5).unwrap().parse::<usize>().unwrap();
+                let components = name.get(5..).unwrap().strip_prefix('_').unwrap();
+                let (decoded_schema, rest) = components.split_at(schema_length);
+                let decoded_table = rest.strip_prefix('_').unwrap();
+                prop_assert_eq!(decoded_table.len(), table_length);
+                prop_assert_eq!(decoded_schema, schema);
+                prop_assert_eq!(decoded_table, table);
+            }
+        }
+    }
+
+    /// Rejects overflow in either field without changing legacy length
+    /// behavior.
+    #[test]
+    fn rejects_components_that_overflow_length_prefixes() {
+        for (schema, table) in [
+            ("_".repeat(100), "a".to_owned()),
+            ("a".to_owned(), "_".repeat(100)),
+            ("a".repeat(100), "_".to_owned()),
+            ("_".to_owned(), "a".repeat(100)),
+            ("_".repeat(100), "_".repeat(100)),
+            ("_".repeat(1000), "a".to_owned()),
+        ] {
+            let source = TableName::new(schema, table);
+            let error = try_stringify_table_name(&source).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValidationError);
+            assert_eq!(
+                error.description(),
+                Some("Destination table name component is too long for length-prefix encoding")
+            );
+        }
+
+        let source = TableName::new("a".repeat(100), "b".repeat(100));
+        assert_eq!(
+            try_stringify_table_name(&source).unwrap(),
+            format!("{}_{}", source.schema, source.name)
+        );
+    }
+
+    /// Rejects characters that cannot be preserved by the readable namespace,
+    /// including when only the other component has a boundary underscore.
+    #[test]
+    fn rejects_unsupported_length_prefixed_components() {
+        for component in ["é", "用户", "e\u{301}", "a b", "a-b", "a.b", "a$b", "a\n", "a\0", "😀"]
+        {
+            for (schema, table) in [(component, "_"), ("_", component)] {
+                let source = TableName::new(schema.to_owned(), table.to_owned());
+                let error = try_stringify_table_name(&source).unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::ValidationError);
+                assert_eq!(
+                    error.description(),
+                    Some("Destination table name requires ASCII letters, digits, and underscores")
+                );
+            }
+        }
     }
 
     #[test]
-    fn rejects_ambiguous_or_unsupported_components() {
+    fn rejects_empty_or_unsupported_components() {
         for (schema, table, description) in [
-            (
-                "_schema",
-                "users",
-                "Destination table name cannot use leading or trailing underscores",
-            ),
-            (
-                "public",
-                "users_",
-                "Destination table name cannot use leading or trailing underscores",
-            ),
+            ("", "users", "Destination table name component cannot be empty"),
+            ("public", "", "Destination table name component cannot be empty"),
+            ("", "_", "Destination table name component cannot be empty"),
+            ("_", "", "Destination table name component cannot be empty"),
             (
                 "public",
                 "users\"quoted",
@@ -118,6 +331,16 @@ mod tests {
             (
                 "public",
                 "users;drop",
+                "Destination table name contains an unsupported SQL identifier character",
+            ),
+            (
+                "_schema",
+                "users;drop_",
+                "Destination table name contains an unsupported SQL identifier character",
+            ),
+            (
+                "_schema\"",
+                "users",
                 "Destination table name contains an unsupported SQL identifier character",
             ),
         ] {
