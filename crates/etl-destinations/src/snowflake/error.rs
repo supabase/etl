@@ -173,8 +173,7 @@ impl Error {
 }
 
 /// Request timeouts, rate limits, and server errors may succeed when sent
-/// again. A 401 is permanent because the client already refreshed its token
-/// and resent the request once.
+/// again.
 fn http_status_retryability(status: StatusCode) -> Retryability {
     if status == StatusCode::REQUEST_TIMEOUT
         || status == StatusCode::TOO_MANY_REQUESTS
