@@ -867,11 +867,8 @@ impl BigQueryClient {
 
         let columns_spec = create_columns_spec(replicated_table_schema)?;
         let table_options_sql = create_table_options_sql(table_options, replicated_table_schema)?;
-        let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
-            Self::max_staleness_option(max_staleness_mins)
-        } else {
-            "".to_owned()
-        };
+        let max_staleness_option =
+            max_staleness_mins.map(Self::max_staleness_option).unwrap_or_default();
 
         info!(%full_table_name, "creating table in bigquery");
 
@@ -967,12 +964,12 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Lists physical versioned table ids for a base table.
+    /// Lists physical table ID strings matching a base table prefix.
     ///
     /// Queries `INFORMATION_SCHEMA.TABLES` instead of using the destination's
     /// local cache so reset cleanup can remove versions left behind by earlier
     /// processes.
-    pub async fn list_versioned_table_ids(
+    pub async fn list_physical_table_ids(
         &self,
         dataset_id: &BigQueryDatasetId,
         base_table_id: &BigQueryTableId,
@@ -1000,17 +997,17 @@ impl BigQueryClient {
         }]);
 
         let mut result_set = self.query(request).await?;
-        let mut table_ids = Vec::new();
+        let mut physical_table_ids = Vec::new();
 
         while result_set.next_row() {
-            if let Some(table_id) =
+            if let Some(physical_table_id) =
                 result_set.get_string_by_name("table_name").map_err(bq_error_to_etl_error)?
             {
-                table_ids.push(table_id);
+                physical_table_ids.push(physical_table_id);
             }
         }
 
-        Ok(table_ids)
+        Ok(physical_table_ids)
     }
 
     /// Adds a column to an existing BigQuery table.

@@ -5,11 +5,7 @@
 //! deadline. The SQL callers must never interpret HTTP acceptance as
 //! completion.
 
-use std::{
-    error::Error as _,
-    future::Future,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{error::Error as _, future::Future};
 
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
@@ -23,9 +19,10 @@ use gcp_bigquery_client::{
         query_request::QueryRequest, query_response::QueryResponse,
     },
 };
-use rand::random;
+use rand::random_range;
 use tokio::time::{Duration, Instant, sleep, timeout_at};
 use tracing::warn;
+use uuid::Uuid;
 
 use crate::{
     bigquery::client::bq_error_to_etl_error,
@@ -97,7 +94,7 @@ const FAILED_BIGQUERY_QUERY_JOB_REASONS: &[&str] =
 
 /// Adds up to one second of jitter without shortening Google's base delay.
 fn query_retry_delay(delay: Duration) -> Duration {
-    let jitter = Duration::from_millis(random::<u64>() % 1001);
+    let jitter = Duration::from_millis(random_range(0..=1000));
     delay.saturating_add(jitter).min(QUERY_MAX_RETRY_DELAY)
 }
 
@@ -149,17 +146,7 @@ fn is_transient_query_request_error(error: &BQError) -> RetryDecision {
 
 /// Generates an idempotency key accepted by BigQuery request-ID fields.
 fn generate_bigquery_request_id() -> String {
-    format!("{:032x}", random::<u128>())
-}
-
-/// Ensures local retries of one BigQuery query job share an idempotency key.
-///
-/// BigQuery retains `jobs.query` request IDs for 15 minutes. The overall query
-/// deadline is shorter than that window, so one generated ID covers every
-/// request retry while preserving an ID supplied by a caller.
-fn with_query_request_id(mut request: QueryRequest) -> QueryRequest {
-    request.request_id.get_or_insert_with(generate_bigquery_request_id);
-    request
+    Uuid::new_v4().simple().to_string()
 }
 
 /// Logs a transient BigQuery query retry.
@@ -216,7 +203,7 @@ where
 
     let reference = response
         .job_reference
-        .clone()
+        .take()
         .filter(|reference| reference.job_id.as_ref().is_some_and(|id| !id.is_empty()))
         .ok_or_else(|| {
             etl_error!(
@@ -226,7 +213,7 @@ where
             )
         })?;
 
-    timeout_at(deadline, async {
+    let mut response = timeout_at(deadline, async {
         while response.job_complete != Some(true) {
             response = poll(reference.clone(), None).await?;
             if response.job_complete != Some(true) {
@@ -249,11 +236,13 @@ where
             response.page_token = page.page_token;
         }
 
-        response.job_reference = Some(reference.clone());
         Ok(response)
     })
     .await
-    .map_err(|error| query_timeout_error(request_id, Some(&reference)).with_source(error))?
+    .map_err(|error| query_timeout_error(request_id, Some(&reference)).with_source(error))??;
+
+    response.job_reference = Some(reference);
+    Ok(response)
 }
 
 /// Submits and completes one job, retrying requests with stable identities.
@@ -328,15 +317,14 @@ async fn execute_query_attempt(
 ///
 /// Only documented terminal job failures permit a fresh request ID, whether
 /// reported by submission or polling. Request-level retries stay inside `run`.
-async fn retry_query_jobs<F, Fut>(request: QueryRequest, mut run: F) -> EtlResult<QueryResponse>
+async fn retry_query_jobs<F, Fut>(mut request: QueryRequest, mut run: F) -> EtlResult<QueryResponse>
 where
     F: FnMut(QueryRequest, Instant) -> Fut,
     Fut: Future<Output = EtlResult<QueryResponse>>,
 {
     let deadline = Instant::now() + QUERY_TIMEOUT;
-    let mut request = with_query_request_id(request);
     request.timeout_ms.get_or_insert(QUERY_WAIT_TIMEOUT_MS);
-    let requires_new_request_id = AtomicBool::new(false);
+    let mut initial_request_id = request.request_id.take();
 
     retry_with_backoff(
         QUERY_JOB_RETRY_POLICY,
@@ -345,8 +333,6 @@ where
                 .source()
                 .and_then(|source| source.downcast_ref::<BQError>())
                 .is_some_and(query_retry_requires_new_request_id);
-
-            requires_new_request_id.store(retry, Ordering::Relaxed);
 
             if retry { RetryDecision::Retry } else { RetryDecision::Stop }
         },
@@ -361,9 +347,10 @@ where
             );
         },
         || {
-            if requires_new_request_id.swap(false, Ordering::Relaxed) {
-                request.request_id = Some(generate_bigquery_request_id());
-            }
+            // Only confirmed job failures reach another attempt. Preserve the
+            // caller's first ID, then allocate a fresh ID for each replacement.
+            request.request_id =
+                Some(initial_request_id.take().unwrap_or_else(generate_bigquery_request_id));
 
             run(request.clone(), deadline)
         },
@@ -411,7 +398,7 @@ mod tests {
     };
     use serde_json::{Value, json};
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
         net::TcpListener,
         time::{Duration, Instant, timeout},
     };
@@ -454,40 +441,34 @@ mod tests {
             let mut requests = Vec::new();
 
             for (status, body) in responses {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut bytes = Vec::new();
-                let header_end = loop {
-                    let mut buffer = [0; 1024];
-                    let read = stream.read(&mut buffer).await.unwrap();
-                    assert_ne!(read, 0);
-                    bytes.extend_from_slice(&buffer[..read]);
-                    if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-                        break index + 4;
-                    }
-                };
-                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
-                let length = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut lines = BufReader::new(stream).lines();
+                let request_line = lines.next_line().await.unwrap().unwrap();
+                let mut content_length = 0;
 
-                while bytes.len() < header_end + length {
-                    let mut buffer = [0; 1024];
-                    let read = stream.read(&mut buffer).await.unwrap();
-                    assert_ne!(read, 0);
-                    bytes.extend_from_slice(&buffer[..read]);
+                loop {
+                    let header = lines.next_line().await.unwrap().unwrap();
+                    if header.is_empty() {
+                        break;
+                    }
+
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().unwrap();
+                    }
                 }
 
-                let request_body = if length == 0 {
+                let mut reader = lines.into_inner();
+                let mut bytes = vec![0; content_length];
+                reader.read_exact(&mut bytes).await.unwrap();
+
+                let request_body = if bytes.is_empty() {
                     Value::Null
                 } else {
-                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()
+                    serde_json::from_slice(&bytes).unwrap()
                 };
-                requests.push((headers.lines().next().unwrap().to_owned(), request_body));
+                requests.push((request_line, request_body));
 
                 let body = body.to_string();
                 let response = format!(
@@ -495,7 +476,7 @@ mod tests {
                      application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                stream.write_all(response.as_bytes()).await.unwrap();
+                reader.get_mut().write_all(response.as_bytes()).await.unwrap();
             }
 
             requests
@@ -617,7 +598,12 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(result.is_ok(), dry_run);
-            assert_eq!(server.await.unwrap().len(), 1);
+
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let request_id = requests[0].1["requestId"].as_str().unwrap();
+            assert_eq!(request_id.len(), 32);
+            assert!(request_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }
     }
 
@@ -675,6 +661,9 @@ mod tests {
             .unwrap();
         assert_eq!(polls, 2);
         assert_eq!(completed.job_complete, Some(true));
+        let reference = completed.job_reference.unwrap();
+        assert_eq!(reference.job_id.as_deref(), Some("pending_job"));
+        assert_eq!(reference.location.as_deref(), Some("europe-west1"));
     }
 
     /// Cleanup listings must retain every page and the original job location.

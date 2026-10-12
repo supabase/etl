@@ -9,9 +9,8 @@ use etl::{
     bail,
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -124,9 +123,9 @@ impl VersionedBigQueryTableId {
         Self(table_id, TableVersionId::Random(Uuid::new_v4()))
     }
 
-    /// Extracts the logical BigQuery table ID without the version suffix.
-    fn to_bigquery_table_id(&self) -> BigQueryTableId {
-        self.0.clone()
+    /// Borrows the logical BigQuery table ID without the version suffix.
+    fn base_table_id(&self) -> &BigQueryTableId {
+        &self.0
     }
 
     /// Returns whether this physical table belongs to `base_table_id`.
@@ -189,9 +188,9 @@ fn metadata_versioned_table_id_for_base(
     metadata: &DestinationTableMetadata,
     base_bigquery_table_id: &BigQueryTableId,
 ) -> EtlResult<VersionedBigQueryTableId> {
-    let versioned_bigquery_table_id = metadata.table_id().parse::<VersionedBigQueryTableId>()?;
+    let versioned_table_id = metadata.table_id().parse::<VersionedBigQueryTableId>()?;
 
-    if !versioned_bigquery_table_id.belongs_to_base(base_bigquery_table_id) {
+    if !versioned_table_id.belongs_to_base(base_bigquery_table_id) {
         bail!(
             ErrorKind::InvalidState,
             "Destination table metadata points to a different BigQuery table",
@@ -204,7 +203,7 @@ fn metadata_versioned_table_id_for_base(
         );
     }
 
-    Ok(versioned_bigquery_table_id)
+    Ok(versioned_table_id)
 }
 
 /// Attempts physical-table deletion without making replication depend on
@@ -234,7 +233,7 @@ async fn delete_table_versions(
 
 /// Ensures BigQuery metadata is ready for streaming operations.
 fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlResult<()> {
-    if matches!(metadata.table_schema(), DestinationTableSchema::Applied { .. }) {
+    if metadata.is_applied() {
         return Ok(());
     }
 
@@ -496,11 +495,11 @@ where
         &self,
         base_table_id: &BigQueryTableId,
     ) -> HashSet<VersionedBigQueryTableId> {
-        match self.client.list_versioned_table_ids(&self.dataset_id, base_table_id).await {
-            Ok(table_ids) => table_ids
+        match self.client.list_physical_table_ids(&self.dataset_id, base_table_id).await {
+            Ok(physical_table_ids) => physical_table_ids
                 .into_iter()
-                .filter_map(|table_id| {
-                    VersionedBigQueryTableId::parse_for_base(&table_id, base_table_id)
+                .filter_map(|physical_table_id| {
+                    VersionedBigQueryTableId::parse_for_base(&physical_table_id, base_table_id)
                 })
                 .collect(),
             Err(error) => {
@@ -550,9 +549,10 @@ where
         let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let existing_metadata = self.state_store.get_destination_table_metadata(table_id).await?;
 
-        // We check if the versioned table already exists.
+        // Applied metadata supplies the physical identity without probing
+        // BigQuery.
         if let Some(metadata) = existing_metadata {
-            let versioned_bigquery_table_id =
+            let versioned_table_id =
                 metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
 
             if metadata.is_applying() {
@@ -574,7 +574,7 @@ where
             )?;
 
             if metadata.is_applied() {
-                return Ok(versioned_bigquery_table_id);
+                return Ok(versioned_table_id);
             }
         }
 
@@ -583,9 +583,9 @@ where
 
         // A Creating target is abandoned without deletion here. Truncate or
         // explicit reset can collect it after redirecting or removing the view.
-        let versioned_bigquery_table_id = VersionedBigQueryTableId::new(bigquery_table_id);
+        let versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id);
         let metadata = DestinationTableMetadata::new_creating(
-            versioned_bigquery_table_id.to_string(),
+            versioned_table_id.to_string(),
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
@@ -595,7 +595,7 @@ where
         self.client
             .create_table(
                 &self.dataset_id,
-                &versioned_bigquery_table_id.to_string(),
+                &versioned_table_id.to_string(),
                 replicated_table_schema,
                 self.max_staleness_mins,
                 self.table_options.get(&table_id),
@@ -604,9 +604,9 @@ where
 
         self.state_store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
-        debug!(%versioned_bigquery_table_id, "created physical bigquery table");
+        debug!(%versioned_table_id, "created physical bigquery table");
 
-        Ok(versioned_bigquery_table_id)
+        Ok(versioned_table_id)
     }
 
     /// Prepares a table for BigQuery writes with schema-aware table creation.
@@ -619,16 +619,12 @@ where
         // workers cannot race the durable metadata transition or derived view
         // cache.
         let mut inner = self.inner.lock().await;
-        let versioned_bigquery_table_id =
+        let versioned_table_id =
             self.resolve_or_create_table_for_schema(replicated_table_schema).await?;
-        let bigquery_table_id = versioned_bigquery_table_id.to_bigquery_table_id();
+        let bigquery_table_id = versioned_table_id.base_table_id();
 
-        self.ensure_view_points_to_table(
-            &mut inner,
-            &bigquery_table_id,
-            &versioned_bigquery_table_id,
-        )
-        .await?;
+        self.ensure_view_points_to_table(&mut inner, bigquery_table_id, &versioned_table_id)
+            .await?;
 
         // Note: We return TableDescriptor by value for simplicity, which means
         // callers clone it when creating multiple batches. This is acceptable
@@ -639,7 +635,7 @@ where
         let table_descriptor =
             column_schemas_to_table_descriptor(replicated_table_schema, use_cdc_sequence_column);
 
-        Ok((versioned_bigquery_table_id, table_descriptor))
+        Ok((versioned_table_id, table_descriptor))
     }
 
     /// Loads destination metadata and requires an applied schema state.
@@ -664,14 +660,14 @@ where
         &self,
         inner: &mut Inner,
         bigquery_table_id: &BigQueryTableId,
-        versioned_bigquery_table_id: &VersionedBigQueryTableId,
+        versioned_table_id: &VersionedBigQueryTableId,
     ) -> EtlResult<bool> {
         if let Some(current_target) = inner.created_views.get(bigquery_table_id)
-            && current_target == versioned_bigquery_table_id
+            && current_target == versioned_table_id
         {
             debug!(
                 %bigquery_table_id,
-                %versioned_bigquery_table_id,
+                %versioned_table_id,
                 "view already points to target, skipping creation"
             );
 
@@ -682,16 +678,16 @@ where
             .create_or_replace_view(
                 &self.dataset_id,
                 bigquery_table_id,
-                &versioned_bigquery_table_id.to_string(),
+                &versioned_table_id.to_string(),
             )
             .await?;
 
         // We insert/overwrite the cached view target.
-        inner.created_views.insert(bigquery_table_id.clone(), versioned_bigquery_table_id.clone());
+        inner.created_views.insert(bigquery_table_id.clone(), versioned_table_id.clone());
 
         debug!(
             %bigquery_table_id,
-            %versioned_bigquery_table_id,
+            %versioned_table_id,
             "view created/updated to point to target"
         );
 
@@ -703,22 +699,22 @@ where
     async fn recreate_view_for_table(
         &self,
         bigquery_table_id: &BigQueryTableId,
-        versioned_bigquery_table_id: &VersionedBigQueryTableId,
+        versioned_table_id: &VersionedBigQueryTableId,
     ) -> EtlResult<()> {
         self.client
             .create_or_replace_view(
                 &self.dataset_id,
                 bigquery_table_id,
-                &versioned_bigquery_table_id.to_string(),
+                &versioned_table_id.to_string(),
             )
             .await?;
 
         let mut inner = self.inner.lock().await;
-        inner.created_views.insert(bigquery_table_id.clone(), versioned_bigquery_table_id.clone());
+        inner.created_views.insert(bigquery_table_id.clone(), versioned_table_id.clone());
 
         debug!(
             %bigquery_table_id,
-            %versioned_bigquery_table_id,
+            %versioned_table_id,
             "view recreated for target table"
         );
 
@@ -736,7 +732,7 @@ where
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         // Prepare table for streaming.
-        let (versioned_bigquery_table_id, table_descriptor) =
+        let (versioned_table_id, table_descriptor) =
             self.prepare_table_for_writes(replicated_table_schema, false).await?;
 
         // Add the CDC operation type to all rows (no lock needed).
@@ -753,7 +749,7 @@ where
 
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, target_batches);
-        let versioned_bigquery_table_id_string = versioned_bigquery_table_id.to_string();
+        let physical_table_id = versioned_table_id.to_string();
 
         // Create append requests from the split rows.
         let mut append_requests = Vec::with_capacity(table_rows_batches.len());
@@ -764,7 +760,7 @@ where
                     self.pipeline_id,
                     request_index,
                     &self.dataset_id,
-                    &versioned_bigquery_table_id_string,
+                    &physical_table_id,
                     table_descriptor.clone(),
                     table_rows,
                 )?;
@@ -887,7 +883,7 @@ where
         let plan = current_schema
             .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_MAPPING)?;
         validate_bigquery_schema_plan(new_replicated_table_schema, &plan)?;
-        let versioned_bigquery_table_id = metadata.table_id().parse()?;
+        let versioned_table_id = metadata.table_id().parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and
         // mask).
@@ -907,9 +903,7 @@ where
             .store_destination_table_metadata(table_id, updated_metadata.clone())
             .await?;
 
-        if let Err(err) =
-            self.apply_schema_plan(&table_id, &versioned_bigquery_table_id, &plan).await
-        {
+        if let Err(err) = self.apply_schema_plan(&table_id, &versioned_table_id, &plan).await {
             warn!(
                 table_id = %table_id,
                 error = %err,
@@ -918,8 +912,8 @@ where
             return Err(err);
         }
 
-        let bigquery_table_id = versioned_bigquery_table_id.to_bigquery_table_id();
-        self.recreate_view_for_table(&bigquery_table_id, &versioned_bigquery_table_id).await?;
+        let bigquery_table_id = versioned_table_id.base_table_id();
+        self.recreate_view_for_table(bigquery_table_id, &versioned_table_id).await?;
 
         // Mark as applied after successful changes.
         self.state_store
@@ -952,7 +946,7 @@ where
     async fn apply_schema_plan(
         &self,
         table_id: &TableId,
-        versioned_bigquery_table_id: &VersionedBigQueryTableId,
+        versioned_table_id: &VersionedBigQueryTableId,
         plan: &SchemaPlan,
     ) -> EtlResult<()> {
         if plan.is_empty() {
@@ -962,12 +956,14 @@ where
 
         debug!(
             source_table_id = %table_id,
-            destination_table_id = %versioned_bigquery_table_id,
+            destination_table_id = %versioned_table_id,
             added_column_count = plan.diff().added_columns.len(),
             removed_column_count = plan.diff().dropped_columns.len(),
             altered_column_count = plan.diff().altered_columns.len(),
             "applying bigquery table schema plan"
         );
+
+        let physical_table_id = versioned_table_id.to_string();
 
         // Apply the shared plan without regrouping operations.
         for operation in plan.ordered_operations() {
@@ -976,18 +972,14 @@ where
                     self.client
                         .drop_column(
                             &self.dataset_id,
-                            &versioned_bigquery_table_id.to_string(),
+                            &physical_table_id,
                             &before_column_schema.name,
                         )
                         .await?;
                 }
                 SchemaOperation::AddColumn { after_column_schema, reason: _ } => {
                     self.client
-                        .add_column(
-                            &self.dataset_id,
-                            &versioned_bigquery_table_id.to_string(),
-                            after_column_schema,
-                        )
+                        .add_column(&self.dataset_id, &physical_table_id, after_column_schema)
                         .await?;
 
                     // BigQuery adds the column as nullable, leaving existing
@@ -998,7 +990,7 @@ where
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
-                                &versioned_bigquery_table_id.to_string(),
+                                &physical_table_id,
                                 &after_column_schema.name,
                                 &default_expression,
                             )
@@ -1019,7 +1011,7 @@ where
                             self.client
                                 .rename_column(
                                     &self.dataset_id,
-                                    &versioned_bigquery_table_id.to_string(),
+                                    &physical_table_id,
                                     &before.name,
                                     &after.name,
                                 )
@@ -1028,7 +1020,7 @@ where
                         ColumnAlterationKind::Type => {
                             warn_unsupported_column_type_change(
                                 "bigquery",
-                                versioned_bigquery_table_id,
+                                versioned_table_id,
                                 alteration,
                             );
                         }
@@ -1040,7 +1032,7 @@ where
                                 self.client
                                     .drop_column_not_null(
                                         &self.dataset_id,
-                                        &versioned_bigquery_table_id.to_string(),
+                                        &physical_table_id,
                                         &before.name,
                                     )
                                     .await?;
@@ -1058,7 +1050,7 @@ where
                                 self.client
                                     .clear_column_default(
                                         &self.dataset_id,
-                                        &versioned_bigquery_table_id.to_string(),
+                                        &physical_table_id,
                                         &before.name,
                                     )
                                     .await?;
@@ -1069,7 +1061,7 @@ where
                                     self.client
                                         .set_column_default(
                                             &self.dataset_id,
-                                            &versioned_bigquery_table_id.to_string(),
+                                            &physical_table_id,
                                             &before.name,
                                             &default_expression,
                                         )
@@ -1089,7 +1081,7 @@ where
         }
 
         debug!(
-            destination_table_id = %versioned_bigquery_table_id,
+            destination_table_id = %versioned_table_id,
             "bigquery table schema plan applied"
         );
 
@@ -1197,17 +1189,16 @@ where
                 for (request_index, (_, (replicated_table_schema, table_rows))) in
                     table_id_to_data.into_iter().enumerate()
                 {
-                    let (versioned_bigquery_table_id, table_descriptor) =
+                    let (versioned_table_id, table_descriptor) =
                         self.prepare_table_for_writes(&replicated_table_schema, true).await?;
-                    let versioned_bigquery_table_id_string =
-                        versioned_bigquery_table_id.to_string();
+                    let physical_table_id = versioned_table_id.to_string();
                     histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                     let append_request = self.client.create_append_request(
                         self.pipeline_id,
                         request_index,
                         &self.dataset_id,
-                        &versioned_bigquery_table_id_string,
+                        &physical_table_id,
                         table_descriptor,
                         table_rows,
                     )?;
@@ -1294,7 +1285,7 @@ where
                 &metadata,
                 &replicated_table_schema,
             )?;
-            let versioned_bigquery_table_id =
+            let versioned_table_id =
                 metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
 
             // Capture candidates before creation while holding serialization.
@@ -1302,15 +1293,14 @@ where
             // lags. Cleanup must never discover a newer table after the switch.
             let mut obsolete_table_ids =
                 self.list_table_versions_for_cleanup(&bigquery_table_id).await;
-            obsolete_table_ids.insert(versioned_bigquery_table_id);
-            let next_versioned_bigquery_table_id =
-                VersionedBigQueryTableId::new(bigquery_table_id.clone());
+            obsolete_table_ids.insert(versioned_table_id);
+            let next_versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id.clone());
 
             // Create-only DDL fails on a collision instead of replacing data.
             self.client
                 .create_table(
                     &self.dataset_id,
-                    &next_versioned_bigquery_table_id.to_string(),
+                    &next_versioned_table_id.to_string(),
                     &replicated_table_schema,
                     self.max_staleness_mins,
                     self.table_options.get(&table_id),
@@ -1321,13 +1311,13 @@ where
             self.ensure_view_points_to_table(
                 &mut inner,
                 &bigquery_table_id,
-                &next_versioned_bigquery_table_id,
+                &next_versioned_table_id,
             )
             .await?;
 
             // Update the metadata to point to the new table.
             let metadata = DestinationTableMetadata::new_applied(
-                next_versioned_bigquery_table_id.to_string(),
+                next_versioned_table_id.to_string(),
                 replicated_table_schema.inner().snapshot_id,
                 replicated_table_schema.replication_mask().clone(),
             );
@@ -1344,7 +1334,7 @@ where
 
             info!(
                 table_id = table_id.0,
-                %next_versioned_bigquery_table_id,
+                %next_versioned_table_id,
                 "successfully processed truncate, view updated"
             );
 
@@ -2200,7 +2190,7 @@ mod tests {
             ("_0607_Public__Orders_42", "_0607_Public__Orders", 42),
         ] {
             let parsed = input.parse::<VersionedBigQueryTableId>().unwrap();
-            assert_eq!(parsed.to_bigquery_table_id(), base);
+            assert_eq!(parsed.base_table_id(), base);
             assert_eq!(parsed.1, TableVersionId::Legacy(version));
             assert_eq!(parsed.to_string(), input);
         }
