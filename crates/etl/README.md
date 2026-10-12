@@ -29,6 +29,41 @@ Copy and change data capture (CDC) are replication paths, not customer-visible
 phases. See the [architecture overview](https://supabase.github.io/etl/explanation/architecture/)
 for the worker model.
 
+### Initial-copy locks and beta schema-change handling
+
+The parent transaction locks each copy unit and its descendants in
+`ACCESS SHARE` mode **before** the slot snapshot and retains those locks until
+all source copy workers finish. Workers import the snapshot and acquire their
+own locks with `NOWAIT`, retaining them across chunks. A conflict starts a fresh
+copy under the configured retry policy.
+
+For partitioned tables, the unit is the published root/subtree when
+`publish_via_partition_root = true`, otherwise an individual leaf. Ordinary
+tables are separate units. Locks never climb to ancestors.
+
+On a primary, normal DML remains compatible, while `ACCESS EXCLUSIVE` DDL can
+wait and delay later queries. Ordinary vacuum can run, but the snapshot may
+prevent cleanup. On a standby, locks affect local WAL replay and can lead to
+recovery-conflict cancellation; they do not lock tables on the primary.
+
+The 30-second copy lock timeout bounds individual lock acquisitions, not lock
+lifetime or how long migration sessions wait. ETL does not automatically stop a
+copy to release queued application traffic. Long copies and slow destinations
+extend snapshot and WAL retention; resuming an interrupted copy requires a fresh
+snapshot. `max_slot_wal_keep_size` bounds slot retention at checkpoints, not
+snapshot-related bloat or total disk usage. Losing a table-sync slot during
+copy requires a table reset and fresh initial sync. Retained slots continue
+holding WAL while the pipeline is stopped. See [Planning long initial copies](../../site/content/docs/guides/configure-postgres.mdx#planning-long-initial-copies)
+for migration scheduling, storage, and monitoring guidance.
+
+Schema-change handling is in **public beta**. The trigger captures an
+unprojected schema; each pipeline combines it with its replication mask.
+This also turns publication column-list changes into logical schema changes.
+Copy locks do not fix catalog-helper visibility, stale concurrent-DDL snapshots,
+or relation-mask ambiguity. See [Schema Changes](../../site/content/docs/explanation/schema-changes.mdx)
+for guarantees, retries, and operating cautions, and the [source migration notes](migrations/README.md#schema-capture-contract-and-limitations)
+for the trigger boundary.
+
 ### Key Components
 
 - **Pipeline**: Main orchestrator that manages the replication process
