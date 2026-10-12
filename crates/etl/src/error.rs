@@ -188,6 +188,8 @@ pub enum ErrorKind {
     ReplicationSlotNotFound,
     /// A replication slot already exists.
     ReplicationSlotAlreadyExists,
+    /// A replication slot belongs to another session and cannot be reused.
+    ReplicationSlotInUse,
     /// A replication slot could not be created.
     ReplicationSlotNotCreated,
     /// A replication slot was invalidated by Postgres.

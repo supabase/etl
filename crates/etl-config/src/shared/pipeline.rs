@@ -300,6 +300,7 @@ impl Default for MemoryBackpressureConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
+#[serde(tag = "type")]
 pub enum ReplicationSlotPersistence {
     /// Keeps slots after their creating sessions end, allowing replication to
     /// resume from retained WAL.
@@ -307,8 +308,8 @@ pub enum ReplicationSlotPersistence {
     Permanent,
     /// Drops slots on an error or when their creating sessions end.
     ///
-    /// Use for ephemeral pipelines whose store and destination are rebuilt
-    /// together. Replication cannot resume after the apply connection is lost.
+    /// Resynchronizes tables on every pipeline start. Losing the apply
+    /// connection during a run stops the pipeline until it is started again.
     Temporary,
 }
 
@@ -1044,13 +1045,30 @@ mod tests {
             let config = ReplicationSlotConfig { persistence, ..Default::default() };
             let json = serde_json::to_value(&config).unwrap();
 
-            assert_eq!(json["persistence"], name);
+            assert_eq!(json["persistence"], serde_json::json!({ "type": name }));
             assert_eq!(serde_json::from_value::<ReplicationSlotConfig>(json).unwrap(), config);
             config.validate().unwrap();
         }
 
         let config: ReplicationSlotConfig =
-            serde_json::from_str(r#"{"persistence":"temporary"}"#).unwrap();
+            serde_json::from_str(r#"{"persistence":{"type":"temporary"}}"#).unwrap();
+        assert!(!config.failover);
+    }
+
+    /// YAML uses the same tagged persistence shape as JSON.
+    #[test]
+    fn replication_slot_config_deserializes_tagged_yaml() {
+        let config = config::Config::builder()
+            .add_source(config::File::from_str(
+                "persistence:\n  type: temporary\n",
+                config::FileFormat::Yaml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<ReplicationSlotConfig>()
+            .unwrap();
+
+        assert_eq!(config.persistence, ReplicationSlotPersistence::Temporary);
         assert!(!config.failover);
     }
 
@@ -1068,7 +1086,7 @@ mod tests {
                 "password": null,
                 "tls": {"trusted_root_certs": "", "enabled": false}
             },
-            "replication_slot": {"persistence": "temporary", "failover": true}
+            "replication_slot": {"persistence": {"type": "temporary"}, "failover": true}
         }"#;
         let config: PipelineConfig = serde_json::from_str(json).unwrap();
         let expected = ValidationError::InvalidFieldValue {

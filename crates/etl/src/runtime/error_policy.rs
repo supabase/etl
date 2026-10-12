@@ -51,6 +51,7 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
         // intervention.
         ErrorKind::SourceConnectionFailed
         | ErrorKind::SourceLockTimeout
+        | ErrorKind::ReplicationSlotInUse
         | ErrorKind::ReplicationFeedbackUnavailable
         | ErrorKind::DestinationConnectionFailed
         | ErrorKind::DestinationAtomicBatchRetryable
@@ -171,6 +172,8 @@ mod tests {
             (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
             (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
             (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
+            (ErrorKind::ReplicationSlotInUse, RetryDirective::Timed),
+            (ErrorKind::ReplicationSlotInvalidated, RetryDirective::Manual),
         ] {
             let error = EtlError::from((kind, "Test replication failure"));
             assert_eq!(build_error_handling_policy(&error).retry_directive(), retry);

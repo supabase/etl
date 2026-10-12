@@ -77,17 +77,29 @@ every start, use session-scoped slots:
 ```yaml
 pipeline:
   replication_slot:
-    persistence: temporary
+    persistence:
+      type: temporary
+  table_error_retry_delay_ms: 10000
+  table_error_retry_max_attempts: 8
 ```
 
 This applies to both apply-worker and table-sync slots. PostgreSQL drops them
 on an error or when their creating sessions end. Omitted `persistence` defaults
 to `permanent`, including in existing configurations.
 
-Temporary slots cannot retain replication progress across a lost connection.
-Restart with a fresh store and destination so initial synchronization rebuilds
-the data. ETL rejects reusing stale table state or an existing apply slot in
-temporary mode. `failover: true` requires permanent slots.
+Every start resets table state and resynchronizes the destination from a fresh
+snapshot. You can reuse the same store and destination. Losing the apply slot
+during a run stops the pipeline; starting it again resynchronizes its tables.
+Wait for the previous run's table-sync sessions to end before restarting.
+`failover: true` requires permanent slots.
+
+After a host or network failure, PostgreSQL may keep the previous session's
+temporary slot until it detects the lost connection. ETL retries while that
+slot is still held. Set the retry window longer than PostgreSQL's
+[`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
+which defaults to 60 seconds. The example allows eight retries ten seconds
+apart; the default retry settings allow only five. A clean session exit or
+an error in the session drops the slot immediately.
 
 ### Viewing Replication Slots
 

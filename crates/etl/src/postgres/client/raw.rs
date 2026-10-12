@@ -1,6 +1,6 @@
 use std::{fmt, future::Future, num::NonZeroI32, sync::Arc, time::Duration};
 
-use etl_config::shared::{ReplicationSlotConfig, Validate};
+use etl_config::shared::{ReplicationSlotConfig, ReplicationSlotPersistence, Validate};
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     publications::publication_table_ids_query,
@@ -549,6 +549,33 @@ impl PgReplicationClient {
             "Replication slot not found",
             format!("Replication slot '{}' not found in database", slot_name)
         );
+    }
+
+    /// Returns a slot's persistence, or [`None`] if it does not exist.
+    ///
+    /// Reads persistence independently of the slot's replication position so
+    /// a slot still being initialized by another session can be identified.
+    pub(crate) async fn get_slot_persistence(
+        &self,
+        slot_name: &str,
+    ) -> EtlResult<Option<ReplicationSlotPersistence>> {
+        let query = format!(
+            r#"select temporary::int as temporary from pg_replication_slots where slot_name = {};"#,
+            quote_literal(slot_name)
+        );
+
+        for result in self.client.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = result {
+                let temporary = get_row_value::<u8>(&row, "temporary", "pg_replication_slots")?;
+                return Ok(Some(if temporary != 0 {
+                    ReplicationSlotPersistence::Temporary
+                } else {
+                    ReplicationSlotPersistence::Permanent
+                }));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Ensures that an existing logical replication slot is failover-enabled.

@@ -29,7 +29,7 @@ use crate::{
         concurrency::{ShutdownResult, with_shutdown},
         error_policy::{RetryDirective, build_error_handling_policy},
     },
-    store::{PipelineStore, StateStore, TableStateLifecycleStore, TableStateType},
+    store::{PipelineStore, StateStore, TableStateLifecycleStore},
 };
 
 /// Handle for monitoring and controlling the apply worker.
@@ -224,9 +224,10 @@ where
     /// worker types.
     async fn guarded_run_apply_worker(self) -> EtlResult<()> {
         let mut retry_attempts: u32 = 0;
+        let mut entered_apply_loop = false;
 
         loop {
-            let result = self.run_apply_worker().await;
+            let result = self.run_apply_worker(&mut entered_apply_loop).await;
             match result {
                 Ok(()) => return Ok(()),
                 Err(err) => {
@@ -247,7 +248,7 @@ where
     }
 
     /// Runs a single apply worker attempt.
-    async fn run_apply_worker(&self) -> EtlResult<()> {
+    async fn run_apply_worker(&self, entered_apply_loop: &mut bool) -> EtlResult<()> {
         // Slot creation can wait indefinitely for source transactions. No apply
         // work has been accepted yet, so cancellation can close this
         // connection.
@@ -264,6 +265,7 @@ where
                     &self.store,
                     &self.config.invalidated_slot_behavior,
                     &self.config.replication_slot,
+                    *entered_apply_loop,
                 )
                 .await?;
                 Ok::<_, EtlError>((replication_client, start_lsn))
@@ -287,6 +289,9 @@ where
             batch_memory_governor: self.batch_memory_governor.clone(),
         });
 
+        // Once table-sync workers can exist, resetting their persisted state
+        // would race with the state they still hold in memory.
+        *entered_apply_loop = true;
         let apply_loop_result = ApplyLoop::start(
             self.pipeline_id,
             start_lsn,
@@ -345,38 +350,69 @@ where
 /// When creating a new slot, this function warns if any tables already depend
 /// on the apply worker for replication. Those tables can miss changes between
 /// the previous slot stopping and the new slot being created.
-/// Temporary slots instead require fresh table state, since their WAL history
-/// ends with the creating session.
+/// Temporary slots reset tables before the first apply attempt. After the
+/// apply loop has started, a new connection requires a new pipeline run so
+/// active table-sync workers cannot overwrite reset state.
 async fn get_start_lsn<S: StateStore + TableStateLifecycleStore>(
     pipeline_id: PipelineId,
     replication_client: &mut PgReplicationClient,
     store: &S,
     invalidated_slot_behavior: &InvalidatedSlotBehavior,
     replication_slot: &ReplicationSlotConfig,
+    entered_apply_loop: bool,
 ) -> EtlResult<PgLsn> {
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into()?;
     let worker_type = WorkerType::Apply;
+
+    if replication_slot.persistence == ReplicationSlotPersistence::Temporary {
+        if entered_apply_loop {
+            bail!(
+                ErrorKind::ReplicationSlotInvalidated,
+                "Temporary apply slot cannot be resumed on a new connection",
+                "Restart the pipeline to resynchronize its tables".to_owned()
+            );
+        }
+
+        match replication_client.get_slot_persistence(&slot_name).await? {
+            Some(ReplicationSlotPersistence::Temporary) => {
+                // This connection is new, so an existing temporary slot belongs
+                // to another session. Wait for that session to release it.
+                bail!(
+                    ErrorKind::ReplicationSlotInUse,
+                    "Temporary apply slot belongs to another session",
+                    format!("Waiting for replication slot '{slot_name}' to be released")
+                );
+            }
+            Some(ReplicationSlotPersistence::Permanent) => {
+                bail!(
+                    ErrorKind::ConfigError,
+                    "Permanent apply slot conflicts with temporary persistence",
+                    format!("Drop replication slot '{slot_name}' or use permanent persistence")
+                );
+            }
+            None => {}
+        }
+
+        // Reset before creating the new slot so it cannot be paired with a
+        // checkpoint or table state from the previous session's WAL history.
+        store.reset_table_states_for_resync().await?;
+        let slot = replication_client.create_slot(&slot_name, replication_slot).await?;
+        info!(
+            slot_name,
+            consistent_point = %slot.consistent_point,
+            "created temporary apply slot after resetting tables for resync"
+        );
+        return Ok(slot.consistent_point);
+    }
 
     // Inspect the slot before creating it so a stale checkpoint from the
     // previous lineage can be deleted first. Creating the slot before cleanup
     // would leave a crash window where a later restart could pair the new slot
     // with old persisted checkpoint.
     let slot = match replication_client.get_slot(&slot_name).await {
-        Ok(_) if replication_slot.persistence == ReplicationSlotPersistence::Temporary => {
-            // A temporary slot can only be used by its creating session. This
-            // worker has a fresh connection, so any existing slot is either
-            // permanent or belongs to another session.
-            bail!(
-                ErrorKind::ConfigError,
-                "Temporary replication requires a new apply slot",
-                format!(
-                    "Replication slot '{slot_name}' already exists; use a different pipeline id"
-                )
-            );
-        }
         Ok(slot) => GetOrCreateSlotResult::GetSlot(slot),
         Err(err) if err.kind() == ErrorKind::ReplicationSlotNotFound => {
-            validate_new_apply_slot_state(store, replication_slot.persistence).await?;
+            validate_new_apply_slot_state(store).await?;
             store.delete_replication_checkpoint(worker_type).await?;
 
             let slot = replication_client.create_slot(&slot_name, replication_slot).await?;
@@ -526,23 +562,9 @@ async fn handle_invalidated_slot<S: TableStateLifecycleStore>(
     }
 }
 
-/// Rejects reuse of table state after a temporary apply slot is lost, and warns
-/// when a new permanent slot may skip changes for already synchronized tables.
-async fn validate_new_apply_slot_state<S: StateStore>(
-    store: &S,
-    persistence: ReplicationSlotPersistence,
-) -> EtlResult<()> {
+/// Warns when a new permanent slot may skip changes for synchronized tables.
+async fn validate_new_apply_slot_state<S: StateStore>(store: &S) -> EtlResult<()> {
     let table_states = store.get_table_states().await?;
-
-    if persistence == ReplicationSlotPersistence::Temporary
-        && table_states.values().any(|state| state.as_type() != TableStateType::Init)
-    {
-        bail!(
-            ErrorKind::InvalidState,
-            "Cannot resume replication after a temporary apply slot is lost",
-            "Restart the pipeline with a fresh store and destination".to_owned()
-        );
-    }
 
     let tables_at_risk: Vec<_> = table_states
         .iter()
