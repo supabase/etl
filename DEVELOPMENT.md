@@ -229,8 +229,8 @@ gh workflow run publish-image.yml --repo supabase/etl --ref main \
 
 ## Documentation
 
-The docs site uses Next.js and Fumadocs. Use Node.js 22, matching CI. From the
-repository root:
+The docs site uses Next.js and Fumadocs. Use Node.js 22 and its bundled npm,
+matching CI, including when updating the lockfile. From the repository root:
 
 ```bash
 cd site
