@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use chrono::{DateTime, Utc};
 use etl::{
     bail,
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
@@ -79,9 +80,29 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> EtlResult<BigQ
 struct SequencedBigQueryTableId(BigQueryTableId, u64);
 
 impl SequencedBigQueryTableId {
-    /// Creates a new sequenced table ID starting at version 0.
-    fn new(table_id: BigQueryTableId) -> Self {
-        Self(table_id, 0)
+    /// Creates the first table version of a fresh table generation.
+    ///
+    /// The sequence is `created_at` in UTC as the digits `YYYYMMDDHHMMSSmmm`.
+    /// Fresh generations must not reuse a dropped table name: BigQuery can
+    /// route Storage Write appends for a recreated name to the dropped table.
+    /// A copy reset drops every version and ETL clears the destination
+    /// metadata, so no counter survives to continue from. A millisecond
+    /// creation time is practically never reused. Names usually sort by
+    /// creation, but a clock that moves backward breaks that, so do not rely
+    /// on ordering.
+    fn new(table_id: BigQueryTableId, created_at: DateTime<Utc>) -> EtlResult<Self> {
+        // Only years before 0 fail: chrono formats them with a leading `-`.
+        let sequence =
+            created_at.format("%Y%m%d%H%M%S%3f").to_string().parse::<u64>().map_err(|error| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "BigQuery table creation time is out of range",
+                    format!("Cannot derive a BigQuery table sequence from {created_at}."),
+                    source: error
+                )
+            })?;
+
+        Ok(Self(table_id, sequence))
     }
 
     /// Returns the next version of this sequenced table ID.
@@ -469,7 +490,7 @@ where
         let existing_metadata = self.state_store.get_destination_table_metadata(table_id).await?;
         let sequenced_bigquery_table_id = match &existing_metadata {
             Some(metadata) => metadata_sequenced_table_id_for_base(metadata, &bigquery_table_id)?,
-            None => SequencedBigQueryTableId::new(bigquery_table_id),
+            None => SequencedBigQueryTableId::new(bigquery_table_id, Utc::now())?,
         };
         let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
 
@@ -1378,9 +1399,7 @@ where
         }
 
         // Invalidate Storage Write API connections after dropping the physical
-        // tables. A subsequent copy can recreate a table with the same ID, and
-        // a cached connection may still refer to the previous table
-        // incarnation.
+        // tables so no cached connection keeps targeting a dropped table.
         self.client.invalidate_all_connections().await;
 
         // Once destination cleanup is done, remove the stale derived view
@@ -2201,9 +2220,10 @@ mod tests {
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_starts_at_zero_and_increments() {
-        let initial = SequencedBigQueryTableId::new("users_table".to_owned());
-        assert_eq!(initial, SequencedBigQueryTableId("users_table".to_owned(), 0));
+    fn sequenced_bigquery_table_id_starts_at_utc_millis_and_increments() {
+        let created_at = DateTime::parse_from_rfc3339("2026-01-02T03:04:05.006Z").unwrap().to_utc();
+        let initial = SequencedBigQueryTableId::new("users_table".to_owned(), created_at).unwrap();
+        assert_eq!(initial.to_string(), "users_table_20260102030405006");
 
         for sequence in [0, 42, u64::MAX - 1] {
             let current = SequencedBigQueryTableId("users_table".to_owned(), sequence);

@@ -48,6 +48,11 @@ fn test_snapshot_id(value: u64) -> SnapshotId {
     SnapshotId::new(lsn, lsn)
 }
 
+/// Returns the generation sequence of a physical table belonging to `base`.
+fn physical_table_sequence(table_id: &str, base: &str) -> Option<u64> {
+    table_id.strip_prefix(base)?.strip_prefix('_')?.parse().ok()
+}
+
 /// Checks physical generations and logical views retain distinct names across
 /// copy, CDC, restart, truncate, and reset.
 #[tokio::test(flavor = "multi_thread")]
@@ -72,7 +77,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
             .await
             .unwrap();
         let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-        assert_eq!(metadata.table_id(), format!("{name}_0"));
+        assert!(physical_table_sequence(metadata.table_id(), name).is_some());
         original_metadata.push(metadata);
     }
     destination.shutdown().await.unwrap();
@@ -122,8 +127,10 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     // Join generation cleanup before checking or resetting the physical tables.
     restarted.shutdown().await.unwrap();
     let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-    assert_eq!(metadata.table_id(), format!("{name}_1"));
-    assert!(database.get_table_metadata_by_id(&format!("{name}_0")).await.is_none());
+    let original_table_id = original_metadata[0].table_id();
+    let original_sequence = physical_table_sequence(original_table_id, name).unwrap();
+    assert_eq!(metadata.table_id(), format!("{name}_{}", original_sequence + 1));
+    assert!(database.get_table_metadata_by_id(original_table_id).await.is_none());
     let rows = database.query_table(schema.name().clone()).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -741,6 +748,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
     store.store_table_schema(table_schema.clone()).await.unwrap();
 
     let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
+    let mut physical_table_ids = Vec::new();
 
     for iteration in 1..=3 {
         let users_rows = vec![
@@ -757,6 +765,18 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
         ];
 
         destination.write_table_rows_for_tests(&replicated_table_schema, users_rows).await.unwrap();
+
+        // A recopy must not recreate a dropped physical table name: BigQuery
+        // can route appends for a recreated name to the dropped table.
+        let physical_table_id = store
+            .get_destination_table_metadata(table_schema.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .table_id()
+            .to_owned();
+        assert!(!physical_table_ids.contains(&physical_table_id));
+        physical_table_ids.push(physical_table_id);
 
         let mut rows = parse_bigquery_table_rows::<BigQueryUser>(
             bigquery_database.query_table(table_schema.name.clone()).await.unwrap(),

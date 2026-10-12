@@ -1,4 +1,4 @@
-use std::{str::FromStr, time::Duration};
+use std::str::FromStr;
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use etl::{
@@ -37,7 +37,6 @@ use crate::support::{
 };
 
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
-const BIGQUERY_RECREATED_TABLE_READY_TIMEOUT: Duration = Duration::from_secs(600);
 
 fn generate_random_ascii_string(length: usize) -> String {
     rand::rng().sample_iter(&Alphanumeric).take(length).map(char::from).collect()
@@ -416,10 +415,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
 
     pipeline.start().await.unwrap();
 
-    // BigQuery can keep the default Storage Write stream for a dropped and
-    // re-created table unavailable for several minutes. The destination is
-    // expected to keep retrying while preserving the physical `*_0` table id.
-    users_sync_complete_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
+    users_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
