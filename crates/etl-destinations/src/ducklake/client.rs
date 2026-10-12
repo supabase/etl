@@ -32,7 +32,7 @@ use crate::{
             ETL_DUCKLAKE_BLOCKING_SLOT_WAIT_SECONDS, ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS,
         },
     },
-    retry::{ClassifiedError, EtlErrorExt},
+    retry::{ClassifiedError, classified_error},
 };
 
 /// Monotonic identifier assigned to each DuckLake connection setup attempt.
@@ -455,11 +455,11 @@ impl DuckLakeConnectionProvider for Arc<r2d2::Pool<DuckLakeConnectionManager>> {
             if Instant::now() >= deadline {
                 duckdb_blocking_timeout_error(timeout, "pool_checkout")
             } else {
-                etl_error!(
+                classified_error(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to check out DuckLake connection"
+                    "Failed to check out DuckLake connection",
+                    error,
                 )
-                .caused_by(error)
             }
         })?;
         histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
@@ -498,11 +498,11 @@ impl DuckLakeConnectionProvider for DuckLakeDedicatedConnection {
                 if Instant::now() >= deadline {
                     duckdb_blocking_timeout_error(timeout, "pool_checkout")
                 } else {
-                    etl_error!(
+                    classified_error(
                         ErrorKind::DestinationConnectionFailed,
-                        "Failed to check out dedicated DuckLake connection"
+                        "Failed to check out dedicated DuckLake connection",
+                        error,
                     )
-                    .caused_by(error)
                 }
             })?;
             histogram!(ETL_DUCKLAKE_POOL_CHECKOUT_WAIT_SECONDS)
@@ -643,11 +643,11 @@ impl DuckLakeConnectionManager {
                 disable_extension_autoload,
             )
             .map_err(|error| {
-                etl_error!(
+                classified_error(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to initialize shared DuckLake DuckDB instance"
+                    "Failed to initialize shared DuckLake DuckDB instance",
+                    error,
                 )
-                .caused_by(error)
             })
         }))
         .await
@@ -803,11 +803,11 @@ impl DuckLakeConnectionManager {
                     Ok(())
                 };
                 let setup_error = |error| {
-                    etl_error!(
+                    classified_error(
                         ErrorKind::DestinationConnectionFailed,
-                        "Failed to recreate shared DuckLake DuckDB instance"
+                        "Failed to recreate shared DuckLake DuckDB instance",
+                        error,
                     )
-                    .caused_by(error)
                 };
                 check_admission(watchdog)?;
                 let conn = Self::open_duckdb_instance(manager.disable_extension_autoload)
@@ -924,21 +924,21 @@ pub(super) async fn build_warm_ducklake_pool(
             .error_handler(Box::new(r2d2::NopErrorHandler))
             .build(manager)
             .map_err(|e| {
-                etl_error!(
+                classified_error(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to build DuckLake connection pool"
+                    "Failed to build DuckLake connection pool",
+                    e,
                 )
-                .caused_by(e)
             })?;
 
         let mut warmed_connections = Vec::with_capacity(pool_size as usize);
         for _ in 0..pool_size {
             let conn = pool.get().map_err(|e| {
-                etl_error!(
+                classified_error(
                     ErrorKind::DestinationConnectionFailed,
-                    "Failed to warm DuckLake connection pool"
+                    "Failed to warm DuckLake connection pool",
+                    e,
                 )
-                .caused_by(e)
             })?;
             warmed_connections.push(conn);
         }
@@ -1310,16 +1310,22 @@ mod tests {
             .unwrap()
             .execute_batch("select * from missing_table")
             .unwrap_err();
-        let failed_query = etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake query failed")
-            .caused_by(duckdb_error);
+        let failed_query = classified_error(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake query failed",
+            duckdb_error,
+        );
         assert_eq!(failed_query.retryability(), Retryability::Permanent);
         assert_eq!(
             retryable_until_classified(failed_query).retryability(),
             Retryability::Retryable
         );
 
-        let failed_setup = etl_error!(ErrorKind::DestinationConnectionFailed, "Setup failed")
-            .caused_by(DuckLakeConnectionError::shared_instance("Setup failed"));
+        let failed_setup = classified_error(
+            ErrorKind::DestinationConnectionFailed,
+            "Setup failed",
+            DuckLakeConnectionError::shared_instance("Setup failed"),
+        );
         assert_eq!(failed_setup.retryability(), Retryability::Retryable);
 
         let shutdown =
@@ -1573,11 +1579,11 @@ mod tests {
             Duration::from_secs(1),
             |conn| -> EtlResult<i64> {
                 conn.query_row("SELECT 1;", [], |row| row.get::<_, i64>(0)).map_err(|source| {
-                    etl_error!(
+                    classified_error(
                         ErrorKind::DestinationQueryFailed,
-                        "DuckLake timeout verification query failed"
+                        "DuckLake timeout verification query failed",
+                        source,
                     )
-                    .caused_by(source)
                 })
             },
         )
@@ -2233,11 +2239,11 @@ mod tests {
                             |row| row.get::<_, i64>(0),
                         )
                         .map_err(|source| {
-                            etl_error!(
+                            classified_error(
                                 ErrorKind::DestinationQueryFailed,
-                                "DuckLake interrupt test query failed"
+                                "DuckLake interrupt test query failed",
+                                source,
                             )
-                            .caused_by(source)
                         })?;
                         Ok(())
                     },

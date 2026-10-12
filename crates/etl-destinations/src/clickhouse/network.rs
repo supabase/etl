@@ -26,7 +26,7 @@ use hyper_util::{
 use tower_service::Service;
 use url::{Host, Url};
 
-use crate::retry::{ClassifiedError, EtlErrorExt};
+use crate::retry::{ClassifiedError, classified_error};
 
 /// TCP keepalive interval used by the ClickHouse HTTP connector.
 const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
@@ -115,8 +115,11 @@ pub(super) async fn new_public_client(
     let connector = HttpsConnectorBuilder::new()
         .with_provider_and_webpki_roots(rustls::crypto::aws_lc_rs::default_provider())
         .map_err(|error| {
-            etl_error!(ErrorKind::ConfigError, "ClickHouse TLS client configuration failed")
-                .caused_by(error)
+            classified_error(
+                ErrorKind::ConfigError,
+                "ClickHouse TLS client configuration failed",
+                error,
+            )
         })?
         .https_only()
         .enable_http1()
@@ -140,26 +143,31 @@ async fn ensure_public_https_url(url: &Url, resolution_timeout: Duration) -> Etl
 
     match host {
         Host::Ipv4(address) => ensure_public_ip(IpAddr::V4(address)).map_err(|error| {
-            etl_error!(ErrorKind::ConfigError, "ClickHouse URL host is not publicly routable")
-                .caused_by(error)
+            classified_error(
+                ErrorKind::ConfigError,
+                "ClickHouse URL host is not publicly routable",
+                error,
+            )
         }),
         Host::Ipv6(address) => ensure_public_ip(IpAddr::V6(address)).map_err(|error| {
-            etl_error!(ErrorKind::ConfigError, "ClickHouse URL host is not publicly routable")
-                .caused_by(error)
+            classified_error(
+                ErrorKind::ConfigError,
+                "ClickHouse URL host is not publicly routable",
+                error,
+            )
         }),
         Host::Domain(domain) => {
             let name = domain.parse::<Name>().map_err(|error| {
-                etl_error!(ErrorKind::ConfigError, "ClickHouse URL host is invalid")
-                    .caused_by(error)
+                classified_error(ErrorKind::ConfigError, "ClickHouse URL host is invalid", error)
             })?;
             let mut resolver = PublicDnsResolver::new();
             match tokio::time::timeout(resolution_timeout, resolver.call(name)).await {
                 Ok(Ok(_)) => Ok(()),
-                Ok(Err(error)) => Err(etl_error!(
+                Ok(Err(error)) => Err(classified_error(
                     ErrorKind::ConfigError,
-                    "ClickHouse URL host could not be resolved safely"
-                )
-                .caused_by(error)),
+                    "ClickHouse URL host could not be resolved safely",
+                    error,
+                )),
                 Err(_) => Err(etl_error!(
                     ErrorKind::ConfigError,
                     "ClickHouse URL host resolution timed out",

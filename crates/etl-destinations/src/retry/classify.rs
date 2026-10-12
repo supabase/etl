@@ -1,16 +1,18 @@
 //! Classification of failed destination calls by retryability.
 //!
-//! Every error type a destination attaches to an [`EtlError`] implements
-//! [`ClassifiedError`], and [`EtlErrorExt::caused_by`] is the only way to
-//! attach it: this crate's `clippy.toml` forbids [`EtlError::with_source`].
-//! An unclassified source type therefore fails to compile instead of falling
-//! back to the default for its error kind.
+//! [`classified_error`] constructs a single error from a source implementing
+//! [`ClassifiedError`], preserving aggregate sources and their member
+//! classifications. This crate's `clippy.toml` rejects direct
+//! [`etl::error::EtlError::with_source`] calls; conversions implemented by
+//! `etl` remain outside that lint's scope.
 
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake", test))]
+use std::borrow::Cow;
 use std::{error::Error, io, num::TryFromIntError, str::Utf8Error};
 
 use etl::{
     config::ValidationError,
-    error::{EtlError, Retryability},
+    error::{ErrorKind, EtlError, Retryability},
 };
 
 /// An error that knows whether the failed call may succeed if it runs again.
@@ -24,29 +26,44 @@ pub(crate) trait ClassifiedError {
     fn retryability(&self) -> Retryability;
 }
 
-/// Attaches classified sources to an [`EtlError`].
-pub(crate) trait EtlErrorExt {
-    /// Attaches `source` and records its [`ClassifiedError::retryability`].
-    ///
-    /// The source's answer replaces the error's current retryability. Call
-    /// [`EtlError::with_retryability`] afterwards to override it.
-    fn caused_by<E>(self, source: E) -> EtlError
-    where
-        E: ClassifiedError + Error + Send + Sync + 'static;
+/// Creates a single error with `source` and its retryability.
+///
+/// The source's classification takes precedence over the default for `kind`.
+/// An aggregate source retains its members and their classifications. Calling
+/// [`EtlError::with_retryability`] on the returned error overrides only the
+/// wrapper's classification.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "classified constructors preserve the source and record its retryability"
+)]
+pub(crate) fn classified_error<E>(kind: ErrorKind, description: &'static str, source: E) -> EtlError
+where
+    E: ClassifiedError + Error + Send + Sync + 'static,
+{
+    let retryability = source.retryability();
+    EtlError::from((kind, description)).with_source(source).with_retryability(retryability)
 }
 
-impl EtlErrorExt for EtlError {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the one sanctioned source attachment records the source's retryability"
-    )]
-    fn caused_by<E>(self, source: E) -> EtlError
-    where
-        E: ClassifiedError + Error + Send + Sync + 'static,
-    {
-        let retryability = source.retryability();
-        self.with_source(source).with_retryability(retryability)
-    }
+/// Creates a single error with diagnostic detail and a classified source.
+///
+/// Preserves the source and its classification as [`classified_error`] does.
+#[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake", test))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "classified constructors preserve the source and record its retryability"
+)]
+pub(crate) fn classified_error_with_detail<E, D>(
+    kind: ErrorKind,
+    description: &'static str,
+    detail: D,
+    source: E,
+) -> EtlError
+where
+    E: ClassifiedError + Error + Send + Sync + 'static,
+    D: Into<Cow<'static, str>>,
+{
+    let retryability = source.retryability();
+    EtlError::from((kind, description, detail)).with_source(source).with_retryability(retryability)
 }
 
 /// A wrapped [`EtlError`] keeps the classification made where it happened.
@@ -100,30 +117,76 @@ impl ClassifiedError for ValidationError {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
+    use std::{error::Error, io, sync::Arc};
 
     use etl::error::{ErrorKind, EtlError, Retryability};
 
-    use crate::retry::{ClassifiedError, EtlErrorExt};
+    use crate::retry::{ClassifiedError, classified_error, classified_error_with_detail};
 
-    /// Attaching a source records the source's answer, whatever the kind's
-    /// default, and a wrapped error keeps the answer of the error it wraps.
+    /// Returns the ETL error stored behind an error's shared source.
+    fn etl_source(error: &EtlError) -> &EtlError {
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<Arc<dyn Error + Send + Sync>>()
+            .unwrap()
+            .as_ref()
+            .downcast_ref::<EtlError>()
+            .unwrap()
+    }
+
+    /// Source classification overrides the kind's default retry policy.
     #[test]
-    fn caused_by_records_the_source_classification() {
-        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
-        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
-
-        let retryable =
-            EtlError::from((ErrorKind::DestinationQueryFailed, "Query failed")).caused_by(refused);
-        let permanent = EtlError::from((ErrorKind::DestinationConnectionFailed, "Connect failed"))
-            .caused_by(denied);
-        let wrapped = EtlError::from((ErrorKind::DestinationError, "Batch failed"))
-            .caused_by(retryable.clone());
+    fn constructor_uses_source_classification_over_kind_default() {
+        let retryable = classified_error(
+            ErrorKind::DestinationQueryFailed,
+            "Query failed",
+            io::Error::from(io::ErrorKind::ConnectionRefused),
+        );
+        let permanent = classified_error_with_detail(
+            ErrorKind::DestinationConnectionFailed,
+            "Connect failed",
+            "Operation: connect",
+            io::Error::from(io::ErrorKind::PermissionDenied),
+        );
 
         assert_eq!(retryable.retryability(), Retryability::Retryable);
         assert_eq!(permanent.retryability(), Retryability::Permanent);
-        assert_eq!(wrapped.retryability(), Retryability::Retryable);
-        assert!(std::error::Error::source(&permanent).is_some());
+    }
+
+    /// Wrapping an aggregate and overriding the wrapper never reclassifies
+    /// the aggregate's members.
+    #[test]
+    fn wrapping_aggregate_preserves_member_classifications() {
+        let aggregate = EtlError::from(vec![
+            EtlError::from((ErrorKind::DestinationTimeout, "Request timed out")),
+            EtlError::from((ErrorKind::InvalidData, "Invalid row")),
+        ]);
+        let wrapped =
+            classified_error(ErrorKind::DestinationConnectionFailed, "Batch failed", aggregate);
+        assert_eq!(wrapped.retryability(), Retryability::Permanent);
+
+        let aggregate = etl_source(&wrapped);
+        let members = aggregate.errors().unwrap();
+        assert_eq!(members[0].retryability(), Retryability::Retryable);
+        assert_eq!(members[1].retryability(), Retryability::Permanent);
+
+        let outer = classified_error_with_detail(
+            ErrorKind::DestinationTimeout,
+            "Write failed",
+            "Operation: write",
+            wrapped,
+        );
+        assert_eq!(outer.retryability(), Retryability::Permanent);
+        let overridden = outer.with_retryability(Retryability::Retryable);
+        assert_eq!(overridden.retryability(), Retryability::Retryable);
+
+        let wrapped = etl_source(&overridden);
+        assert_eq!(wrapped.retryability(), Retryability::Permanent);
+        let aggregate = etl_source(wrapped);
+        let members = aggregate.errors().unwrap();
+        assert_eq!(members[0].retryability(), Retryability::Retryable);
+        assert_eq!(members[1].retryability(), Retryability::Permanent);
     }
 
     /// Lost connections and timeouts are retryable; denied and invalid

@@ -6,7 +6,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 
 use crate::{
-    retry::{ClassifiedError, EtlErrorExt},
+    retry::{ClassifiedError, classified_error},
     snowflake::encoding::CdcOperation,
 };
 
@@ -212,26 +212,26 @@ impl ClassifiedError for Error {
 impl From<Error> for EtlError {
     fn from(err: Error) -> Self {
         if matches!(&err, Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. }) {
-            return etl::etl_error!(
+            return classified_error(
                 ErrorKind::CorruptedTableSchema,
-                "Snowflake table schema is incompatible"
-            )
-            .caused_by(err);
+                "Snowflake table schema is incompatible",
+                err,
+            );
         }
         if matches!(&err, Error::RowTooLarge { .. }) {
-            return etl::etl_error!(
+            return classified_error(
                 ErrorKind::UnsupportedValueInDestination,
-                "Snowflake cannot accept a row of this size"
-            )
-            .caused_by(err);
+                "Snowflake cannot accept a row of this size",
+                err,
+            );
         }
 
         if matches!(&err, Error::NullJsonArrayElement { .. }) {
-            return etl::etl_error!(
+            return classified_error(
                 ErrorKind::NullValuesNotSupportedInArrayInDestination,
-                "Snowflake cannot preserve SQL NULL elements in JSON arrays"
-            )
-            .caused_by(err);
+                "Snowflake cannot preserve SQL NULL elements in JSON arrays",
+                err,
+            );
         }
 
         let (kind, description) = match &err {
@@ -257,7 +257,7 @@ impl From<Error> for EtlError {
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
         };
-        etl::etl_error!(kind, description).caused_by(err)
+        classified_error(kind, description, err)
     }
 }
 

@@ -93,7 +93,7 @@ use crate::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
         warn_unsupported_column_type_change,
     },
-    retry::EtlErrorExt,
+    retry::{classified_error, classified_error_with_detail},
 };
 
 /// Shared Postgres metadata pool size for DuckLake background samplers.
@@ -165,8 +165,11 @@ fn validate_ducklake_table_shape(schema: &ReplicatedTableSchema) -> EtlResult<()
 /// Builds the shared Postgres metadata pool used by background samplers.
 fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
     let options = ducklake_catalog_metadata_connect_options(catalog_url).map_err(|source| {
-        etl_error!(ErrorKind::ConfigError, "DuckLake metadata pool configuration failed")
-            .caused_by(source)
+        classified_error(
+            ErrorKind::ConfigError,
+            "DuckLake metadata pool configuration failed",
+            source,
+        )
     })?;
 
     Ok(PgPoolOptions::new()
@@ -931,37 +934,37 @@ fn read_ducklake_table_column_names_blocking(
 ) -> EtlResult<Vec<String>> {
     let sql = ducklake_table_columns_sql(table_name);
     let mut statement = conn.prepare(&sql).map_err(|source| {
-        etl_error!(
+        classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table schema lookup failed",
-            format_query_error_detail(&sql)
+            format_query_error_detail(&sql),
+            source,
         )
-        .caused_by(source)
     })?;
     let mut rows = statement.query([]).map_err(|source| {
-        etl_error!(
+        classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table schema lookup failed",
-            format_query_error_detail(&sql)
+            format_query_error_detail(&sql),
+            source,
         )
-        .caused_by(source)
     })?;
     let mut column_names = Vec::new();
     while let Some(row) = rows.next().map_err(|source| {
-        etl_error!(
+        classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table schema lookup failed",
-            format_query_error_detail(&sql)
+            format_query_error_detail(&sql),
+            source,
         )
-        .caused_by(source)
     })? {
         column_names.push(row.get(0).map_err(|source| {
-            etl_error!(
+            classified_error_with_detail(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake table schema lookup failed",
-                format_query_error_detail(&sql)
+                format_query_error_detail(&sql),
+                source,
             )
-            .caused_by(source)
         })?);
     }
 
@@ -983,29 +986,29 @@ fn read_ducklake_nullable_column_names_blocking(
         quote_literal(table_name.table())
     );
     let mut statement = conn.prepare(&sql).map_err(|source| {
-        etl_error!(
+        classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table nullability lookup failed",
-            format_query_error_detail(&sql)
+            format_query_error_detail(&sql),
+            source,
         )
-        .caused_by(source)
     })?;
     let rows = statement.query_map([], |row| row.get(0)).map_err(|source| {
-        etl_error!(
+        classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table nullability lookup failed",
-            format_query_error_detail(&sql)
+            format_query_error_detail(&sql),
+            source,
         )
-        .caused_by(source)
     })?;
 
     rows.collect::<Result<_, _>>().map_err(|source| {
-        etl_error!(
+        classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table nullability lookup failed",
-            format_query_error_detail(&sql)
+            format_query_error_detail(&sql),
+            source,
         )
-        .caused_by(source)
     })
 }
 
@@ -1498,14 +1501,12 @@ fn classify_copy_data_inlining_error(
         return error;
     }
 
-    retryable_until_classified(
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake COPY data inlining configuration failed",
-            format!("table={table_name}, row_limit={row_limit}")
-        )
-        .caused_by(error),
-    )
+    retryable_until_classified(classified_error_with_detail(
+        ErrorKind::DestinationQueryFailed,
+        "DuckLake COPY data inlining configuration failed",
+        format!("table={table_name}, row_limit={row_limit}"),
+        error,
+    ))
 }
 
 impl<S> DuckLakeDestination<S>
@@ -1819,8 +1820,11 @@ where
             ));
         }
         copy_buffer_config.validate().map_err(|error| {
-            etl_error!(ErrorKind::ConfigError, "DuckLake copy buffer configuration is invalid")
-                .caused_by(error)
+            classified_error(
+                ErrorKind::ConfigError,
+                "DuckLake copy buffer configuration is invalid",
+                error,
+            )
         })?;
         if !table_sorting.is_empty()
             && external_maintenance.mode == DuckLakeMaintenanceMode::Disabled
@@ -1878,11 +1882,11 @@ where
             Arc::clone(&blocking_slots),
             move |conn| -> EtlResult<()> {
                 conn.execute_batch(&target_file_size_sql).map_err(|error| {
-                    etl_error!(
+                    classified_error(
                         ErrorKind::DestinationQueryFailed,
-                        "DuckLake target_file_size configuration failed"
+                        "DuckLake target_file_size configuration failed",
+                        error,
                     )
-                    .caused_by(error)
                 })?;
                 Ok(())
             },
@@ -1898,15 +1902,15 @@ where
                 let retention_is_safe: bool = conn
                     .query_row(&expire_snapshots_validation_sql, [], |row| row.get(0))
                     .map_err(|source| {
-                        etl_error!(
+                        classified_error_with_detail(
                             ErrorKind::ConfigError,
                             "DuckLake expire_snapshots_older_than configuration failed",
                             format!(
-                                "Invalid expire_snapshots_older_than value `{}`",
-                                expire_snapshots_older_than_for_error
-                            )
+                                "Invalid expire_snapshots_older_than value \
+                                 `{expire_snapshots_older_than_for_error}`"
+                            ),
+                            source,
                         )
-                        .caused_by(source)
                     })?;
                 if !retention_is_safe {
                     return Err(etl_error!(
@@ -1941,20 +1945,26 @@ where
         let streaming_progress_table_created = Arc::new(AtomicBool::new(false));
         let copy_buffer_max_permits =
             u32::try_from(copy_buffer_config.max_total_bytes).map_err(|error| {
-                etl_error!(ErrorKind::ConfigError, "DuckLake copy buffer maximum is too large")
-                    .caused_by(error)
+                classified_error(
+                    ErrorKind::ConfigError,
+                    "DuckLake copy buffer maximum is too large",
+                    error,
+                )
             })?;
         let copy_buffer_max_permits =
             usize::try_from(copy_buffer_max_permits).map_err(|error| {
-                etl_error!(
+                classified_error(
                     ErrorKind::ConfigError,
-                    "DuckLake copy buffer maximum does not fit this platform"
+                    "DuckLake copy buffer maximum does not fit this platform",
+                    error,
                 )
-                .caused_by(error)
             })?;
         let copy_session_permits = usize::try_from(pool_size).map_err(|error| {
-            etl_error!(ErrorKind::ConfigError, "DuckLake pool size does not fit this platform")
-                .caused_by(error)
+            classified_error(
+                ErrorKind::ConfigError,
+                "DuckLake pool size does not fit this platform",
+                error,
+            )
         })?;
 
         // Persist helper-table inlining options before warming COPY
@@ -2091,28 +2101,30 @@ where
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
             let _write_guard = write_guard;
             conn.execute_batch("BEGIN TRANSACTION").map_err(|e| {
-                etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake BEGIN TRANSACTION failed")
-                    .caused_by(e)
+                classified_error(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake BEGIN TRANSACTION failed",
+                    e,
+                )
             })?;
 
             let result = (|| -> EtlResult<()> {
                 let target_table = qualified_lake_table_name(&table_name_for_truncate);
                 let truncate_table_sql = format!("TRUNCATE TABLE {target_table};");
                 conn.execute_batch(&truncate_table_sql).map_err(|e| {
-                    etl_error!(
+                    classified_error_with_detail(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake TRUNCATE TABLE failed",
-                        format_query_error_detail(&truncate_table_sql)
+                        format_query_error_detail(&truncate_table_sql),
+                        e,
                     )
-                    .caused_by(e)
                 })?;
                 Ok(())
             })();
 
             match result {
                 Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                    etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed")
-                        .caused_by(e)
+                    classified_error(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", e)
                 }),
                 Err(error) => {
                     let err = conn.execute_batch("ROLLBACK");
@@ -2155,28 +2167,30 @@ where
         self.run_duckdb_blocking(move |conn| -> EtlResult<()> {
             let _write_guard = write_guard;
             conn.execute_batch("begin transaction").map_err(|e| {
-                etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake BEGIN TRANSACTION failed")
-                    .caused_by(e)
+                classified_error(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake BEGIN TRANSACTION failed",
+                    e,
+                )
             })?;
 
             let result = (|| -> EtlResult<()> {
                 let table_name = qualified_lake_table_name(&table_name_for_drop);
                 let drop_table_sql = format!("drop table if exists {table_name};");
                 conn.execute_batch(&drop_table_sql).map_err(|e| {
-                    etl_error!(
+                    classified_error_with_detail(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake DROP TABLE failed",
-                        format_query_error_detail(&drop_table_sql)
+                        format_query_error_detail(&drop_table_sql),
+                        e,
                     )
-                    .caused_by(e)
                 })?;
                 Ok(())
             })();
 
             match result {
                 Ok(()) => conn.execute_batch("commit").map_err(|e| {
-                    etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed")
-                        .caused_by(e)
+                    classified_error(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", e)
                 }),
                 Err(error) => {
                     let err = conn.execute_batch("rollback");
@@ -2264,7 +2278,7 @@ where
             let _guard = guard;
             debug!(table = %table_name, row_limit, "ducklake table data inlining configuration begin");
             conn.execute_batch(&sql).map_err(|error| {
-                etl_error!(ErrorKind::DestinationQueryFailed, "DuckLake table data inlining configuration failed", format_query_error_detail(&sql)).caused_by(error)
+                classified_error_with_detail(ErrorKind::DestinationQueryFailed, "DuckLake table data inlining configuration failed", format_query_error_detail(&sql), error)
             })?;
             debug!(table = %table_name, row_limit, "ducklake table data inlining configuration finished");
             Ok(())
@@ -2549,8 +2563,11 @@ where
     ) -> EtlResult<OwnedSemaphorePermit> {
         let reserved_bytes = estimated_bytes.max(1);
         let permits = u32::try_from(reserved_bytes).map_err(|error| {
-            etl_error!(ErrorKind::ConfigError, "DuckLake copy buffer reservation is too large")
-                .caused_by(error)
+            classified_error(
+                ErrorKind::ConfigError,
+                "DuckLake copy buffer reservation is too large",
+                error,
+            )
         })?;
 
         match Arc::clone(&self.copy_buffer_capacity).try_acquire_many_owned(permits) {
@@ -2804,12 +2821,12 @@ where
             let _write_guard = write_guard;
             let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
                 conn.execute_batch(sql).map_err(|source| {
-                    etl_error!(
+                    classified_error_with_detail(
                         ErrorKind::DestinationQueryFailed,
                         description,
-                        format_query_error_detail(sql)
+                        format_query_error_detail(sql),
+                        source,
                     )
-                    .caused_by(source)
                 })
             };
 
@@ -2883,12 +2900,12 @@ where
             .fetch_all(&self.metadata_pg_pool)
             .await
             .map_err(|source| {
-                etl_error!(
+                classified_error_with_detail(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake table sort order query failed",
-                    format!("table={table_name}")
+                    format!("table={table_name}"),
+                    source,
                 )
-                .caused_by(source)
             })?;
         let active = active
             .into_iter()
@@ -2918,12 +2935,12 @@ where
         run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
             let _write_guard = write_guard;
             conn.execute_batch(&ddl).map_err(|source| {
-                etl_error!(
+                classified_error_with_detail(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake table sorting reconciliation failed",
-                    format_query_error_detail(&ddl)
+                    format_query_error_detail(&ddl),
+                    source,
                 )
-                .caused_by(source)
             })?;
             debug!(table = %table_name, "ducklake table sorting reconciled");
             Ok(())
@@ -3001,12 +3018,12 @@ where
             let _write_guard = write_guard;
             let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
                 conn.execute_batch(sql).map_err(|source| {
-                    etl_error!(
+                    classified_error_with_detail(
                         ErrorKind::DestinationQueryFailed,
                         description,
-                        format_query_error_detail(sql)
+                        format_query_error_detail(sql),
+                        source,
                     )
-                    .caused_by(source)
                 })
             };
 
@@ -3465,12 +3482,12 @@ where
                     Ok(()) => {}
                     Err(error) if is_create_table_conflict(&error, table_name.table()) => {}
                     Err(error) => {
-                        return Err(etl_error!(
+                        return Err(classified_error_with_detail(
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake create table failed",
-                            format_query_error_detail(&ddl)
-                        )
-                        .caused_by(error));
+                            format_query_error_detail(&ddl),
+                            error,
+                        ));
                     }
                 }
                 debug!(table = %table_name, "ducklake create table finished");
@@ -4086,12 +4103,12 @@ where
             .fetch_all(&self.metadata_pg_pool)
             .await
             .map_err(|source| {
-                etl_error!(
+                classified_error_with_detail(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake table list query failed",
-                    format!("metadata_schema={}", self.metadata_schema.as_ref())
+                    format!("metadata_schema={}", self.metadata_schema.as_ref()),
+                    source,
                 )
-                .caused_by(source)
             })?;
         Ok(rows
             .into_iter()

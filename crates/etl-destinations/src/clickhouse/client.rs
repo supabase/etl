@@ -30,7 +30,7 @@ use crate::{
         schema::{clickhouse_column_type, clickhouse_default_clause},
         sql::quote_identifier,
     },
-    retry::{ClassifiedError, EtlErrorExt},
+    retry::{ClassifiedError, classified_error_with_detail},
 };
 
 /// Returns the `outcome` label for an error returned by [`timeout_call`]:
@@ -93,12 +93,12 @@ where
     let client_timeout = config.client_timeout_for(op);
     match tokio::time::timeout(client_timeout, fut).await {
         Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => Err(etl_error!(
+        Ok(Err(err)) => Err(classified_error_with_detail(
             op.failed_kind(),
             "ClickHouse call failed",
-            detail(op, "failed", context)
-        )
-        .caused_by(err)),
+            detail(op, "failed", context),
+            err,
+        )),
         Err(_) => Err(etl_error!(
             ErrorKind::DestinationTimeout,
             "ClickHouse call timed out",

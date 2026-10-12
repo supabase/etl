@@ -48,7 +48,10 @@ use crate::{
         schema::{create_columns_spec, postgres_to_bigquery_type},
         sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
-    retry::{ClassifiedError, EtlErrorExt, RetryPolicy, retry_with_backoff},
+    retry::{
+        ClassifiedError, RetryPolicy, classified_error, classified_error_with_detail,
+        retry_with_backoff,
+    },
 };
 
 /// Multiplier for calculating max inflight requests from pool size.
@@ -662,11 +665,10 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
         None
     };
 
-    let error = match detail {
-        Some(detail) => etl_error!(kind, description, detail),
-        None => etl_error!(kind, description),
-    };
-    error.caused_by(err)
+    match detail {
+        Some(detail) => classified_error_with_detail(kind, description, detail, err),
+        None => classified_error(kind, description, err),
+    }
 }
 
 /// Decodes BigQuery Storage error codes from gRPC status details when present.

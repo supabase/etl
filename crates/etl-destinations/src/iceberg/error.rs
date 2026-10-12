@@ -1,10 +1,7 @@
 use arrow::error::ArrowError;
-use etl::{
-    error::{ErrorKind, EtlError, Retryability},
-    etl_error,
-};
+use etl::error::{ErrorKind, EtlError, Retryability};
 
-use crate::retry::{ClassifiedError, EtlErrorExt};
+use crate::retry::{ClassifiedError, classified_error};
 
 /// Iceberg marks the errors that may succeed when retried, such as commit
 /// conflicts. It leaves a commit whose outcome is unknown unmarked, because
@@ -54,7 +51,7 @@ pub(crate) fn iceberg_error_to_etl_error(err: iceberg::Error) -> EtlError {
         _ => (ErrorKind::Unknown, "Unknown iceberg error"),
     };
 
-    etl_error!(kind, description).caused_by(err)
+    classified_error(kind, description, err)
 }
 
 /// Converts Arrow errors to ETL errors with appropriate classification.
@@ -92,7 +89,7 @@ pub(crate) fn arrow_error_to_etl_error(err: ArrowError) -> EtlError {
         }
     };
 
-    etl_error!(kind, description).caused_by(err)
+    classified_error(kind, description, err)
 }
 
 #[cfg(test)]
