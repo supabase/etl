@@ -2,6 +2,7 @@ mod client;
 mod core;
 mod encoding;
 mod metrics;
+mod query;
 mod schema;
 mod sql;
 #[cfg(feature = "test-utils")]

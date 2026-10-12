@@ -44,6 +44,7 @@ ducklake = [
     "dep:url",
 ]
 bigquery = [
+    "dep:uuid",
     "dep:gcp-bigquery-client",
     "dep:serde_json",
     "dep:prost",
@@ -152,6 +153,7 @@ uuid = { workspace = true, optional = true, features = ["v4"] }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 base64 = { workspace = true }
 
 chrono = { workspace = true }
