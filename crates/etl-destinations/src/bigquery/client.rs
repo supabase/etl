@@ -58,13 +58,13 @@ const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
 /// computing max inflight requests from connection pool size.
 const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
 
-/// Maximum time to retry locally retryable BigQuery Storage Write append
-/// errors.
+/// Retry window for locally retryable BigQuery Storage Write append errors.
 ///
 /// The current retryable cases are Storage Write schema propagation and
 /// `NOT_FOUND` responses when the BigQuery table API confirms that the target
 /// table exists. Google documents schema update detection as happening on the
-/// order of minutes.
+/// order of minutes. This window is checked after completed attempts; it does
+/// not cancel in-flight appends or impose a deadline on SDK retries.
 const STORAGE_WRITE_RETRY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Initial backoff when retrying locally retryable Storage Write errors.
@@ -633,11 +633,9 @@ fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
     }
 
     let storage_error_codes = decode_storage_error_codes(status);
-    if storage_error_codes
-        .iter()
-        .any(|code| *code == StorageErrorCode::SchemaMismatchExtraFields.as_str_name())
-    {
-        return true;
+    if !storage_error_codes.is_empty() {
+        return storage_error_codes
+            .contains(&StorageErrorCode::SchemaMismatchExtraFields.as_str_name());
     }
 
     let message = status.message().to_ascii_lowercase();
@@ -1764,6 +1762,37 @@ mod tests {
                 retryable_storage_write_schema_update_detail(&error).is_some(),
                 retryable,
                 "{code}: {message}"
+            );
+        }
+    }
+
+    /// Structured Storage errors take precedence over message heuristics.
+    #[test]
+    fn schema_update_detail_prefers_structured_error_codes() {
+        for (code, message, retryable) in [
+            (StorageErrorCode::SchemaMismatchExtraFields, "Schema update pending", true),
+            (StorageErrorCode::InvalidStreamType, "schema_mismatch_extra_fields", false),
+            (StorageErrorCode::KmsPermissionDenied, "extra proto fields", false),
+        ] {
+            let mut rpc_status = GoogleRpcStatus {
+                code: i32::from(Code::InvalidArgument),
+                message: message.to_owned(),
+                details: vec![Default::default()],
+            };
+            rpc_status.details[0].type_url =
+                format!("type.googleapis.com/{BIGQUERY_STORAGE_ERROR_TYPE_NAME}");
+            rpc_status.details[0].value =
+                StorageError { code: i32::from(code), ..Default::default() }.encode_to_vec();
+            let error = BQError::from(tonic::Status::with_details(
+                Code::InvalidArgument,
+                message,
+                rpc_status.encode_to_vec().into(),
+            ));
+
+            assert_eq!(
+                retryable_storage_write_schema_update_detail(&error).is_some(),
+                retryable,
+                "{code:?}"
             );
         }
     }

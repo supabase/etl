@@ -47,7 +47,7 @@ const QUERY_WAIT_TIMEOUT_MS: i32 = 10_000;
 /// Avoids rapid polling when BigQuery returns early with an incomplete job.
 const QUERY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Maximum backoff recommended by BigQuery's reliability guidance.
+/// Maximum backoff, using one of BigQuery's typical values of 32 or 64 seconds.
 /// See <https://cloud.google.com/bigquery/docs/reliability-intro#retry_failed_api_requests>.
 const QUERY_MAX_RETRY_DELAY: Duration = Duration::from_secs(32);
 
