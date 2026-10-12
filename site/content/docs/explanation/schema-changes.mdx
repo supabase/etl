@@ -122,6 +122,13 @@ partition membership are read from the copy's MVCC snapshot; row-filter
 expressions also come from that snapshot, but `pg_get_expr` deparses them using
 internal catalog lookups. The helper limitations below still apply.
 
+The initial schema and identity metadata are read together, and the publication
+column query uses the same slot snapshot. ETL builds the replication mask from
+those column names and intersects the identity columns with that mask. COPY
+chooses columns, filters, and physical partitions through direct catalog SQL
+instead of `pg_publication_tables` or `pg_partition_tree`. Concurrent publication
+or partition changes do not replace that snapshot-visible selection.
+
 Supported publication column-list changes can proceed and are handled after
 copying. A partition attached before the snapshot without a pre-existing lock
 causes a retry; a partition attached after it is excluded from the running
@@ -281,7 +288,7 @@ which affects only future inserts.
 | Destination | Schema-change policy |
 | --- | --- |
 | **[BigQuery](https://cloud.google.com/bigquery/docs/managing-table-schemas)** | Applies non-primary-key add, drop, rename, `NOT NULL` relaxation, and supported literal defaults. Publication-added scalars remain `NULL` for old rows and may receive a future-only default. Publication-added arrays are rejected. Primary-key definitions must remain stable. Type DDL is skipped. |
-| **[ClickHouse](https://clickhouse.com/docs/reference/statements/alter/column)** | Applies add, drop, rename, `NOT NULL` relaxation, create-time defaults, and supported literal add-column defaults. Later existing-column default changes are skipped because ClickHouse would apply them to rows stored before the column was added. Publication-added scalars are nullable and default-free; arrays are rejected because [`Nullable(Array(...))`](https://clickhouse.com/docs/reference/data-types/nullable) is unsupported. Type DDL is skipped. `ReplacingMergeTree` also rejects primary-key changes. |
+| **[ClickHouse](https://clickhouse.com/docs/reference/statements/alter/column)** | Applies add, drop, rename, `NOT NULL` relaxation, create-time defaults, and supported literal add-column defaults. Later existing-column default changes are skipped because ClickHouse would apply them to rows stored before the column was added. Publication-added scalars are nullable and default-free; arrays are rejected because [`Nullable(Array(...))`](https://clickhouse.com/docs/reference/data-types/nullable) is unsupported. Changes to the mapped ClickHouse type are rejected. `ReplacingMergeTree` also rejects primary-key changes. |
 | **[DuckLake](https://ducklake.select/docs/stable/duckdb/usage/schema_evolution)** | Applies add, drop, rename, `NOT NULL` relaxation, and supported literal defaults transactionally. Publication-added columns are nullable and omit DuckLake initial defaults. ETL does not emit `DEFAULT(NULL)`; some catalog clients display an omitted default as `NULL`. Type DDL is skipped. |
 | **[Snowflake](https://docs.snowflake.com/en/sql-reference/sql/alter-table)** | Applies add, drop, rename, create-time defaults, and supported literal add-column defaults. Destination columns remain nullable. Publication-added columns omit defaults because Snowflake would populate old rows. Later existing-column default changes are skipped. Type DDL is skipped. |
 | **[Iceberg](https://iceberg.apache.org/spec/#schema-evolution)** | Deprecated. Accepts only an identical applied relation and rejects every newer logical schema, including publication-mask changes. |
@@ -365,99 +372,98 @@ Resynchronize the affected table when recovery cannot prove a safe endpoint.
 
 ## Schema-capture cautions [#current-limitations]
 
-Concurrent DDL and catalog visibility affect whether ETL can obtain and select
-the correct source schema, even when the destination supports the requested
-column operation. The following cases describe the current behavior.
+Initial-copy locks protect the copied table's layout before the snapshot is
+established and throughout copying. Schema, identity, publication columns,
+and partition selection use the copy snapshot. These protections do not freeze
+all referenced objects or extend to later DDL event-trigger capture.
+
+Follow [Planning schema changes](#operating-within-the-current-limits) to
+reduce schema-capture risks. A successful source DDL command or schema validation
+does not guarantee that every captured field describes the same schema state.
 
 ### Catalog rows and PostgreSQL helper functions can see different metadata
 
-Ordinary SQL reads of `pg_catalog` rows follow the query's MVCC snapshot.
-Schema extraction also calls PostgreSQL helpers such as `pg_get_expr` and
-`format_type`. Their internal C implementations can use catalog caches,
-relation caches, and other catalog access paths; they are not a general API
-for reconstructing every object as of the caller's MVCC snapshot.
+SQL reads of `pg_catalog` follow an MVCC snapshot, but helpers such as
+`format_type` and `pg_get_expr` can use newer internal catalog metadata.
+A concurrent change to an enum, type, function, or namespace can therefore
+produce a name or expression that disagrees with the captured catalog rows.
+The table's copy lock does not protect all of these shared objects.
 
-Consequently, snapshot-visible catalog rows and metadata reconstructed by a
-helper can describe different schema states when DDL occurs concurrently.
-Running the extraction in one transaction does not by itself make those
-paths agree. Initial-copy locks protect the relevant table layout during
-copying, but they do not freeze every referenced catalog object, and they are
-not held around later schema-change capture.
-
-We reproduced this on PostgreSQL 14.24 and 18.6 with a table using an enum. A
-repeatable-read transaction held `ACCESS SHARE` on the table while another
-session renamed the enum type and one of its values. In the first session,
-`pg_type.typname` and `pg_enum.enumlabel` still returned the old names, while
-`format_type` and `pg_get_expr` returned the new names. The table lock did not
-block those independent type changes.
+COPY reads publication columns, row-filter definitions, and partition membership
+through snapshot-visible catalog SQL. Row-filter deparsing still uses
+`pg_get_expr`, and the DDL event trigger still discovers publication members
+through `pg_publication_tables`. Use a maintenance window for changes to shared
+objects and unsupported publication settings.
 
 ### Concurrent DDL can outlive the capturing transaction's snapshot
 
-The [`ddl_command_end` event](https://www.postgresql.org/docs/current/event-trigger-definition.html#EVENT-TRIGGER-DDL_COMMAND_END)
-fires after a DDL command has executed and before its transaction commits. It
-makes the command's own changes visible to the trigger, but does not give the
-trigger a fresh view of every other transaction's committed catalog changes.
+The DDL event trigger runs in the source transaction that executes the DDL.
+With `REPEATABLE READ` or `SERIALIZABLE`, a snapshot established before another
+transaction's committed schema change can omit that change from the trigger's
+catalog queries. PostgreSQL's internal relation cache can recognize the newer
+table definition without refreshing the SQL snapshot. Acquiring a table lock
+or committing the transaction does not repair an incomplete captured schema.
 
-For example, consider this ordering for a table `C`:
+Run migrations in short, fresh `READ COMMITTED` transactions on the source.
+Changing ETL's connection isolation does not change the trigger's visibility.
+`SERIALIZABLE` is not a workaround: it does not guarantee that every affected
+DDL transaction will abort. See PostgreSQL's
+[transaction isolation rules](https://www.postgresql.org/docs/18/transaction-iso.html).
 
-1. Transaction A uses `REPEATABLE READ` or `SERIALIZABLE` and establishes its
-   snapshot by reading unrelated data, without locking `C`.
-2. Transaction B alters `C` and commits.
-3. A alters `C`. If PostgreSQL allows the command to complete, ETL's event
-   trigger runs inside A before A commits.
-4. The trigger's ordinary catalog reads can retain A's earlier snapshot while
-   also seeing A's own changes. They can therefore omit B's committed changes
-   and produce a schema description that differs from the live relation.
+### Separate trigger queries can mix committed states
 
-Starting A with `BEGIN` alone is not enough for this example: its snapshot
-must already have been established before B commits. PostgreSQL's
-[transaction isolation rules](https://www.postgresql.org/docs/current/transaction-iso.html#XACT-REPEATABLE-READ)
-preserve that snapshot at these isolation levels. Serialization failures can
-abort some schedules; `SERIALIZABLE` is not a fix for ETL's capture mechanism.
-The command ending, A acquiring a table lock, or A eventually committing does
-not retroactively refresh the schema description already emitted.
+The trigger reads table names, columns, and replica identity in separate SQL
+queries. Under `READ COMMITTED`, another transaction can commit between those
+queries. Each `STABLE` helper uses its calling query's snapshot, but separate
+calls from the `VOLATILE` trigger need not share one snapshot. See PostgreSQL's
+[function snapshot rules](https://www.postgresql.org/docs/18/xfunc-volatility.html).
 
-We reproduced this with ETL's installed source trigger on PostgreSQL 14.24 and
-18.6. Starting with column `id`, B added `from_b`, then A added `from_a`:
-
-| A's isolation level | Columns in A's committed WAL schema message | Live table after both commits |
-| --- | --- | --- |
-| `READ COMMITTED` | `id, from_b, from_a` | `id, from_b, from_a` |
-| `REPEATABLE READ` | `id, from_a` | `id, from_b, from_a` |
-| `SERIALIZABLE` | `id, from_a` | `id, from_b, from_a` |
-
-Both stronger-isolation cases committed successfully in this schedule. The
-transactional message contained an incomplete schema; WAL ordering did not
-repair it. These results demonstrate specific failures, not every possible
-DDL schedule.
+A table alteration holding `ACCESS EXCLUSIVE` prevents another transaction
+from changing that table during capture. A publication-level command might not
+hold equivalent protection on every table it captures. Its message can then
+combine an earlier column list with a newer replica identity. Serialize table
+and publication migrations affecting the same tables; `READ COMMITTED` alone
+does not prevent this race.
 
 ### Relation metadata cannot distinguish every schema mismatch from filtering
 
-ETL relies on the stored table snapshot and the `RELATION` column set describing
-the same schema state. A column present in the stored schema but absent from
-`RELATION` is treated as publication column filtering. That absence alone
-cannot distinguish intentional filtering from a mismatch between relation
-metadata and the selected schema snapshot.
+ETL combines stored schema snapshots with PostgreSQL `RELATION` messages to
+identify replicated columns. A column missing from a relation message can
+mean publication filtering or inconsistent schema history. Unknown columns
+can be rejected, but a valid-looking subset does not prove that the selected
+schema is correct.
 
-This matters when schema history diverges or metadata is rebuilt during
-reconnect and replay. Some mismatches, such as an unknown relation column,
-can be rejected, but a valid-looking subset is not proof that the correct
-schema was selected. The mask design does not detect every schema mismatch.
-
-At table-sync handover, the worker fails closed when it cannot establish a complete decoding schema
-after schema activity during catch-up. Retry after schema activity settles or
-resynchronize the table. No-op DDL without a fresh protocol relation is handled
-when ETL has valid previous masks to reuse; a new relation is not required
-after every DDL statement.
+If schema history is inconsistent, resolve the source changes and
+resynchronize the affected table. Restarting the pipeline alone cannot repair
+that history. During initial-sync handover, ETL fails when it cannot establish
+a complete decoding schema; retry after schema activity settles or
+resynchronize the table.
 
 ### Planning schema changes [#operating-within-the-current-limits]
 
-Serialize schema changes affecting the same replicated tables and prefer
-short, fresh `READ COMMITTED` transactions for those changes. This reduces the
-stale-transaction-snapshot risk; it does not resolve every helper-function or
-relation-metadata inconsistency. For unsupported changes or schema history that
-cannot be trusted, coordinate a stop and table resynchronization. A restart
-alone does not repair an incorrectly captured snapshot.
+The supported operating model permits ordinary reads and writes while keeping
+schema changes controlled. Apply these rules to replicated tables and the
+objects they depend on:
+
+| Operation | Operating rule |
+| --- | --- |
+| Ordinary reads, inserts, updates, and deletes | Continue during initial copy and CDC; account for copy resource usage |
+| Table DDL, truncation, or publication changes during initial copy | Wait for the affected table to finish initial sync, or stop the affected pipelines for maintenance |
+| Supported column DDL or publication column-list changes during CDC | Run one migration at a time in a short, fresh source-side `READ COMMITTED` transaction |
+| Publication membership, row filters, published operations, or partition topology | Stop affected pipelines and follow the lifecycle and resynchronization requirements for the change |
+| Types, enum values, functions, or namespaces used by replicated tables | Plan maintenance with affected pipelines stopped and resynchronize affected tables as needed |
+| Primary keys or replica identity | Stop affected pipelines for maintenance, check destination compatibility, and plan any required resynchronization before changing row identity |
+
+The initial-copy implementation can preserve snapshot-visible publication
+column lists across concurrent changes. Scheduling those
+changes after initial sync remains the recommended operating rule. ETL does
+not automatically reject or detect every operation outside these rules.
+
+Coordinate migrations across every pipeline using the affected tables or
+shared objects. Stopping a pipeline does not disable the source event trigger,
+so keep maintenance transactions short and use `READ COMMITTED` too. A restart
+alone does not rebuild destination tables or repair inconsistent schema history;
+plan any required table resynchronization before resuming replication.
 
 - Table creation, removal, and rename are pipeline lifecycle operations, not
   live schema changes.

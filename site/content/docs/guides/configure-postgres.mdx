@@ -145,9 +145,10 @@ cause **significant disk usage**. See PostgreSQL's [slot fields](https://www.pos
 - **Slow destinations:** High latency, large transactions, or outages can make
   ingestion fall behind source writes.
 - **Long initial copies:** Each active table copy retains WAL needed by its
-  table-sync slot, potentially starting before the consistent snapshot point. Its table-sync slot starts consuming changes
-  after the source copy finishes. Progress on the separate apply-worker slot
-  does not release WAL still needed by a table-sync slot.
+  table-sync slot, potentially starting before the consistent snapshot point.
+  Its table-sync slot starts consuming changes after the source copy finishes.
+  Progress on the separate apply-worker slot does not release WAL still needed
+  by a table-sync slot.
 
 Retention covers PostgreSQL WAL files, including activity outside the copied
 table or publication. Size the budget using the server's WAL generation rate
@@ -191,6 +192,21 @@ maintenance. Table-sync slots are persistent PostgreSQL slots, even though ETL
 removes them after successful synchronization.
 
 ### Planning Long Initial Copies
+
+Before copying a large table:
+
+1. Estimate copy duration at the throughput the source and destination can
+   sustain. Budget WAL for that duration, catch-up, and possible retries using
+   the whole server's WAL generation rate. Leave separate disk headroom for
+   ordinary database growth and retained old row versions.
+2. Schedule table DDL and truncation outside the copy. Keep publication and
+   shared-object changes within the [schema-change operating rules](/explanation/schema-changes/#operating-within-the-current-limits).
+3. Set `max_table_sync_workers` and `max_copy_connections_per_table` to fit
+   source, network, and destination capacity. Increase them only when the
+   bottleneck has spare capacity.
+4. Monitor every active table copy and slot, available disk, application
+   latency, and destination throughput. Set alerts early enough to respond
+   before disk space or WAL retention runs out.
 
 ETL holds `ACCESS SHARE`, the same table-level lock used by an ordinary
 `SELECT`, throughout each copy unit. It also keeps an MVCC snapshot open for
@@ -236,9 +252,11 @@ and [concurrent index behavior](https://www.postgresql.org/docs/current/sql-crea
 Schedule incompatible DDL outside long copies, or give migration sessions a
 short `lock_timeout` so a blocked migration fails instead of holding up
 application traffic indefinitely. Monitor blocking with `pg_blocking_pids()`
-and `pg_stat_activity`. If availability requires stopping ETL to release its
-locks, the incomplete table copy must restart from a fresh snapshot; completed
-chunks are not a resumable checkpoint.
+and `pg_stat_activity`. If a waiting migration is blocking application
+traffic, cancel it and roll back its transaction when safe, then reschedule it.
+If availability requires stopping ETL to release its locks, the incomplete
+table copy must restart from a fresh snapshot; completed chunks are not a
+resumable checkpoint.
 
 Set copy concurrency to fit source and destination capacity. Fewer workers can
 reduce immediate load while extending snapshot and WAL retention. Slow
@@ -250,6 +268,16 @@ does not release another connection's copy locks, snapshot, or table-sync WAL.
 See [Initial-copy schema protection](/explanation/schema-changes/#initial-copy-schema-protection)
 for partition scope, retry behavior, and the DDL changes these locks do not
 protect.
+
+If copy progress stalls or retention headroom shrinks, fix destination errors
+or throughput limits, reduce avoidable bulk writes, or add capacity before
+retrying. Catch-up needs enough processing capacity to consume the backlog
+faster than new work arrives. Raising retention only provides more time, and
+only helps while the required WAL still exists and disk space is available.
+Stopping ETL releases its copy snapshots after teardown, but retained slots
+continue holding WAL. Do not treat a stop or repeated restart as a disk-space
+recovery procedure; follow [WAL buildup and disk usage](#wal-buildup-and-disk-usage)
+for slot recovery.
 
 ### Monitoring WAL Usage
 
