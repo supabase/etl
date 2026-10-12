@@ -229,8 +229,8 @@ gh workflow run publish-image.yml --repo supabase/etl --ref main \
 
 ## Documentation
 
-The docs site uses Next.js and Fumadocs. Use Node.js 22, matching CI. From the
-repository root:
+The docs site uses Next.js and Fumadocs. Use Node.js 22 and its bundled npm,
+matching CI, including when updating the lockfile. From the repository root:
 
 ```bash
 cd site
@@ -253,6 +253,11 @@ npm run smoke:docs
 
 For a manual preview of the build, run `npm run preview` and open the URL
 printed by the server.
+
+For compatible dependency updates, run `npm update` from `site/`, then verify
+`npm ci` and the build and smoke checks above. Raise the `next` and
+`eslint-config-next` minimum versions together when applying a security fix.
+Commit both `package.json` and the generated `package-lock.json`.
 
 ## Troubleshooting
 
