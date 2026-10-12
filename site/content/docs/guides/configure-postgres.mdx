@@ -279,6 +279,26 @@ continue holding WAL. Do not treat a stop or repeated restart as a disk-space
 recovery procedure; follow [WAL buildup and disk usage](#wal-buildup-and-disk-usage)
 for slot recovery.
 
+### Tuning Copy Throughput
+
+Two settings control initial-copy parallelism:
+
+| Setting | Effect |
+| --- | --- |
+| `max_table_sync_workers` (default `4`) | Allows more tables to sync concurrently; does not add parallelism within one table |
+| `max_copy_connections_per_table` (default `4`) | Allows more parallel copy workers within each table, which can speed up a large copy |
+
+Increase concurrency only while the source, network, and destination have
+spare capacity. More workers use more connections and resources; additional
+table-sync workers also need replication slots.
+
+Destination-specific settings can further improve performance. Review the
+available settings for your destination alongside these copy controls.
+
+Change one setting at a time and monitor copy progress and resource usage.
+Plan changes before a large copy where possible: restarting to apply
+configuration can repeat an unfinished copy.
+
 ### Monitoring WAL Usage
 
 ```sql
