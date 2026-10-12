@@ -96,6 +96,7 @@ impl Display for TableVersionId {
                 let mut value = uuid.as_u128();
                 let mut digits = ['0'; TABLE_VERSION_ID_LENGTH];
                 for digit in digits.iter_mut().rev() {
+                    // The remainder is below 36, so both conversions succeed.
                     let remainder = u32::try_from(value % 36).unwrap();
                     *digit = char::from_digit(remainder, 36).unwrap();
                     value /= 36;
@@ -148,6 +149,7 @@ impl FromStr for VersionedBigQueryTableId {
             if base.is_empty() || suffix.is_empty() {
                 return None;
             }
+
             let version = if suffix.len() == TABLE_VERSION_ID_LENGTH {
                 if !suffix.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()) {
                     return None;
@@ -162,8 +164,10 @@ impl FromStr for VersionedBigQueryTableId {
                 }
                 TableVersionId::Legacy(suffix.parse().ok()?)
             };
+
             Some(Self(base.to_owned(), version))
         });
+
         parsed.ok_or_else(|| {
             etl_error!(
                 ErrorKind::DestinationTableNameInvalid,
@@ -2620,6 +2624,7 @@ mod tests {
         }
     }
 
+    /// Malformed suffixes fail without slicing Unicode or accepting overflow.
     #[test]
     fn versioned_bigquery_table_id_rejects_invalid_ids() {
         for input in [
@@ -2636,6 +2641,12 @@ mod tests {
             "users_é",
             "users_１２３",
             "users_+1",
+            "users_ 1",
+            "users_1\n",
+            "users_000000000000000000000",
+            "users_000000000000000000000000",
+            "users_000000000000000000000000 ",
+            "_0000000000000000000000000",
             "users_zzzzzzzzzzzzzzzzzzzzzzzzz",
             "users_000000000000000000000000Z",
             "users_00000000000000000000000é",

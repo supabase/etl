@@ -969,7 +969,7 @@ impl BigQueryClient {
     /// Queries `INFORMATION_SCHEMA.TABLES` instead of using the destination's
     /// local cache so reset cleanup can remove versions left behind by earlier
     /// processes.
-    pub async fn list_physical_table_ids(
+    pub(super) async fn list_physical_table_ids(
         &self,
         dataset_id: &BigQueryDatasetId,
         base_table_id: &BigQueryTableId,
