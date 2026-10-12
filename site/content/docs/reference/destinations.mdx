@@ -293,6 +293,29 @@ This status applies to the managed service, not local or self-hosted use.
 
 Snowflake uses direct Snowpipe Streaming and key-pair authentication.
 
+### Resynchronizing after a source table rename
+
+A source rename preserves the recorded destination table name during streaming.
+Resynchronization drops that recorded table, then creates a fresh destination
+from the current source name. If that name is already occupied, ETL fails the
+copy instead of writing into another table's destination.
+
+For example, suppose `public.orders` is renamed to `public.ordersold`, and
+`public.ordersnew` is renamed to `public.orders`. The first table still owns
+`PUBLIC_ORDERS`, so resynchronizing the second table fails when it tries to
+create `PUBLIC_ORDERS`.
+
+To recover, resynchronize `public.ordersold` first and wait for it to finish.
+Provided `PUBLIC_ORDERSOLD` is available, this rebuilds the first table there
+and frees `PUBLIC_ORDERS`. Then retry resynchronizing `public.orders`.
+Resynchronization deletes previous destination data and CDC history. Existing
+source rows are copied again only when initial copying is enabled. Update any
+queries that depend on the first table's previous destination name.
+
+If the existing destination must remain unchanged, use a new pipeline targeting
+an unused destination schema. Do not manually delete or rename a destination
+that another replicated table still uses.
+
 ### Limitations
 
 - Setup requires a Snowflake user and role with the documented warehouse,
