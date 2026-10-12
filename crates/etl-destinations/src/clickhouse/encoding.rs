@@ -46,6 +46,31 @@ pub(crate) enum ClickHouseValue {
     Array(Vec<ClickHouseValue>),
 }
 
+/// RowBinary encoding shape of one destination column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColumnEncoding {
+    /// `Nullable(T)`: a null-indicator byte precedes every value.
+    Nullable,
+    /// Non-nullable scalar `T`: NULL cannot be encoded.
+    Required,
+    /// Non-nullable `Array(...)`. ClickHouse rejects `Nullable(Array(...))`,
+    /// so a top-level NULL is written as an empty array, matching BigQuery.
+    Array,
+}
+
+impl ColumnEncoding {
+    /// Classifies a ClickHouse column type as reported by `system.columns`.
+    pub(crate) fn from_type_name(type_name: &str) -> Self {
+        if type_name.starts_with("Nullable(") {
+            Self::Nullable
+        } else if type_name.starts_with("Array(") {
+            Self::Array
+        } else {
+            Self::Required
+        }
+    }
+}
+
 /// Converts a [`Cell`] to a [`ClickHouseValue`], consuming it (no clone).
 pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue> {
     Ok(match cell {
@@ -229,30 +254,30 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
     Ok(())
 }
 
-/// Encodes a complete row into `buf`, selecting nullable vs non-nullable
-/// encoding per column.
+/// Encodes a complete row into `buf`, selecting the encoding per column.
 pub(crate) fn encode_to_row_binary(
     values: Vec<ClickHouseValue>,
-    nullable_flags: &[bool],
+    column_encodings: &[ColumnEncoding],
     buf: &mut Vec<u8>,
 ) -> EtlResult<()> {
-    if values.len() != nullable_flags.len() {
+    if values.len() != column_encodings.len() {
         return Err(etl_error!(
             ErrorKind::ConversionError,
             "ClickHouse RowBinary row width mismatch",
             format!(
-                "values length {} does not match nullable flags length {}",
+                "values length {} does not match column encodings length {}",
                 values.len(),
-                nullable_flags.len()
+                column_encodings.len()
             )
         ));
     }
 
-    for (val, &is_nullable) in values.into_iter().zip(nullable_flags.iter()) {
-        if is_nullable {
-            rb_encode_nullable(val, buf)?;
-        } else {
-            rb_encode_value(val, buf)?;
+    for (val, &encoding) in values.into_iter().zip(column_encodings.iter()) {
+        match (encoding, val) {
+            (ColumnEncoding::Nullable, val) => rb_encode_nullable(val, buf)?,
+            // An empty array is a single zero length varint.
+            (ColumnEncoding::Array, ClickHouseValue::Null) => rb_varint(0, buf),
+            (ColumnEncoding::Array | ColumnEncoding::Required, val) => rb_encode_value(val, buf)?,
         }
     }
     Ok(())
@@ -473,26 +498,55 @@ mod tests {
         assert!(buf.is_empty(), "no bytes should be written on error");
     }
 
+    /// A top-level NULL array is stored as an empty array, while the row's
+    /// other columns keep their own encodings.
     #[test]
-    fn encode_to_row_binary_rejects_fewer_values_than_nullable_flags() {
-        let mut buf = vec![0xaa];
-        let result =
-            encode_to_row_binary(vec![ClickHouseValue::Int32(1)], &[false, false], &mut buf);
+    fn encode_to_row_binary_writes_null_array_as_empty_array() {
+        let encodings = [ColumnEncoding::Array, ColumnEncoding::Nullable, ColumnEncoding::Required];
+        let mut buf = Vec::new();
+        encode_to_row_binary(
+            vec![ClickHouseValue::Null, ClickHouseValue::Null, ClickHouseValue::Int32(7)],
+            &encodings,
+            &mut buf,
+        )
+        .unwrap();
 
-        assert!(result.is_err(), "row width mismatch must error");
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConversionError);
-        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
-        assert_eq!(err.detail(), Some("values length 1 does not match nullable flags length 2"));
-        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
+        let mut expected = Vec::new();
+        encode_to_row_binary(
+            vec![
+                ClickHouseValue::Array(Vec::new()),
+                ClickHouseValue::Null,
+                ClickHouseValue::Int32(7),
+            ],
+            &encodings,
+            &mut expected,
+        )
+        .unwrap();
+        assert_eq!(buf, expected);
+        assert_eq!(buf, [0x00, 0x01, 0x07, 0x00, 0x00, 0x00]);
     }
 
+    /// Only array columns turn NULL into a value; a required scalar column
+    /// still rejects it.
     #[test]
-    fn encode_to_row_binary_rejects_more_values_than_nullable_flags() {
+    fn encode_to_row_binary_rejects_null_for_required_column() {
+        let error = encode_to_row_binary(
+            vec![ClickHouseValue::Null],
+            &[ColumnEncoding::Required],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConversionError);
+    }
+
+    /// A row narrower than its layout is rejected before any byte is written.
+    #[test]
+    fn encode_to_row_binary_rejects_fewer_values_than_column_encodings() {
         let mut buf = vec![0xaa];
         let result = encode_to_row_binary(
-            vec![ClickHouseValue::Int32(1), ClickHouseValue::Int32(2)],
-            &[false],
+            vec![ClickHouseValue::Int32(1)],
+            &[ColumnEncoding::Required, ColumnEncoding::Required],
             &mut buf,
         );
 
@@ -500,9 +554,28 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConversionError);
         assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
-        assert_eq!(err.detail(), Some("values length 2 does not match nullable flags length 1"));
+        assert_eq!(err.detail(), Some("values length 1 does not match column encodings length 2"));
         assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
     }
+
+    /// A row wider than its layout is rejected before any byte is written.
+    #[test]
+    fn encode_to_row_binary_rejects_more_values_than_column_encodings() {
+        let mut buf = vec![0xaa];
+        let result = encode_to_row_binary(
+            vec![ClickHouseValue::Int32(1), ClickHouseValue::Int32(2)],
+            &[ColumnEncoding::Required],
+            &mut buf,
+        );
+
+        assert!(result.is_err(), "row width mismatch must error");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConversionError);
+        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
+        assert_eq!(err.detail(), Some("values length 2 does not match column encodings length 1"));
+        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
+    }
+
     #[test]
     fn special_temporal_values_require_faithful_wire_encodings() {
         for cell in [

@@ -17,12 +17,14 @@
 //! failure replay knob.
 //!
 //! The generated envelope mirrors what the Postgres codec can produce (no NUL
-//! bytes in text, microsecond temporal precision) and stays inside the ranges
-//! the destination accepts, e.g. ClickHouse `Date32`'s
-//! `1900-01-01..=2299-12-31`. Out-of-range values are covered separately by the
-//! loud-rejection property.
+//! bytes in text, microsecond temporal precision) and stays inside ClickHouse
+//! `Date32`'s `1900-01-01..=2299-12-31` range. ClickHouse stores values outside
+//! that range exactly but reads them back clamped, so a roundtrip by display
+//! value cannot pass there. `out_of_range_timestamps_are_rejected_or_roundtrip`
+//! checks only that the raw stored ticks stay exact.
 
 use std::{
+    error::Error as _,
     sync::{
         Arc,
         atomic::{AtomicI64, Ordering},
@@ -77,7 +79,224 @@ use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
 
-use crate::support::{clickhouse::current_state_query, crypto::install_crypto_provider};
+use crate::support::{
+    clickhouse::current_state_query, crypto::install_crypto_provider,
+    table_name::table_name_schemas,
+};
+
+/// Checks name and view isolation across copy, CDC, restart, truncate, and
+/// reset.
+async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let cases = table_name_schemas();
+    let destination = database.build_destination_with_engine(store.clone(), engine).await;
+    let mut original_metadata = Vec::new();
+    for (schema, name) in &cases {
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        write_table_rows_via_trait(
+            &destination,
+            schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
+        )
+        .await
+        .unwrap();
+        let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+        assert_eq!(metadata.table_id(), name);
+        original_metadata.push(metadata);
+    }
+    destination.shutdown().await.unwrap();
+
+    let restarted = database.build_destination_with_engine(store.clone(), engine).await;
+    for ((schema, name), metadata) in cases.iter().zip(&original_metadata) {
+        write_events_via_trait(
+            &restarted,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(10_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(2), Cell::String("streamed".to_owned())]),
+            })],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
+            Some(metadata)
+        );
+        let query = current_state_query(engine, name, "id, name", &["id"], "id");
+        assert_eq!(
+            database.query::<(i32, String)>(&query).await,
+            vec![(1, "copied".to_owned()), (2, "streamed".to_owned())]
+        );
+        if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+            assert_eq!(
+                database
+                    .query::<i32>(&format!("select id from \"{name}__current\" order by id"))
+                    .await,
+                vec![1, 2]
+            );
+        }
+    }
+
+    let (schema, name) = &cases[0];
+    write_events_via_trait(
+        &restarted,
+        WriteEventsDurability::RequireDurable,
+        vec![
+            Event::Truncate(TruncateEvent {
+                commit_lsn: PgLsn::from(20_u64),
+                tx_ordinal: 1,
+                options: 0,
+                truncated_tables: vec![schema.clone()],
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(20_u64),
+                tx_ordinal: 2,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(3), Cell::String("after".to_owned())]),
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    let query = current_state_query(engine, name, "id, name", &["id"], "id");
+    assert_eq!(database.query::<(i32, String)>(&query).await, vec![(3, "after".to_owned())]);
+
+    drop_table_for_copy_via_trait(&restarted, schema).await.unwrap();
+    assert_eq!(
+        database
+            .query::<u64>(&format!(
+                "select count() from system.tables where database = currentDatabase() and name in \
+                 ('{name}', '{name}__current')"
+            ))
+            .await,
+        vec![0]
+    );
+    store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+    store.store_table_schema(schema.inner().clone()).await.unwrap();
+    write_table_rows_via_trait(
+        &restarted,
+        schema,
+        vec![TableRow::new(vec![Cell::I32(4), Cell::String("recopied".to_owned())])],
+    )
+    .await
+    .unwrap();
+    restarted.shutdown().await.unwrap();
+    for (index, (_, name)) in cases.iter().enumerate() {
+        let query = current_state_query(engine, name, "id, name", &["id"], "id");
+        assert_eq!(
+            database.query::<(i32, String)>(&query).await,
+            if index == 0 {
+                vec![(4, "recopied".to_owned())]
+            } else {
+                vec![(1, "copied".to_owned()), (2, "streamed".to_owned())]
+            }
+        );
+    }
+}
+
+/// Exercises the naming lifecycle with MergeTree history queries.
+#[tokio::test(flavor = "multi_thread")]
+async fn boundary_underscore_names_survive_lifecycle_merge_tree() {
+    boundary_underscore_names_survive_lifecycle(ClickHouseEngine::MergeTree).await;
+}
+
+/// Exercises the naming lifecycle with ReplacingMergeTree current-state views.
+#[tokio::test(flavor = "multi_thread")]
+async fn boundary_underscore_names_survive_lifecycle_replacing_merge_tree() {
+    boundary_underscore_names_survive_lifecycle(ClickHouseEngine::ReplacingMergeTree).await;
+}
+
+/// Preserves ClickHouse's native length error without truncating or hashing a
+/// length-prefixed name to fit the database's metadata filename budget.
+#[tokio::test(flavor = "multi_thread")]
+async fn overlong_encoded_names_preserve_native_clickhouse_error() {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    // Model a source with a raised identifier limit. The components still fit
+    // the two-digit prefix, but exceed this database's native filename budget.
+    let component = "_".repeat(99);
+    let name = format!("_9999_{component}_{component}");
+    let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+        TableId::new(1),
+        TableName::new(component.clone(), component),
+        vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+    )));
+    store.store_table_schema(schema.inner().clone()).await.unwrap();
+    let destination = database.build_destination(store).await;
+    let error =
+        write_table_rows_via_trait(&destination, &schema, vec![TableRow::new(vec![Cell::I32(1)])])
+            .await
+            .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+    assert!(error.source().unwrap().to_string().contains("max length of table name"));
+    destination.shutdown().await.unwrap();
+    assert!(
+        database
+            .query::<String>(&format!(
+                "select name from system.tables where database = currentDatabase() and name in \
+                 ('{name}', '{name}__current')"
+            ))
+            .await
+            .is_empty()
+    );
+}
+
+/// Rejects unsupported names consistently before copy, CDC, or reset creates
+/// destination objects or ownership metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_boundary_names_fail_before_destination_setup() {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let destination = database.build_destination(store.clone()).await;
+    for (index, (source_schema, source_table)) in [
+        ("public".to_owned(), "_café".to_owned()),
+        ("schéma".to_owned(), "_orders".to_owned()),
+        ("_public".to_owned(), "order items".to_owned()),
+        ("_".repeat(100), "orders".to_owned()),
+        ("public".to_owned(), "_".repeat(100)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(u32::try_from(index + 1).unwrap()),
+            TableName::new(source_schema, source_table),
+            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+        )));
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        for rows in [vec![], vec![TableRow::new(vec![Cell::I32(1)])]] {
+            let error = write_table_rows_via_trait(&destination, &schema, rows).await.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValidationError);
+        }
+        let error = write_events_via_trait(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(10_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                table_row: TableRow::new(vec![Cell::I32(1)]),
+            })],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValidationError);
+        let error = drop_table_for_copy_via_trait(&destination, &schema).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValidationError);
+        assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
+    }
+    destination.shutdown().await.unwrap();
+    assert!(database.query::<String>("show tables").await.is_empty());
+}
 
 /// One ClickHouse table receiving generated rows through the production
 /// destination write path.
@@ -692,15 +911,121 @@ async fn array_values_roundtrip_through_destination() {
     });
 }
 
+/// One `id` and `bigint[]` value read back from ClickHouse.
+#[derive(Debug, PartialEq, clickhouse::Row, serde::Deserialize)]
+struct ArrayRow {
+    /// Source primary key.
+    id: i64,
+    /// Stored array value.
+    values: Vec<Option<i64>>,
+}
+
+/// Builds an expected [`ArrayRow`].
+fn array_row(id: i64, values: Vec<Option<i64>>) -> ArrayRow {
+    ArrayRow { id, values }
+}
+
+/// A top-level `NULL` array is stored as an empty array on both the initial
+/// copy and the change stream, and `NULL` elements inside an array survive.
 #[tokio::test(flavor = "multi_thread")]
-async fn nullable_array_columns_fail_only_for_top_level_null_values() {
+async fn null_arrays_are_stored_as_empty_arrays_on_copy_and_streaming() {
+    // GIVEN: a table with a nullable `bigint[]` column.
     let table = PropertyTable::create("nullablearray", &[("values", Type::INT8_ARRAY, true)]).await;
 
+    // WHEN: the copy writes an empty array, a NULL array, and an array with a
+    // NULL element, and the change stream inserts another NULL array.
     table.write(vec![Cell::Array(ArrayCell::I64(vec![]))]).await.unwrap();
-    let error = table.write(vec![Cell::Null]).await.unwrap_err();
+    table.write(vec![Cell::Null]).await.unwrap();
+    table.write(vec![Cell::Array(ArrayCell::I64(vec![None, Some(1)]))]).await.unwrap();
+    table
+        .destination
+        .write_events(vec![Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(500),
+            tx_ordinal: 1,
+            replicated_table_schema: table.replicated_table_schema.clone(),
+            table_row: TableRow::new(vec![Cell::I64(4), Cell::Null]),
+        })])
+        .await
+        .unwrap();
 
-    assert_eq!(error.kind(), ErrorKind::ConversionError);
-    assert_eq!(error.description(), Some("NULL value for non-nullable ClickHouse column"));
+    // THEN: both NULL arrays read back as empty arrays.
+    assert_eq!(
+        table
+            .database
+            .query::<ArrayRow>(&format!(
+                "select id, values from {} order by id",
+                table.clickhouse_table
+            ))
+            .await,
+        vec![
+            array_row(1, vec![]),
+            array_row(2, vec![]),
+            array_row(3, vec![None, Some(1)]),
+            array_row(4, vec![]),
+        ]
+    );
+}
+
+/// An array column that enters the publication is added without a resync.
+/// Rows stored before it read as empty arrays, and later rows keep their value.
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_added_array_columns_read_empty_for_existing_rows() {
+    // GIVEN: one copied row while the publication omits the `tags` column.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    // A publication column-list change stores a new snapshot of the same
+    // columns.
+    let mut snapshots = Vec::new();
+    for snapshot_id in [test_snapshot_id(100, 100), test_snapshot_id(200, 200)] {
+        snapshots.push(
+            store
+                .store_table_schema(TableSchema::with_snapshot_id(
+                    TableId::new(4309),
+                    TableName::new("public".to_owned(), "maskarray".to_owned()),
+                    vec![
+                        ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                            .with_primary_key(1),
+                        ColumnSchema::new("tags".to_owned(), Type::INT8_ARRAY, -1, 2, true),
+                    ],
+                    snapshot_id,
+                ))
+                .await
+                .unwrap(),
+        );
+    }
+    let before = ReplicatedTableSchema::from_mask(
+        Arc::clone(&snapshots[0]),
+        ReplicationMask::from_bytes(vec![1, 0]),
+    );
+    let after = ReplicatedTableSchema::from_mask(
+        Arc::clone(&snapshots[1]),
+        ReplicationMask::from_bytes(vec![1, 1]),
+    );
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination.write_table_rows(&before, vec![TableRow::new(vec![Cell::I64(1)])]).await.unwrap();
+
+    // WHEN: the publication adds `tags` and the source inserts a row.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+            amount_insert(&after, 2, Cell::Array(ArrayCell::I64(vec![Some(7)]))),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: the old row reads an empty array and the new row its value.
+    assert_eq!(
+        database
+            .query::<ArrayRow>(
+                "select id, tags as values from public_maskarray__current order by id"
+            )
+            .await,
+        vec![array_row(1, vec![]), array_row(2, vec![Some(7)])]
+    );
 }
 
 /// Dates legal in Postgres but outside ClickHouse `Date32`'s
@@ -724,14 +1049,14 @@ struct TimestampRejectRow {
     vtstz: Option<i64>,
 }
 
-/// Out-of-range writes must never silently change values: either the write
-/// fails loudly or the stored value reads back equal to what was written.
+/// Out-of-range writes must never silently change stored values: either the
+/// write fails loudly or the stored value reads back equal to what was written.
 ///
-/// Unlike dates, timestamps outside `DateTime64(6)`'s documented `1900..=2299`
-/// range have no local range check. Empirically ClickHouse accepts the raw
-/// microsecond ticks and reads them back bit-exact, so the values survive
-/// storage unchanged; this property pins that behavior and fails if either side
-/// ever starts mutating such values silently.
+/// ETL has no range check for dates or timestamps. ClickHouse accepts the raw
+/// ticks outside `DateTime64(6)`'s documented `1900..=2299` range and stores
+/// them bit-exact, but displays them clamped to the range limits. This property
+/// compares raw ticks, so it pins the stored value and does not see the
+/// clamped display.
 #[tokio::test(flavor = "multi_thread")]
 async fn out_of_range_timestamps_are_rejected_or_roundtrip() {
     let table = PropertyTable::create(
@@ -1621,7 +1946,8 @@ async fn type_changes_that_change_the_clickhouse_type_fail_before_applying_inner
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
     let timestamp = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_hms_opt(12, 0, 0).unwrap();
-    // Same byte width, a wider type, and the same bytes with another meaning.
+    // Same byte width, a wider type, and a time zone change that keeps the
+    // ClickHouse type but not the meaning of existing rows.
     let cases = [
         (4301, "amountfloat", Type::INT8, Cell::I64(12), Type::FLOAT8, Cell::F64(12.5)),
         (4302, "amountwide", Type::INT4, Cell::I32(12), Type::INT8, Cell::I64(12)),
@@ -1707,6 +2033,83 @@ async fn type_changes_that_change_the_clickhouse_type_fail_before_applying_repla
     .await;
 }
 
+/// Stores one version of `public.arraynull` whose `tags` array column has the
+/// given nullability.
+async fn store_array_nullability_schema(
+    store: &MemoryStore,
+    snapshot_id: SnapshotId,
+    nullable: bool,
+) -> ReplicatedTableSchema {
+    ReplicatedTableSchema::all(
+        store
+            .store_table_schema(TableSchema::with_snapshot_id(
+                TableId::new(4308),
+                TableName::new("public".to_owned(), "arraynull".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("tags".to_owned(), Type::INT4_ARRAY, -1, 2, nullable),
+                ],
+                snapshot_id,
+            ))
+            .await
+            .unwrap(),
+    )
+}
+
+/// `DROP NOT NULL` on an array column applies without DDL, because ClickHouse
+/// arrays cannot be `Nullable`, and replication continues.
+#[tokio::test(flavor = "multi_thread")]
+async fn array_column_drop_not_null_continues_replicating() {
+    // GIVEN: one copied row in a table with a NOT NULL array column.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let before = store_array_nullability_schema(&store, test_snapshot_id(100, 100), false).await;
+    let after = store_array_nullability_schema(&store, test_snapshot_id(400, 400), true).await;
+    let destination = database
+        .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &before,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::Array(ArrayCell::I32(vec![Some(1)]))])],
+        )
+        .await
+        .unwrap();
+
+    // WHEN: the source drops NOT NULL on the array and inserts a NULL array.
+    destination
+        .write_events(vec![
+            Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+            amount_insert(&after, 2, Cell::Null),
+        ])
+        .await
+        .unwrap();
+
+    // THEN: the column type is unchanged, the metadata reached the new
+    // snapshot, and the NULL array is stored as an empty array.
+    assert_eq!(
+        database.column_types("public_arraynull").await,
+        vec![
+            ("id".to_owned(), "Int64".to_owned()),
+            ("tags".to_owned(), "Array(Nullable(Int32))".to_owned()),
+        ]
+    );
+    let metadata = store.get_destination_table_metadata(TableId::new(4308)).await.unwrap().unwrap();
+    assert!(metadata.is_applied());
+    assert_eq!(metadata.snapshot_id(), test_snapshot_id(400, 400));
+    assert_eq!(
+        database
+            .query::<(i64, String)>(
+                "select id, toString(tags) from public_arraynull__current order by id"
+            )
+            .await,
+        vec![(1, "[1]".to_owned()), (2, "[]".to_owned())]
+    );
+}
+
 /// A source type change that keeps the ClickHouse column type, such as a
 /// longer `varchar`, is applied without DDL and replication continues.
 #[tokio::test(flavor = "multi_thread")]
@@ -1767,6 +2170,49 @@ async fn type_changes_that_keep_the_clickhouse_type_continue_replicating() {
     );
     let metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert_eq!(metadata.snapshot_id(), test_snapshot_id(400, 400));
+}
+
+/// A `timestamp` column matches its source wall-clock value as a filter
+/// literal whatever the reader's session time zone.
+#[tokio::test(flavor = "multi_thread")]
+async fn timestamp_filters_match_source_values_in_any_session_time_zone() {
+    // GIVEN: one copied `timestamp` row with source value 2024-01-01 12:00:00.
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = store_amount_schema(
+        &store,
+        TableId::new(4308),
+        "amountwall",
+        test_snapshot_id(100, 100),
+        Type::TIMESTAMP,
+        -1,
+    )
+    .await;
+    let destination =
+        database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
+    let timestamp = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap().and_hms_opt(12, 0, 0).unwrap();
+    destination
+        .write_table_rows(
+            &schema,
+            vec![TableRow::new(vec![Cell::I64(1), Cell::Timestamp(Timestamp::Value(timestamp))])],
+        )
+        .await
+        .unwrap();
+
+    // WHEN: a reader whose session time zone is not UTC queries the row.
+    // Drivers and BI tools set the time zone per session.
+    let matching = database
+        .db_client()
+        .query("select count() from public_amountwall where amount = '2024-01-01 12:00:00'")
+        .with_option("session_timezone", "America/New_York")
+        .fetch_all::<u64>()
+        .await
+        .unwrap();
+
+    // THEN: the source literal matches the row.
+    assert_eq!(matching, vec![1]);
 }
 
 /// A ClickHouse column whose type no longer matches ETL's schema fails writes

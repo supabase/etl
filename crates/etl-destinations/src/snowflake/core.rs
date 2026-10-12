@@ -29,7 +29,7 @@ use crate::{
         encoding::{CdcMeta, CdcOperation},
         metrics::register_metrics,
         schema,
-        streaming::{OffsetToken, RestStreamClient, RowBatchBuilder, StreamClient},
+        streaming::{Completed, OffsetToken, RestStreamClient, RowBatchBuilder, StreamClient},
     },
     table_name::try_stringify_table_name,
 };
@@ -59,6 +59,37 @@ type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
 /// Maximum time allowed to drain Snowflake event tasks and retire local table
 /// state before a reset.
 const RESET_PREPARATION_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Groups consecutive row events in first-seen table order without crossing a
+/// relation or truncate barrier. Moving events preserves each table's source
+/// order without cloning its row payloads.
+fn take_data_events(iter: &mut EventIter) -> Vec<(TableId, Vec<Event>)> {
+    let mut table_indexes = HashMap::new();
+    let mut tables: Vec<(TableId, Vec<Event>)> = Vec::new();
+
+    while let Some(event) = iter.peek() {
+        let table_id = match event {
+            Event::Insert(event) => event.replicated_table_schema.id(),
+            Event::Update(event) => event.replicated_table_schema.id(),
+            Event::Delete(event) => event.replicated_table_schema.id(),
+            Event::Relation(_) | Event::Truncate(_) => break,
+            _ => {
+                iter.next();
+                continue;
+            }
+        };
+        let Some(event) = iter.next() else {
+            break;
+        };
+        let index = *table_indexes.entry(table_id).or_insert_with(|| {
+            tables.push((table_id, Vec::new()));
+            tables.len() - 1
+        });
+        tables[index].1.push(event);
+    }
+
+    tables
+}
 
 /// Takes consecutive truncate operations without collapsing distinct source
 /// boundaries. An outcome-unknown earlier truncate must be reconciled before a
@@ -127,9 +158,14 @@ where
                     ErrorKind::DestinationTableAlreadyExists,
                     "Snowflake destination table already exists",
                     format!(
-                        "Table {table_name} exists, but this pipeline has no destination metadata \
-                         proving ownership. Remove the table or use another destination schema \
-                         before retrying."
+                        "Cannot create destination table '{table_name}' for source table '{}': \
+                         the destination already exists and is not registered to this source \
+                         table. If it belongs to another renamed source table, resynchronize that \
+                         table first and wait for completion, then retry this one. \
+                         Resynchronization deletes previous destination data and history; source \
+                         rows are copied again only when initial copying is enabled. Otherwise, \
+                         use a new pipeline targeting an unused destination schema.",
+                        table_schema.name()
                     )
                 );
             }
@@ -332,8 +368,7 @@ where
         let mut requires_durability_wait = false;
 
         while iter.peek().is_some() {
-            let builders = self.accumulate_data_events(&mut iter).await?;
-            self.flush_batches(builders).await?;
+            self.write_data_events(&mut iter).await?;
             requires_durability_wait |= self.apply_relation_events(&mut iter).await?;
             requires_durability_wait |= self.apply_truncate_events(&mut iter).await?;
         }
@@ -348,38 +383,41 @@ where
         }
     }
 
-    async fn accumulate_data_events(
-        &self,
-        iter: &mut EventIter,
-    ) -> EtlResult<HashMap<TableId, RowBatchBuilder>> {
-        let mut builders: HashMap<TableId, RowBatchBuilder> = HashMap::new();
-        let mut column_cache: HashMap<TableId, Vec<ColumnSchema>> = HashMap::new();
+    /// Encodes one table at a time within each data segment.
+    ///
+    /// A stream compressor has substantial native state even for a tiny row.
+    /// Finish each table before starting the next so the number of tables in
+    /// the source batch does not multiply live compressor memory. Completed
+    /// requests are sent immediately, preserving per-table order and packing.
+    async fn write_data_events(&self, iter: &mut EventIter) -> EtlResult<()> {
+        for (table_id, events) in take_data_events(iter) {
+            let mut builder = RowBatchBuilder::new(table_id);
+            let mut columns = None;
 
-        // Consume data events (insert/update/delete) into per-table batch
-        // builders, stopping at barrier events (truncate, relation) that
-        // require a flush before they can be applied.
-        while let Some(event) = iter.peek() {
-            if matches!(event, Event::Truncate(_) | Event::Relation(_)) {
-                break;
+            for event in events {
+                let completed = match event {
+                    Event::Insert(event) => {
+                        self.encode_insert(event, &mut builder, &mut columns).await?
+                    }
+                    Event::Update(event) => {
+                        self.encode_update(event, &mut builder, &mut columns).await?
+                    }
+                    Event::Delete(event) => {
+                        self.encode_delete(event, &mut builder, &mut columns).await?
+                    }
+                    _ => unreachable!("data groups contain only row events"),
+                };
+                for batch in completed {
+                    self.client
+                        .send_streaming_batch(table_id, batch)
+                        .await
+                        .map_err(EtlError::from)?;
+                }
             }
-            let Some(event) = iter.next() else {
-                break;
-            };
-            match event {
-                Event::Insert(e) => self.encode_insert(e, &mut builders, &mut column_cache).await?,
-                Event::Update(e) => self.encode_update(e, &mut builders, &mut column_cache).await?,
-                Event::Delete(e) => self.encode_delete(e, &mut builders, &mut column_cache).await?,
-                _ => {}
+
+            for batch in builder.finish().map_err(EtlError::from)? {
+                self.client.send_streaming_batch(table_id, batch).await.map_err(EtlError::from)?;
             }
-        }
-
-        Ok(builders)
-    }
-
-    async fn flush_batches(&self, builders: HashMap<TableId, RowBatchBuilder>) -> EtlResult<()> {
-        for (table_id, builder) in builders {
-            let batches = builder.finish().map_err(EtlError::from)?;
-            self.client.send_streaming_batches(table_id, batches).await.map_err(EtlError::from)?;
         }
         Ok(())
     }
@@ -407,24 +445,21 @@ where
         Ok(had_truncates)
     }
 
+    /// Encodes an insert row, returning the request it completed, if any.
     async fn encode_insert(
         &self,
         e: InsertEvent,
-        builders: &mut HashMap<TableId, RowBatchBuilder>,
-        column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
-    ) -> EtlResult<()> {
+        builder: &mut RowBatchBuilder,
+        columns: &mut Option<Vec<ColumnSchema>>,
+    ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
-        self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema).await?;
-
-        let cols = &column_cache[&table_id];
+        let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
-            return Ok(());
+            return Ok(Completed::default());
         }
 
-        builders
-            .entry(table_id)
-            .or_default()
+        builder
             .push_row(
                 cols,
                 &e.table_row,
@@ -434,66 +469,52 @@ where
             .map_err(EtlError::from)
     }
 
+    /// Encodes an update row, returning the request it completed, if any.
     async fn encode_update(
         &self,
         e: UpdateEvent,
-        builders: &mut HashMap<TableId, RowBatchBuilder>,
-        column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
-    ) -> EtlResult<()> {
+        builder: &mut RowBatchBuilder,
+        columns: &mut Option<Vec<ColumnSchema>>,
+    ) -> EtlResult<Completed> {
         let full_row = snowflake_update_row(&e.replicated_table_schema, e.updated_table_row)?;
 
         let table_id = e.replicated_table_schema.id();
-        self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema).await?;
-
-        let cols = &column_cache[&table_id];
+        let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
         if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
-            return Ok(());
+            return Ok(Completed::default());
         }
 
-        builders
-            .entry(table_id)
-            .or_default()
+        builder
             .push_row(cols, &full_row, CdcMeta::new(CdcOperation::Update, offset.as_ref()), &offset)
             .map_err(EtlError::from)
     }
 
+    /// Encodes a delete row, returning the request it completed, if any.
     async fn encode_delete(
         &self,
         e: DeleteEvent,
-        builders: &mut HashMap<TableId, RowBatchBuilder>,
-        column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
-    ) -> EtlResult<()> {
+        builder: &mut RowBatchBuilder,
+        columns: &mut Option<Vec<ColumnSchema>>,
+    ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
-        self.ensure_column_cache(column_cache, table_id, &e.replicated_table_schema).await?;
+        let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
         if self.client.is_offset_committed(table_id, &offset).await.map_err(EtlError::from)? {
-            return Ok(());
+            return Ok(Completed::default());
         }
 
         match snowflake_delete_row(&e.replicated_table_schema, e.old_table_row)? {
-            SnowflakeDeleteRow::Full(row) => {
-                let cols = &column_cache[&table_id];
-                builders
-                    .entry(table_id)
-                    .or_default()
-                    .push_row(
-                        cols,
-                        &row,
-                        CdcMeta::new(CdcOperation::Delete, offset.as_ref()),
-                        &offset,
-                    )
-                    .map_err(EtlError::from)
-            }
+            SnowflakeDeleteRow::Full(row) => builder
+                .push_row(cols, &row, CdcMeta::new(CdcOperation::Delete, offset.as_ref()), &offset)
+                .map_err(EtlError::from),
             SnowflakeDeleteRow::Key(key_row) => {
                 let identity_cols: Vec<_> = e
                     .replicated_table_schema
                     .identity_column_schemas()
                     .map(|column| SNOWFLAKE_COLUMN_NAME_MAPPING.map_column_schema(column))
                     .collect();
-                builders
-                    .entry(table_id)
-                    .or_default()
+                builder
                     .push_row(
                         &identity_cols,
                         &key_row,
@@ -505,20 +526,23 @@ where
         }
     }
 
-    async fn ensure_column_cache(
+    /// Prepares the table and caches its projected columns on the first row.
+    async fn prepare_columns<'a>(
         &self,
-        column_cache: &mut HashMap<TableId, Vec<ColumnSchema>>,
-        table_id: TableId,
+        columns: &'a mut Option<Vec<ColumnSchema>>,
         table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<()> {
-        #[expect(clippy::map_entry)]
-        if !column_cache.contains_key(&table_id) {
-            self.prepare_table_for_writes(table_schema).await?;
-            let cols: Vec<_> =
-                table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
-            column_cache.insert(table_id, cols);
+    ) -> EtlResult<&'a [ColumnSchema]> {
+        match columns {
+            Some(columns) => Ok(columns),
+            None => {
+                self.prepare_table_for_writes(table_schema).await?;
+                Ok(columns.insert(
+                    table_schema
+                        .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
+                        .collect(),
+                ))
+            }
         }
-        Ok(())
     }
 
     async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<bool> {
@@ -694,12 +718,28 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
         async_result: DropTableForCopyResult<()>,
     ) -> EtlResult<()> {
-        let table_name = try_stringify_table_name(replicated_table_schema.name())?.to_uppercase();
         let (task_guard, detached) = timeout(RESET_PREPARATION_TIMEOUT, async {
             // Acquire the task registry before any client lock. Event tasks
             // have no registry access, so they can finish while reset waits for
             // them.
             let task_guard = self.tasks.drain().await?;
+
+            // A source rename changes the schema name but not the destination
+            // this table owns. Use the same durable target for channel and
+            // table deletion, including when no channel is cached
+            // after a restart.
+            let metadata = self
+                .writer
+                .store
+                .get_destination_table_metadata(replicated_table_schema.id())
+                .await?;
+            let table_name = metadata.as_ref().map_or_else(
+                || {
+                    try_stringify_table_name(replicated_table_schema.name())
+                        .map(|name| name.to_uppercase())
+                },
+                |metadata| Ok(metadata.table_id().to_owned()),
+            )?;
             let detached = self
                 .writer
                 .client
@@ -756,12 +796,12 @@ where
                 .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
                 .collect();
 
-            // Build row batches. Snowflake has limits on max size of input, so
-            // we slice into proper batches, when necessary.
+            // Encode rows one at a time and send each request as it completes,
+            // so encoded output never accumulates for the whole copy batch.
             let zero = OffsetToken::zero();
-            let mut builder = RowBatchBuilder::new();
+            let mut builder = RowBatchBuilder::new(table_id);
             for row in &table_rows {
-                builder
+                let completed = builder
                     .push_row(
                         &columns,
                         row,
@@ -769,14 +809,22 @@ where
                         &zero,
                     )
                     .map_err(EtlError::from)?;
+                for batch in completed {
+                    self.writer
+                        .client
+                        .send_table_copy_batch(table_id, batch)
+                        .await
+                        .map_err(EtlError::from)?;
+                }
             }
 
-            let batches = builder.finish().map_err(EtlError::from)?;
-            self.writer
-                .client
-                .send_table_copy_batches(table_id, batches)
-                .await
-                .map_err(EtlError::from)?;
+            for batch in builder.finish().map_err(EtlError::from)? {
+                self.writer
+                    .client
+                    .send_table_copy_batch(table_id, batch)
+                    .await
+                    .map_err(EtlError::from)?;
+            }
 
             Ok(DestinationWriteStatus::Accepted)
         }

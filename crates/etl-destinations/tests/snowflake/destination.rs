@@ -1,8 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
 use etl::{
-    data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
-    destination::{DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability},
+    data::{ArrayCell, Cell, OldTableRow, TableRow, UpdatedTableRow},
+    destination::{
+        Destination as _, DestinationTableMetadata, DestinationWriteStatus, WriteEventsDurability,
+    },
     error::ErrorKind,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     pipeline::PipelineId,
@@ -10,10 +12,11 @@ use etl::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
     },
-    store::{SchemaStore, StateStore},
+    store::{SchemaStore, StateStore, TableStateLifecycleStore},
     test_utils::{
         destination::{
-            write_events as invoke_write_events, write_table_rows as invoke_write_table_rows,
+            drop_table_for_copy, write_events as invoke_write_events,
+            write_table_rows as invoke_write_table_rows,
         },
         notifying_store::NotifyingStore,
     },
@@ -23,8 +26,13 @@ use etl_destinations::snowflake::{
     SqlClient,
     test_utils::{load_test_config, query_rows},
 };
+use futures::FutureExt;
+use serde_json::{Value, json};
 
-use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
+use crate::{
+    snowflake::common::{build_auth, poll_destination_offset, with_table_cleanup},
+    support::table_name::table_name_schemas,
+};
 
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
@@ -241,6 +249,139 @@ async fn assert_status_default_absent(
     );
 }
 
+/// Checks name isolation, metadata reuse, and generated pipe/channel lengths
+/// through copy, CDC, restart, truncate, and reset.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn boundary_underscore_names_survive_destination_lifecycle() {
+    let harness = TestHarness::with_pipeline_id(u64::MAX);
+    let cases = table_name_schemas();
+    let names: Vec<_> = cases.iter().map(|(_, name)| name.to_uppercase()).collect();
+    let cleanup_names: Vec<_> = names.iter().map(String::as_str).collect();
+
+    with_table_cleanup(&harness.sql, &cleanup_names, || async {
+        let mut original_metadata = Vec::new();
+        for ((schema, _), name) in cases.iter().zip(&names) {
+            harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
+            write_table_copy_and_wait(
+                &harness.destination,
+                schema,
+                vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
+            )
+            .await;
+            let metadata =
+                harness.store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+            assert_eq!(metadata.table_id(), name);
+            original_metadata.push(metadata);
+        }
+
+        // Case-only collisions with an already-created table use the existing
+        // ownership rejection in both naming formats.
+        for index in [0, 3] {
+            let source_name = cases[index].0.name();
+            let schema = ReplicatedTableSchema::all(Arc::new(make_table_schema(
+                u32::try_from(100 + index).unwrap(),
+                &source_name.schema,
+                &source_name.name.to_ascii_uppercase(),
+            )));
+            harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
+            let error = invoke_write_table_rows(
+                &harness.destination,
+                &schema,
+                vec![TableRow::new(vec![Cell::I32(99), Cell::String("collision".to_owned())])],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+            assert!(
+                harness.store.get_destination_table_metadata(schema.id()).await.unwrap().is_none()
+            );
+        }
+        harness.destination.shutdown().await.unwrap();
+
+        let restarted =
+            Destination::new(Client::new(build_auth(), u64::MAX), harness.store.clone());
+        for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
+            invoke_write_events(
+                &restarted,
+                WriteEventsDurability::RequireDurable,
+                vec![Event::Insert(InsertEvent {
+                    commit_lsn: PgLsn::from(10_u64),
+                    tx_ordinal: 1,
+                    replicated_table_schema: schema.clone(),
+                    table_row: TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("streamed".to_owned()),
+                    ]),
+                })],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                harness.store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
+                Some(metadata)
+            );
+        }
+        for name in &names {
+            let rows = query_rows(
+                &harness.sql,
+                &format!("select \"id\", \"name\" from \"{name}\" order by \"id\""),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    vec![serde_json::json!("1"), serde_json::json!("copied")],
+                    vec![serde_json::json!("2"), serde_json::json!("streamed")]
+                ]
+            );
+        }
+
+        let schema = &cases[0].0;
+        invoke_write_events(
+            &restarted,
+            WriteEventsDurability::RequireDurable,
+            truncate_replay_events(schema),
+        )
+        .await
+        .unwrap();
+        let rows = query_rows(&harness.sql, &format!("select \"name\" from \"{}\"", names[0]))
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![vec![serde_json::json!("after")]]);
+
+        drop_table_for_copy(&restarted, schema).await.unwrap();
+        assert!(!harness.sql.table_exists(&names[0]).await.unwrap());
+        harness.store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+        harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
+        write_table_copy_and_wait(
+            &restarted,
+            schema,
+            vec![TableRow::new(vec![Cell::I32(3), Cell::String("recopied".to_owned())])],
+        )
+        .await;
+        restarted.shutdown().await.unwrap();
+        let rows = query_rows(&harness.sql, &format!("select \"name\" from \"{}\"", names[0]))
+            .await
+            .unwrap();
+        assert_eq!(rows, vec![vec![serde_json::json!("recopied")]]);
+        for name in names.iter().skip(1) {
+            let rows = query_rows(
+                &harness.sql,
+                &format!("select \"name\" from \"{name}\" order by \"id\""),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                vec![vec![serde_json::json!("copied")], vec![serde_json::json!("streamed")]]
+            );
+        }
+    })
+    .await;
+}
+
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn create_table_with_default_expressions() {
@@ -436,7 +577,9 @@ async fn fresh_generation_rejects_existing_table_without_destination_metadata() 
         assert_eq!(error.description(), Some("Snowflake destination table already exists"));
         let detail = error.detail().expect("ownership rejection should explain the conflict");
         assert!(detail.contains(&sf_table));
-        assert!(detail.contains("no destination metadata proving ownership"));
+        assert!(detail.contains("is not registered to this source table"));
+        assert!(detail.contains("resynchronize that table first"));
+        assert!(detail.contains("deletes previous destination data and history"));
         assert!(second.store.get_destination_table_metadata(table_id).await.unwrap().is_none());
 
         let rows = query_rows(
@@ -448,6 +591,174 @@ async fn fresh_generation_rejects_existing_table_without_destination_metadata() 
         assert_eq!(rows, vec![vec![serde_json::json!("1"), serde_json::json!("retained")]]);
     })
     .await;
+}
+
+/// Exercises rename-swap reset, collision rejection, and ordered recovery with
+/// either cached channels or a fresh client sharing the persisted metadata.
+async fn resync_after_source_name_swap(cold_client: bool) {
+    let harness = TestHarness::new();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let original_name = format!("orders{suffix}");
+    let replacement_name = format!("ordersnew{suffix}");
+    let archived_name = format!("ordersold{suffix}");
+    let original_destination = snowflake_table_name("public", &original_name);
+    let replacement_destination = snowflake_table_name("public", &replacement_name);
+    let archived_destination = snowflake_table_name("public", &archived_name);
+    let original = make_table_schema(2201, "public", &original_name);
+    let replacement = make_table_schema(2202, "public", &replacement_name);
+    let original_id = original.id;
+    let replacement_id = replacement.id;
+    harness.store.store_table_schema(original.clone()).await.unwrap();
+    harness.store.store_table_schema(replacement.clone()).await.unwrap();
+
+    with_table_cleanup(
+        &harness.sql,
+        &[&original_destination, &replacement_destination, &archived_destination],
+        || async {
+            let original_row = TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned())]);
+            let replacement_row =
+                TableRow::new(vec![Cell::I32(2), Cell::String("replacement".to_owned())]);
+            write_table_copy_and_wait(
+                &harness.destination,
+                &ReplicatedTableSchema::all(Arc::new(original.clone())),
+                vec![original_row.clone()],
+            )
+            .await;
+            initialize_empty_table(
+                &harness.destination,
+                &ReplicatedTableSchema::all(Arc::new(replacement.clone())),
+            )
+            .await;
+
+            let mut archived = original;
+            archived.name = TableName::new("public".to_owned(), archived_name);
+            archived.snapshot_id = test_snapshot_id(100, 101);
+            let mut replacement_renamed = replacement;
+            replacement_renamed.name = TableName::new("public".to_owned(), original_name);
+            replacement_renamed.snapshot_id = test_snapshot_id(100, 102);
+            harness.store.store_table_schema(archived.clone()).await.unwrap();
+            harness.store.store_table_schema(replacement_renamed.clone()).await.unwrap();
+            let archived = ReplicatedTableSchema::all(Arc::new(archived));
+            let replacement_renamed = ReplicatedTableSchema::all(Arc::new(replacement_renamed));
+            invoke_write_events(
+                &harness.destination,
+                WriteEventsDurability::RequireDurable,
+                vec![
+                    Event::Relation(RelationEvent { replicated_table_schema: archived.clone() }),
+                    Event::Relation(RelationEvent {
+                        replicated_table_schema: replacement_renamed.clone(),
+                    }),
+                ],
+            )
+            .await
+            .unwrap();
+
+            let restarted = if cold_client {
+                etl::destination::Destination::shutdown(&harness.destination).await.unwrap();
+                Some(Destination::new(Client::new(build_auth(), 1), harness.store.clone()))
+            } else {
+                None
+            };
+            let destination = restarted.as_ref().unwrap_or(&harness.destination);
+
+            let metadata = harness
+                .store
+                .get_destination_table_metadata(replacement_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(metadata.table_id(), replacement_destination);
+            assert_eq!(metadata.snapshot_id(), replacement_renamed.inner().snapshot_id);
+
+            drop_table_for_copy(destination, &replacement_renamed).await.unwrap();
+            assert!(harness.sql.table_exists(&original_destination).await.unwrap());
+            assert!(!harness.sql.table_exists(&replacement_destination).await.unwrap());
+
+            // Match table sync: discard copy state and fetch the current source
+            // schema before trying to copy under the new destination name.
+            harness.store.prepare_table_state_for_copy(replacement_id).await.unwrap();
+            let mut replacement_copy = replacement_renamed.inner().clone();
+            replacement_copy.snapshot_id = SnapshotId::initial();
+            harness.store.store_table_schema(replacement_copy.clone()).await.unwrap();
+            let replacement_copy = ReplicatedTableSchema::all(Arc::new(replacement_copy));
+            let error = invoke_write_table_rows(
+                destination,
+                &replacement_copy,
+                vec![replacement_row.clone()],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+            assert!(
+                harness
+                    .store
+                    .get_destination_table_metadata(replacement_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let original_fqn = format!(
+                "\"{}\".\"{}\".\"{original_destination}\"",
+                harness.config.database(),
+                harness.config.schema(),
+            );
+            assert_eq!(
+                query_rows(&harness.sql, &format!("select \"id\", \"name\" from {original_fqn}"))
+                    .await
+                    .unwrap(),
+                vec![vec![serde_json::json!("1"), serde_json::json!("kept")]],
+            );
+
+            // Follow the recovery guidance: resync the current owner first,
+            // then retry the replacement once the desired name is available.
+            drop_table_for_copy(destination, &archived).await.unwrap();
+            harness.store.prepare_table_state_for_copy(original_id).await.unwrap();
+            let mut archived_copy = archived.inner().clone();
+            archived_copy.snapshot_id = SnapshotId::initial();
+            harness.store.store_table_schema(archived_copy.clone()).await.unwrap();
+            let archived_copy = ReplicatedTableSchema::all(Arc::new(archived_copy));
+            write_table_copy_and_wait(destination, &archived_copy, vec![original_row]).await;
+            assert!(!harness.sql.table_exists(&original_destination).await.unwrap());
+            assert!(harness.sql.table_exists(&archived_destination).await.unwrap());
+
+            write_table_copy_and_wait(destination, &replacement_copy, vec![replacement_row]).await;
+            etl::destination::Destination::shutdown(destination).await.unwrap();
+            for (table_id, table_name, expected_id, expected_name) in [
+                (original_id, archived_destination.as_str(), "1", "kept"),
+                (replacement_id, original_destination.as_str(), "2", "replacement"),
+            ] {
+                let fqn = format!(
+                    "\"{}\".\"{}\".\"{table_name}\"",
+                    harness.config.database(),
+                    harness.config.schema(),
+                );
+                assert_eq!(
+                    query_rows(&harness.sql, &format!("select \"id\", \"name\" from {fqn}"))
+                        .await
+                        .unwrap(),
+                    vec![vec![serde_json::json!(expected_id), serde_json::json!(expected_name)]],
+                );
+                let metadata =
+                    harness.store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+                assert_eq!(metadata.table_id(), table_name);
+            }
+        },
+    )
+    .await;
+}
+
+/// Cached channels must not cause reset to delete another source's table.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn resync_after_source_name_swap_with_cached_channels() {
+    resync_after_source_name_swap(false).await;
+}
+
+/// A restarted client must resolve both deletion targets from stored metadata.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn resync_after_source_name_swap_with_cold_client() {
+    resync_after_source_name_swap(true).await;
 }
 
 #[tokio::test]
@@ -1744,4 +2055,321 @@ async fn schema_evolution_interleaved_ddl_dml() {
         assert!(!columns.iter().any(|column| column == "name"), "name column should be renamed");
     })
     .await;
+}
+
+/// Builds a synthetic row with the same scalar in each JSON column.
+fn json_null_row(id: i32, scalar: Cell, array: Cell) -> TableRow {
+    TableRow::new(vec![Cell::I32(id), scalar.clone(), scalar.clone(), scalar, array])
+}
+
+/// Compares provider predicates and JSON values with the source null kinds.
+fn assert_json_null_observation(row: &Value, scalar: &Cell, array: &Cell) {
+    for label in ["json", "jsonb", "defaulted"] {
+        let observed = &row[label];
+        match scalar {
+            Cell::Null => {
+                assert_eq!(observed["sql_null"], true);
+                assert!(observed["json_null"].is_null());
+                assert!(observed["json"].is_null());
+            }
+            Cell::Json(value) => {
+                assert_eq!(observed["sql_null"], false);
+                assert_eq!(observed["json_null"], value.is_null());
+                assert_eq!(
+                    serde_json::from_str::<Value>(observed["json"].as_str().unwrap()).unwrap(),
+                    *value
+                );
+            }
+            _ => unreachable!("test scalar fixtures contain only SQL NULL or JSON"),
+        }
+    }
+    match array {
+        Cell::Null => assert_eq!(row["array"]["sql_null"], true),
+        Cell::Array(ArrayCell::Json(elements)) => {
+            assert_eq!(row["array"]["sql_null"], false);
+            assert_eq!(row["array"]["length"], elements.len());
+            assert_eq!(
+                serde_json::from_str::<Value>(row["array"]["json"].as_str().unwrap()).unwrap(),
+                json!(elements)
+            );
+            for (index, element) in elements.iter().enumerate() {
+                assert_eq!(row["array"]["elements"][index]["sql_null"], false);
+                assert_eq!(
+                    row["array"]["elements"][index]["json_null"],
+                    element.as_ref().unwrap().is_null()
+                );
+            }
+        }
+        _ => unreachable!("test array fixtures contain only SQL NULL or JSON arrays"),
+    }
+}
+
+/// Preserves scalar null kinds after migrating legacy defaults, across copy
+/// and restart, and rejects SQL-null JSON-array elements before ingestion.
+///
+/// Uses one synthetic table, two small writes and one classification readback.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials; bounded JSON-null regression"]
+async fn json_null_preservation_and_legacy_defaults() {
+    let harness = TestHarness::new();
+    let src_table = format!("ETL_JSON_NULL_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
+    let sf_table = snowflake_table_name("public", &src_table);
+    let table_schema = TableSchema::new(
+        TableId::new(19001),
+        TableName::new("public".to_owned(), src_table),
+        vec![
+            ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("j".to_owned(), Type::JSON, -1, 2, true),
+            ColumnSchema::new("jb".to_owned(), Type::JSONB, -1, 3, true),
+            ColumnSchema::new("jd".to_owned(), Type::JSONB, -1, 4, true)
+                .with_default_expression(r#"'{"default":true}'::jsonb"#.to_owned()),
+            ColumnSchema::new("a".to_owned(), Type::JSONB_ARRAY, -1, 5, true),
+        ],
+    );
+    let schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+    harness.store.store_table_schema(table_schema).await.unwrap();
+    let restarted = Destination::new(Client::new(build_auth(), 1), harness.store.clone());
+    let fqn = format!(
+        "\"{}\".\"{}\".\"{sf_table}\"",
+        harness.config.database().replace('"', "\"\""),
+        harness.config.schema().replace('"', "\"\"")
+    );
+
+    let test = async {
+        // Reproduce the schema created by earlier ETL versions, including
+        // ownership metadata required to reopen an existing table.
+        harness
+            .sql
+            .execute_ddl(&format!(
+                r#"create table {fqn} (
+                "id" integer, "j" variant, "jb" variant,
+                "jd" variant default parse_json('{{"default":true}}'), "a" array,
+                "_cdc_operation" varchar not null, "_cdc_sequence_number" varchar not null
+            )"#
+            ))
+            .await
+            .unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(
+                schema.id(),
+                DestinationTableMetadata::new_applied(
+                    sf_table.clone(),
+                    SnapshotId::initial(),
+                    schema.replication_mask().clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let cases = [
+            (None, None),
+            (Some(json!(null)), Some(vec![json!(null)])),
+            (Some(json!("null")), Some(vec![json!("null")])),
+            (
+                Some(json!({"nested": null})),
+                Some(vec![json!(null), json!({"nested": null}), json!("null")]),
+            ),
+            (Some(json!([null])), Some(vec![])),
+            (Some(json!({"ordinary": 1})), Some(vec![json!({"ordinary": 1})])),
+            (Some(json!(42)), Some(vec![json!(42)])),
+            (Some(json!(true)), Some(vec![json!(true)])),
+            (Some(json!("ordinary")), Some(vec![json!("ordinary")])),
+        ]
+        .map(|(scalar, array)| {
+            (
+                scalar.map_or(Cell::Null, Cell::Json),
+                array.map_or(Cell::Null, |elements| {
+                    Cell::Array(ArrayCell::Json(elements.into_iter().map(Some).collect()))
+                }),
+            )
+        });
+        let rows = cases
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (scalar, array))| {
+                json_null_row(i32::try_from(index).unwrap() + 1, scalar, array)
+            })
+            .collect();
+        write_table_copy_and_wait(&harness.destination, &schema, rows).await;
+        let invalid_row = json_null_row(
+            11,
+            Cell::Null,
+            Cell::Array(ArrayCell::Json(vec![Some(Value::Null), None])),
+        );
+        let error =
+            invoke_write_table_rows(&harness.destination, &schema, vec![invalid_row.clone()])
+                .await
+                .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        etl::destination::Destination::shutdown(&harness.destination).await.unwrap();
+
+        // A fresh client must validate the already migrated schema again.
+        // Neither failed inserts nor updates may advance the durable offset.
+        for event in [
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(9_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                table_row: invalid_row.clone(),
+            }),
+            Event::Update(UpdateEvent {
+                commit_lsn: PgLsn::from(9_u64),
+                tx_ordinal: 2,
+                replicated_table_schema: schema.clone(),
+                updated_table_row: UpdatedTableRow::Full(invalid_row),
+                old_table_row: None,
+            }),
+        ] {
+            let error =
+                invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, vec![event])
+                    .await
+                    .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        }
+        assert_eq!(
+            restarted.fetch_committed_offset(schema.id()).await.unwrap(),
+            Some(first_copy_request_offset())
+        );
+        let commit_lsn = PgLsn::from(10_u64);
+        let cdc_cases = [
+            ("insert", Cell::Null, Cell::Null),
+            ("update", cases[1].0.clone(), cases[1].1.clone()),
+            ("update", Cell::Json(json!({"updated": true})), Cell::Array(ArrayCell::Json(vec![]))),
+            ("update", Cell::Null, Cell::Null),
+            ("delete", Cell::Null, Cell::Null),
+        ];
+        let events = cdc_cases
+            .iter()
+            .enumerate()
+            .map(|(index, (operation, scalar, array))| {
+                let tx_ordinal = u64::try_from(index).unwrap() + 1;
+                let row = json_null_row(10, scalar.clone(), array.clone());
+                match *operation {
+                    "insert" => Event::Insert(InsertEvent {
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: schema.clone(),
+                        table_row: row,
+                    }),
+                    "update" => Event::Update(UpdateEvent {
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: schema.clone(),
+                        updated_table_row: UpdatedTableRow::Full(row),
+                        old_table_row: None,
+                    }),
+                    "delete" => Event::Delete(DeleteEvent {
+                        commit_lsn,
+                        tx_ordinal,
+                        replicated_table_schema: schema.clone(),
+                        old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(10)]))),
+                    }),
+                    _ => unreachable!("CDC fixtures contain only insert, update and delete"),
+                }
+            })
+            .collect();
+        let status = invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, events)
+            .await
+            .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        etl::destination::Destination::shutdown(&restarted).await.unwrap();
+        let scalar_fields = [("json", "j"), ("jsonb", "jb"), ("defaulted", "jd")]
+            .into_iter()
+            .map(|(label, column)| {
+                format!(
+                    "'{label}', object_construct_keep_null('sql_null', \"{column}\" is null, \
+                     'json_null', is_null_value(\"{column}\"), 'type', typeof(\"{column}\"), \
+                     'json', to_json(\"{column}\"))"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let elements = (0..3)
+            .map(|index| {
+                format!(
+                    "object_construct_keep_null('sql_null', \"a\"[{index}] is null, 'json_null', \
+                     is_null_value(\"a\"[{index}]))"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            r#"
+                with samples as (
+                    select 'stream' as origin, "id", "_cdc_operation", "_cdc_sequence_number", "j", "jb", "jd", "a" from {fqn}
+                    union all
+                    select 'sql_control', 0, 'control', '0', null::variant, parse_json('null'), parse_json('"null"'), array_construct(null, parse_json('null'), 'null')
+                )
+                select object_construct_keep_null(
+                    'origin', origin, 'id', "id", 'operation', "_cdc_operation", 'sequence', "_cdc_sequence_number",
+                    {scalar_fields},
+                    'array', object_construct_keep_null('sql_null', "a" is null, 'length', array_size("a"), 'json', to_json("a"), 'elements', array_construct({elements}))
+                ) from samples order by origin, "id", "_cdc_sequence_number"
+            "#
+        );
+        let rows = query_rows(&harness.sql, &query).await.unwrap();
+        let observations: Vec<Value> = rows
+            .into_iter()
+            .map(|row| {
+                let value = row.into_iter().next().unwrap();
+                match value {
+                    Value::String(text) => serde_json::from_str(&text).unwrap(),
+                    value => value,
+                }
+            })
+            .collect();
+        assert_eq!(observations.len(), cases.len() + cdc_cases.len() + 1);
+        let control = observations.iter().find(|row| row["origin"] == "sql_control").unwrap();
+        assert_eq!(control["json"]["sql_null"], true);
+        assert_eq!(control["jsonb"]["json_null"], true);
+        assert_eq!(control["defaulted"]["type"], "VARCHAR");
+        assert_eq!(control["array"]["elements"][0]["sql_null"], true);
+        assert_eq!(control["array"]["elements"][1]["json_null"], true);
+        let streamed: Vec<_> =
+            observations.iter().filter(|row| row["origin"] == "stream").collect();
+        assert_eq!(streamed.len(), cases.len() + cdc_cases.len());
+        for (index, (scalar, array)) in cases.iter().enumerate() {
+            let row = streamed[index];
+            assert_eq!(row["id"], i32::try_from(index).unwrap() + 1);
+            assert_eq!(row["operation"], "insert");
+            assert_eq!(row["sequence"], OffsetToken::zero().as_ref());
+            assert_json_null_observation(row, scalar, array);
+        }
+        for (index, (row, (operation, scalar, array))) in
+            streamed[cases.len()..].iter().zip(&cdc_cases).enumerate()
+        {
+            assert_eq!(row["id"], 10);
+            assert_eq!(row["operation"], *operation);
+            assert_eq!(
+                row["sequence"],
+                OffsetToken::new(commit_lsn, u64::try_from(index).unwrap() + 1).as_ref()
+            );
+            assert_json_null_observation(row, scalar, array);
+        }
+    };
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(120), test).await.unwrap();
+    })
+    .catch_unwind()
+    .await;
+
+    // Cleanup is attempted after success, panic, or the bounded probe timeout.
+    let mut shutdown_ok = true;
+    for destination in [&harness.destination, &restarted] {
+        shutdown_ok &= tokio::time::timeout(
+            Duration::from_secs(15),
+            etl::destination::Destination::shutdown(destination),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+    }
+    let dropped = harness.sql.drop_table(&sf_table).await;
+    let absent = harness.sql.table_exists(&sf_table).await.map(|exists| !exists);
+    assert!(shutdown_ok);
+    assert!(dropped.is_ok());
+    assert!(absent.unwrap());
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
 }

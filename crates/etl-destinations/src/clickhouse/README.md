@@ -63,7 +63,21 @@ replicator's `destination.engine` setting:
 
 Table names are `<schema>_<table>` with underscores in either part doubled:
 `public.orders` → `public_orders`, `my_schema.t` → `my__schema_t`.
-Schema and table names cannot start or end with `_`, or contain `"` or `;`.
+If either component starts or ends with `_`, names containing only ASCII
+letters (either case), digits, and underscores use
+`_SSTT_<schema>_<table>`, where `SS` and `TT` are the respective byte lengths,
+each written as two decimal digits. For example,
+`_public.orders` → `_0706__public_orders` and
+`Public._Orders` → `_0607_Public__Orders`. The lengths make the boundary
+unambiguous while keeping the original names readable. Each component must fit
+in 99 bytes; unsupported characters or lengths produce a validation error.
+
+There is no fallback encoding. Existing names without boundary underscores
+retain their original mapping. Schema and table names cannot contain `"` or `;`.
+
+ClickHouse enforces a database-dependent table-name length limit, including
+room for the `__current` view suffix. Names that exceed the server's limit
+return its native error; ETL does not truncate or hash them.
 
 ### ReplacingMergeTree (default)
 
@@ -205,6 +219,36 @@ For an exact current-state baseline, reset the table instead: ETL drops and
 recreates it and re-copies the source. **This discards the event history**,
 so export it first if you need it. `TRUNCATE` on its own neither
 migrates the layout nor resets ETL checkpoints.
+
+### `timestamp` columns
+
+ETL maps PostgreSQL `timestamp` and `timestamp[]` to `DateTime64(6, 'UTC')`.
+Tables created by earlier versions use `DateTime64(6)`, which ClickHouse
+renders in the reader's server or session time zone, and ETL now rejects them
+with a column type mismatch. The stored values are already UTC, so changing
+the column's time zone fixes the table without rewriting data or resetting ETL
+state:
+
+1. Stop all writers to the table.
+2. Change every `timestamp` column, keeping any `Nullable` wrapper:
+
+   ```sql
+   alter table default.public_orders
+       modify column created_at DateTime64(6, 'UTC'),
+       modify column delivery_windows Array(Nullable(DateTime64(6, 'UTC')));
+   ```
+
+3. For `ReplacingMergeTree`, recreate the `__current` view, which keeps the
+   column types it was created with. `show create table` includes that column
+   list, so rebuild the view from its query alone:
+
+   ```sql
+   select as_select from system.tables
+   where database = 'default' and name = 'public_orders__current';
+   -- Run the returned query as:
+   create or replace view default.public_orders__current as <as_select>;
+   ```
+4. Restart the pipeline.
 
 ## Connection notes
 

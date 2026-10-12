@@ -231,14 +231,29 @@ destination. Drop the conflicting object or use another database.
 - A replicated `TRUNCATE` clears the destination table in either engine,
   including `MergeTree` event history.
 - A source type change that changes the mapped ClickHouse type, such as
-  `integer` to `bigint` or `timestamp` to `timestamptz`, fails the schema change
-  before ETL alters anything. Replication stops until you resynchronize the
-  table. Changes that keep the ClickHouse type, such as a longer `varchar`,
-  continue without DDL. Every insert names its columns and types, so ClickHouse
-  also rejects writes to a column whose type changed outside ETL.
-- ClickHouse `Array` columns are non-nullable. A top-level PostgreSQL `NULL`
-  array cannot be encoded in RowBinary and fails the write; empty arrays and
-  `NULL` array elements remain supported.
+  `integer` to `bigint`, fails the schema change before ETL alters anything, as
+  does `timestamp` to `timestamptz`, which shares a ClickHouse type but
+  converts existing values through the session time zone. Replication stops
+  until you resynchronize the table. Changes that keep the ClickHouse type,
+  such as a longer `varchar`, continue without DDL. Every insert names its
+  columns and types, so ClickHouse also rejects writes to a column whose type
+  changed outside ETL.
+- PostgreSQL `timestamp` and `timestamptz` columns, and their arrays, map to
+  `DateTime64(6, 'UTC')`. A `timestamp` value reads back as its source
+  wall-clock value in any server or session time zone. Tables created by
+  earlier ETL versions use `DateTime64(6)` for `timestamp` and fail with a
+  column type mismatch; follow the upgrade steps in the ClickHouse destination
+  guide.
+- ClickHouse `Date32` and `DateTime64` columns support 1900-01-01 through
+  2299-12-31. ETL writes dates and timestamps outside that range exactly, and
+  ClickHouse stores them, but reads them back clamped to the nearest limit,
+  without an error. For example, `1800-06-15` reads back as `1900-01-01`.
+  Filters match neither the source value nor the clamped one. Keep replicated
+  dates and timestamps inside this range.
+- ClickHouse `Array` columns are non-nullable. As with BigQuery, ETL stores a
+  top-level PostgreSQL `NULL` array as an empty array, so the two source
+  values are indistinguishable in the destination. `NULL` array elements are
+  preserved.
 - ETL sends any value RowBinary can encode; ClickHouse applies its own
   conversion and rejection rules.
 - You may add `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` columns to a table ETL
@@ -278,6 +293,29 @@ This status applies to the managed service, not local or self-hosted use.
 
 Snowflake uses direct Snowpipe Streaming and key-pair authentication.
 
+### Resynchronizing after a source table rename
+
+A source rename preserves the recorded destination table name during streaming.
+Resynchronization drops that recorded table, then creates a fresh destination
+from the current source name. If that name is already occupied, ETL fails the
+copy instead of writing into another table's destination.
+
+For example, suppose `public.orders` is renamed to `public.ordersold`, and
+`public.ordersnew` is renamed to `public.orders`. The first table still owns
+`PUBLIC_ORDERS`, so resynchronizing the second table fails when it tries to
+create `PUBLIC_ORDERS`.
+
+To recover, resynchronize `public.ordersold` first and wait for it to finish.
+Provided `PUBLIC_ORDERSOLD` is available, this rebuilds the first table there
+and frees `PUBLIC_ORDERS`. Then retry resynchronizing `public.orders`.
+Resynchronization deletes previous destination data and CDC history. Existing
+source rows are copied again only when initial copying is enabled. Update any
+queries that depend on the first table's previous destination name.
+
+If the existing destination must remain unchanged, use a new pipeline targeting
+an unused destination schema. Do not manually delete or rename a destination
+that another replicated table still uses.
+
 ### Limitations
 
 - Setup requires a Snowflake user and role with the documented warehouse,
@@ -290,6 +328,20 @@ Snowflake uses direct Snowpipe Streaming and key-pair authentication.
   translate safely at table creation or column addition are applied. Later
   existing-column default changes are skipped because Snowflake default
   provenance cannot be inferred safely.
+- `json` and `jsonb` use native `VARIANT` storage and preserve SQL `NULL`
+  separately from JSON `null`. ETL omits destination defaults for these columns
+  and removes existing defaults before opening or refreshing their streaming
+  channels. PostgreSQL still applies source defaults before replication. If a
+  destination default cannot be removed, channel setup fails before writing.
+  Existing destination columns mapped from `json` or `jsonb` must have physical
+  type `VARIANT`; incompatible types are rejected during channel setup.
+- PostgreSQL `json[]` and `jsonb[]` arrays containing SQL `NULL` elements are
+  rejected during encoding because the ingestion format cannot distinguish
+  them from JSON `null` elements. JSON `null` elements, empty arrays, and a
+  whole SQL `NULL` array are supported.
+- Earlier versions could merge SQL `NULL` and JSON `null`. The encoding fix
+  does not repair existing rows; restoring that distinction requires the
+  source data or a fresh copy.
 - Validate channel recovery, committed offsets, and account-specific resource
   limits before production use.
 

@@ -13,7 +13,7 @@ use serde::{
 
 use crate::snowflake::{
     Error, Result,
-    schema::{CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN},
+    schema::{CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN, is_json_type},
 };
 
 /// CDC operation type appended to every row sent via Snowpipe Streaming.
@@ -33,6 +33,46 @@ impl CdcOperation {
             Self::Delete => "delete",
         }
     }
+}
+
+impl fmt::Display for CdcOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Byte sink that counts what is written and stores nothing.
+struct CountingSink(usize);
+
+impl Write for CountingSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0 += data.len();
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialized NDJSON length of one row, including the newline, without
+/// allocating.
+pub(crate) fn serialized_row_len(
+    cols: &[ColumnSchema],
+    row: &TableRow,
+    cdc: CdcMeta<'_>,
+) -> Result<usize> {
+    let mut sink = CountingSink(0);
+    serialize_row(&mut sink, cols, row, cdc)?;
+    Ok(sink.0)
+}
+
+/// Serialized JSON length of one cell value, without allocating.
+pub(crate) fn serialized_cell_len(cell: &Cell) -> Result<usize> {
+    let mut sink = CountingSink(0);
+    serde_json::to_writer(&mut sink, &CellSerializer(cell))
+        .map_err(|e| Error::Encoding(e.to_string()))?;
+    Ok(sink.0)
 }
 
 /// CDC metadata attached to every row in a batch.
@@ -67,6 +107,19 @@ pub(crate) fn serialize_row(
         )));
     }
 
+    // JSON has only one null token, so an array element cannot encode SQL NULL
+    // separately from JSON null. Reject before writing any part of the row.
+    for (column, cell) in cols.iter().zip(cells) {
+        if let Cell::Array(ArrayCell::Json(elements)) = cell
+            && let Some(element_index) = elements.iter().position(Option::is_none)
+        {
+            return Err(Error::NullJsonArrayElement {
+                column_name: column.name.clone(),
+                element_index,
+            });
+        }
+    }
+
     let serializable =
         RowSerializer { cols, cells, operation: cdc.operation.as_str(), sequence: cdc.sequence };
     serde_json::to_writer(&mut *writer, &serializable)
@@ -84,8 +137,14 @@ struct RowSerializer<'a> {
 
 impl Serialize for RowSerializer<'_> {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
-        let mut map = ser.serialize_map(Some(self.cols.len() + 2))?;
+        let mut map = ser.serialize_map(None)?;
         for (col, cell) in self.cols.iter().zip(self.cells) {
+            // On the default pipe an omitted VARIANT field is SQL NULL, while
+            // an explicit null token is JSON null. Channel setup removes the
+            // column defaults that would otherwise override this omission.
+            if is_json_type(&col.typ) && matches!(cell, Cell::Null) {
+                continue;
+            }
             map.serialize_entry(col.name.as_str(), &CellSerializer(cell))?;
         }
         map.serialize_entry(CDC_OPERATION_COLUMN, self.operation)?;
@@ -306,6 +365,95 @@ mod tests {
         Ok(map.get("v").unwrap().clone())
     }
 
+    /// Serializes a JSON cell while checking row sizing and CDC metadata.
+    fn serialize_json_cell(typ: Type, cell: Cell, operation: CdcOperation) -> Value {
+        let cols = [ColumnSchema::new("v".to_owned(), typ, -1, 1, true)];
+        let row = TableRow::new(vec![cell]);
+        let cdc = CdcMeta::new(operation, "0");
+        let mut bytes = Vec::new();
+        serialize_row(&mut bytes, &cols, &row, cdc).unwrap();
+
+        assert_eq!(serialized_row_len(&cols, &row, cdc).unwrap(), bytes.len());
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let document: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(document.get(CDC_OPERATION_COLUMN), Some(&json!(operation.as_str())));
+        assert_eq!(document.get(CDC_SEQUENCE_COLUMN), Some(&json!("0")));
+        document
+    }
+
+    /// SQL NULL omits a scalar JSON field; JSON null remains an explicit token.
+    #[test]
+    fn scalar_json_null_kinds_are_distinct() {
+        for typ in [Type::JSON, Type::JSONB] {
+            for operation in [CdcOperation::Insert, CdcOperation::Update, CdcOperation::Delete] {
+                let sql_null = serialize_json_cell(typ.clone(), Cell::Null, operation);
+                assert_eq!(sql_null.get("v"), None);
+                assert_eq!(sql_null.as_object().unwrap().len(), 2);
+                for expected in [
+                    Value::Null,
+                    json!("null"),
+                    json!({"nested": null}),
+                    json!([null]),
+                    json!({"ordinary": 1}),
+                    json!(42),
+                    json!(true),
+                ] {
+                    let actual =
+                        serialize_json_cell(typ.clone(), Cell::Json(expected.clone()), operation);
+                    assert_eq!(actual.get("v"), Some(&expected));
+                }
+            }
+        }
+    }
+
+    /// Whole SQL-null arrays, empty arrays and JSON-null elements remain valid.
+    #[test]
+    fn json_arrays_preserve_supported_null_shapes() {
+        for typ in [Type::JSON_ARRAY, Type::JSONB_ARRAY] {
+            for (cell, expected) in [
+                (Cell::Null, Value::Null),
+                (Cell::Array(ArrayCell::Json(vec![])), json!([])),
+                (
+                    Cell::Array(ArrayCell::Json(vec![
+                        Some(Value::Null),
+                        Some(json!("null")),
+                        Some(json!({"nested": null})),
+                    ])),
+                    json!([null, "null", {"nested": null}]),
+                ),
+            ] {
+                let actual = serialize_json_cell(typ.clone(), cell, CdcOperation::Insert);
+                assert_eq!(actual.get("v"), Some(&expected));
+            }
+        }
+    }
+
+    /// Invalid JSON-array elements fail before any bytes reach the writer.
+    #[test]
+    fn json_arrays_reject_sql_null_elements() {
+        for typ in [Type::JSON_ARRAY, Type::JSONB_ARRAY] {
+            for operation in [CdcOperation::Insert, CdcOperation::Update, CdcOperation::Delete] {
+                for elements in [vec![None], vec![Some(Value::Null), None]] {
+                    let element_index = elements.len() - 1;
+                    let cols = [ColumnSchema::new("payload".to_owned(), typ.clone(), -1, 1, true)];
+                    let row = TableRow::new(vec![Cell::Array(ArrayCell::Json(elements))]);
+                    let cdc = CdcMeta::new(operation, "0");
+                    let mut bytes = Vec::new();
+                    let error = serialize_row(&mut bytes, &cols, &row, cdc).unwrap_err();
+                    assert!(
+                        matches!(error, Error::NullJsonArrayElement { column_name, element_index: index }
+                        if column_name == "payload" && index == element_index)
+                    );
+                    assert!(bytes.is_empty());
+                    assert!(matches!(
+                        serialized_row_len(&cols, &row, cdc),
+                        Err(Error::NullJsonArrayElement { .. })
+                    ));
+                }
+            }
+        }
+    }
+
     #[test]
     fn cell_serialization_ok() {
         let d = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
@@ -389,7 +537,10 @@ mod tests {
                 Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::nil())])),
                 json!(["00000000-0000-0000-0000-000000000000"]),
             ),
-            (Cell::Array(ArrayCell::Json(vec![Some(json!(1)), None])), json!([1, null])),
+            (
+                Cell::Array(ArrayCell::Json(vec![Some(json!(1)), Some(Value::Null)])),
+                json!([1, null]),
+            ),
             (
                 Cell::Array(ArrayCell::F64(vec![Some(1.5), None, Some(2.5)])),
                 json!([1.5, null, 2.5]),

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use etl::{
     data::{Cell, TableRow},
-    schema::{ColumnSchema, Type},
+    schema::{ColumnSchema, TableId, Type},
 };
 use etl_destinations::snowflake::{
     AuthManager, CdcMeta, CdcOperation, Config, Error, HttpExchanger, OffsetToken,
@@ -31,9 +31,11 @@ fn build_clients(
 }
 
 fn build_batch(cols: &[ColumnSchema], rows: &[TableRow], offset: &OffsetToken) -> RowBatch {
-    let mut builder = RowBatchBuilder::new();
+    let mut builder = RowBatchBuilder::new(TableId::new(1));
     for row in rows {
-        builder.push_row(cols, row, CdcMeta::new(CdcOperation::Insert, "0"), offset).unwrap();
+        let completed =
+            builder.push_row(cols, row, CdcMeta::new(CdcOperation::Insert, "0"), offset).unwrap();
+        assert!(completed.is_empty(), "test rows must fit one request");
     }
     builder.finish().unwrap().into_iter().next().unwrap()
 }
