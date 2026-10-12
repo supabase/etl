@@ -254,6 +254,16 @@ npm run smoke:docs
 For a manual preview of the build, run `npm run preview` and open the URL
 printed by the server.
 
+For compatible dependency updates, run `npm update` from `site/`, then verify
+`npm ci` and the build and smoke checks above. Raise the `next` and
+`eslint-config-next` minimum versions together when applying a security fix.
+Commit both `package.json` and the generated `package-lock.json`.
+
+The `mdast-util-to-markdown` override stays at 2.1.2 because 2.2.0 causes
+recursive Markdown serialization and build-time stack overflows with
+Fumadocs 16.14.0. Remove the override only after a compatible Fumadocs update
+passes the build and smoke checks.
+
 ## Troubleshooting
 
 - Nothing listens on 5430: run `cargo x init` (or `SKIP_DOCKER=1` with
