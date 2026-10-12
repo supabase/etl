@@ -861,12 +861,6 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // Simulate an interrupted truncate that already created `test_users_1`
-    // without the table options used by the restarted pipeline. BigQuery cannot
-    // replace it with a different partitioning kind, so recovery must preserve
-    // it and create the next unused generation.
-    bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
-
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let table_options = pipeline_table_options(
@@ -906,6 +900,20 @@ async fn table_truncate_with_batching() {
 
     users_sync_complete_notify.notified().await;
     orders_sync_complete_notify.notified().await;
+
+    let initial_metadata = store
+        .get_destination_table_metadata(database_schema.users_schema().id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (table_base, sequence) = initial_metadata.table_id().rsplit_once('_').unwrap();
+    let sequence = sequence.parse::<u64>().unwrap();
+
+    // Simulate an interrupted truncate that already created the next generation
+    // without partitioning. Recovery must skip it rather than replace it with
+    // a different partitioning kind.
+    let occupied_table_id = format!("{table_base}_{}", sequence + 1);
+    bigquery_database.create_table(&occupied_table_id, &[("age", "integer")]).await;
 
     // Wait for 4 inserts and 1 truncate per table.
     let events_notify = destination
@@ -950,7 +958,7 @@ async fn table_truncate_with_batching() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(users_metadata.table_id(), "test_users_2");
+    assert_eq!(users_metadata.table_id(), format!("{table_base}_{}", sequence + 2));
 
     // We query BigQuery directly to get the data which tests have inserted,
     // expecting that only the rows after truncation are there.
