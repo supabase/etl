@@ -20,10 +20,11 @@
         # Toolchain and components from rust-toolchain.toml.
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
 
-        # Dev shell toolchain: append editor components instead of replacing the
-        # components listed in rust-toolchain.toml.
+        # Dev shell toolchain: append editor and coverage components instead of
+        # replacing the components listed in rust-toolchain.toml. cargo-llvm-cov
+        # needs llvm-tools, and without rustup the toolchain must provide it.
         devToolchain = rustToolchain.override (old: {
-          extensions = old.extensions ++ [ "rust-src" "rust-analyzer" ];
+          extensions = old.extensions ++ [ "llvm-tools" "rust-src" "rust-analyzer" ];
         });
 
         rustPlatform = pkgs.makeRustPlatform {
@@ -39,6 +40,7 @@
         ];
 
         devTools = with pkgs; [
+          cargo-llvm-cov
           cargo-nextest
           cargo-sort
           postgresql
