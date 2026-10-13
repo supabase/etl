@@ -246,9 +246,10 @@ where
             #[cfg(feature = "failpoints")]
             etl_fail_point(START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP)?;
 
-            // We create the slot with a transaction, since we need to have a
-            // consistent snapshot of the database before copying the schema and
-            // tables.
+            // Lock the table before the slot establishes its snapshot. A data
+            // snapshot does not freeze the relation metadata used by COPY.
+            // Keep the parent transaction's locks until all copy workers
+            // finish.
             //
             // If a slot already exists at this point, we could delete it and
             // try to recover, but it means that the state was somehow reset
@@ -256,8 +257,11 @@ where
             // Slot creation can wait for an unrelated source transaction. The
             // persisted DataSync state makes cancellation restart the copy.
             let ShutdownResult::Ok(created) = with_shutdown!(
-                replication_client
-                    .create_slot_with_transaction(&slot_name, config.replication_slot.failover),
+                replication_client.create_table_copy_slot(
+                    &slot_name,
+                    table_id,
+                    config.replication_slot.failover
+                ),
                 shutdown_token,
             ) else {
                 return Ok(TableSyncResult::Stopped);
@@ -288,15 +292,9 @@ where
             // outside the lifecycle of the pipeline.
             let table_schema = store.store_table_schema(table_schema).await?;
 
-            // Get the names of columns being replicated based on the
-            // publication's column filter. This runs in the copy
-            // transaction, but PostgreSQL's publication-expansion
-            // helpers use catalog access that is not guaranteed to
-            // follow the imported MVCC snapshot. A concurrent publication
-            // change can therefore race this bootstrap read;
-            // mask/schema mismatches fail below, and
-            // later transactional DDL and Relation messages reconcile changes
-            // observed in the WAL.
+            // Read publication column lists from the slot's MVCC snapshot.
+            // ACCESS SHARE permits column-list changes, so current catalog
+            // caches cannot define the copy's bootstrap decoding mask.
             let replicated_column_names = replication_transaction
                 .get_replicated_column_names(table_id, &table_schema, &config.publication_name)
                 .await?;

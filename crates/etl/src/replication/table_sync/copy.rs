@@ -493,7 +493,7 @@ async fn table_copy_worker<D>(
 where
     D: Destination + Clone,
 {
-    let child_replication_transaction =
+    let mut child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
     let mut total_progress = TableCopyProgress::default();
 
@@ -509,7 +509,7 @@ where
 
         let partition_progress = table_copy_partition_rows(
             &activity_handle,
-            &child_replication_transaction,
+            &mut child_replication_transaction,
             &batch_id_generator,
             table_id,
             replicated_table_schema.clone(),
@@ -529,7 +529,7 @@ where
 #[expect(clippy::too_many_arguments)]
 async fn table_copy_partition_rows<D>(
     activity_handle: &ActivityHandle,
-    child_replication_transaction: &PgChildReplicationTransaction<'_>,
+    child_replication_transaction: &mut PgChildReplicationTransaction<'_>,
     batch_id_generator: &TableCopyBatchIdGenerator,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,

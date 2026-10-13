@@ -122,7 +122,7 @@ pub(crate) fn schema_snapshot_id_from_message(
 
 /// The identity metadata emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct IdentityMessage {
+pub struct IdentityMessage {
     /// The primary key columns in key order, expressed as `pg_attribute.attnum`
     /// values.
     pub(crate) primary_key_attnums: Vec<i32>,

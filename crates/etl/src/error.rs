@@ -116,6 +116,9 @@ pub enum ErrorKind {
     DestinationQueryFailed,
     /// A source query failed because a lock could not be acquired in time.
     SourceLockTimeout,
+    /// Initial table copy could not establish or retain its required lock
+    /// protection. Retrying requires a fresh snapshot and a complete recopy.
+    SourceTableCopyLockConflict,
     /// A destination operation exceeded its timeout.
     DestinationTimeout,
     /// A source operation was canceled by Postgres.
@@ -258,6 +261,7 @@ impl ErrorKind {
             ErrorKind::SourceConnectionFailed
             | ErrorKind::DestinationConnectionFailed
             | ErrorKind::SourceLockTimeout
+            | ErrorKind::SourceTableCopyLockConflict
             | ErrorKind::DestinationTimeout
             | ErrorKind::ReplicationFeedbackUnavailable
             | ErrorKind::SourceDatabaseInRecovery

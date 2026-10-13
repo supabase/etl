@@ -34,6 +34,23 @@
 //! [`pipeline::Pipeline::shutdown_and_wait`] combines both steps when no wait
 //! is in progress. See [`pipeline::Pipeline::wait`] for teardown guarantees.
 //!
+//! ## Initial sync and source impact
+//!
+//! Each initial copy holds `ACCESS SHARE` locks and an MVCC snapshot until its
+//! source workers finish. On a primary, ordinary reads and writes remain
+//! compatible, but queued exclusive DDL can block later application queries.
+//! Long copies retain old row versions and WAL; slow destination writes can
+//! extend that retention. Copy lock timeouts bound lock acquisition, not the
+//! lifetime of already-held locks. An interrupted copy can restart from
+//! scratch. `max_slot_wal_keep_size` bounds slot retention at checkpoints; it
+//! does not cap total disk usage or snapshot-related bloat. Slot invalidation
+//! during copy requires a table reset and a fresh initial sync. Stopping the
+//! pipeline releases copy locks after teardown but leaves slots retaining WAL.
+//!
+//! Schedule migrations outside initial copies and monitor source storage and
+//! blocking. See [source operating guidance](https://supabase.github.io/etl/guides/configure-postgres/#planning-long-initial-copies)
+//! and [schema-capture cautions](https://supabase.github.io/etl/explanation/schema-changes/#current-limitations).
+//!
 //! ## Destinations
 //! [`destination::Destination`] trait implementations define where replicated
 //! data should be sent. Destinations are pluggable and can integrate with

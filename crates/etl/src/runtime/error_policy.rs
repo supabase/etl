@@ -125,12 +125,23 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
     }
 }
 
+/// Returns operator guidance for a retryable error of `kind`, if any.
+fn retry_solution(kind: ErrorKind) -> Option<&'static str> {
+    match kind {
+        ErrorKind::SourceTableCopyLockConflict => Some(
+            "Allow conflicting source DDL to finish before retrying the entire table copy with a \
+             fresh snapshot. Schedule DDL outside initial copy if conflicts persist.",
+        ),
+        _ => None,
+    }
+}
+
 /// Builds an [`ErrorHandlingPolicy`] from an [`EtlError`] to determine in a
 /// unified way how errors should be handled.
 ///
 /// The retry directive follows [`EtlError::retryability`] alone. Retry
 /// attempts are bounded, so persistent failures still require intervention.
-/// The [`ErrorKind`] only selects operator guidance for permanent errors.
+/// The [`ErrorKind`] only selects operator guidance.
 pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPolicy {
     // Fault-injection kinds force a directive regardless of classification.
     #[cfg(feature = "failpoints")]
@@ -139,7 +150,9 @@ pub(crate) fn build_error_handling_policy(error: &EtlError) -> ErrorHandlingPoli
     }
 
     match error.retryability() {
-        Retryability::Retryable => ErrorHandlingPolicy::new(RetryDirective::Timed, None),
+        Retryability::Retryable => {
+            ErrorHandlingPolicy::new(RetryDirective::Timed, retry_solution(error.kind()))
+        }
         Retryability::Permanent => ErrorHandlingPolicy::new(
             RetryDirective::Manual,
             Some(manual_solution(permanent_kind(error))),
@@ -166,6 +179,7 @@ mod tests {
             (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
             (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
             (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
+            (ErrorKind::SourceTableCopyLockConflict, RetryDirective::Timed),
             (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
         ] {
             let error = EtlError::from((kind, "Test replication failure"));
