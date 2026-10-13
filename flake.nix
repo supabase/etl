@@ -34,13 +34,6 @@
           protobuf
         ];
 
-        # Nix enables `_FORTIFY_SOURCE` by default; jemalloc's configure runs
-        # detection tests at `-O0`, which turns that into a hard error and
-        # mis-detects `strerror_r` (tikv-jemalloc-sys).
-        jemallocHardening = {
-          hardeningDisable = [ "fortify" ];
-        };
-
         devTools = with pkgs; [
           cargo-nextest
           cargo-sort
@@ -60,7 +53,7 @@
             && base != "node_modules";
         };
 
-        etl-replicator = rustPlatform.buildRustPackage (jemallocHardening // {
+        etl-replicator = rustPlatform.buildRustPackage {
           pname = "etl-replicator";
           version = "0.1.0";
           inherit src;
@@ -93,7 +86,7 @@
             description = "Standalone binary for Supabase ETL Postgres replication pipelines.";
             mainProgram = "etl-replicator";
           };
-        });
+        };
 
       in {
         packages = {
@@ -106,12 +99,17 @@
           program = "${etl-replicator}/bin/etl-replicator";
         };
 
-        devShells.default = pkgs.mkShell (jemallocHardening // {
+        devShells.default = pkgs.mkShell {
+          # Debug builds compile jemalloc's configure probes at -O0, where Nix's
+          # _FORTIFY_SOURCE breaks its -Werror `strerror_r` check
+          # (tikv-jemalloc-sys). Release builds, like the package, are unaffected.
+          hardeningDisable = [ "fortify" ];
+
           packages = [ rustToolchain ] ++ buildDeps ++ devTools;
 
           shellHook = ''
             export RUST_SRC_PATH=${rustToolchain}/lib/rustlib/src/rust/library
           '';
-        });
+        };
       });
 }
