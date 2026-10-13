@@ -20,8 +20,6 @@ pub const SEND_STATUS_UPDATE_FP: &str = "send_status_update_fp";
 pub const STORE_REPLICATION_CHECKPOINT_FP: &str = "store_replication_checkpoint_fp";
 pub const APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP: &str =
     "apply_loop.after_event_batch_dispatch_fp";
-pub const APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP: &str =
-    "apply_loop.pending_flush_before_retry_fp";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///

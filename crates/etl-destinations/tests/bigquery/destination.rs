@@ -50,8 +50,8 @@ fn test_snapshot_id(value: u64) -> SnapshotId {
     SnapshotId::new(lsn, lsn)
 }
 
-/// Parallel copy preserves distinct keys, and replaying a transaction split
-/// across streaming batches preserves its final rows.
+/// Parallel copy and retries preserve distinct keys, and partial transaction
+/// replay cannot restore stale rows or resurrect deleted keys.
 #[tokio::test(flavor = "multi_thread")]
 async fn copy_then_transaction_replay_preserves_current_rows() {
     install_crypto_provider();
@@ -77,10 +77,19 @@ async fn copy_then_transaction_replay_preserves_current_rows() {
     let second_copy_id = TableCopyBatchId::new(attempt_id, 1);
 
     tokio::try_join!(
-        write_table_rows_with_batch_id(&destination, &schema, first_copy_id, first_copy_rows),
+        write_table_rows_with_batch_id(
+            &destination,
+            &schema,
+            first_copy_id,
+            first_copy_rows.clone()
+        ),
         write_table_rows_with_batch_id(&destination, &schema, second_copy_id, second_copy_rows),
     )
     .unwrap();
+
+    write_table_rows_with_batch_id(&destination, &schema, first_copy_id, first_copy_rows)
+        .await
+        .unwrap();
 
     let rows = database.query_table(schema.name().clone()).await.unwrap();
     let users: Vec<BigQueryUser> = parse_bigquery_table_rows(rows);
@@ -133,9 +142,22 @@ async fn copy_then_transaction_replay_preserves_current_rows() {
     // ETL may split one transaction across batches, but can checkpoint only
     // its commit. If checkpointing fails after the writes land, it replays the
     // whole transaction in source order with the same sequence keys.
-    for batch in [first_batch.clone(), second_batch.clone(), first_batch, second_batch] {
+    for batch in [first_batch.clone(), second_batch.clone(), first_batch.clone()] {
         write_events(&destination, WriteEventsDurability::MayDefer, batch).await.unwrap();
     }
+
+    // Check before later events can restore the final state: replaying the
+    // earlier updates must neither rewind key 1 nor resurrect deleted key 2.
+    let rows = database.query_table(schema.name().clone()).await.unwrap();
+    let users: Vec<BigQueryUser> = parse_bigquery_table_rows(rows);
+    assert_eq!(
+        users,
+        vec![BigQueryUser::new(1, "second", 30), BigQueryUser::new(3, "snapshot", 10)]
+    );
+
+    // Reconnect can change batch boundaries without changing sequence keys.
+    let replay = first_batch.into_iter().chain(second_batch).collect();
+    write_events(&destination, WriteEventsDurability::MayDefer, replay).await.unwrap();
 
     destination.shutdown().await.unwrap();
 

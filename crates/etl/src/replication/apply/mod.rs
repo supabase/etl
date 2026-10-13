@@ -32,8 +32,8 @@ use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "failpoints")]
 use crate::failpoints::{
-    APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP,
-    STORE_REPLICATION_CHECKPOINT_FP, etl_fail_point_active_for_parameter,
+    APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, STORE_REPLICATION_CHECKPOINT_FP,
+    etl_fail_point_active_for_parameter,
 };
 use crate::{
     activity::{ActivityHandle, ActivityKind, ActivityRegistration},
@@ -1050,9 +1050,6 @@ where
             error = %error,
             "waiting for pending destination work before retrying failed apply loop"
         );
-
-        #[cfg(feature = "failpoints")]
-        fail::fail_point!(APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP);
 
         let ShutdownResult::Ok(completed) = with_shutdown!(pending_flush_result, shutdown_token)
         else {
@@ -4376,6 +4373,7 @@ mod tests {
             },
             state::{StoredTableDecodingState, TableState},
         },
+        runtime::build_error_handling_policy,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId,
             TableId, TableName, TableSchema,
@@ -4405,32 +4403,37 @@ mod tests {
         }
     }
 
-    /// A source retry observes the dispatched completion, including permitted
-    /// deferred acceptance, without requiring an extra durability barrier.
-    #[tokio::test]
-    async fn retry_waits_for_dispatched_completion() {
-        for status in [DestinationWriteStatus::Durable, DestinationWriteStatus::Accepted] {
-            let token = CancellationToken::new();
-            let (result, pending) =
-                WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
+    /// A failed attempt waits for completion in either durability mode.
+    /// Accepted results need no extra barrier because the attempt cannot
+    /// checkpoint them.
+    #[test]
+    fn retry_waits_for_dispatched_completion() {
+        for durability in [WriteEventsDurability::MayDefer, WriteEventsDurability::RequireDurable] {
+            for status in [DestinationWriteStatus::Durable, DestinationWriteStatus::Accepted] {
+                let token = CancellationToken::new();
+                let (result, pending) = WriteEventsResult::new(flush_metadata(durability));
 
-            let settled = TestApplyLoop::settle_pending_flush_on_error(
-                etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
-                Some(pending),
-                &token,
-            );
-            tokio::pin!(settled);
-            assert!(settled.as_mut().now_or_never().is_none());
+                let settled = TestApplyLoop::settle_pending_flush_on_error(
+                    etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
+                    Some(pending),
+                    &token,
+                );
+                tokio::pin!(settled);
+                assert!(settled.as_mut().now_or_never().is_none());
 
-            result.send(Ok(status));
+                result.send(Ok(status));
 
-            assert_eq!(settled.await.kind(), ErrorKind::SourceConnectionFailed);
+                assert_eq!(
+                    settled.now_or_never().unwrap().kind(),
+                    ErrorKind::SourceConnectionFailed
+                );
+            }
         }
     }
 
     /// A late terminal write error must override the source's retry policy.
-    #[tokio::test]
-    async fn retry_preserves_destination_error_policy() {
+    #[test]
+    fn retry_preserves_destination_error_policy() {
         let token = CancellationToken::new();
         let (result, pending) =
             WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
@@ -4445,34 +4448,19 @@ mod tests {
             Some(pending),
             &token,
         )
-        .await;
+        .now_or_never()
+        .unwrap();
 
-        assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
-    }
-
-    /// An accepted barrier cannot advance progress on an already failed
-    /// attempt.
-    #[tokio::test]
-    async fn retry_accepts_uncheckpointed_durability_barrier() {
-        let token = CancellationToken::new();
-        let (result, pending) =
-            WriteEventsResult::new(flush_metadata(WriteEventsDurability::RequireDurable));
-
-        result.send(Ok(DestinationWriteStatus::Accepted));
-
-        let error = TestApplyLoop::settle_pending_flush_on_error(
-            etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
-            Some(pending),
-            &token,
-        )
-        .await;
-
-        assert_eq!(error.kind(), ErrorKind::SourceConnectionFailed);
+        assert_eq!(
+            error.kinds(),
+            vec![ErrorKind::DestinationAuthenticationError, ErrorKind::SourceConnectionFailed]
+        );
+        assert!(!build_error_handling_policy(&error).should_retry());
     }
 
     /// Shutdown stops retrying, so it can interrupt a failed attempt's wait.
-    #[tokio::test]
-    async fn shutdown_interrupts_retry_completion_wait() {
+    #[test]
+    fn shutdown_interrupts_retry_completion_wait() {
         let token = CancellationToken::new();
         let (_result, pending) =
             WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
@@ -4487,12 +4475,12 @@ mod tests {
 
         token.cancel();
 
-        assert_eq!(settled.await.kind(), ErrorKind::SourceConnectionFailed);
+        assert_eq!(settled.now_or_never().unwrap().kind(), ErrorKind::SourceConnectionFailed);
     }
 
     /// Terminal failures still return immediately rather than draining work.
-    #[tokio::test]
-    async fn terminal_error_does_not_wait_for_dispatched_completion() {
+    #[test]
+    fn terminal_error_does_not_wait_for_dispatched_completion() {
         let token = CancellationToken::new();
         let (_result, pending) =
             WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));

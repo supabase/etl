@@ -2141,6 +2141,7 @@ mod tests {
         store::{MemoryStore, StateStore},
         test_utils::destination::write_table_rows,
     };
+    use futures::FutureExt;
     use gcp_bigquery_client::{
         auth::Authenticator,
         client_builder::ClientBuilder,
@@ -2368,6 +2369,31 @@ mod tests {
         assert!(second.await.is_err());
 
         destination.shutdown().await.unwrap();
+    }
+
+    /// Pending DDL for one table must not block or invalidate another table's
+    /// cached write preparation.
+    #[tokio::test]
+    async fn pending_table_ddl_does_not_block_other_tables() {
+        let destination = unavailable_destination(true).await;
+        let cold_schema = schema_for_table(1);
+        let warm_schema = schema_for_table(2);
+        seed_table(&destination, &warm_schema).await;
+        let (target, descriptor) =
+            destination.prepare_table_for_writes(&warm_schema, false).await.unwrap();
+
+        let pending = destination.prepare_table_for_writes(&cold_schema, false);
+        tokio::pin!(pending);
+        assert!(pending.as_mut().now_or_never().is_none());
+
+        let (reused_target, reused_descriptor) = destination
+            .prepare_table_for_writes(&warm_schema, false)
+            .now_or_never()
+            .unwrap()
+            .unwrap();
+
+        assert!(Arc::ptr_eq(&target, &reused_target));
+        assert!(Arc::ptr_eq(&descriptor, &reused_descriptor));
     }
 
     /// Warm descriptors are reused, but each schema endpoint and write mode
@@ -3046,12 +3072,7 @@ mod tests {
             (10, 4, vec![3, 3, 2, 2]),
         ] {
             let rows = (0..row_count)
-                .map(|i| {
-                    BigQueryTableRow::try_from(TableRow::new(vec![Cell::I32(
-                        i32::try_from(i).unwrap(),
-                    )]))
-                    .unwrap()
-                })
+                .map(|i| BigQueryTableRow::try_from(TableRow::new(vec![Cell::I32(i)])).unwrap())
                 .collect::<Vec<_>>();
             let encoded_rows: Vec<_> = rows.iter().map(Message::encode_to_vec).collect();
             let batches = split_table_rows(rows, target_batches);
@@ -3062,7 +3083,6 @@ mod tests {
             let batch_sizes: Vec<_> = batches.iter().map(Vec::len).collect();
 
             assert_eq!(batch_sizes, expected_batch_sizes);
-            assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), row_count);
         }
     }
 

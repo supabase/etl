@@ -76,26 +76,3 @@ impl fmt::Debug for TimedNotify {
         f.debug_struct("TimedNotify").field("timeout_duration", &self.timeout_duration).finish()
     }
 }
-
-/// Registers a one-shot notification for the next evaluation of a failpoint.
-///
-/// Register before triggering the operation. The callback never blocks the
-/// worker, and subsequent evaluations do not send another notification.
-/// The caller's [`fail::FailScenario`] owns removal of the callback.
-///
-/// # Panics
-///
-/// Panics if the failpoint callback cannot be registered.
-#[cfg(feature = "failpoints")]
-pub fn notify_on_failpoint(name: &str) -> tokio::sync::oneshot::Receiver<()> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    let sender = std::sync::Mutex::new(Some(sender));
-    fail::cfg_callback(name, move || {
-        if let Some(sender) = sender.lock().unwrap().take() {
-            let _ = sender.send(());
-        }
-    })
-    .unwrap();
-
-    receiver
-}

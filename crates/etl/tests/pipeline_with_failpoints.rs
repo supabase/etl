@@ -16,8 +16,8 @@ use etl::{
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
     failpoints::{
-        APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP,
-        SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
+        APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, SEND_STATUS_UPDATE_FP,
+        START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
         STORE_REPLICATION_CHECKPOINT_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
@@ -26,13 +26,13 @@ use etl::{
     store::{StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
         database::{
-            replication_slot_state, spawn_source_database, terminate_walsender, test_table_name,
+            replication_slot_state, spawn_source_database, test_table_name,
             wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp, HoldGate},
         memory_destination::MemoryDestination,
-        notify::{DEFAULT_NOTIFY_TIMEOUT, notify_on_failpoint},
+        notify::DEFAULT_NOTIFY_TIMEOUT,
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_database_and_sync_done_pipeline_with_table, create_pipeline,
@@ -43,8 +43,9 @@ use etl::{
         },
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
-            TableSelection, assert_events_equal, build_expected_users_inserts, insert_orders_data,
-            insert_users_data, setup_test_database_schema,
+            TableSelection, assert_events_equal, assert_table_rows_equal_ignoring_size,
+            build_expected_users_inserts, insert_orders_data, insert_users_data,
+            setup_test_database_schema,
         },
     },
 };
@@ -2763,32 +2764,23 @@ impl IdleDurabilityTest {
     }
 }
 
-/// A failed attempt observes its dispatched result before replay, but only a
-/// successful replay may checkpoint that batch.
+/// Only successful replay may checkpoint a batch dispatched by a failed
+/// attempt, even when the original write completed durably.
 #[tokio::test(flavor = "multi_thread")]
-async fn source_disconnect_waits_for_pending_write_without_checkpointing() {
+async fn apply_retry_replays_dispatched_write_without_checkpointing() {
     let _scenario = FailScenario::setup();
     let mut test = IdleDurabilityTest::start().await;
+    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+
+    // Failure is injected after dispatch and before completion handling, so
+    // releasing the result cannot let the failed attempt checkpoint it.
+    fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(apply)").unwrap();
 
     test.insert(1).await;
 
     let (commit_lsn, result) = test.next_batch().await;
-    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
-    let client = test.database.client.as_ref().unwrap();
-    let (_, active_pid) = replication_slot_state(client, &test.slot_name).await;
-    let active_pid = active_pid.unwrap();
-    let retry_wait = notify_on_failpoint(APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP);
-
-    assert!(terminate_walsender(client, active_pid).await.unwrap());
-
-    tokio::select! {
-        biased;
-
-        _ = test.writes_rx.recv() => panic!("Replay overtook the pending write"),
-
-        result = retry_wait => result.unwrap(),
-    }
     assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+    assert!(test.confirmed_lsn().await < commit_lsn);
 
     result.send(Ok(DestinationWriteStatus::Durable));
 
@@ -2807,9 +2799,10 @@ async fn source_disconnect_waits_for_pending_write_without_checkpointing() {
     );
 }
 
-/// A catchup failure cannot reset the table while its old write is pending.
+/// A failed catchup attempt recopies from a fresh snapshot even when its
+/// dispatched write completed durably.
 #[tokio::test(flavor = "multi_thread")]
-async fn catchup_retry_waits_for_pending_write_before_recopy() {
+async fn catchup_retry_recopies_after_dispatched_write() {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
     init_test_tracing();
@@ -2819,13 +2812,14 @@ async fn catchup_retry_waits_for_pending_write_before_recopy() {
     let table_id = schema.users_schema().id;
     let store = NotifyingStore::new();
     let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
+    let destination = TestDestinationWrapper::wrap(destination);
     let pipeline_id: PipelineId = random();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
         schema.publication_name(),
         store.clone(),
-        destination,
+        destination.clone(),
     );
     let finished_copy =
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
@@ -2848,8 +2842,6 @@ async fn catchup_retry_waits_for_pending_write_before_recopy() {
     let copied_again =
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
     let synced = store.notify_on_table_sync_complete(table_id).await;
-    let retry_wait = notify_on_failpoint(APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP);
-
     fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(table_sync)").unwrap();
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
@@ -2857,18 +2849,6 @@ async fn catchup_retry_waits_for_pending_write_before_recopy() {
     let DeferredEventsWrite::Batch { result, .. } = write else {
         panic!("Expected a catchup batch");
     };
-    tokio::select! {
-        biased;
-
-        _ = errored.notified() => panic!("Table retry overtook the pending write"),
-
-        result = retry_wait => result.unwrap(),
-    }
-    assert_eq!(
-        store.get_table_state(table_id).await.unwrap().unwrap().as_type(),
-        TableStateType::FinishedCopy
-    );
-
     result.send(Ok(DestinationWriteStatus::Durable));
 
     errored.notified().await;
@@ -2878,6 +2858,11 @@ async fn catchup_retry_waits_for_pending_write_before_recopy() {
     pipeline.shutdown_and_wait().await.unwrap();
 
     assert!(writes_rx.try_recv().is_err());
+    let table_rows = destination.get_table_rows().await;
+    assert_table_rows_equal_ignoring_size(
+        table_rows.get(&table_id).unwrap(),
+        &[TableRow::new(vec![Cell::I64(1), Cell::String("user_1".to_owned()), Cell::I32(1)])],
+    );
 }
 
 /// A single accepted batch settles without another source write.

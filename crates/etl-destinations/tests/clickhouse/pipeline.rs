@@ -4,9 +4,7 @@ use etl::{
     config::BatchConfig,
     error::ErrorKind,
     event::{Event, EventType, RelationEvent},
-    failpoints::{
-        APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP,
-    },
+    failpoints::APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
     pipeline::PipelineId,
     schema::ReplicatedTableSchema,
     store::{
@@ -16,7 +14,6 @@ use etl::{
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
-        notify::notify_on_failpoint,
         notifying_store::NotifyingStore,
         pipeline::{PipelineBuilder, create_pipeline, wait_for_pipeline_error},
         store::{wait_for_table_state_type, wait_for_table_sync_complete},
@@ -951,7 +948,7 @@ async fn in_flight_write_keeps_streaming_and_shuts_down_cleanly_merge_tree() {
 /// for the in-flight insert. Otherwise the truncate runs first and the late
 /// insert restores the truncated row.
 ///
-/// Signals control each write and observe the retry wait:
+/// Signals control each write:
 /// - an armed pause parks the in-flight insert,
 /// - a failpoint fails the apply loop once after dispatch,
 /// - the destination wrapper reports each applied batch.
@@ -1007,8 +1004,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
     // makes the replay's own INSERT observable. The failpoint fails the apply
     // worker once, right after the first CDC batch is dispatched.
     let (in_flight_reached, in_flight_release) = arm_pause_before_insert_statement_for_tests(0);
-    let (mut replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
-    let retry_wait = notify_on_failpoint(APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP);
+    let (replay_reached, replay_release) = arm_pause_before_insert_statement_for_tests(0);
     fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(apply)").unwrap();
 
     // WHEN: one row is inserted, its batch parks at the INSERT, and the apply
@@ -1027,14 +1023,13 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
 
     in_flight_reached.await.unwrap();
 
-    // Core reaches its retry wait while the original insert is still held.
-    tokio::select! {
-        biased;
+    // Queue TRUNCATE while the original insert is still held. A retry must
+    // preserve source ordering even when its replay contains both operations.
+    let truncate_applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
+        .await;
 
-        _ = &mut replay_reached => panic!("Replay overtook the pending insert"),
-
-        result = retry_wait => result.unwrap(),
-    }
+    database.run_sql(&format!("TRUNCATE {}", table_name.as_quoted_identifier())).await.unwrap();
 
     // Releasing the in-flight insert lets it land, which lets the replay
     // proceed to its INSERT. The wrapper records the replayed insert as well.
@@ -1042,6 +1037,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
 
     in_flight_applied.notified().await;
     replay_reached.await.unwrap();
+
     assert_eq!(clickhouse_db.query::<i64>("select id from \"test_retryfence\"").await, vec![1]);
     let replay_applied = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
@@ -1050,14 +1046,6 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
     replay_release.send(()).unwrap();
 
     replay_applied.notified().await;
-
-    // A source TRUNCATE now streams through the retried attempt and lands
-    // after both inserts.
-    let truncate_applied = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
-        .await;
-
-    database.run_sql(&format!("TRUNCATE {}", table_name.as_quoted_identifier())).await.unwrap();
 
     truncate_applied.notified().await;
 
