@@ -27,9 +27,17 @@
           extensions = old.extensions ++ [ "llvm-tools" "rust-src" "rust-analyzer" ];
         });
 
+        # The package needs only rustc, cargo, and the standard library, so build it
+        # with the minimal profile of the same release instead of fetching the docs,
+        # rustfmt, and clippy.
+        buildToolchain = pkgs.rust-bin.fromRustupToolchain {
+          inherit ((pkgs.lib.importTOML ./rust-toolchain.toml).toolchain) channel;
+          profile = "minimal";
+        };
+
         rustPlatform = pkgs.makeRustPlatform {
-          cargo = rustToolchain;
-          rustc = rustToolchain;
+          cargo = buildToolchain;
+          rustc = buildToolchain;
         };
 
         # Native build tools and libraries, shared by the package and dev shell:
