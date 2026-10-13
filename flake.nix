@@ -17,10 +17,14 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        rustToolchain =
-          (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
-            extensions = [ "rust-src" "rust-analyzer" ];
-          };
+        # Toolchain and components from rust-toolchain.toml.
+        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+        # Dev shell toolchain: append editor components instead of replacing the
+        # components listed in rust-toolchain.toml.
+        devToolchain = rustToolchain.override (old: {
+          extensions = old.extensions ++ [ "rust-src" "rust-analyzer" ];
+        });
 
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rustToolchain;
@@ -105,10 +109,10 @@
           # (tikv-jemalloc-sys). Release builds, like the package, are unaffected.
           hardeningDisable = [ "fortify" ];
 
-          packages = [ rustToolchain ] ++ buildDeps ++ devTools;
+          packages = [ devToolchain ] ++ buildDeps ++ devTools;
 
           shellHook = ''
-            export RUST_SRC_PATH=${rustToolchain}/lib/rustlib/src/rust/library
+            export RUST_SRC_PATH=${devToolchain}/lib/rustlib/src/rust/library
           '';
         };
       });
