@@ -11,13 +11,13 @@ use crate::{
 };
 
 /// Below this length, a plain byte-by-byte scan outperforms `memchr3`: for
-/// short slices, `memchr3`'s setup cost (splatting each needle byte into a
-/// SIMD register and checking length preconditions) is not repaid by scanning
-/// fewer bytes. Chosen empirically: fields with a delimiter, newline, or
-/// backslash roughly every 5 bytes or more see a net speedup from routing
-/// through `memchr3` at this threshold; only pathological fields with one of
-/// those bytes every 1-2 bytes, which Postgres COPY output does not produce,
-/// are slower than scanning byte by byte throughout.
+/// short slices, `memchr3`'s setup cost (splatting each needle byte into a SIMD
+/// register and checking length preconditions) is not repaid by scanning fewer
+/// bytes. Chosen empirically: fields with a delimiter, newline, or backslash
+/// roughly every 5 bytes or more see a net speedup from routing through
+/// `memchr3` at this threshold; only pathological fields with one of those
+/// bytes every 1-2 bytes, which Postgres COPY output does not produce, are
+/// slower than scanning byte by byte throughout.
 const MEMCHR_MIN_LEN: usize = 32;
 
 /// Returns the offset of the next tab, newline, or backslash in `haystack`,
@@ -82,13 +82,15 @@ fn parse_table_row_from_postgres_copy_str(
         let mut field_end = field_start;
         let mut field_escaped = false;
 
-        // Inner loop parses a single field value until tab, newline, or end of input.
-        // `find_next_special` uses vectorized search for long literal runs.
+        // Inner loop parses a single field value until tab, newline, or end of
+        // input. `find_next_special` uses vectorized search for long literal
+        // runs.
         loop {
             let Some(offset) = find_next_special(&bytes[pos..]) else {
-                // No delimiter, terminator, or escape anywhere in the rest of the
-                // row. A properly terminated row always has an unescaped newline
-                // remaining at this point, so this means the row is incomplete.
+                // No delimiter, terminator, or escape anywhere in the rest of
+                // the row. A properly terminated row always has an unescaped
+                // newline remaining at this point, so this means the row is
+                // incomplete.
                 if field_escaped && bytes.len() > literal_start {
                     field_buffer.push_str(&row_str[literal_start..]);
                 }
@@ -103,9 +105,10 @@ fn parse_table_row_from_postgres_copy_str(
             };
             let special_pos = pos + offset;
 
-            // Escapes packed only a byte or two apart (or consecutive delimiters,
-            // like an empty field) make this run empty most of the time; skip the
-            // slice and its UTF-8 boundary check rather than appending nothing.
+            // Escapes packed only a byte or two apart (or consecutive
+            // delimiters, like an empty field) make this run empty most of the
+            // time; skip the slice and its UTF-8 boundary check rather than
+            // appending nothing.
             if field_escaped && special_pos > literal_start {
                 field_buffer.push_str(&row_str[literal_start..special_pos]);
             }
@@ -124,8 +127,8 @@ fn parse_table_row_from_postgres_copy_str(
                     row_terminated = true;
                     break;
                 }
-                // Escape character - decode the following character and keep scanning
-                // this same field.
+                // Escape character - decode the following character and keep scanning this same
+                // field.
                 _ => {
                     if !field_escaped {
                         field_buffer.push_str(&row_str[field_start..special_pos]);
@@ -135,9 +138,9 @@ fn parse_table_row_from_postgres_copy_str(
                     pos = special_pos + 1;
 
                     match bytes.get(pos) {
-                        // Postgres COPY TO emits ASCII escape sequences for
-                        // delimiters, backslashes, and supported control bytes.
-                        // This fast path handles those without `chars()` decoding.
+                        // Postgres COPY TO emits ASCII escape sequences for delimiters,
+                        // backslashes, and supported control bytes. This fast path handles those
+                        // without `chars()` decoding.
                         Some(&escaped) if escaped.is_ascii() => {
                             match escaped {
                                 // Standard Postgres escape sequences.
@@ -152,9 +155,9 @@ fn parse_table_row_from_postgres_copy_str(
                             }
                             pos += 1;
                         }
-                        // A non-ASCII byte following a backslash. Postgres never
-                        // actually emits this, but decode it correctly rather than
-                        // reading only its first byte, which would corrupt the value.
+                        // A non-ASCII byte following a backslash. Postgres never actually emits
+                        // this, but decode it correctly rather than reading only its first byte,
+                        // which would corrupt the value.
                         Some(_) => {
                             let escaped = row_str[pos..]
                                 .chars()
@@ -163,10 +166,10 @@ fn parse_table_row_from_postgres_copy_str(
                             field_buffer.push(escaped);
                             pos += escaped.len_utf8();
                         }
-                        // Trailing backslash with no following byte at all. The row
-                        // cannot be validly terminated after this, so the missing
-                        // terminator check below will reject it; keep the dangling
-                        // backslash out of the value rather than guessing its meaning.
+                        // Trailing backslash with no following byte at all. The row cannot be
+                        // validly terminated after this, so the missing terminator check below will
+                        // reject it; keep the dangling backslash out of the value rather than
+                        // guessing its meaning.
                         None => {}
                     }
 
@@ -179,7 +182,8 @@ fn parse_table_row_from_postgres_copy_str(
             break;
         }
 
-        // Get the next column schema - error if we have more fields than expected.
+        // Get the next column schema - error if we have more fields than
+        // expected.
         let Some(column_schema) = column_schemas.get(column_index) else {
             let actual_column_count = column_index + 1;
             bail!(
@@ -203,9 +207,9 @@ fn parse_table_row_from_postgres_copy_str(
         } else {
             let field_value = if field_escaped { field_buffer.as_str() } else { raw_field_value };
 
-            // Convert non-null field value to the appropriate Cell type based on the
-            // column's Postgres type, covering all supported data types (integers,
-            // floats, strings, booleans, etc.).
+            // Convert non-null field value to the appropriate Cell type based
+            // on the column's Postgres type, covering all supported data types
+            // (integers, floats, strings, booleans, etc.).
             match parse_cell_from_postgres_text(&column_schema.typ, field_value) {
                 Ok(value) => value,
                 Err(e) => {
@@ -232,8 +236,8 @@ fn parse_table_row_from_postgres_copy_str(
 
     // Validate that all expected columns were present in the row.
     //
-    // If there are still columns left in the schema slice, it means the row
-    // had fewer fields than expected, which is an error.
+    // If there are still columns left in the schema slice, it means the row had
+    // fewer fields than expected, which is an error.
     if let Some(missing_column_schema) = column_schemas.get(column_index) {
         let actual_column_count = column_index;
         bail!(
@@ -556,7 +560,8 @@ mod tests {
     fn try_from_postgres_multibyte_with_escapes() {
         let column_schemas = create_single_column_schema("data", Type::TEXT);
 
-        // Unicode text with escape sequences (testing multibyte character handling)
+        // Unicode text with escape sequences (testing multibyte character
+        // handling)
         let row_data = "Hello\\t🌍\\nWorld\\r测试".as_bytes();
         let mut row_with_newline = row_data.to_vec();
         row_with_newline.push(b'\n');
@@ -571,7 +576,8 @@ mod tests {
     fn try_from_postgres_escape_sequences() {
         let column_schemas = create_single_column_schema("data", Type::TEXT);
 
-        // Comprehensive test of all escape sequences that Postgres COPY TO produces
+        // Comprehensive test of all escape sequences that Postgres COPY TO
+        // produces
         let test_cases: Vec<(&[u8], &str)> = vec![
             // Control character escapes
             (b"\\b\n", "\u{0008}"), // backspace

@@ -2,8 +2,7 @@ use std::{fmt, io::Write};
 
 use etl::{
     data::{
-        ArrayCell, Cell, DATE_FORMAT, PgNumeric, TIME_FORMAT, TIMESTAMP_FORMAT,
-        TIMESTAMPTZ_FORMAT_HH_MM, TableRow,
+        ArrayCell, Cell, PgNumeric, TableRow, format_date, format_timestamp, format_timestamptz,
     },
     schema::ColumnSchema,
 };
@@ -14,7 +13,7 @@ use serde::{
 
 use crate::snowflake::{
     Error, Result,
-    schema::{CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN},
+    schema::{CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN, is_json_type},
 };
 
 /// CDC operation type appended to every row sent via Snowpipe Streaming.
@@ -34,6 +33,46 @@ impl CdcOperation {
             Self::Delete => "delete",
         }
     }
+}
+
+impl fmt::Display for CdcOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Byte sink that counts what is written and stores nothing.
+struct CountingSink(usize);
+
+impl Write for CountingSink {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.0 += data.len();
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialized NDJSON length of one row, including the newline, without
+/// allocating.
+pub(crate) fn serialized_row_len(
+    cols: &[ColumnSchema],
+    row: &TableRow,
+    cdc: CdcMeta<'_>,
+) -> Result<usize> {
+    let mut sink = CountingSink(0);
+    serialize_row(&mut sink, cols, row, cdc)?;
+    Ok(sink.0)
+}
+
+/// Serialized JSON length of one cell value, without allocating.
+pub(crate) fn serialized_cell_len(cell: &Cell) -> Result<usize> {
+    let mut sink = CountingSink(0);
+    serde_json::to_writer(&mut sink, &CellSerializer(cell))
+        .map_err(|e| Error::Encoding(e.to_string()))?;
+    Ok(sink.0)
 }
 
 /// CDC metadata attached to every row in a batch.
@@ -68,6 +107,19 @@ pub(crate) fn serialize_row(
         )));
     }
 
+    // JSON has only one null token, so an array element cannot encode SQL NULL
+    // separately from JSON null. Reject before writing any part of the row.
+    for (column, cell) in cols.iter().zip(cells) {
+        if let Cell::Array(ArrayCell::Json(elements)) = cell
+            && let Some(element_index) = elements.iter().position(Option::is_none)
+        {
+            return Err(Error::NullJsonArrayElement {
+                column_name: column.name.clone(),
+                element_index,
+            });
+        }
+    }
+
     let serializable =
         RowSerializer { cols, cells, operation: cdc.operation.as_str(), sequence: cdc.sequence };
     serde_json::to_writer(&mut *writer, &serializable)
@@ -85,8 +137,14 @@ struct RowSerializer<'a> {
 
 impl Serialize for RowSerializer<'_> {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
-        let mut map = ser.serialize_map(Some(self.cols.len() + 2))?;
+        let mut map = ser.serialize_map(None)?;
         for (col, cell) in self.cols.iter().zip(self.cells) {
+            // On the default pipe an omitted VARIANT field is SQL NULL, while
+            // an explicit null token is JSON null. Channel setup removes the
+            // column defaults that would otherwise override this omission.
+            if is_json_type(&col.typ) && matches!(cell, Cell::Null) {
+                continue;
+            }
             map.serialize_entry(col.name.as_str(), &CellSerializer(cell))?;
         }
         map.serialize_entry(CDC_OPERATION_COLUMN, self.operation)?;
@@ -108,7 +166,7 @@ impl Serialize for CellSerializer<'_> {
             Cell::U32(n) => ser.serialize_u32(*n),
             Cell::I64(n) => ser.serialize_i64(*n),
             Cell::F32(f) => {
-                reject_non_finite(*f as f64)?;
+                reject_non_finite(f64::from(*f))?;
                 ser.serialize_f32(*f)
             }
             Cell::F64(f) => {
@@ -116,13 +174,13 @@ impl Serialize for CellSerializer<'_> {
                 ser.serialize_f64(*f)
             }
             Cell::Numeric(n) => serialize_pg_numeric(n, ser),
-            // collect_str: Display::fmt writes directly into the JSON serializer's
-            // output buffer, avoiding an intermediate String allocation.
-            Cell::Date(d) => ser.collect_str(&d.format(DATE_FORMAT)),
-            Cell::Time(t) => ser.collect_str(&t.format(TIME_FORMAT)),
+            // collect_str: Display::fmt writes directly into the JSON serializer's output buffer,
+            // avoiding an intermediate String allocation.
+            Cell::Date(d) => ser.collect_str(&format_date(d)),
+            Cell::Time(t) => ser.collect_str(t),
             Cell::TimeTz(t) => ser.collect_str(t),
-            Cell::Timestamp(dt) => ser.collect_str(&dt.format(TIMESTAMP_FORMAT)),
-            Cell::TimestampTz(dt) => ser.collect_str(&dt.format(TIMESTAMPTZ_FORMAT_HH_MM)),
+            Cell::Timestamp(dt) => ser.collect_str(&format_timestamp(dt)),
+            Cell::TimestampTz(dt) => ser.collect_str(&format_timestamptz(dt)),
             Cell::Uuid(u) => ser.collect_str(u),
             Cell::Json(v) => v.serialize(ser),
             Cell::Bytes(b) => ser.collect_str(&HexDisplay(b)),
@@ -186,7 +244,7 @@ struct ValidatedF32(f32);
 
 impl Serialize for ValidatedF32 {
     fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
-        reject_non_finite(self.0 as f64)?;
+        reject_non_finite(f64::from(self.0))?;
         ser.serialize_f32(self.0)
     }
 }
@@ -226,18 +284,14 @@ impl Serialize for ArrayCellSerializer<'_> {
             ArrayCell::F64(v) => serialize_array_with(v, ser, |f| ValidatedF64(*f)),
             // Custom formatting via collect_str wrappers.
             ArrayCell::Numeric(v) => serialize_array_with(v, ser, NumericElement),
-            ArrayCell::Date(v) => {
-                serialize_array_with(v, ser, |d| CollectStr(d.format(DATE_FORMAT)))
-            }
-            ArrayCell::Time(v) => {
-                serialize_array_with(v, ser, |t| CollectStr(t.format(TIME_FORMAT)))
-            }
+            ArrayCell::Date(v) => serialize_array_with(v, ser, |d| CollectStr(format_date(d))),
+            ArrayCell::Time(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::TimeTz(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::Timestamp(v) => {
-                serialize_array_with(v, ser, |dt| CollectStr(dt.format(TIMESTAMP_FORMAT)))
+                serialize_array_with(v, ser, |dt| CollectStr(format_timestamp(dt)))
             }
             ArrayCell::TimestampTz(v) => {
-                serialize_array_with(v, ser, |dt| CollectStr(dt.format(TIMESTAMPTZ_FORMAT_HH_MM)))
+                serialize_array_with(v, ser, |dt| CollectStr(format_timestamptz(dt)))
             }
             ArrayCell::Uuid(v) => serialize_array_with(v, ser, CollectStr),
             ArrayCell::Bytes(v) => serialize_array_with(v, ser, |b| CollectStr(HexDisplay(b))),
@@ -285,7 +339,10 @@ where
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
-    use etl::schema::Type;
+    use etl::{
+        data::{Date, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, Timestamp},
+        schema::Type,
+    };
     use serde_json::{Value, json};
     use uuid::Uuid;
 
@@ -308,6 +365,95 @@ mod tests {
         Ok(map.get("v").unwrap().clone())
     }
 
+    /// Serializes a JSON cell while checking row sizing and CDC metadata.
+    fn serialize_json_cell(typ: Type, cell: Cell, operation: CdcOperation) -> Value {
+        let cols = [ColumnSchema::new("v".to_owned(), typ, -1, 1, true)];
+        let row = TableRow::new(vec![cell]);
+        let cdc = CdcMeta::new(operation, "0");
+        let mut bytes = Vec::new();
+        serialize_row(&mut bytes, &cols, &row, cdc).unwrap();
+
+        assert_eq!(serialized_row_len(&cols, &row, cdc).unwrap(), bytes.len());
+        assert_eq!(bytes.last(), Some(&b'\n'));
+        let document: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(document.get(CDC_OPERATION_COLUMN), Some(&json!(operation.as_str())));
+        assert_eq!(document.get(CDC_SEQUENCE_COLUMN), Some(&json!("0")));
+        document
+    }
+
+    /// SQL NULL omits a scalar JSON field; JSON null remains an explicit token.
+    #[test]
+    fn scalar_json_null_kinds_are_distinct() {
+        for typ in [Type::JSON, Type::JSONB] {
+            for operation in [CdcOperation::Insert, CdcOperation::Update, CdcOperation::Delete] {
+                let sql_null = serialize_json_cell(typ.clone(), Cell::Null, operation);
+                assert_eq!(sql_null.get("v"), None);
+                assert_eq!(sql_null.as_object().unwrap().len(), 2);
+                for expected in [
+                    Value::Null,
+                    json!("null"),
+                    json!({"nested": null}),
+                    json!([null]),
+                    json!({"ordinary": 1}),
+                    json!(42),
+                    json!(true),
+                ] {
+                    let actual =
+                        serialize_json_cell(typ.clone(), Cell::Json(expected.clone()), operation);
+                    assert_eq!(actual.get("v"), Some(&expected));
+                }
+            }
+        }
+    }
+
+    /// Whole SQL-null arrays, empty arrays and JSON-null elements remain valid.
+    #[test]
+    fn json_arrays_preserve_supported_null_shapes() {
+        for typ in [Type::JSON_ARRAY, Type::JSONB_ARRAY] {
+            for (cell, expected) in [
+                (Cell::Null, Value::Null),
+                (Cell::Array(ArrayCell::Json(vec![])), json!([])),
+                (
+                    Cell::Array(ArrayCell::Json(vec![
+                        Some(Value::Null),
+                        Some(json!("null")),
+                        Some(json!({"nested": null})),
+                    ])),
+                    json!([null, "null", {"nested": null}]),
+                ),
+            ] {
+                let actual = serialize_json_cell(typ.clone(), cell, CdcOperation::Insert);
+                assert_eq!(actual.get("v"), Some(&expected));
+            }
+        }
+    }
+
+    /// Invalid JSON-array elements fail before any bytes reach the writer.
+    #[test]
+    fn json_arrays_reject_sql_null_elements() {
+        for typ in [Type::JSON_ARRAY, Type::JSONB_ARRAY] {
+            for operation in [CdcOperation::Insert, CdcOperation::Update, CdcOperation::Delete] {
+                for elements in [vec![None], vec![Some(Value::Null), None]] {
+                    let element_index = elements.len() - 1;
+                    let cols = [ColumnSchema::new("payload".to_owned(), typ.clone(), -1, 1, true)];
+                    let row = TableRow::new(vec![Cell::Array(ArrayCell::Json(elements))]);
+                    let cdc = CdcMeta::new(operation, "0");
+                    let mut bytes = Vec::new();
+                    let error = serialize_row(&mut bytes, &cols, &row, cdc).unwrap_err();
+                    assert!(
+                        matches!(error, Error::NullJsonArrayElement { column_name, element_index: index }
+                        if column_name == "payload" && index == element_index)
+                    );
+                    assert!(bytes.is_empty());
+                    assert!(matches!(
+                        serialized_row_len(&cols, &row, cdc),
+                        Err(Error::NullJsonArrayElement { .. })
+                    ));
+                }
+            }
+        }
+    }
+
     #[test]
     fn cell_serialization_ok() {
         let d = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
@@ -325,14 +471,19 @@ mod tests {
             (Cell::F32(1.5), json!(1.5f64)),
             (Cell::F64(2.5), json!(2.5)),
             (Cell::Numeric(PgNumeric::default()), json!(PgNumeric::default().to_string())),
-            (Cell::Date(d), json!("2026-04-29")),
-            (Cell::Time(t), json!(t.format(TIME_FORMAT).to_string())),
+            (Cell::Date(Date::Value(d)), json!("2026-04-29")),
+            (Cell::Date(Date::PosInfinity), json!("infinity")),
+            (Cell::Timestamp(Timestamp::NegInfinity), json!("-infinity")),
+            (Cell::Time(PgTime::EndOfDay), json!("24:00:00")),
+            (Cell::Time(PgTime::Value(t)), json!(t.format(TIME_FORMAT).to_string())),
             (
-                Cell::Timestamp(NaiveDateTime::new(d, t)),
+                Cell::Timestamp(Timestamp::Value(NaiveDateTime::new(d, t))),
                 json!(NaiveDateTime::new(d, t).format(TIMESTAMP_FORMAT).to_string()),
             ),
             (
-                Cell::TimestampTz(Utc.with_ymd_and_hms(2026, 4, 29, 10, 30, 0).unwrap()),
+                Cell::TimestampTz(Timestamp::Value(
+                    Utc.with_ymd_and_hms(2026, 4, 29, 10, 30, 0).unwrap(),
+                )),
                 json!(
                     Utc.with_ymd_and_hms(2026, 4, 29, 10, 30, 0)
                         .unwrap()
@@ -386,14 +537,17 @@ mod tests {
                 Cell::Array(ArrayCell::Uuid(vec![Some(Uuid::nil())])),
                 json!(["00000000-0000-0000-0000-000000000000"]),
             ),
-            (Cell::Array(ArrayCell::Json(vec![Some(json!(1)), None])), json!([1, null])),
+            (
+                Cell::Array(ArrayCell::Json(vec![Some(json!(1)), Some(Value::Null)])),
+                json!([1, null]),
+            ),
             (
                 Cell::Array(ArrayCell::F64(vec![Some(1.5), None, Some(2.5)])),
                 json!([1.5, null, 2.5]),
             ),
             (
                 Cell::Array(ArrayCell::Date(vec![
-                    Some(NaiveDate::from_ymd_opt(2026, 4, 29).unwrap()),
+                    Some(Date::Value(NaiveDate::from_ymd_opt(2026, 4, 29).unwrap())),
                     None,
                 ])),
                 json!(["2026-04-29", null]),

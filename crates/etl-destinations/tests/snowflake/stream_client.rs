@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use etl::{
     data::{Cell, TableRow},
-    schema::{ColumnSchema, Type},
+    schema::{ColumnSchema, TableId, Type},
 };
 use etl_destinations::snowflake::{
     AuthManager, CdcMeta, CdcOperation, Config, Error, HttpExchanger, OffsetToken,
@@ -31,9 +31,11 @@ fn build_clients(
 }
 
 fn build_batch(cols: &[ColumnSchema], rows: &[TableRow], offset: &OffsetToken) -> RowBatch {
-    let mut builder = RowBatchBuilder::new();
+    let mut builder = RowBatchBuilder::new(TableId::new(1));
     for row in rows {
-        builder.push_row(cols, row, CdcMeta::new(CdcOperation::Insert, "0"), offset).unwrap();
+        let completed =
+            builder.push_row(cols, row, CdcMeta::new(CdcOperation::Insert, "0"), offset).unwrap();
+        assert!(completed.is_empty(), "test rows must fit one request");
     }
     builder.finish().unwrap().into_iter().next().unwrap()
 }
@@ -215,8 +217,9 @@ async fn channel_reopen_prevents_previous_sequencer_from_committing() {
         let current_batch =
             build_batch(&columns, &[TableRow::new(vec![Cell::I32(2)])], &current_offset);
 
-        // A fenced append may report a stale sequencer or be acknowledged as a no-op.
-        // Only durable status and table contents prove that its row could not commit.
+        // A fenced append may report a stale sequencer or be acknowledged as a
+        // no-op. Only durable status and table contents prove that its row
+        // could not commit.
         match stream
             .insert_rows(
                 config.database(),
@@ -562,7 +565,8 @@ async fn continuation_token() {
         // Still 2 rows, offset token is not advanced to offset3.
         assert_row_count(&sql, &fqn, 2).await;
 
-        // Retry batch 3 with the CORRECT token, data commits, offset is updated.
+        // Retry batch 3 with the CORRECT token, data commits, offset is
+        // updated.
         let insert3_retry = stream
             .insert_rows(
                 config.database(),

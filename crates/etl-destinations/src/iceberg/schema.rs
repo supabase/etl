@@ -47,8 +47,8 @@ fn postgres_scalar_type_to_iceberg_type(typ: &Type) -> IcebergType {
 
 /// Creates an Iceberg list type with the specified element type.
 fn create_iceberg_list_type(element_type: PrimitiveType, field_id: i32) -> IcebergType {
-    // Create the element field with a standard name
-    // Use the provided field_id for the element field to ensure uniqueness
+    // Create the element field with a standard name Use the provided field_id
+    // for the element field to ensure uniqueness
     let element_field =
         Arc::new(NestedField::list_element(field_id, IcebergType::Primitive(element_type), false));
 
@@ -361,8 +361,8 @@ mod tests {
 
     #[test]
     fn postgres_scalar_type_fallback() {
-        // Test fallback for unknown scalar types
-        // Using a type that should fall through to the default case
+        // Test fallback for unknown scalar types Using a type that should fall
+        // through to the default case
         let result = postgres_scalar_type_to_iceberg_type(&Type::UNKNOWN);
         assert_eq!(result, IcebergType::Primitive(PrimitiveType::String));
     }
@@ -429,8 +429,8 @@ mod tests {
 
         let schema = postgres_to_iceberg_schema(&columns).expect("schema creation");
 
-        // tenant_id is field_id 1, id is field_id 2
-        // Iceberg identifier fields are unordered, so we sort before comparing.
+        // tenant_id is field_id 1, id is field_id 2 Iceberg identifier fields
+        // are unordered, so we sort before comparing.
         let mut ids: Vec<i32> = schema.identifier_field_ids().collect();
         ids.sort();
         assert_eq!(ids, vec![1, 2]);

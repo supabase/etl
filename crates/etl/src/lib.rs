@@ -28,6 +28,29 @@
 //! coordinates initial sync and ongoing replication, and handles failures
 //! gracefully.
 //!
+//! [`pipeline::Pipeline::shutdown`] requests shutdown; keep the original
+//! [`pipeline::Pipeline::wait`] future alive to finish cleanup. Failures return
+//! immediately and drop remaining owned tasks to request cancellation.
+//! [`pipeline::Pipeline::shutdown_and_wait`] combines both steps when no wait
+//! is in progress. See [`pipeline::Pipeline::wait`] for teardown guarantees.
+//!
+//! ## Initial sync and source impact
+//!
+//! Each initial copy holds `ACCESS SHARE` locks and an MVCC snapshot until its
+//! source workers finish. On a primary, ordinary reads and writes remain
+//! compatible, but queued exclusive DDL can block later application queries.
+//! Long copies retain old row versions and WAL; slow destination writes can
+//! extend that retention. Copy lock timeouts bound lock acquisition, not the
+//! lifetime of already-held locks. An interrupted copy can restart from
+//! scratch. `max_slot_wal_keep_size` bounds slot retention at checkpoints; it
+//! does not cap total disk usage or snapshot-related bloat. Slot invalidation
+//! during copy requires a table reset and a fresh initial sync. Stopping the
+//! pipeline releases copy locks after teardown but leaves slots retaining WAL.
+//!
+//! Schedule migrations outside initial copies and monitor source storage and
+//! blocking. See [source operating guidance](https://supabase.github.io/etl/guides/configure-postgres/#planning-long-initial-copies)
+//! and [schema-capture cautions](https://supabase.github.io/etl/explanation/schema-changes/#current-limitations).
+//!
 //! ## Destinations
 //! [`destination::Destination`] trait implementations define where replicated
 //! data should be sent. Destinations are pluggable and can integrate with
@@ -44,19 +67,18 @@
 //! checkpoints, and destination table metadata, providing a single interface
 //! for all state-related storage operations.
 //!
-//! The [`store::SchemaStore`] trait handles versioned table schemas,
-//! and [`store::TableStateLifecycleStore`] handles table-scoped preparation,
-//! reset, and deletion operations that must update state, schema, and metadata
-//! consistently.
-//! [`store::SharedStateStore`], [`store::DestinationStore`], and
+//! The [`store::SchemaStore`] trait handles versioned table schemas, and
+//! [`store::TableStateLifecycleStore`] handles table-scoped preparation, reset,
+//! and deletion operations that must update state, schema, and metadata
+//! consistently. [`store::SharedStateStore`], [`store::DestinationStore`], and
 //! [`store::PipelineStore`] are facade traits for code that needs common
 //! combinations of these capabilities.
 //!
 //! **Note:** To pause and resume a pipeline after the process is stopped, it
 //! must be able to persist data durably. The crate itself provides no
 //! durability guarantees as it only transfers data between Postgres and the
-//! destination relying on the store traits to provide the required
-//! data when needed.
+//! destination relying on the store traits to provide the required data when
+//! needed.
 //!
 //! ## Error Handling
 //! All operations return [`error::EtlResult<T>`] which provides detailed error
@@ -154,6 +176,7 @@
 //!         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
 //!         memory_refresh_interval_ms: 100,
 //!         table_sync_monitor_refresh_interval_ms: 10_000,
+//!         settle_durable_interval_ms: None,
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::default(),
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
@@ -191,7 +214,9 @@ compile_error!(
     "Either the `tls-rustls-ring` or the `tls-rustls-aws-lc-rs` feature must be enabled."
 );
 
+pub mod activity;
 pub mod config;
+mod constants;
 pub mod data;
 pub mod destination;
 #[cfg(feature = "egress")]
@@ -217,6 +242,7 @@ mod runtime;
 pub mod schema;
 mod source_payload_metadata;
 pub mod store;
+pub mod task;
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

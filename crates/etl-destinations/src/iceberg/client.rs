@@ -55,8 +55,8 @@ impl IcebergClient {
     /// Creates a new [`IcebergClient`] using a REST catalog configuration.
     ///
     /// This constructor initializes a client that connects to an Iceberg
-    /// catalog through the REST catalog protocol. The REST catalog provides
-    /// a standardized HTTP-based interface for catalog operations.
+    /// catalog through the REST catalog protocol. The REST catalog provides a
+    /// standardized HTTP-based interface for catalog operations.
     pub async fn new_with_rest_catalog(
         catalog_uri: String,
         warehouse_name: String,
@@ -76,13 +76,13 @@ impl IcebergClient {
     ///
     /// This constructor creates a client specifically configured to work with
     /// Supabase's storage service, automatically setting up the necessary
-    /// S3-compatible endpoints and authentication parameters. The client
-    /// uses Supabase's REST catalog implementation with additional custom
-    /// behavior for Supabase-specific operations.
+    /// S3-compatible endpoints and authentication parameters. The client uses
+    /// Supabase's REST catalog implementation with additional custom behavior
+    /// for Supabase-specific operations.
     ///
     /// The method automatically constructs the catalog URI and S3 endpoint from
-    /// the provided project reference and domain, simplifying the
-    /// configuration process for Supabase users.
+    /// the provided project reference and domain, simplifying the configuration
+    /// process for Supabase users.
     pub async fn new_with_supabase_catalog(
         project_ref: &str,
         supabase_domain: &str,
@@ -146,10 +146,10 @@ impl IcebergClient {
     /// Validates that the catalog is accessible by listing namespaces.
     ///
     /// This method attempts to list namespaces in the catalog as a connectivity
-    /// check, similar to how BigQuery's `dataset_exists` verifies access.
-    /// This is the cheapest way to verify the connection to the Iceberg
-    /// catalog works correctly. Returns `Ok(())` if the catalog is
-    /// accessible, or an error if connectivity fails.
+    /// check, similar to how BigQuery's `dataset_exists` verifies access. This
+    /// is the cheapest way to verify the connection to the Iceberg catalog
+    /// works correctly. Returns `Ok(())` if the catalog is accessible, or an
+    /// error if connectivity fails.
     pub async fn validate_connectivity(&self) -> Result<(), iceberg::Error> {
         debug!("validating iceberg catalog connectivity");
         // Try to list namespaces as a connectivity check; this is the cheapest
@@ -162,9 +162,9 @@ impl IcebergClient {
     ///
     /// This method performs an idempotent table creation operation. It checks
     /// if the table exists within the specified namespace and creates it if
-    /// missing. The table schema is derived from the provided column
-    /// schemas, which are automatically converted from PostgreSQL types to
-    /// Iceberg schema format.
+    /// missing. The table schema is derived from the provided column schemas,
+    /// which are automatically converted from PostgreSQL types to Iceberg
+    /// schema format.
     ///
     /// The created table includes default commit properties for retry behavior
     /// and transaction management.
@@ -281,8 +281,7 @@ impl IcebergClient {
     /// Removes a namespace from the catalog.
     ///
     /// This method permanently deletes the namespace from the catalog. The
-    /// namespace must be empty (contain no tables) before it can be
-    /// dropped.
+    /// namespace must be empty (contain no tables) before it can be dropped.
     pub async fn drop_namespace(&self, namespace: &str) -> Result<(), iceberg::Error> {
         debug!(%namespace, "dropping namespace");
         let namespace_ident = NamespaceIdent::from_strs(namespace.split('.'))?;
@@ -292,8 +291,8 @@ impl IcebergClient {
     /// Loads a table from the catalog.
     ///
     /// This method retrieves the table metadata and returns a [`Table`]
-    /// instance that can be used for further operations such as reading
-    /// data, writing data, or inspecting the table schema and properties.
+    /// instance that can be used for further operations such as reading data,
+    /// writing data, or inspecting the table schema and properties.
     pub async fn load_table(
         &self,
         namespace: String,
@@ -325,9 +324,9 @@ impl IcebergClient {
         let table_metadata = table.metadata();
         let iceberg_schema = table_metadata.current_schema();
 
-        // Convert the actual Iceberg schema to Arrow schema using iceberg-rust's
-        // built-in converter This preserves field IDs properly for
-        // transaction-based writes
+        // Convert the actual Iceberg schema to Arrow schema using
+        // iceberg-rust's built-in converter This preserves field IDs properly
+        // for transaction-based writes
         let arrow_schema = iceberg::arrow::schema_to_arrow_schema(iceberg_schema)
             .map_err(iceberg_error_to_etl_error)?;
         let record_batch =
@@ -339,9 +338,8 @@ impl IcebergClient {
     /// Writes a RecordBatch to an Iceberg table using Parquet format.
     ///
     /// This method handles the low-level details of writing Arrow RecordBatch
-    /// data to an Iceberg table. It creates the necessary writers, applies
-    /// the data, and commits the transaction to make the data visible in the
-    /// table.
+    /// data to an Iceberg table. It creates the necessary writers, applies the
+    /// data, and commits the transaction to make the data visible in the table.
     async fn write_record_batch(
         &self,
         table: &Table,
@@ -362,7 +360,8 @@ impl IcebergClient {
         let parquet_writer_builder =
             ParquetWriterBuilder::new(writer_props, Arc::clone(table.metadata().current_schema()));
 
-        // Create rolling file writer builder (handles file I/O and location generation)
+        // Create rolling file writer builder (handles file I/O and location
+        // generation)
         let rolling_writer_builder = RollingFileWriterBuilder::new_with_default_file_size(
             parquet_writer_builder,
             table.file_io().clone(),
@@ -373,7 +372,8 @@ impl IcebergClient {
         // Create data file writer builder
         let data_file_writer_builder = DataFileWriterBuilder::new(rolling_writer_builder);
 
-        // Build the writer (pass None for partition key on unpartitioned tables)
+        // Build the writer (pass None for partition key on unpartitioned
+        // tables)
         let mut data_file_writer = data_file_writer_builder.build(None).await?;
 
         // Write the record batch using Iceberg writer

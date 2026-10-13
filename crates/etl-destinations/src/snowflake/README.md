@@ -6,10 +6,46 @@ Status: In progress. See the
 and the [`etl-examples` Snowflake section](../../../etl-examples/README.md#snowflake)
 for the runnable example.
 
+## Request Packing and Large Rows
+
+Snowpipe Streaming rejects any request body over 4 MiB (4,194,304 bytes,
+measured; the docs say "4 MB") with HTTP 413. The encoder in
+`streaming/batch/` fills requests up to that limit and accepts large rows
+whose level-3 frame, using the bounded window described below, fits it.
+
+- A request body is a sequence of zstd frames. Rows up to 256 KiB serialized
+  share one stream frame; each larger row is compressed into its own frame
+  first, so its size is exact before it is admitted. Large rows do not share
+  compression history with adjacent rows, which can increase request sizes for
+  near-duplicate values; the 32 MiB window applies within each row.
+- Every row follows one rule, in arrival order: it joins the open request when
+  the body provably stays under the limit, otherwise the open request completes
+  and the row starts the next one. Small rows are admitted under a derived
+  headroom (`BatchLimits::stream_headroom`). For an all-small-row workload,
+  completed requests are at least 90% full except for the final partial request;
+  large rows pack by their exact compressed size.
+- Each row frame uses and declares a fixed 32 MiB zstd window instead of level
+  3's default 2 MiB. This makes longer-distance matches reachable without
+  measuring the row first; zstd need not find every match. The window bounds
+  compression history, not row size: rows above 32 MiB can still be accepted
+  when their complete level-3 frame fits the 4 MiB request cap. zstd allocates
+  about 33.5 MiB of compressor workspace per active row frame at this setting
+  (measured with zstd 1.5.7), in addition to the 4 MiB output cap, the 64 KiB
+  write buffer, and the source row itself. Resident memory depends on the input
+  and the allocator; concurrent large-row compressors multiply this cost.
+- A large row is compressed once at level 3 into a buffer capped at 4 MiB.
+  A frame that exceeds the limit is rejected with `Error::RowTooLarge`,
+  carrying the table, operation, column count and sizes, never values.
+  It maps to `UnsupportedValueInDestination`.
+- Completed requests are sent as soon as they complete; nothing is retained
+  across rows beyond one open request body and a 256 KiB scratch buffer.
+
+The counter `etl_snowflake_row_frames_total{outcome}` reports rows that took
+the frame path as `fit` or `rejected`.
+
 ## Running Integration Tests
 
-The easiest way to run the full Snowflake test suite (API tests, validator integration, and
-destination integration) is a single `cargo x` command:
+Run the Snowflake destination test suite with:
 
 ```bash
 cargo x test-snowflake
@@ -17,9 +53,15 @@ cargo x test-snowflake
 
 This requires local Postgres to already be running. Run `cargo x init` first if the local development stack is not up. The command first runs the non-credentialed Snowflake destination preset, then runs the credentialed integration tiers when `TESTS_SNOWFLAKE_CONNECTION` is set. Use `--credentials skip` to run only the non-credentialed tier, or `--credentials required` to fail when credentials are missing.
 
-GitHub Actions runs the credential-free tier for relevant pull request and `main` changes, retaining the `Snowflake Gate` check. Routine CI does not receive Snowflake credentials. The separate `Snowflake Daily Tests` workflow runs the credentialed API validator and destination integration tiers once daily at 04:17 UTC on the default branch, using the `TESTS_SNOWFLAKE_CONNECTION` repository secret. Scheduled runs begin after the workflow is merged and can be delayed by GitHub.
+The `CI` workflow runs credential-free Snowflake tests in the shared test suite
+and checks the Snowflake-only feature configuration in `Features (Snowflake
+only)`. Both contribute to the `CI passed` check. Routine CI does not
+receive Snowflake credentials.
 
-Failures appear in the repository's Actions tab under `Snowflake Daily Tests`.
+The separate `Snowflake tests` workflow runs credentialed destination integration
+tests daily at 04:17 UTC on the default branch, or manually from the Actions tab.
+It requires the `TESTS_SNOWFLAKE_CONNECTION` repository secret. GitHub may delay
+scheduled runs. Failures appear in the Actions tab under `Snowflake tests`.
 
 To run a specific destination test directly:
 
@@ -64,7 +106,7 @@ on the command line.
 
 GitHub Actions uses the same one-var contract:
 
-- `TESTS_SNOWFLAKE_CONNECTION` for `.github/workflows/snowflake-daily.yml`.
+- `TESTS_SNOWFLAKE_CONNECTION` for `.github/workflows/snowflake-tests.yml`.
 - `BENCH_SNOWFLAKE_CONNECTION` for manual Snowflake benchmark workflow runs.
 
 Both repository secrets use the same JSON shape shown above. The workflows pass the JSON only

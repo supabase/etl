@@ -13,7 +13,7 @@ pub(crate) struct InitArgs {}
 impl InitArgs {
     /// Starts local Docker services and runs migrations.
     ///
-    /// Does not write API or replicator configuration, and does not apply
+    /// Does not write replicator configuration, and does not apply
     /// Kubernetes resources.
     pub(crate) fn run(self) -> Result<()> {
         let workspace_root = workspace_root()?;
@@ -25,9 +25,7 @@ impl InitArgs {
 
         println!("== Local development environment ==");
         println!("This starts Postgres, ClickHouse, and the Iceberg catalog, and runs migrations.");
-        println!(
-            "It does not write API or replicator configuration or apply Kubernetes resources."
-        );
+        println!("It does not write replicator configuration or apply Kubernetes resources.");
         println!();
 
         let _config = prepare_local_databases()?;
@@ -42,10 +40,6 @@ impl InitArgs {
 
 /// Prints how to set up a service after `cargo x init`.
 fn print_next_steps() {
-    println!("If you want to set up the API:");
-    println!("  cargo x setup api");
-    println!("  cargo x run api");
-    println!();
     println!("If you want a local replicator (ClickHouse by default):");
     println!("  cargo x setup replicator");
     println!("  cargo x seed");

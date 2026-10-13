@@ -55,8 +55,8 @@ impl TableError {
         self
     }
 
-    /// Builds a [`TableError`] from a shared handling policy and
-    /// worker retry policy.
+    /// Builds a [`TableError`] from a shared handling policy and worker retry
+    /// policy.
     pub(crate) fn from_error_policy(
         error: &EtlError,
         policy: &ErrorHandlingPolicy,

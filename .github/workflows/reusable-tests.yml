@@ -1,0 +1,144 @@
+name: Tests (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      postgres-version:
+        description: Postgres major version used by the test-service runner.
+        type: string
+        default: '18'
+      postgres-image:
+        description: Source Postgres container image, including OrioleDB variants.
+        type: string
+        default: postgres:18
+      coverage:
+        description: Compile instrumented tests instead of consuming the regular test archive.
+        type: boolean
+        default: false
+    secrets:
+      TESTS_BIGQUERY_PROJECT_ID:
+        required: false
+      TESTS_BIGQUERY_SA_KEY_JSON:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ${{ inputs.coverage && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    timeout-minutes: 90
+    env:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PORT: 5430
+      POSTGRES_REPLICA_PORT: 6430
+      POSTGRES_HOST: localhost
+      TESTS_DATABASE_HOST: localhost
+      TESTS_DATABASE_PORT: 5430
+      TESTS_DATABASE_REPLICA_HOST: localhost
+      TESTS_DATABASE_REPLICA_PORT: 6430
+      TESTS_DATABASE_START_PORT: 5430
+      NUM_LOCAL_DATABASES: 4
+      TESTS_DATABASE_USERNAME: postgres
+      TESTS_DATABASE_PASSWORD: postgres
+      TESTS_DATABASE_TLS_ENABLED: "true"
+      TESTS_DATABASE_TLS_ROOT_CERT: ${{ github.workspace }}/target/postgres-tls/root.crt
+      TESTS_CLICKHOUSE_URL: http://localhost:8123
+      TESTS_CLICKHOUSE_USER: etl
+      TESTS_CLICKHOUSE_PASSWORD: etl
+      ETL_DUCKDB_EXTENSION_ROOT: ${{ github.workspace }}/vendor/duckdb/extensions
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Set up BigQuery credentials
+        # Fork PRs do not receive secrets; all other lanes use the same credentials.
+        env:
+          TESTS_BIGQUERY_PROJECT_ID: ${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}
+          TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
+        run: |
+          if [[ -n "$TESTS_BIGQUERY_SA_KEY_JSON" || -n "$TESTS_BIGQUERY_PROJECT_ID" ]]; then
+            if [[ -z "$TESTS_BIGQUERY_SA_KEY_JSON" || -z "$TESTS_BIGQUERY_PROJECT_ID" ]]; then
+              echo '::error::BigQuery tests require both the project ID and service-account JSON'
+              exit 1
+            fi
+            umask 077
+            printf '%s' "$TESTS_BIGQUERY_SA_KEY_JSON" > "$RUNNER_TEMP/bigquery-sa-key.json"
+            {
+              echo "TESTS_BIGQUERY_SA_KEY_PATH=$RUNNER_TEMP/bigquery-sa-key.json"
+              echo "TESTS_BIGQUERY_PROJECT_ID=$TESTS_BIGQUERY_PROJECT_ID"
+              echo "REQUIRE_BIGQUERY_CREDENTIALS=true"
+            } >> "$GITHUB_ENV"
+          fi
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          cache: ${{ inputs.coverage }}
+          rustflags: ''
+          cache-key: coverage
+          cache-workspaces: |
+            . -> target/llvm-cov-target
+            . -> target/xtask
+          cache-on-failure: false
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install test tools
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-nextest@0.9.133${{ inputs.coverage && ',cargo-llvm-cov@0.6.23' || '' }}
+      - name: Download test binaries
+        if: '!inputs.coverage'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: test-binaries
+          path: target/ci
+      - name: Extract test runner
+        if: '!inputs.coverage'
+        run: tar -xzf target/ci/test-tools.tar.gz -C target/ci
+      - name: Start test services
+        env:
+          POSTGRES_IMAGE: ${{ inputs.postgres-image }}
+          POSTGRES_VERSION: ${{ inputs.postgres-version }}
+          COVERAGE: ${{ inputs.coverage }}
+        run: |
+          if [[ "$COVERAGE" == true ]]; then
+            cargo --locked xtask postgres start
+          else
+            target/ci/xtask postgres start
+          fi
+      - name: Vendor DuckDB extensions
+        run: ./scripts/bin/vendor-duckdb-extensions.sh --platform linux_amd64
+      - name: Run tests
+        env:
+          COVERAGE: ${{ inputs.coverage }}
+        run: |
+          if [[ "$COVERAGE" == true ]]; then
+            cargo --locked xtask nextest llvm-cov
+          else
+            target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst
+          fi
+      - name: Export coverage
+        if: inputs.coverage
+        run: cargo llvm-cov report --locked --lcov --output-path lcov.info
+      - name: Upload coverage
+        if: inputs.coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload coverage to Coveralls
+        if: inputs.coverage
+        uses: coverallsapp/github-action@5cbfd81b66ca5d10c19b062c04de0199c215fb6e # v2.3.7
+        with:
+          fail-on-error: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: lcov.info
+      - name: Remove BigQuery credentials
+        if: always()
+        run: rm -f "$RUNNER_TEMP/bigquery-sa-key.json"

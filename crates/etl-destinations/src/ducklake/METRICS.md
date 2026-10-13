@@ -85,7 +85,7 @@ How to read them:
 `etl_ducklake_external_maintenance_pause_duration_seconds` is emitted by the
 replicator when a Kubernetes-driven external maintenance pause ends. It measures
 only the time after the destination has drained foreground mutations and reported
-`Quiesced`; time spent queued by the controller is intentionally excluded.
+`Quiesced`; time spent waiting for external maintenance is intentionally excluded.
 
 It carries these labels:
 
@@ -104,7 +104,7 @@ maintenance. It carries the same `operation` label as
 operation requests emitted by the replicator after it samples DuckLake catalog
 state. The watcher reuses an existing pending request when it already covers the
 sampled operations, so this counter is not incremented on every poll while a CR
-waits in the controller queue.
+waits for external maintenance.
 
 It carries these labels:
 

@@ -1,76 +1,81 @@
-//! Pipeline runtime helpers.
+//! Pipeline initialization and graceful shutdown owned by the replicator.
+
+use std::future::Future;
 
 use etl::{destination::PipelineDestination, pipeline::Pipeline, store::PipelineStore};
-use tokio::signal::unix::{SignalKind, signal};
-use tracing::{error, info, warn};
 
-use crate::{error::ReplicatorResult, metrics};
+use crate::{
+    core::{
+        ReplicatorState,
+        shutdown::{ShutdownSignal, with_shutdown},
+    },
+    error::ReplicatorResult,
+    health::ReplicatorHealth,
+    metrics,
+};
 
-/// Starts a pipeline and handles graceful shutdown signals.
+/// Initializes a destination and pipeline, then drains running workers on
+/// termination. Initialization is cancellable; a running completion future
+/// must remain alive until graceful teardown finishes.
 ///
-/// Launches the pipeline, sets up signal handlers for SIGTERM and SIGINT,
-/// and ensures proper cleanup on shutdown. The pipeline will attempt to
-/// finish processing current batches before terminating.
-#[tracing::instrument(skip(pipeline))]
-pub(super) async fn start<S, D>(mut pipeline: Pipeline<S, D>) -> ReplicatorResult<()>
+/// The factory keeps only its captures in the async argument storage carried
+/// through the tracing wrapper. Current compiler layouts can reserve separate
+/// slots for a future argument and the child being awaited; constructing the
+/// initialization future inside avoids the extra large argument slot.
+#[tracing::instrument(skip(initialize, shutdown_signal, replicator_health))]
+pub(super) async fn start<S, D, F, Fut>(
+    initialize: F,
+    shutdown_signal: &mut ShutdownSignal,
+    replicator_health: &ReplicatorHealth,
+) -> ReplicatorResult<()>
 where
     S: PipelineStore,
     D: PipelineDestination,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = ReplicatorResult<Pipeline<S, D>>>,
 {
-    // Start the pipeline.
-    pipeline.start().await?;
+    let Some(result) = with_shutdown!(initialize(), shutdown_signal.wait()) else {
+        return Ok(());
+    };
+    let mut pipeline = result?;
 
-    // We spawn metrics collection after the pipeline was started, so that if we
-    // crash before starting we don't keep emitting metrics that make it look as
-    // if the system is running.
+    let startup_result = with_shutdown!(pipeline.start(), shutdown_signal.wait());
+
+    match startup_result {
+        Some(Ok(())) => replicator_health.set_replicator_state(ReplicatorState::Running),
+        result => {
+            replicator_health.set_replicator_state(ReplicatorState::Stopping);
+
+            // Startup failures return immediately. A signal is an orderly
+            // stop, so close the destination constructed before cancellation.
+            result.unwrap_or(Ok(()))?;
+
+            pipeline.shutdown_and_wait().await?;
+
+            return Ok(());
+        }
+    }
+
+    // Runtime metrics begin only once the pipeline has started successfully.
     let metrics_tasks = metrics::spawn_metrics_tasks();
 
-    // Spawn a task to listen for shutdown signals and trigger shutdown.
-    let shutdown_tx = pipeline.shutdown_tx();
-    let shutdown_handle = tokio::spawn(async move {
-        // Listen for SIGTERM, sent by Kubernetes before SIGKILL during pod termination.
-        //
-        // If the process is killed before shutdown completes, the pipeline may become
-        // corrupted, depending on the store and destination
-        // implementations.
-        let Ok(mut sigterm) = signal(SignalKind::terminate()) else {
-            error!("failed to register sigterm handler, shutting down pipeline");
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
 
-            if let Err(err) = shutdown_tx.shutdown() {
-                warn!(error = %err, "failed to send shutdown signal");
-            }
+    let pipeline_result = with_shutdown!(&mut pipeline_wait, shutdown_signal.wait());
+    replicator_health.set_replicator_state(ReplicatorState::Stopping);
 
-            return;
-        };
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                info!("sigint (ctrl+c) received, shutting down pipeline");
-            }
-            _ = sigterm.recv() => {
-                info!("sigterm received, shutting down pipeline");
-            }
+    match pipeline_result {
+        Some(result) => result?,
+        None => {
+            // Kubernetes enforces the grace period with SIGKILL. Do not drop
+            // the completion future while transactions and writes drain.
+            pipeline.shutdown();
+            pipeline_wait.await?;
         }
+    }
 
-        if let Err(err) = shutdown_tx.shutdown() {
-            warn!(error = %err, "failed to send shutdown signal");
-        }
-    });
-
-    // Wait for the pipeline to finish (either normally or via shutdown).
-    let result = pipeline.wait().await;
-
-    // Ensure the shutdown task is finished before returning.
-    // If the pipeline finished before Ctrl+C, we want to abort the shutdown task.
-    // If Ctrl+C was pressed, the shutdown task will have already triggered
-    // shutdown. We don't care about the result of the shutdown_handle, but we
-    // should abort it if it's still running.
-    shutdown_handle.abort();
-    let _ = shutdown_handle.await;
-    metrics_tasks.abort_and_wait().await;
-
-    // Propagate any pipeline error.
-    result?;
+    metrics_tasks.abort_and_wait().await?;
 
     Ok(())
 }

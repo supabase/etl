@@ -90,8 +90,8 @@ async fn wait_for_synchronized_failover_slot(
     slot_name: &str,
 ) {
     // Advance the logical slot through a fresh running-xacts snapshot before
-    // asking the standby to build its synchronized slot. This keeps the
-    // primary slot's catalog horizon from falling behind the standby's.
+    // asking the standby to build its synchronized slot. This keeps the primary
+    // slot's catalog horizon from falling behind the standby's.
     let synchronization_lsn = database.log_standby_snapshot().await.unwrap();
     wait_for_replication_slot_flush_lsn(
         database.client.as_ref().unwrap(),
@@ -210,7 +210,7 @@ async fn pipeline_enables_failover_on_an_existing_apply_slot() {
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 
     // Model a pipeline whose apply slot predates the failover setting.
-    let replication_client =
+    let mut replication_client =
         etl::postgres::client::PgReplicationClient::connect(database.config.clone()).await.unwrap();
     replication_client.create_slot(&apply_slot_name, false).await.unwrap();
     assert_eq!(replication_slot_failover(&database, &apply_slot_name).await, Some(false));

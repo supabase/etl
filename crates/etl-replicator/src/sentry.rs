@@ -11,8 +11,8 @@ use crate::error::ReplicatorError;
 
 /// Sets the destination tag on the current Sentry scope.
 ///
-/// This tag is applied at the scope level so all captured errors inherit
-/// the configured destination type.
+/// This tag is applied at the scope level so all captured errors inherit the
+/// configured destination type.
 pub(crate) fn set_destination_tag(destination: &'static str) {
     sentry::configure_scope(|scope| {
         scope.set_tag("destination", destination);

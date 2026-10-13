@@ -1,6 +1,5 @@
-//! Local configuration generation for the API and standalone replicator.
+//! Local configuration generation for the standalone replicator.
 
-mod api;
 mod replicator;
 
 use std::{
@@ -10,7 +9,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use api::write_api_config;
 use clap::{Args, Subcommand};
 use replicator::{
     IcebergCatalog, ReplicatorSetup, release_conflicting_apply_slot, write_replicator_config,
@@ -18,10 +16,7 @@ use replicator::{
 pub(crate) use replicator::{detect_replicator_destination, replicator_config_has_placeholders};
 
 use crate::{
-    commands::local::{
-        InitConfig, configure_kubernetes, prepare_local_databases, require_command,
-        seed_default_replicator_image, wait_for_iceberg_catalog,
-    },
+    commands::local::{InitConfig, require_command, wait_for_iceberg_catalog},
     utils::{DestinationPreset, workspace_root},
 };
 
@@ -30,7 +25,6 @@ use crate::{
 #[command(after_help = "\
 Examples:
   cargo x init
-  cargo x setup api && cargo x run api
   cargo x setup replicator && cargo x seed && cargo x run replicator
 ")]
 pub(crate) struct SetupArgs {
@@ -41,19 +35,8 @@ pub(crate) struct SetupArgs {
 /// Service that can be initialized for local development.
 #[derive(Subcommand)]
 enum SetupTarget {
-    /// Install API prerequisites and generate gitignored local configuration.
-    Api(SetupApiArgs),
     /// Generate gitignored local replicator configuration.
     Replicator(SetupReplicatorArgs),
-}
-
-/// Options for `cargo x setup api`.
-#[derive(Args)]
-struct SetupApiArgs {
-    /// Rewrite API configuration, appending a new encryption key when it
-    /// exists.
-    #[arg(long)]
-    force: bool,
 }
 
 /// Options for `cargo x setup replicator`.
@@ -83,39 +66,8 @@ impl SetupArgs {
     /// Initializes local configuration for the selected service.
     pub(crate) fn run(self) -> Result<()> {
         match self.target {
-            SetupTarget::Api(args) => args.run(),
             SetupTarget::Replicator(args) => args.run(),
         }
-    }
-}
-
-impl SetupApiArgs {
-    /// Writes API configuration and applies Kubernetes resources.
-    fn run(self) -> Result<()> {
-        let workspace_root = workspace_root()?;
-        std::env::set_current_dir(&workspace_root).with_context(|| {
-            format!("Failed to change directory to {}", workspace_root.display())
-        })?;
-
-        print_banner("ETL API local setup");
-        println!(
-            "This writes gitignored API configuration and seeds the default replicator image."
-        );
-        println!("If the local stack is not running, it starts Docker and Kubernetes first.");
-        println!();
-
-        require_command("psql", &["--version"], "Postgres client (psql) is not installed")?;
-        require_command("kubectl", &["version", "--client"], "Kubectl is not installed")?;
-
-        let config = prepare_local_databases()?;
-        seed_default_replicator_image(&config.database_url())?;
-        configure_kubernetes()?;
-        write_api_config(&config, self.force)?;
-
-        println!();
-        println!("✅ ETL API is ready to start.");
-        print_api_next_steps();
-        Ok(())
     }
 }
 
@@ -266,19 +218,6 @@ fn prompt_iceberg_catalog(default: IcebergCatalog) -> Result<IcebergCatalog> {
     IcebergCatalog::parse(&selected)
 }
 
-/// Prints how to start the API after setup.
-fn print_api_next_steps() {
-    println!("API:");
-    println!("  cargo x run api");
-    println!("  Health      http://127.0.0.1:8010/health_check");
-    println!("  Swagger UI  http://127.0.0.1:8010/swagger-ui");
-    println!("  Internal    http://127.0.0.1:8081/health_check");
-    println!("  Keys        crates/etl-api/configuration/dev.yaml (gitignored)");
-    println!("  Add key     cargo x setup api --force");
-    println!("  Rotate data cargo x rotate-encryption-key");
-    println!("  Remove old encryption keys only after rotation succeeds.");
-}
-
 /// Prints how to start the replicator after setup.
 fn print_replicator_next_steps(destination: DestinationPreset, iceberg_catalog: IcebergCatalog) {
     println!("Replicator:");
@@ -340,19 +279,9 @@ fn finish_prompt(default: &str) -> Result<String> {
     if trimmed.is_empty() { Ok(default.to_owned()) } else { Ok(trimmed.to_owned()) }
 }
 
-/// Returns the gitignored API configuration directory.
-pub(crate) fn api_config_dir() -> Result<PathBuf> {
-    Ok(workspace_root()?.join("crates/etl-api/configuration"))
-}
-
 /// Returns the gitignored replicator configuration directory.
 pub(crate) fn replicator_config_dir() -> Result<PathBuf> {
     Ok(workspace_root()?.join("crates/etl-replicator/configuration"))
-}
-
-/// Returns whether local API configuration already exists.
-pub(crate) fn api_config_exists() -> Result<bool> {
-    Ok(api_config_dir()?.join("dev.yaml").is_file())
 }
 
 /// Returns whether local replicator configuration already exists.

@@ -1,6 +1,30 @@
-use etl::error::{ErrorKind, EtlError};
+use etl::{
+    error::{ErrorKind, EtlError},
+    schema::TableId,
+};
 use reqwest::StatusCode;
 use serde::Deserialize;
+
+use crate::snowflake::encoding::CdcOperation;
+
+/// Name and serialized length of the largest column in a rejected row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LargestColumn {
+    /// Destination column name.
+    pub name: String,
+    /// Serialized JSON length of the value, including string quotes.
+    pub serialized_bytes: usize,
+}
+
+/// Formats the largest-column clause of [`Error::RowTooLarge`].
+fn describe_largest_column(largest_column: &Option<LargestColumn>) -> String {
+    match largest_column {
+        Some(column) => {
+            format!(", largest column {} {} B", column.name, column.serialized_bytes)
+        }
+        None => String::new(),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,6 +49,19 @@ pub enum Error {
     #[error("Encoding error: {0}")]
     Encoding(String),
 
+    /// A PostgreSQL JSON array contains a SQL-null element with no faithful
+    /// representation in the Snowpipe JSON request.
+    #[error(
+        "SQL NULL at index {element_index} in JSON array column '{column_name}' cannot be encoded \
+         without becoming JSON null"
+    )]
+    NullJsonArrayElement {
+        /// Source column containing the array.
+        column_name: String,
+        /// Zero-based position of the first SQL-null element.
+        element_index: usize,
+    },
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -39,6 +76,31 @@ pub enum Error {
 
     #[error("schema '{schema}' not found in database '{database}'")]
     SchemaNotFound { database: String, schema: String },
+
+    /// A single row cannot be sent: its complete compressed frame exceeds the
+    /// Snowflake request limit at the configured compression level.
+    #[error(
+        "Row for table {table_id} ({operation}, {column_count} columns, {serialized_bytes} B \
+         serialized{}) compresses to at least {compressed_lower_bound} B, over the \
+         {request_limit} B Snowflake request limit",
+        describe_largest_column(largest_column)
+    )]
+    RowTooLarge {
+        /// Source table whose row was rejected.
+        table_id: TableId,
+        /// CDC operation the row carried.
+        operation: CdcOperation,
+        /// Number of destination columns in the row.
+        column_count: usize,
+        /// Exact NDJSON line length, including the newline.
+        serialized_bytes: usize,
+        /// Largest column by serialized length, when it could be measured.
+        largest_column: Option<LargestColumn>,
+        /// Output length at which compression was stopped.
+        compressed_lower_bound: usize,
+        /// Request limit the frame had to fit.
+        request_limit: usize,
+    },
 }
 
 /// Stable, low-cardinality classification for a failed Snowpipe append.
@@ -56,6 +118,8 @@ pub(super) enum AppendFailureType {
     Channel,
     /// Request or response encoding failed.
     Encoding,
+    /// A single row cannot fit the request limit.
+    RowTooLarge,
     /// Destination configuration is invalid or incomplete.
     Configuration,
 }
@@ -70,6 +134,7 @@ impl AppendFailureType {
             Self::SnowpipeApi => "snowpipe_api",
             Self::Channel => "channel",
             Self::Encoding => "encoding",
+            Self::RowTooLarge => "row_too_large",
             Self::Configuration => "configuration",
         }
     }
@@ -93,7 +158,8 @@ impl Error {
             | Self::Channel(_) => AppendFailureType::Channel,
             Self::Snowpipe(SnowpipeError::ApiStatus { .. }) => AppendFailureType::SnowpipeApi,
             Self::Snowpipe(SnowpipeError::HttpStatus { .. }) => AppendFailureType::Provider,
-            Self::Encoding(_) => AppendFailureType::Encoding,
+            Self::Encoding(_) | Self::NullJsonArrayElement { .. } => AppendFailureType::Encoding,
+            Self::RowTooLarge { .. } => AppendFailureType::RowTooLarge,
             Self::Config(_)
             | Self::MissingTableColumn { .. }
             | Self::UnexpectedTableColumn { .. }
@@ -112,6 +178,21 @@ impl From<Error> for EtlError {
                 source: err
             );
         }
+        if matches!(&err, Error::RowTooLarge { .. }) {
+            return etl::etl_error!(
+                ErrorKind::UnsupportedValueInDestination,
+                "Snowflake cannot accept a row of this size",
+                source: err
+            );
+        }
+
+        if matches!(&err, Error::NullJsonArrayElement { .. }) {
+            return etl::etl_error!(
+                ErrorKind::NullValuesNotSupportedInArrayInDestination,
+                "Snowflake cannot preserve SQL NULL elements in JSON arrays",
+                source: err
+            );
+        }
 
         let (kind, description) = match &err {
             Error::HttpTransport(_) => {
@@ -127,8 +208,11 @@ impl From<Error> for EtlError {
             Error::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
             Error::Encoding(_) => (ErrorKind::InvalidData, "Snowflake encoding error"),
             Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
-            Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. } => {
-                unreachable!("schema errors return above")
+            Error::MissingTableColumn { .. }
+            | Error::UnexpectedTableColumn { .. }
+            | Error::RowTooLarge { .. }
+            | Error::NullJsonArrayElement { .. } => {
+                unreachable!("schema and unsupported value errors return above")
             }
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
@@ -234,6 +318,17 @@ mod tests {
 
     use super::*;
 
+    /// Unsupported array elements retain their typed cause and stable kind.
+    #[test]
+    fn json_array_null_error_is_preserved() {
+        let error =
+            Error::NullJsonArrayElement { column_name: "payload".to_owned(), element_index: 2 };
+        assert_eq!(error.append_failure_type(), AppendFailureType::Encoding);
+        let error = EtlError::from(error);
+        assert_eq!(error.kind(), ErrorKind::NullValuesNotSupportedInArrayInDestination);
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
     #[test]
     fn table_schema_error_is_preserved() {
         let error = Error::MissingTableColumn {
@@ -246,6 +341,34 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::CorruptedTableSchema);
         assert_eq!(source.to_string(), "Snowflake table 'events' is missing column 'id'");
+    }
+
+    #[test]
+    fn row_too_large_is_an_unsupported_value_with_structural_details() {
+        let error = Error::RowTooLarge {
+            table_id: etl::schema::TableId::new(42),
+            operation: crate::snowflake::CdcOperation::Update,
+            column_count: 3,
+            serialized_bytes: 13_613_900,
+            largest_column: Some(LargestColumn {
+                name: "payload".to_owned(),
+                serialized_bytes: 13_613_000,
+            }),
+            compressed_lower_bound: 5_452_596,
+            request_limit: 4_194_304,
+        };
+        assert_eq!(error.append_failure_type(), AppendFailureType::RowTooLarge);
+        assert_eq!(
+            error.to_string(),
+            "Row for table 42 (update, 3 columns, 13613900 B serialized, largest column payload \
+             13613000 B) compresses to at least 5452596 B, over the 4194304 B Snowflake request \
+             limit"
+        );
+
+        let error = EtlError::from(error);
+        assert_eq!(error.kind(), ErrorKind::UnsupportedValueInDestination);
+        let source = error.source().unwrap();
+        assert!(source.to_string().starts_with("Row for table 42"));
     }
 
     #[test]

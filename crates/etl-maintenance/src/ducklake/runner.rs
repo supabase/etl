@@ -26,13 +26,13 @@ use regex::Regex;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 use tokio::{
     sync::{Semaphore, oneshot},
-    task::JoinHandle,
     time::Instant,
 };
 use tokio_postgres::{
     Config as PgConfig,
     config::{Host, SslMode},
 };
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
@@ -817,7 +817,7 @@ struct DuckDbMaintenanceWatchdog {
     timed_out: Arc<AtomicBool>,
     interrupt_tx: Option<oneshot::Sender<Arc<duckdb::InterruptHandle>>>,
     done_tx: Option<oneshot::Sender<()>>,
-    task: Option<JoinHandle<()>>,
+    task: Option<AbortOnDropHandle<()>>,
 }
 
 impl DuckDbMaintenanceWatchdog {
@@ -826,7 +826,7 @@ impl DuckDbMaintenanceWatchdog {
         let timeout_flag = Arc::clone(&timed_out);
         let (interrupt_tx, interrupt_rx) = oneshot::channel::<Arc<duckdb::InterruptHandle>>();
         let (done_tx, done_rx) = oneshot::channel();
-        let task = tokio::spawn(async move {
+        let task = AbortOnDropHandle::new(tokio::spawn(async move {
             info!(
                 operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
                 timeout_ms = timeout.as_millis() as u64,
@@ -841,6 +841,7 @@ impl DuckDbMaintenanceWatchdog {
             let mut done_rx = Box::pin(done_rx);
             let interrupt_handle = tokio::select! {
                 biased;
+
                 _ = &mut done_rx => {
                     info!(
                         operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
@@ -850,6 +851,7 @@ impl DuckDbMaintenanceWatchdog {
                     );
                     return;
                 },
+
                 result = &mut interrupt_rx => match result {
                     Ok(handle) => {
                         info!(
@@ -872,6 +874,7 @@ impl DuckDbMaintenanceWatchdog {
                         return;
                     },
                 },
+
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
                     warn!(
@@ -884,6 +887,7 @@ impl DuckDbMaintenanceWatchdog {
                     );
                     tokio::select! {
                         biased;
+
                         _ = &mut done_rx => {
                             info!(
                                 operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
@@ -893,6 +897,7 @@ impl DuckDbMaintenanceWatchdog {
                             );
                             return;
                         },
+
                         result = &mut interrupt_rx => match result {
                             Ok(handle) => {
                                 warn!(
@@ -936,6 +941,7 @@ impl DuckDbMaintenanceWatchdog {
 
             tokio::select! {
                 biased;
+
                 _ = &mut done_rx => {
                     info!(
                         operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
@@ -946,6 +952,7 @@ impl DuckDbMaintenanceWatchdog {
                         remaining_ms_until(deadline)
                     );
                 }
+
                 _ = tokio::time::sleep_until(deadline) => {
                     timeout_flag.store(true, Ordering::Relaxed);
                     warn!(
@@ -965,7 +972,7 @@ impl DuckDbMaintenanceWatchdog {
                     );
                 }
             }
-        });
+        }));
 
         Self {
             timeout,
@@ -1024,7 +1031,7 @@ impl DuckDbMaintenanceWatchdog {
         self.timed_out.load(Ordering::Relaxed)
     }
 
-    fn async_task_handle(&mut self) -> EtlResult<JoinHandle<()>> {
+    fn async_task_handle(&mut self) -> EtlResult<AbortOnDropHandle<()>> {
         self.task.take().ok_or_else(|| {
             etl_error!(
                 ErrorKind::DestinationError,
@@ -1155,7 +1162,7 @@ impl DuckDbMaintenanceExecutor {
                 .await
             {
                 Ok(Ok(permit)) => permit,
-                Ok(Err(_)) => {
+                Ok(Err(error)) => {
                     tracing::error!(
                         operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
                         "ducklake maintenance blocking operation semaphore closed: \
@@ -1163,8 +1170,9 @@ impl DuckDbMaintenanceExecutor {
                         DUCKDB_MAINTENANCE_OPERATION_KIND
                     );
                     return Err(etl_error!(
-                        ErrorKind::ApplyWorkerPanic,
-                        "DuckLake maintenance blocking slot acquisition failed"
+                        ErrorKind::InvalidState,
+                        "DuckLake maintenance blocking slot acquisition failed",
+                        source: error
                     ));
                 }
                 Err(_) => {
@@ -1201,7 +1209,22 @@ impl DuckDbMaintenanceExecutor {
         let watchdog_timed_out = Arc::clone(&watchdog.timed_out);
         let abort_deadline = deadline + BLOCKING_ABORT_GRACE;
 
-        let blocking_task = tokio::task::spawn_blocking(move || -> EtlResult<R> {
+        // The blocking closure owns both guards: cancelling its async caller
+        // must not disable native interruption or the hard deadline.
+        let (blocking_done_tx, blocking_done_rx) = oneshot::channel::<()>();
+        let abort_task = AbortOnDropHandle::new(tokio::spawn(async move {
+            tokio::select! {
+                biased;
+
+                _ = blocking_done_rx => {}
+
+                _ = tokio::time::sleep_until(abort_deadline) => {
+                    abort_stuck_duckdb_maintenance_operation(timeout, BLOCKING_ABORT_GRACE);
+                }
+            }
+        }));
+
+        let blocking_work = move || -> EtlResult<R> {
             info!(
                 operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
                 deadline_remaining_ms = remaining_ms_until(deadline),
@@ -1371,103 +1394,52 @@ impl DuckDbMaintenanceExecutor {
             }
 
             res
-        });
+        };
+
+        let blocking_task = AbortOnDropHandle::new(tokio::task::spawn_blocking(move || {
+            let _blocking_done = blocking_done_tx;
+            (blocking_work(), watchdog_task, abort_task)
+        }));
 
         info!(
             operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
             abort_deadline_remaining_ms = remaining_ms_until(abort_deadline),
-            "ducklake maintenance blocking operation waiting for blocking task or abort deadline: \
+            "ducklake maintenance blocking operation waiting for supervised blocking task: \
              operation_kind={}, abort_deadline_remaining_ms={}",
             DUCKDB_MAINTENANCE_OPERATION_KIND,
             remaining_ms_until(abort_deadline)
         );
-        let blocking_result = tokio::select! {
-            biased;
-            result = blocking_task => result,
-            _ = tokio::time::sleep_until(abort_deadline) => {
-                abort_stuck_duckdb_maintenance_operation(timeout, BLOCKING_ABORT_GRACE);
-            }
-        };
+        let (blocking_result, watchdog_task, abort_task) =
+            blocking_task.await.map_err(EtlError::from)?;
 
         match &blocking_result {
-            Ok(Ok(_)) => info!(
+            Ok(_) => info!(
                 operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
                 timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-                "ducklake maintenance blocking operation task joined with success: \
-                 operation_kind={}, timed_out={}",
-                DUCKDB_MAINTENANCE_OPERATION_KIND,
-                watchdog_timed_out.load(Ordering::Relaxed)
+                "ducklake maintenance blocking operation completed"
             ),
-            Ok(Err(error)) => warn!(
+            Err(error) => warn!(
                 operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
                 timed_out = watchdog_timed_out.load(Ordering::Relaxed),
                 error = %error,
-                "ducklake maintenance blocking operation task joined with error: operation_kind={}, \
-                 timed_out={}, error={}",
-                DUCKDB_MAINTENANCE_OPERATION_KIND,
-                watchdog_timed_out.load(Ordering::Relaxed),
-                error
-            ),
-            Err(error) => tracing::error!(
-                operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
-                timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-                error = %error,
-                "ducklake maintenance blocking operation task join failed: operation_kind={}, \
-                 timed_out={}, error={}",
-                DUCKDB_MAINTENANCE_OPERATION_KIND,
-                watchdog_timed_out.load(Ordering::Relaxed),
-                error
+                "ducklake maintenance blocking operation failed"
             ),
         }
 
-        info!(
-            operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
-            timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-            "ducklake maintenance blocking operation awaiting watchdog task: operation_kind={}, \
-             timed_out={}",
-            DUCKDB_MAINTENANCE_OPERATION_KIND,
-            watchdog_timed_out.load(Ordering::Relaxed)
-        );
-        match watchdog_task.await {
-            Ok(()) => info!(
-                operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
-                timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-                "ducklake maintenance blocking operation watchdog task joined: operation_kind={}, \
-                 timed_out={}",
-                DUCKDB_MAINTENANCE_OPERATION_KIND,
-                watchdog_timed_out.load(Ordering::Relaxed)
-            ),
-            Err(error) => {
-                tracing::error!(
-                    operation_kind = DUCKDB_MAINTENANCE_OPERATION_KIND,
-                    timed_out = watchdog_timed_out.load(Ordering::Relaxed),
-                    error = %error,
-                    "ducklake maintenance blocking operation watchdog task panicked: \
-                     operation_kind={}, timed_out={}, error={}",
-                    DUCKDB_MAINTENANCE_OPERATION_KIND,
-                    watchdog_timed_out.load(Ordering::Relaxed),
-                    error
-                );
-                return Err(etl_error!(
-                    ErrorKind::ApplyWorkerPanic,
-                    "DuckLake maintenance query watchdog task panicked"
-                ));
-            }
-        }
+        // Native work has returned, so failed operations can drop their
+        // monitors.
+        let result = blocking_result?;
+        watchdog_task.await.map_err(EtlError::from)?;
+        abort_task.await.map_err(EtlError::from)?;
 
-        blocking_result.map_err(|_| {
-            etl_error!(
-                ErrorKind::ApplyWorkerPanic,
-                "DuckLake maintenance blocking operation task panicked"
-            )
-        })?
+        Ok(result)
     }
 }
 
 async fn build_warm_ducklake_pool(
     manager: DuckLakeConnectionManager,
 ) -> EtlResult<r2d2::Pool<DuckLakeConnectionManager>> {
-    tokio::task::spawn_blocking(move || -> EtlResult<_> {
+    AbortOnDropHandle::new(tokio::task::spawn_blocking(move || -> EtlResult<_> {
         let pool = r2d2::Pool::builder()
             .max_size(MAINTENANCE_DUCKDB_POOL_SIZE)
             .min_idle(Some(0))
@@ -1500,14 +1472,9 @@ async fn build_warm_ducklake_pool(
             "ducklake maintenance connection pool warmed"
         );
         Ok(pool)
-    })
+    }))
     .await
-    .map_err(|_| {
-        etl_error!(
-            ErrorKind::ApplyWorkerPanic,
-            "DuckLake maintenance connection pool initialization task panicked"
-        )
-    })?
+    .map_err(EtlError::from)?
 }
 
 fn format_query_error_detail(sql: &str) -> String {
@@ -1764,32 +1731,31 @@ fn validate_config(config: &DuckLakeMaintenanceConfig) -> EtlResult<()> {
     Ok(())
 }
 
-/// Validates the configured snapshot-retention interval on DuckDB.
-async fn validate_expire_snapshots_older_than(
-    duckdb: &DuckDbMaintenanceExecutor,
-    older_than: &str,
-) -> EtlResult<()> {
+/// Computes a snapshot-expiration timestamp and checks its actual retention.
+///
+/// The returned timestamp must be used directly for expiration because calendar
+/// arithmetic can change an interval's effective retention between queries.
+fn expire_snapshots_cutoff(conn: &duckdb::Connection, older_than: &str) -> EtlResult<String> {
+    // Compare timestamps because interval ordering assumes every month has 30
+    // days.
     let sql = format!(
-        "SELECT CAST({} AS INTERVAL) >= CAST({} AS INTERVAL);",
-        quote_literal(older_than),
+        "select cast(cutoff as varchar), cutoff <= cast(now() as timestamp) - cast({} as \
+         interval) from (select cast(now() as timestamp) - cast({} as interval) as cutoff);",
         quote_literal(MIN_EXPIRE_SNAPSHOTS_OLDER_THAN),
+        quote_literal(older_than),
     );
-    let older_than_for_error = older_than.to_owned();
-    let retention_is_safe = duckdb
-        .run(move |conn| -> EtlResult<bool> {
-            conn.query_row(&sql, [], |row| row.get(0)).map_err(|source| {
-                etl_error!(
-                    ErrorKind::ConfigError,
-                    "DuckLake expire_snapshots_older_than configuration failed",
-                    format!("Invalid expire_snapshots_older_than value `{older_than_for_error}`"),
-                    source: source
-                )
-            })
-        })
-        .await?;
+    let (cutoff, retention_is_safe): (String, bool) =
+        conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?))).map_err(|source| {
+            etl_error!(
+                ErrorKind::ConfigError,
+                "DuckLake expire_snapshots_older_than configuration failed",
+                format!("Invalid expire_snapshots_older_than value `{older_than}`"),
+                source: source
+            )
+        })?;
 
     if retention_is_safe {
-        return Ok(());
+        return Ok(cutoff);
     }
 
     Err(etl_error!(
@@ -1800,6 +1766,15 @@ async fn validate_expire_snapshots_older_than(
             MIN_EXPIRE_SNAPSHOTS_OLDER_THAN, older_than
         )
     ))
+}
+
+/// Validates the configured snapshot-retention interval on DuckDB.
+async fn validate_expire_snapshots_older_than(
+    duckdb: &DuckDbMaintenanceExecutor,
+    older_than: &str,
+) -> EtlResult<()> {
+    let older_than = older_than.to_owned();
+    duckdb.run(move |conn| expire_snapshots_cutoff(conn, &older_than).map(|_| ())).await
 }
 
 /// Opens initialized DuckDB connections for maintenance.
@@ -2510,11 +2485,11 @@ fn rewrite_data_files(
 
 /// Calls DuckLake snapshot expiration.
 fn expire_snapshots(conn: &duckdb::Connection, older_than: &str) -> EtlResult<u64> {
+    let cutoff = expire_snapshots_cutoff(conn, older_than)?;
     let sql = format!(
-        "CALL ducklake_expire_snapshots({}, older_than => CAST(now() AS TIMESTAMP) - CAST({} AS \
-         INTERVAL));",
+        "call ducklake_expire_snapshots({}, older_than => cast({} as timestamp));",
         quote_literal(LAKE_CATALOG),
-        quote_literal(older_than),
+        quote_literal(&cutoff),
     );
     count_maintenance_rows(conn, &sql, "DuckLake expire snapshots failed")
 }
@@ -3816,6 +3791,7 @@ mod tests {
         assert_eq!(parsed.get_ssl_mode(), SslMode::Prefer);
     }
 
+    /// Rejects unsafe or malformed intervals before maintenance starts.
     #[tokio::test]
     async fn validate_expire_snapshots_older_than_enforces_minimum_retention() {
         let executor = make_maintenance_test_executor();
@@ -3823,10 +3799,19 @@ mod tests {
         validate_expire_snapshots_older_than(&executor, "1 day").await.unwrap();
         validate_expire_snapshots_older_than(&executor, "7 days").await.unwrap();
 
-        for older_than in ["0 seconds", "-1 day", "23 hours"] {
-            let error = validate_expire_snapshots_older_than(&executor, older_than)
-                .await
-                .expect_err("unsafe retention should fail");
+        for older_than in [
+            "0 seconds",
+            "-1 day",
+            "23 hours",
+            "1 day -1 microsecond",
+            // DuckDB compares years as 12 * 30 days: -360 + 361 = 1 day, exactly the old minimum.
+            // Calendar subtraction instead moves the cutoff 4 or 5 days into the future.
+            "-1 year 361 days",
+            "",
+            "not an interval",
+        ] {
+            let error =
+                validate_expire_snapshots_older_than(&executor, older_than).await.unwrap_err();
 
             assert_eq!(error.kind(), ErrorKind::ConfigError);
             assert_eq!(
@@ -3834,6 +3819,93 @@ mod tests {
                 Some("DuckLake expire_snapshots_older_than configuration failed")
             );
         }
+    }
+
+    /// Passes the exact validated calendar cutoff, including fractional
+    /// seconds.
+    #[test]
+    fn expire_snapshots_uses_validated_cutoff() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create macro now() as timestamp '2026-03-01 12:00:00.123456';
+             create macro ducklake_expire_snapshots(catalog, older_than := null) as table
+                 select older_than where older_than = timestamp '2026-02-01 12:00:00.123456';",
+        )
+        .unwrap();
+
+        assert_eq!(expire_snapshots(&conn, "1 month").unwrap(), 1);
+    }
+
+    /// Rechecks calendar retention when expiration runs after initial
+    /// validation.
+    #[tokio::test]
+    async fn expire_snapshots_rechecks_retention_at_execution() {
+        let executor = make_maintenance_test_executor();
+        executor
+            .run(|conn| {
+                conn.execute_batch(
+                    "create macro now() as timestamp '2026-02-01 12:00:00';
+                     create macro ducklake_expire_snapshots(catalog, older_than := null)
+                         as table select older_than;",
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        validate_expire_snapshots_older_than(&executor, "1 month -29 days").await.unwrap();
+        executor
+            .run(|conn| {
+                conn.execute_batch(
+                    "create or replace macro now() as timestamp '2026-03-01 12:00:00';",
+                )
+                .unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let config = ExpireSnapshotsMaintenanceConfig {
+            enabled: true,
+            older_than: "1 month -29 days".to_owned(),
+        };
+        let mut outcome = DuckLakeMaintenanceOutcome::default();
+        let error = run_expire_snapshots(&executor, &config, &mut outcome).await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert_eq!(outcome.expired_snapshots, 0);
+    }
+
+    /// Caller cancellation must not stop the watchdog while DuckDB is running.
+    #[tokio::test]
+    async fn cancelled_maintenance_caller_retains_watchdog() {
+        let executor = make_maintenance_test_executor();
+        let slots = Arc::clone(&executor.blocking_slots);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (interrupted_tx, interrupted_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            executor
+                .run_with_timeout(Duration::from_secs(1), move |conn| {
+                    started_tx.send(()).unwrap();
+                    let result = conn.query_row(
+                        "select count(*) from range(10000000) t1, range(1000000) t2",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    );
+                    interrupted_tx.send(result.is_err()).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), interrupted_rx).await.unwrap().unwrap()
+        );
+        let _permit =
+            tokio::time::timeout(Duration::from_secs(5), slots.acquire()).await.unwrap().unwrap();
     }
 
     #[tokio::test]

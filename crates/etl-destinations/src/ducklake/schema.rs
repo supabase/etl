@@ -73,21 +73,21 @@ fn postgres_column_type_to_ducklake_sql(typ: &Type, modifier: i32) -> Cow<'stati
 /// Maximum precision (width) supported by DuckDB `DECIMAL(p, s)`.
 const DUCKDB_MAX_DECIMAL_PRECISION: i16 = 38;
 
-/// Returns whether Postgres [`NumericModifiers`] are within the range
-/// supported by DuckDB `DECIMAL(p, s)`.
+/// Returns whether Postgres [`NumericModifiers`] are within the range supported
+/// by DuckDB `DECIMAL(p, s)`.
 ///
 /// DuckDB requires `1 <= p <= 38` and `0 <= s <= p`. Postgres allows a wider
 /// range (p up to 1000, negative scale, scale exceeding precision), so
-/// constrained `NUMERIC(p, s)` columns outside the DuckDB range must fall
-/// back to `varchar`.
+/// constrained `NUMERIC(p, s)` columns outside the DuckDB range must fall back
+/// to `varchar`.
 fn is_ducklake_compatible(nm: &NumericModifiers) -> bool {
     nm.p >= 1 && nm.p <= DUCKDB_MAX_DECIMAL_PRECISION && nm.s >= 0 && nm.s <= nm.p
 }
 
 /// Builds one DuckLake column definition.
 ///
-/// For example, a non-null source `name text` column becomes
-/// `"name" varchar not null`.
+/// For example, a non-null source `name text` column becomes `"name" varchar
+/// not null`.
 fn ducklake_column_definition(
     column_schema: &ColumnSchema,
     include_default: bool,
@@ -163,8 +163,8 @@ fn render_ducklake_default_expression(
         DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
         DefaultExpression::BooleanLiteral(expression) => {
             // DuckLake accepts only literal add-time defaults. DuckDB parses
-            // bare boolean keywords as expressions for this validation, while
-            // a quoted boolean remains a literal and is coerced to BOOLEAN.
+            // bare boolean keywords as expressions for this validation, while a
+            // quoted boolean remains a literal and is coerced to BOOLEAN.
             matches!(typ, &Type::BOOL).then(|| quote_literal(expression))
         }
     }
@@ -213,8 +213,8 @@ fn ducklake_default_expression(default_expression: &str, typ: &Type) -> Option<S
 /// Builds a `create table if not exists` DDL statement for the given table name
 /// and schema.
 ///
-/// The supplied columns are the destination-visible replicated columns in
-/// write order.
+/// The supplied columns are the destination-visible replicated columns in write
+/// order.
 pub(super) fn build_create_table_sql_ducklake(
     table_name: &DuckLakeTableName,
     column_schemas: &[ColumnSchema],
@@ -418,17 +418,16 @@ mod tests {
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(10, 2)");
 
         // NUMERIC(38, 0): max DuckDB precision, zero scale.
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((38i32 << 16) | 0) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(38, 0)");
 
         // NUMERIC(38, 38): max DuckDB precision and scale.
-        #[allow(clippy::identity_op)]
         let typmod = ((38i32 << 16) | 38) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(38, 38)");
 
         // NUMERIC(1, 0): minimal.
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((1i32 << 16) | 0) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "decimal(1, 0)");
     }
@@ -436,12 +435,12 @@ mod tests {
     #[test]
     fn scalar_type_mapping_numeric_incompatible_falls_back_to_varchar() {
         // NUMERIC(39, 0): precision exceeds DuckDB max.
-        #[allow(clippy::identity_op)]
+        #[expect(clippy::identity_op)]
         let typmod = ((39i32 << 16) | 0) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "varchar");
 
         // NUMERIC(10, -3): negative scale.
-        let typmod = ((10i32 << 16) | ((-3i16 as u16) as i32)) + 4;
+        let typmod = ((10i32 << 16) | i32::from(-3i16 as u16)) + 4;
         assert_eq!(postgres_scalar_type_to_ducklake_sql(&Type::NUMERIC, typmod), "varchar");
 
         // NUMERIC(3, 5): scale exceeds precision.

@@ -11,12 +11,12 @@ if you want to embed the `etl` crate instead.
 
 ## Available Examples
 
-| Example                     | Binary       | Feature      | Destination                            | Status      |
-| --------------------------- | ------------ | ------------ | -------------------------------------- | ----------- |
-| [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | In progress |
-| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable      |
-| [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | In progress |
-| [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | In progress |
+| Example                     | Binary       | Feature      | Destination                            | Status        |
+| --------------------------- | ------------ | ------------ | -------------------------------------- | ------------- |
+| [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | Private alpha |
+| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable        |
+| [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | In progress   |
+| [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | In progress   |
 
 Iceberg is deprecated and is not recommended for new deployments. It has no
 example here.
@@ -33,9 +33,9 @@ cargo x example ducklake
 cargo x example snowflake
 ```
 
-This handles the `-p etl-examples --features <name>` boilerplate, injects
-`TESTS_DATABASE_*` as `--db-*` flags, and defaults `--db-name` to `etl_testdata`
-and `--publication` to `seed_pub` (matching `cargo x seed`).
+This selects the package and feature, reads the exported `TESTS_DATABASE_*`
+variables, and defaults to database `etl_testdata` and publication `seed_pub`
+(matching `cargo x seed`).
 
 Override any flag by passing it explicitly:
 
@@ -116,9 +116,9 @@ After `cargo x seed`:
 cargo x example clickhouse
 ```
 
-No cloud account is required. Full flags and table-engine notes are in
-[ClickHouse](#clickhouse) below. Use BigQuery, DuckLake, or Snowflake only when
-you already have those services.
+No cloud account is required. See the [ClickHouse destination guide][clickhouse-guide]
+for flags, requirements, and table engines. Use BigQuery, DuckLake, or Snowflake
+only when you already have those services.
 
 ## BigQuery
 
@@ -168,99 +168,25 @@ cargo run --bin bigquery -p etl-examples --features bigquery -- \
 
 ## ClickHouse
 
-Replicates a Postgres publication to ClickHouse over HTTP(S). ClickHouse **23.5
-or newer** is required for the default `ReplacingMergeTree` engine.
+**Private alpha.** The managed service admits a limited set of users; the
+open-source destination is unrestricted. Expect operational requirements to
+change.
 
-`cargo x init` starts a local ClickHouse on `http://localhost:8123` with user
-`etl` / password `etl`.
-
-### Run
+Replicates a Postgres publication to ClickHouse over HTTP(S). After
+[local setup](#quick-database-setup):
 
 ```bash
-cargo run --bin clickhouse -p etl-examples --features clickhouse -- \
-    --db-host localhost \
-    --db-port 5430 \
-    --db-name etl_testdata \
-    --db-username postgres \
-    --db-password postgres \
-    --clickhouse-url http://localhost:8123 \
-    --clickhouse-user etl \
-    --clickhouse-password etl \
-    --clickhouse-database default \
-    --publication seed_pub
+source .env
+cargo x example clickhouse
 ```
 
-For HTTPS, pass an `https://` URL. TLS uses webpki root certificates.
+The example reads both passwords from `TESTS_DATABASE_PASSWORD` and
+`TESTS_CLICKHOUSE_PASSWORD`, keeping them out of process arguments.
 
-### All Flags
+See the [ClickHouse destination guide][clickhouse-guide] for engine selection,
+requirements, CLI flags, queries, and upgrades.
 
-| Flag                           | Default                 | Description                                              |
-| ------------------------------ | ----------------------- | -------------------------------------------------------- |
-| `--db-host`                    | _(required)_            | Postgres host                                            |
-| `--db-port`                    | _(required)_            | Postgres port                                            |
-| `--db-name`                    | _(required)_            | Postgres database name                                   |
-| `--db-username`                | _(required)_            | Postgres user                                            |
-| `--db-password`                | —                       | Postgres password                                        |
-| `--clickhouse-url`             | _(required)_            | ClickHouse HTTP(S) URL                                   |
-| `--clickhouse-user`            | _(required)_            | ClickHouse user                                          |
-| `--clickhouse-password`        | —                       | ClickHouse password                                      |
-| `--clickhouse-database`        | _(required)_            | ClickHouse database                                      |
-| `--clickhouse-engine`          | `replacing_merge_tree`  | `replacing_merge_tree` or `merge_tree`                   |
-| `--max-batch-fill-duration-ms` | `5000`                  | Max time to wait before flushing a batch                 |
-| `--max-table-sync-workers`     | `4`                     | Concurrent workers during initial copy                   |
-| `--publication`                | _(required)_            | Postgres publication name                                |
-
-### Table Engines
-
-Choose the layout per pipeline with `--clickhouse-engine`:
-
-| Flag value                       | Engine               | Use it for                                              |
-| -------------------------------- | -------------------- | ------------------------------------------------------- |
-| `replacing_merge_tree` (default) | `ReplacingMergeTree` | Current-state replicas. Source must have a primary key. |
-| `merge_tree`                     | `MergeTree`          | Append-only event log. Works for PK-less source tables. |
-
-Table names are derived from the Postgres schema and table name using
-double-underscore escaping (`public.orders` → `public_orders`,
-`my_schema.t` → `my__schema_t`).
-
-#### ReplacingMergeTree (default)
-
-Each replicated table is created as `ReplacingMergeTree(_etl_version, _etl_deleted)`
-keyed on the source primary key:
-
-- `_etl_version UInt128` — packed `(commit_lsn << 64) | tx_ordinal`. Higher
-  values win during a `FINAL` merge.
-- `_etl_deleted UInt8` — `1` for DELETE events, `0` otherwise.
-
-A companion `<table>__current` view hides those internals:
-
-```sql
-CREATE VIEW IF NOT EXISTS "public_orders__current" AS
-SELECT <user columns>
-FROM "public_orders" FINAL
-WHERE _etl_deleted = 0
-```
-
-Prefer the `__current` view for current-state queries. The replicator never
-runs `OPTIMIZE ... FINAL CLEANUP`; run that yourself when you want to reclaim
-deleted rows on disk.
-
-#### MergeTree
-
-Each replicated table is created as `MergeTree() ORDER BY tuple()` with:
-
-- `cdc_operation`: `INSERT`, `UPDATE`, or `DELETE`
-- `cdc_lsn`: the Postgres commit LSN
-
-Current state per primary key:
-
-```sql
-SELECT <user columns> FROM (
-    SELECT * FROM "public_orders"
-    ORDER BY cdc_lsn DESC LIMIT 1 BY (id)
-)
-WHERE cdc_operation != 'DELETE'
-```
+[clickhouse-guide]: ../etl-destinations/src/clickhouse/README.md
 
 ---
 
@@ -385,6 +311,7 @@ RUST_LOG=debug cargo run --bin ducklake -p etl-examples --features ducklake -- [
 ```
 
 ---
+
 
 ## Snowflake
 

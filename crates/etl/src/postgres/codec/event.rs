@@ -65,8 +65,8 @@ impl SchemaChangeMessage {
     /// Returns whether this message applies to `publication_name`.
     ///
     /// Table DDL is global to every publication containing the table.
-    /// Publication DDL without an explicit publication is rejected so it
-    /// cannot mutate another pipeline's schema state.
+    /// Publication DDL without an explicit publication is rejected so it cannot
+    /// mutate another pipeline's schema state.
     pub(crate) fn applies_to_publication(&self, publication_name: &str) -> bool {
         if self.command_tag == "ALTER PUBLICATION" {
             return self.publication_name.as_deref() == Some(publication_name);
@@ -79,14 +79,15 @@ impl SchemaChangeMessage {
     /// snapshot ID.
     ///
     /// This is used to update the stored table schema when a DDL change is
-    /// detected. The snapshot ID should identify both the commit LSN that
-    /// activates the schema and the logical DDL message LSN within that commit.
+    /// detected. The snapshot ID identifies both the transaction's COMMIT
+    /// record start and the logical DDL message LSN within that transaction.
     pub(crate) fn into_table_schema(self, snapshot_id: SnapshotId) -> TableSchema {
         build_table_schema(
             self.table_id(),
             TableName::new(self.nspname, self.relname),
             self.columns,
             self.identity.primary_key_attnums,
+            self.identity.primary_key_condeferrable,
             snapshot_id,
         )
     }
@@ -108,8 +109,8 @@ impl FromStr for SchemaChangeMessage {
 
 /// Returns the durable schema snapshot identifier for a logical message.
 ///
-/// The commit LSN is the activation frontier because transactions are decoded
-/// in commit order. The message LSN cannot provide that order across
+/// The commit LSN orders transactions because they are decoded in commit
+/// order. The message LSN cannot provide that order across
 /// overlapping transactions, but it does preserve the order of multiple DDL
 /// messages delivered within the same commit.
 pub(crate) fn schema_snapshot_id_from_message(
@@ -121,10 +122,17 @@ pub(crate) fn schema_snapshot_id_from_message(
 
 /// The identity metadata emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct IdentityMessage {
+pub struct IdentityMessage {
     /// The primary key columns in key order, expressed as `pg_attribute.attnum`
     /// values.
     pub(crate) primary_key_attnums: Vec<i32>,
+    /// Whether the primary-key constraint is `DEFERRABLE`, from
+    /// `pg_constraint.condeferrable`.
+    ///
+    /// Payloads emitted before the source helper reported it omit the field;
+    /// they are read as not deferrable.
+    #[serde(default)]
+    pub(crate) primary_key_condeferrable: bool,
     /// The replica-identity mode from `pg_class.relreplident`.
     pub(crate) relreplident: String,
     /// The replica-identity index columns in key order, expressed as
@@ -269,6 +277,7 @@ pub(crate) fn build_table_schema(
     table_name: TableName,
     columns: Vec<ColumnSchemaMessage>,
     primary_key_attnums: Vec<i32>,
+    primary_key_deferrable: bool,
     snapshot_id: SnapshotId,
 ) -> TableSchema {
     TableSchema::with_snapshot_id(
@@ -277,6 +286,7 @@ pub(crate) fn build_table_schema(
         build_column_schemas(columns, primary_key_attnums),
         snapshot_id,
     )
+    .with_primary_key_deferrable(primary_key_deferrable)
 }
 
 /// Calculates the uncompressed value bytes in a pgoutput tuple.
@@ -403,8 +413,8 @@ pub(crate) fn parse_replica_identity_column_names(
             .columns()
             .iter()
             // PostgreSQL sends relation column flags as a bitmask. Bit 0 is
-            // LOGICALREP_IS_REPLICA_IDENTITY, so `& 1` tests only that bit
-            // while ignoring any other protocol flags that may be present.
+            // LOGICALREP_IS_REPLICA_IDENTITY, so `& 1` tests only that bit while ignoring any other
+            // protocol flags that may be present.
             .filter(|column| column.flags() & 1 == 1)
             .map(|column| column.name().map(str::to_owned))
             .collect::<Result<HashSet<String>, _>>()?,
@@ -415,9 +425,8 @@ pub(crate) fn parse_replica_identity_column_names(
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
 ///
-/// This function processes an insert operation from the replication stream
-/// and constructs an insert event with the new row data ready for ETL
-/// processing.
+/// This function processes an insert operation from the replication stream and
+/// constructs an insert event with the new row data ready for ETL processing.
 pub(crate) fn parse_event_from_insert_message(
     replicated_table_schema: ReplicatedTableSchema,
     commit_lsn: PgLsn,
@@ -459,8 +468,8 @@ pub(crate) fn parse_event_from_update_message(
 ) -> EtlResult<UpdateEvent> {
     // PostgreSQL can attach either a full old tuple (`old_tuple`) or only the
     // replica-identity columns (`key_tuple`) to an update. If neither is
-    // present, the publisher determined that no old-side image was required
-    // for this key-based replica-identity update. We preserve that shape in
+    // present, the publisher determined that no old-side image was required for
+    // this key-based replica-identity update. We preserve that shape in
     // `OldTableRow`. The new tuple is decoded separately below, where the old
     // row acts only as a source for resolving `UnchangedToast`.
     let is_key = update_body.old_tuple().is_none();
@@ -481,8 +490,8 @@ pub(crate) fn parse_event_from_update_message(
 
     // Old-row shape matters only for `UnchangedToast` resolution:
     // - full rows can recover any unchanged column by index.
-    // - key rows can recover only unchanged key columns, consuming key values in
-    //   replicated table order as we walk the schema below.
+    // - key rows can recover only unchanged key columns, consuming key values
+    //   in replicated table order as we walk the schema below.
     let table_row = convert_update_tuple_to_updated_table_row(
         &replicated_table_schema,
         new_tuple_data,
@@ -651,11 +660,11 @@ fn convert_update_tuple_to_updated_table_row(
             ConvertedTupleCell::Present(value) => full_values.push(value),
             ConvertedTupleCell::Missing => {
                 if !partial_row {
-                    // This is the first column we cannot reconstruct. Up to this
-                    // point `full_values` held a dense prefix of known values, so
-                    // we move that prefix into `present_values` and continue
-                    // collecting only the values we do know plus the indexes we
-                    // do not.
+                    // This is the first column we cannot reconstruct. Up to
+                    // this point `full_values` held a dense prefix of known
+                    // values, so we move that prefix into `present_values` and
+                    // continue collecting only the values we do know plus the
+                    // indexes we do not.
                     present_values.reserve(column_count.saturating_sub(index));
                     present_values.append(&mut full_values);
                     partial_row = true;
@@ -950,8 +959,9 @@ fn convert_tuple_data_to_cell(
 ) -> EtlResult<ConvertedTupleCell> {
     match tuple_data {
         protocol::TupleData::Null => {
-            // If a column schema is nullable and there is no value, it's fine, but if it's
-            // not nullable this is a problem, and we need to raise it.
+            // If a column schema is nullable and there is no value, it's fine,
+            // but if it's not nullable this is a problem, and we need to raise
+            // it.
             if column_schema.nullable {
                 Ok(ConvertedTupleCell::Present(Cell::Null))
             } else {
@@ -971,8 +981,8 @@ fn convert_tuple_data_to_cell(
             // TOASTed values can be represented as `UnchangedToast` instead of
             // an actual value. The caller passes an aligned old value when it
             // can recover one from the available old-row image; otherwise we
-            // surface the field as missing and let the caller produce a
-            // partial updated row.
+            // surface the field as missing and let the caller produce a partial
+            // updated row.
             if let Some(old_value) = old_value {
                 Ok(ConvertedTupleCell::Present(old_value.clone()))
             } else {
@@ -1151,6 +1161,51 @@ mod tests {
             "columns": []
         }"#;
         assert!(malformed.parse::<SchemaChangeMessage>().is_err());
+    }
+
+    #[test]
+    fn schema_change_message_without_deferrability_reads_as_not_deferrable() {
+        // Messages emitted before the source helper reported deferrability
+        // omit the field.
+        let schema = r#"{
+            "command_tag": "ALTER TABLE",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [1],
+                "relreplident": "f",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap()
+        .into_table_schema(SnapshotId::initial());
+
+        assert!(!schema.primary_key_deferrable);
+    }
+
+    #[test]
+    fn schema_change_message_carries_primary_key_deferrability() {
+        let schema = r#"{
+            "command_tag": "ALTER TABLE",
+            "nspname": "public",
+            "relname": "items",
+            "oid": 42,
+            "identity": {
+                "primary_key_attnums": [1],
+                "primary_key_condeferrable": true,
+                "relreplident": "f",
+                "replica_identity_index_attnums": []
+            },
+            "columns": []
+        }"#
+        .parse::<SchemaChangeMessage>()
+        .unwrap()
+        .into_table_schema(SnapshotId::initial());
+
+        assert!(schema.primary_key_deferrable);
     }
 
     fn event_schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
@@ -1370,6 +1425,7 @@ mod tests {
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![1],
         };
@@ -1398,6 +1454,7 @@ mod tests {
         let replication_mask = ReplicationMask::all(&table_schema);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![2],
         };
@@ -1427,6 +1484,7 @@ mod tests {
         let replication_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1, 2],
+            primary_key_condeferrable: false,
             relreplident: "d".to_owned(),
             replica_identity_index_attnums: Vec::new(),
         };
@@ -1450,6 +1508,7 @@ mod tests {
         let replication_mask = ReplicationMask::from_bytes(vec![0, 1, 0]);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
             replica_identity_index_attnums: vec![2, 3],
         };
@@ -1472,6 +1531,7 @@ mod tests {
         let replication_mask = ReplicationMask::from_bytes(vec![1, 0]);
         let identity = IdentityMessage {
             primary_key_attnums: vec![1],
+            primary_key_condeferrable: false,
             relreplident: "f".to_owned(),
             replica_identity_index_attnums: Vec::new(),
         };

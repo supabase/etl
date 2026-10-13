@@ -4,8 +4,8 @@
 //! specific columns are replicated rather than all columns. Each logical
 //! replication connection therefore needs three pieces of protocol state to
 //! decode row changes: the schema snapshot to decode against, the publication
-//! column filter for that snapshot, and the replica-identity semantics for
-//! that same snapshot.
+//! column filter for that snapshot, and the replica-identity semantics for that
+//! same snapshot.
 //!
 //! The connection-local map has two states:
 //!

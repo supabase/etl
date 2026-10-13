@@ -58,7 +58,7 @@ impl StoredTableDecodingState {
         // reachable by this handover. Durable JSON can also outlive the writer
         // version or be malformed independently, so validate the complete
         // stored representation before rebuilding unchecked mask types.
-        let sync_done_snapshot_frontier = SnapshotId::at_lsn(sync_done_lsn);
+        let sync_done_snapshot_frontier = SnapshotId::before_lsn(sync_done_lsn);
         if self.snapshot_id > sync_done_snapshot_frontier {
             bail!(
                 ErrorKind::InvalidState,
@@ -166,9 +166,11 @@ pub enum TableState {
     /// The apply worker waits for this state before continuing to process
     /// events for the table.
     SyncDone {
-        /// The LSN up to which the table-sync worker has caught up.
+        /// The exclusive LSN up to which the table-sync worker has caught up.
         ///
-        /// This LSN is guaranteed to be >= `Catchup.lsn`.
+        /// This LSN is guaranteed to be >= `Catchup.lsn`. A transaction whose
+        /// commit record starts here belongs to the apply worker; its schema
+        /// changes are not part of the stored handoff decoder.
         #[serde(with = "lsn_serde")]
         lsn: PgLsn,
         /// Compact durable decoding state captured at `SyncDone`.
@@ -184,8 +186,8 @@ pub enum TableState {
     },
     /// Set by apply worker when it has caught up with the table-sync worker's
     /// catch-up LSN position. Tables with this state have successfully run
-    /// their initial table copy and catch-up work and any changes to them
-    /// will now be applied by the apply worker only.
+    /// their initial table copy and catch-up work and any changes to them will
+    /// now be applied by the apply worker only.
     ///
     /// `Ready` no longer retains the [`StoredTableDecodingState`] from
     /// `SyncDone`. Before persisting `Ready`, the apply worker therefore
@@ -199,10 +201,10 @@ pub enum TableState {
     /// only the current connection, which may not receive another relation
     /// message after handover. Restart safety comes from the durable
     /// checkpoint: the next apply worker starts at the later of its
-    /// replication-slot position and that checkpoint, so its bootstrap is at
-    /// or beyond `SyncDone.lsn`. A fresh pgoutput connection emits relation
+    /// replication-slot position and that checkpoint, so its bootstrap is at or
+    /// beyond `SyncDone.lsn`. A fresh pgoutput connection emits relation
     /// metadata before its first row change, allowing it to resolve the newest
-    /// stored schema at or before the restart position.
+    /// stored schema committed strictly before the restart position.
     Ready,
     /// Set by either the table-sync worker or the apply worker when a table
     /// encounters an error during replication. Contains diagnostic information
@@ -216,11 +218,11 @@ pub enum TableState {
         retry_policy: TableRetryPolicy,
         /// Original error that triggered the table error state.
         ///
-        /// This field is **not persisted** — it is skipped during
-        /// serialization and replaced with a generic placeholder on
-        /// deserialization. Code that reads states from the state store should
-        /// not rely on `source_err` containing the original error; it is only
-        /// meaningful for the in-memory lifetime of the state that produced it.
+        /// This field is **not persisted** — it is skipped during serialization
+        /// and replaced with a generic placeholder on deserialization. Code
+        /// that reads states from the state store should not rely on
+        /// `source_err` containing the original error; it is only meaningful
+        /// for the in-memory lifetime of the state that produced it.
         #[serde(skip, default = "default_source_err")]
         source_err: EtlError,
     },
@@ -282,8 +284,7 @@ impl TableState {
         Ok((state_type, metadata))
     }
 
-    /// Deserializes a [`TableState`] from a state store row's
-    /// metadata.
+    /// Deserializes a [`TableState`] from a state store row's metadata.
     pub(crate) fn from_state_row(row: StoredTableStateRow) -> EtlResult<Self> {
         let Some(metadata) = row.metadata else {
             bail!(
@@ -331,8 +332,8 @@ impl From<TableError> for TableState {
     }
 }
 
-/// A variant of [`TableState`] that can be used to determine the
-/// current state of a table without having to pattern match on the data fields.
+/// A variant of [`TableState`] that can be used to determine the current state
+/// of a table without having to pattern match on the data fields.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum TableStateType {
     /// Table has been discovered but no copy work has started.
@@ -528,22 +529,26 @@ mod tests {
     }
 
     #[test]
-    fn materialize_compares_snapshot_with_inclusive_sync_done_frontier() {
-        let sync_done_lsn = PgLsn::from(100);
-        let last_snapshot_at_sync_done = SnapshotId::new(sync_done_lsn, PgLsn::from(u64::MAX));
+    fn materialize_excludes_replayable_transaction_at_sync_done() {
+        for frontier in [1, 100, u64::MAX] {
+            let sync_done_lsn = PgLsn::from(frontier);
+            let previous_snapshot =
+                SnapshotId::new(PgLsn::from(frontier - 1), PgLsn::from(u64::MAX));
+            decoding_state_at(previous_snapshot)
+                .materialize(table_schema_at(previous_snapshot), sync_done_lsn)
+                .unwrap();
 
-        decoding_state_at(last_snapshot_at_sync_done)
-            .materialize(table_schema_at(last_snapshot_at_sync_done), sync_done_lsn)
-            .unwrap();
+            for message_lsn in [0, 50, u64::MAX] {
+                let replayed_snapshot = SnapshotId::new(sync_done_lsn, PgLsn::from(message_lsn));
+                let error = decoding_state_at(replayed_snapshot)
+                    .materialize(table_schema_at(replayed_snapshot), sync_done_lsn)
+                    .unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::InvalidState);
+            }
+        }
 
-        let first_snapshot_after_sync_done = SnapshotId::new(PgLsn::from(101), PgLsn::from(0));
-        let error = decoding_state_at(first_snapshot_after_sync_done)
-            .materialize(table_schema_at(first_snapshot_after_sync_done), sync_done_lsn)
-            .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidState);
-
-        decoding_state_at(SnapshotId::max())
-            .materialize(table_schema_at(SnapshotId::max()), PgLsn::from(u64::MAX))
+        decoding_state_at(SnapshotId::initial())
+            .materialize(table_schema_at(SnapshotId::initial()), PgLsn::from(0))
             .unwrap();
     }
 
@@ -762,8 +767,8 @@ mod tests {
             TableState::Init,
             TableState::DataSync,
             TableState::FinishedCopy,
-            // Keep the missing payload covered for rows written before durable
-            // table decoding state was added to SyncDone.
+            // Keep the missing payload covered for rows written before durable table decoding
+            // state was added to SyncDone.
             TableState::SyncDone { lsn: sync_done_lsn, table_decoding_state: None },
             // New SyncDone rows must preserve the complete compact decoder.
             TableState::SyncDone {

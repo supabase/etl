@@ -116,18 +116,46 @@ impl<T: TokenProvider> SqlClient<T> {
         self.execute_ddl(&sql).await
     }
 
-    /// Validates a table's write schema.
-    pub(crate) async fn validate_table_schema(
+    /// Validates the write schema and removes defaults from scalar JSON
+    /// columns.
+    ///
+    /// Omitted VARIANT fields encode SQL NULL. Legacy destination defaults
+    /// would replace that value, so they must be removed before channel open.
+    /// The migration is idempotent and leaves existing row values unchanged.
+    pub(crate) async fn prepare_table_schema(
         &self,
         table_name: &str,
         expected_column_names: &[&str],
+        json_column_names: &[&str],
     ) -> Result<()> {
         let fqn = self.fully_qualified_name(table_name);
-        let columns_response =
-            self.execute_statement(&format!("SHOW COLUMNS IN TABLE {fqn}")).await?;
-        let columns = parse_show_columns(&columns_response)?;
+        let show_columns = format!("show columns in table {fqn}");
+        let response = self.execute_statement(&show_columns).await?;
+        let columns = parse_show_columns(&response)?;
+        validate_column_names(table_name, expected_column_names, &columns)?;
+        let defaults = json_columns_with_defaults(&response, json_column_names)?;
+        if defaults.is_empty() {
+            return Ok(());
+        }
 
-        validate_column_names(table_name, expected_column_names, &columns)
+        let clauses = defaults
+            .iter()
+            .map(|name| format!("column {} drop default", quote_identifier(name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.execute_ddl(&format!("alter table {fqn} alter {clauses}")).await?;
+
+        // Do not open the channel unless its omission contract is established.
+        // A failed migration can safely be retried on the next preparation.
+        let response = self.execute_statement(&show_columns).await?;
+        let columns = parse_show_columns(&response)?;
+        validate_column_names(table_name, expected_column_names, &columns)?;
+        if !json_columns_with_defaults(&response, json_column_names)?.is_empty() {
+            return Err(Error::Config(format!(
+                "Snowflake table '{table_name}' still has defaults on JSON columns after migration"
+            )));
+        }
+        Ok(())
     }
 
     /// Remove all rows from a table without dropping it.
@@ -394,12 +422,12 @@ impl<T: TokenProvider> SqlClient<T> {
     }
 }
 
-/// Parse one named string column from a `SHOW` response.
-fn parse_named_show_column<'a>(
+/// Parse one named column from a complete `SHOW` response.
+fn parse_named_show_values<'a>(
     response: &'a StatementResponse,
     command: &str,
     result_column: &str,
-) -> Result<Vec<&'a str>> {
+) -> Result<Vec<&'a serde_json::Value>> {
     fn malformed_show_response(response: &StatementResponse, message: String) -> Error {
         Error::Sql { statement_handle: response.statement_handle.clone(), message }
     }
@@ -442,17 +470,84 @@ fn parse_named_show_column<'a>(
     let mut columns = Vec::with_capacity(rows.len());
 
     for (row_index, row) in rows.iter().enumerate() {
-        let value =
-            row.get(result_column_index).and_then(serde_json::Value::as_str).ok_or_else(|| {
-                malformed_show_response(
-                    response,
-                    format!("{command} row {row_index} has no string {result_column}"),
-                )
-            })?;
+        let value = row.get(result_column_index).ok_or_else(|| {
+            malformed_show_response(
+                response,
+                format!("{command} row {row_index} omitted {result_column}"),
+            )
+        })?;
         columns.push(value);
     }
 
     Ok(columns)
+}
+
+/// Parse one named string column from a complete `SHOW` response.
+fn parse_named_show_column<'a>(
+    response: &'a StatementResponse,
+    command: &str,
+    result_column: &str,
+) -> Result<Vec<&'a str>> {
+    parse_named_show_values(response, command, result_column)?
+        .into_iter()
+        .enumerate()
+        .map(|(row_index, value)| {
+            value.as_str().ok_or_else(|| Error::Sql {
+                statement_handle: response.statement_handle.clone(),
+                message: format!("{command} row {row_index} has no string {result_column}"),
+            })
+        })
+        .collect()
+}
+
+/// Finds defaults that would override SQL NULL in replicated JSON columns.
+///
+/// Check the physical type before changing defaults so an incompatible table
+/// is not silently adapted as if it had the expected JSON storage contract.
+fn json_columns_with_defaults<'a>(
+    response: &'a StatementResponse,
+    json_column_names: &[&str],
+) -> Result<Vec<&'a str>> {
+    if json_column_names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names = parse_show_columns(response)?;
+    let types = parse_named_show_column(response, "SHOW COLUMNS", "data_type")?;
+    let defaults = parse_named_show_values(response, "SHOW COLUMNS", "default")?;
+    let mut conflicts = Vec::new();
+    for ((name, typ), default) in names.into_iter().zip(types).zip(defaults) {
+        if !json_column_names.contains(&name) {
+            continue;
+        }
+        let typ = serde_json::from_str::<serde_json::Value>(typ).ok();
+        let typ = typ
+            .as_ref()
+            .and_then(|typ| typ.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::Sql {
+                statement_handle: response.statement_handle.clone(),
+                message: format!("SHOW COLUMNS has invalid data_type metadata for column '{name}'"),
+            })?;
+        if typ != "VARIANT" {
+            return Err(Error::Config(format!(
+                "Snowflake JSON column '{name}' must have physical type VARIANT"
+            )));
+        }
+        match default {
+            serde_json::Value::Null => {}
+            serde_json::Value::String(expression) if expression.is_empty() => {}
+            serde_json::Value::String(_) => conflicts.push(name),
+            _ => {
+                return Err(Error::Sql {
+                    statement_handle: response.statement_handle.clone(),
+                    message: format!(
+                        "SHOW COLUMNS has invalid default metadata for column '{name}'"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(conflicts)
 }
 
 /// Parse exact column identifiers from `SHOW COLUMNS`.
@@ -510,6 +605,8 @@ fn classify_for_retry(error: &Error) -> RetryDecision {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     /// Token provider used by hermetic SQL client tests.
@@ -560,6 +657,62 @@ mod tests {
         let columns = parse_show_columns(&response).expect("SHOW COLUMNS should parse");
 
         assert_eq!(columns, vec!["id"]);
+    }
+
+    /// Builds column metadata with deliberately reordered result fields.
+    fn column_response(columns: &[(&str, &str, serde_json::Value)]) -> StatementResponse {
+        statement_response(
+            &["default", "data_type", "column_name"],
+            columns
+                .iter()
+                .map(|(name, typ, default)| vec![default.clone(), json!(typ), json!(name)])
+                .collect(),
+        )
+    }
+
+    /// Only scalar JSON column defaults are migration candidates.
+    #[test]
+    fn json_default_migration_selects_exact_columns() {
+        let response = column_response(&[
+            ("payload", r#"{"type":"VARIANT"}"#, json!("PARSE_JSON('{}')")),
+            ("label", r#"{"type":"TEXT"}"#, json!("'text'")),
+            ("empty", r#"{"type":"VARIANT"}"#, json!("")),
+            ("absent", r#"{"type":"VARIANT"}"#, json!(null)),
+        ]);
+        assert_eq!(
+            json_columns_with_defaults(&response, &["payload", "empty", "absent"]).unwrap(),
+            vec!["payload"]
+        );
+        assert!(json_columns_with_defaults(&response, &["empty", "absent"]).unwrap().is_empty());
+        assert!(json_columns_with_defaults(&response, &[]).unwrap().is_empty());
+    }
+
+    /// Malformed metadata and incompatible types cannot authorize migration.
+    #[test]
+    fn json_default_migration_rejects_invalid_metadata() {
+        for typ in [r#"{"type":"TEXT"}"#, r#"{"type":"ARRAY"}"#] {
+            let response = column_response(&[("payload", typ, json!("'text'"))]);
+            assert!(matches!(
+                json_columns_with_defaults(&response, &["payload"]),
+                Err(Error::Config(_))
+            ));
+        }
+        for typ in ["not-json", "{}", r#"{"type":null}"#, r#"{"type":1}"#] {
+            let response = column_response(&[("payload", typ, json!(null))]);
+            assert!(
+                matches!(json_columns_with_defaults(&response, &["payload"]), Err(Error::Sql { statement_handle: Some(handle), .. }) if handle == "test-statement")
+            );
+        }
+        for default in [json!(false), json!({})] {
+            let response = column_response(&[("payload", r#"{"type":"VARIANT"}"#, default)]);
+            assert!(matches!(
+                json_columns_with_defaults(&response, &["payload"]),
+                Err(Error::Sql { .. })
+            ));
+        }
+        let missing =
+            statement_response(&["column_name"], vec![vec![serde_json::json!("payload")]]);
+        assert!(json_columns_with_defaults(&missing, &["payload"]).is_err());
     }
 
     #[test]

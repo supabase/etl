@@ -14,7 +14,7 @@ use std::{fmt::Display, time::Duration};
 
 use metrics::{Unit, describe_gauge, gauge};
 use tikv_jemalloc_ctl::{epoch, opt, raw, stats};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, warn};
 
 use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
@@ -135,10 +135,10 @@ fn log_jemalloc_config() {
     let tcache = opt::tcache::read().ok();
     let tcache_max = opt::tcache_max::read().ok();
 
-    // Read values not exposed in typed API via raw mallctl.
-    // SAFETY: These are read-only queries to jemalloc's opt.* configuration values.
-    // The keys are valid null-terminated strings and the return types match
-    // jemalloc's types.
+    // Read values not exposed in typed API via raw mallctl. SAFETY: These are
+    // read-only queries to jemalloc's opt.* configuration values. The keys are
+    // valid null-terminated strings and the return types match jemalloc's
+    // types.
     let dirty_decay_ms: Option<isize> = unsafe { raw::read(b"opt.dirty_decay_ms\0") }.ok();
     let muzzy_decay_ms: Option<isize> = unsafe { raw::read(b"opt.muzzy_decay_ms\0") }.ok();
     let abort_conf: Option<bool> = unsafe { raw::read(b"opt.abort_conf\0") }.ok();
@@ -212,14 +212,13 @@ fn register_metrics() {
 /// This function should be called after
 /// [`etl_telemetry::metrics::init_metrics`] to ensure the metrics recorder is
 /// installed.
-pub(super) fn spawn_jemalloc_metrics_task() -> JoinHandle<()> {
+pub(super) fn spawn_jemalloc_metrics_task() -> AbortOnDropHandle<()> {
     register_metrics();
     log_jemalloc_config();
 
-    tokio::spawn(async move {
-        // Initialize MIBs once for efficient repeated lookups.
-        // MIBs translate string keys to numeric indices, avoiding string parsing on
-        // each read.
+    AbortOnDropHandle::new(tokio::spawn(async move {
+        // Initialize MIBs once for efficient repeated lookups. MIBs translate
+        // string keys to numeric indices, avoiding string parsing on each read.
         let epoch_mib = match epoch::mib() {
             Ok(mib) => mib,
             Err(err) => {
@@ -311,5 +310,5 @@ pub(super) fn spawn_jemalloc_metrics_task() -> JoinHandle<()> {
 
             tokio::time::sleep(POLL_INTERVAL).await;
         }
-    })
+    }))
 }

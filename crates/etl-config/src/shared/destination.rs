@@ -2,11 +2,13 @@ use std::collections::HashSet;
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use url::Url;
 #[cfg(feature = "utoipa")]
 use utoipa::ToSchema;
 
-use crate::shared::{Validate, ValidationError};
+use crate::{
+    clickhouse::ClickHouseUrl,
+    shared::{Validate, ValidationError},
+};
 
 const fn default_connection_pool_size() -> usize {
     DestinationConfig::DEFAULT_CONNECTION_POOL_SIZE
@@ -61,9 +63,9 @@ impl DuckLakeWriterConfig {
 
 /// Per-table creation options for BigQuery destinations.
 ///
-/// Applied only when a table is created or recreated (first replication,
-/// a replication state reset, or a source `TRUNCATE`), never to a table
-/// that already exists.
+/// Applied only when a table is created or recreated (first replication, a
+/// replication state reset, or a source `TRUNCATE`), never to a table that
+/// already exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct BigQueryTableOptionsConfig {
@@ -236,11 +238,12 @@ pub enum BigQueryTimePartitionGranularity {
 ///
 /// `ReplacingMergeTree` (default) gives current-state reads via `FINAL` and
 /// reclaims deleted rows on `OPTIMIZE ... FINAL CLEANUP`. `MergeTree` is an
-/// append-only event-log layout retained for PK-less source tables.
+/// append-only event-log layout retained for PK-less source tables. It stores
+/// source ordering in `cdc_lsn` and `cdc_tx_ordinal`.
 ///
-/// Applied only when a table is created or recreated. ClickHouse cannot
-/// alter a table's engine, so a mismatch against an existing table is a
-/// write error, not a silent no-op.
+/// Applied only when a table is created or recreated. ClickHouse cannot alter a
+/// table's engine, so a mismatch against an existing table is a write error,
+/// not a silent no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ClickHouseEngine {
@@ -250,10 +253,9 @@ pub enum ClickHouseEngine {
 }
 
 impl ClickHouseEngine {
-    /// The literal engine name ClickHouse uses in `system.tables.engine` and
-    /// in `CREATE TABLE ... ENGINE = <name>(...)`. Distinct from the
-    /// snake_case form used in YAML / CLI (`merge_tree`,
-    /// `replacing_merge_tree`).
+    /// The literal engine name ClickHouse uses in `system.tables.engine` and in
+    /// `CREATE TABLE ... ENGINE = <name>(...)`. Distinct from the snake_case
+    /// form used in YAML / CLI (`merge_tree`, `replacing_merge_tree`).
     pub const fn as_clickhouse_str(self) -> &'static str {
         match self {
             ClickHouseEngine::MergeTree => "MergeTree",
@@ -299,8 +301,8 @@ pub struct DuckLakeCopyBufferConfig {
     pub target_bytes: u64,
     /// Maximum approximate staged row bytes accepted across all copied tables.
     ///
-    /// The default is 1 GiB (1,073,741,824 bytes). The hard maximum is one
-    /// byte below 4 GiB because byte reservations use a `u32` permit count.
+    /// The default is 1 GiB (1,073,741,824 bytes). The hard maximum is one byte
+    /// below 4 GiB because byte reservations use a `u32` permit count.
     #[serde(default = "DuckLakeCopyBufferConfig::default_max_total_bytes")]
     pub max_total_bytes: u64,
 }
@@ -511,9 +513,9 @@ impl DestinationKind {
 pub enum DestinationConfig {
     /// Google BigQuery destination configuration.
     ///
-    /// Use this variant to configure a BigQuery destination, including
-    /// project and dataset identifiers, service account credentials, and
-    /// optional staleness settings.
+    /// Use this variant to configure a BigQuery destination, including project
+    /// and dataset identifiers, service account credentials, and optional
+    /// staleness settings.
     BigQuery {
         /// Google Cloud project identifier.
         project_id: String,
@@ -545,8 +547,9 @@ pub enum DestinationConfig {
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint URL.
-        url: Url,
+        /// ClickHouse HTTP(S) endpoint URL. Credentials must not be embedded
+        /// in it; use `user` and `password`.
+        url: ClickHouseUrl,
         /// ClickHouse user name
         user: String,
         /// ClickHouse password (omit for passwordless access)
@@ -555,9 +558,8 @@ pub enum DestinationConfig {
         database: String,
         /// Table engine used for replicated tables. Defaults to
         /// `ReplacingMergeTree`; set to `merge_tree` for the append-only
-        /// event-log layout. Applied only when a table is created or
-        /// recreated; changing it does not affect a table that already
-        /// exists.
+        /// event-log layout. Applied only when a table is created or recreated;
+        /// changing it does not affect a table that already exists.
         #[serde(default)]
         engine: ClickHouseEngine,
     },
@@ -671,8 +673,8 @@ pub enum IcebergConfig {
         /// Name of the warehouse in the catalog
         warehouse_name: String,
         /// If present, the iceberg catalog namespace where tables will be
-        /// created. If missing, multiple catlog namespaces will be
-        /// created, one per source schema.
+        /// created. If missing, multiple catlog namespaces will be created, one
+        /// per source schema.
         namespace: Option<String>,
         /// Catalog authentication token
         catalog_token: SecretString,
@@ -689,8 +691,8 @@ pub enum IcebergConfig {
         /// Name of the warehouse in the catalog
         warehouse_name: String,
         /// If present, the iceberg catalog namespace where tables will be
-        /// created. If missing, multiple catlog namespaces will be
-        /// created, one per source schema.
+        /// created. If missing, multiple catlog namespaces will be created, one
+        /// per source schema.
         namespace: Option<String>,
         /// The S3 access key id
         s3_access_key_id: SecretString,
@@ -703,9 +705,8 @@ pub enum IcebergConfig {
 
 impl Validate for IcebergConfig {}
 
-/// Same as [`IcebergConfig`] but without secrets. This type
-/// implements [`Serialize`] because it does not contains secrets
-/// so is safe to serialize.
+/// Same as [`IcebergConfig`] but without secrets. This type implements
+/// [`Serialize`] because it does not contains secrets so is safe to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IcebergConfigWithoutSecrets {
@@ -715,8 +716,8 @@ pub enum IcebergConfigWithoutSecrets {
         /// Name of the warehouse in the catalog
         warehouse_name: String,
         /// If present, the iceberg catalog namespace where tables will be
-        /// created. If missing, multiple catlog namespaces will be
-        /// created, one per source schema.
+        /// created. If missing, multiple catlog namespaces will be created, one
+        /// per source schema.
         namespace: Option<String>,
         /// The S3 region
         s3_region: String,
@@ -769,17 +770,16 @@ impl From<IcebergConfig> for IcebergConfigWithoutSecrets {
     }
 }
 
-/// Same as [`DestinationConfig`] but without secrets. This type
-/// implements [`Serialize`] because it does not contains secrets
-/// so is safe to serialize.
+/// Same as [`DestinationConfig`] but without secrets. This type implements
+/// [`Serialize`] because it does not contains secrets so is safe to serialize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DestinationConfigWithoutSecrets {
     /// Google BigQuery destination configuration.
     ///
-    /// Use this variant to configure a BigQuery destination, including
-    /// project and dataset identifiers, service account credentials, and
-    /// optional staleness settings.
+    /// Use this variant to configure a BigQuery destination, including project
+    /// and dataset identifiers, service account credentials, and optional
+    /// staleness settings.
     BigQuery {
         /// Google Cloud project identifier.
         project_id: String,
@@ -810,17 +810,16 @@ pub enum DestinationConfigWithoutSecrets {
     },
     #[serde(rename = "clickhouse")]
     ClickHouse {
-        /// ClickHouse HTTP(S) endpoint URL.
-        url: Url,
+        /// ClickHouse HTTP(S) endpoint URL, guaranteed free of credentials.
+        url: ClickHouseUrl,
         /// ClickHouse user name
         user: String,
         /// ClickHouse target database
         database: String,
         /// Table engine used for replicated tables. Defaults to
         /// `ReplacingMergeTree`; set to `merge_tree` for the append-only
-        /// event-log layout. Applied only when a table is created or
-        /// recreated; changing it does not affect a table that already
-        /// exists.
+        /// event-log layout. Applied only when a table is created or recreated;
+        /// changing it does not affect a table that already exists.
         #[serde(default)]
         engine: ClickHouseEngine,
     },
@@ -1029,6 +1028,43 @@ mod tests {
             json["ducklake"]["table_sorting"]["tables"][0]["sort_by"]["kind"],
             "primary_key"
         );
+    }
+
+    #[test]
+    fn clickhouse_config_rejects_credentials_embedded_in_url() {
+        let json = serde_json::json!({
+            "clickhouse": {
+                "url": "https://alice:s3cr3t@clickhouse.example:8443",
+                "user": "alice",
+                "password": "s3cr3t",
+                "database": "default"
+            }
+        });
+
+        let err = serde_json::from_value::<DestinationConfig>(json).unwrap_err().to_string();
+        assert!(err.contains("must not embed credentials"));
+        assert!(!err.contains("s3cr3t"));
+    }
+
+    #[test]
+    fn clickhouse_without_secrets_serializes_only_the_credential_free_url() {
+        let config: DestinationConfig = serde_json::from_value(serde_json::json!({
+            "clickhouse": {
+                "url": "https://clickhouse.example:8443/proxy",
+                "user": "alice",
+                "password": "s3cr3t",
+                "database": "default"
+            }
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(DestinationConfigWithoutSecrets::from(config))
+            .unwrap()
+            .to_string();
+
+        assert!(serialized.contains("https://clickhouse.example:8443/proxy"));
+        assert!(!serialized.contains("s3cr3t"));
+        assert!(!serialized.contains("password"));
     }
 
     #[test]

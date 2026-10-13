@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use etl::{
-    data::{ArrayCell, Cell},
+    data::{ArrayCell, Cell, Date, Timestamp},
     error::{ErrorKind, EtlResult},
     etl_error,
 };
@@ -26,7 +26,7 @@ pub(crate) enum ClickHouseValue {
     /// tombstone.
     UInt8(u8),
     UInt32(u32),
-    /// Unsigned 64-bit integer, used for the MergeTree `cdc_lsn` column.
+    /// Unsigned 64-bit integer, used for MergeTree ordering metadata.
     UInt64(u64),
     /// Unsigned 128-bit integer, used for the ReplacingMergeTree `_etl_version`
     /// column (the packed `EventSequenceKey`).
@@ -46,9 +46,34 @@ pub(crate) enum ClickHouseValue {
     Array(Vec<ClickHouseValue>),
 }
 
+/// RowBinary encoding shape of one destination column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColumnEncoding {
+    /// `Nullable(T)`: a null-indicator byte precedes every value.
+    Nullable,
+    /// Non-nullable scalar `T`: NULL cannot be encoded.
+    Required,
+    /// Non-nullable `Array(...)`. ClickHouse rejects `Nullable(Array(...))`,
+    /// so a top-level NULL is written as an empty array, matching BigQuery.
+    Array,
+}
+
+impl ColumnEncoding {
+    /// Classifies a ClickHouse column type as reported by `system.columns`.
+    pub(crate) fn from_type_name(type_name: &str) -> Self {
+        if type_name.starts_with("Nullable(") {
+            Self::Nullable
+        } else if type_name.starts_with("Array(") {
+            Self::Array
+        } else {
+            Self::Required
+        }
+    }
+}
+
 /// Converts a [`Cell`] to a [`ClickHouseValue`], consuming it (no clone).
-pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
-    match cell {
+pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> EtlResult<ClickHouseValue> {
+    Ok(match cell {
         Cell::Null => ClickHouseValue::Null,
         Cell::Bool(b) => ClickHouseValue::Bool(b),
         Cell::I16(v) => ClickHouseValue::Int16(v),
@@ -58,27 +83,38 @@ pub(crate) fn cell_to_clickhouse_value(cell: Cell) -> ClickHouseValue {
         Cell::F32(v) => ClickHouseValue::Float32(v),
         Cell::F64(v) => ClickHouseValue::Float64(v),
         Cell::Numeric(n) => ClickHouseValue::String(n.to_string()),
-        Cell::Date(d) => ClickHouseValue::Date32(date_to_date32_days(d)),
+        Cell::Date(Date::Value(d)) => ClickHouseValue::Date32(date_to_date32_days(d)),
         Cell::Time(t) => ClickHouseValue::String(t.to_string()),
         Cell::TimeTz(t) => ClickHouseValue::String(t.to_string()),
-        Cell::Timestamp(dt) => ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()),
-        Cell::TimestampTz(dt) => ClickHouseValue::DateTime64(dt.timestamp_micros()),
+        Cell::Timestamp(Timestamp::Value(dt)) => {
+            ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros())
+        }
+        Cell::TimestampTz(Timestamp::Value(dt)) => {
+            ClickHouseValue::DateTime64(dt.timestamp_micros())
+        }
         Cell::Uuid(u) => ClickHouseValue::Uuid(*u.as_bytes()),
         Cell::Json(j) => ClickHouseValue::String(j.to_string()),
         Cell::Bytes(b) => ClickHouseValue::String(bytes_to_hex(&b)),
         Cell::String(s) => ClickHouseValue::String(s),
         Cell::Array(array_cell) => {
-            ClickHouseValue::Array(array_cell_to_clickhouse_values(array_cell))
+            ClickHouseValue::Array(array_cell_to_clickhouse_values(array_cell)?)
         }
-    }
+        Cell::Date(_) | Cell::Timestamp(_) | Cell::TimestampTz(_) => {
+            return Err(etl_error!(
+                ErrorKind::ConversionError,
+                "Cannot encode infinite temporal value",
+                "ClickHouse dates and timestamps use finite wire integers"
+            ));
+        }
+    })
 }
 
 /// Converts an [`ArrayCell`] to a flat `Vec<ClickHouseValue>`, mapping each
 /// `Some(x)` to the matching scalar variant and each `None` to
 /// [`ClickHouseValue::Null`]. Per-element conversions mirror
 /// [`cell_to_clickhouse_value`].
-fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue> {
-    match array_cell {
+fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> EtlResult<Vec<ClickHouseValue>> {
+    Ok(match array_cell {
         ArrayCell::Bool(v) => map_array(v, ClickHouseValue::Bool),
         ArrayCell::String(v) => map_array(v, ClickHouseValue::String),
         ArrayCell::I16(v) => map_array(v, ClickHouseValue::Int16),
@@ -88,19 +124,26 @@ fn array_cell_to_clickhouse_values(array_cell: ArrayCell) -> Vec<ClickHouseValue
         ArrayCell::F32(v) => map_array(v, ClickHouseValue::Float32),
         ArrayCell::F64(v) => map_array(v, ClickHouseValue::Float64),
         ArrayCell::Numeric(v) => map_array(v, |n| ClickHouseValue::String(n.to_string())),
-        ArrayCell::Date(v) => map_array(v, |d| ClickHouseValue::Date32(date_to_date32_days(d))),
+        ArrayCell::Date(v) => return map_temporal_array(v, Cell::Date),
         ArrayCell::Time(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
         ArrayCell::TimeTz(v) => map_array(v, |t| ClickHouseValue::String(t.to_string())),
-        ArrayCell::Timestamp(v) => {
-            map_array(v, |dt| ClickHouseValue::DateTime64(dt.and_utc().timestamp_micros()))
-        }
-        ArrayCell::TimestampTz(v) => {
-            map_array(v, |dt| ClickHouseValue::DateTime64(dt.timestamp_micros()))
-        }
+        ArrayCell::Timestamp(v) => return map_temporal_array(v, Cell::Timestamp),
+        ArrayCell::TimestampTz(v) => return map_temporal_array(v, Cell::TimestampTz),
         ArrayCell::Uuid(v) => map_array(v, |u| ClickHouseValue::Uuid(*u.as_bytes())),
         ArrayCell::Json(v) => map_array(v, |j| ClickHouseValue::String(j.to_string())),
         ArrayCell::Bytes(v) => map_array(v, |b| ClickHouseValue::String(bytes_to_hex(&b))),
-    }
+    })
+}
+
+/// Uses the scalar encoder for temporal array elements and preserves nulls.
+fn map_temporal_array<T>(
+    values: Vec<Option<T>>,
+    cell: impl Fn(T) -> Cell,
+) -> EtlResult<Vec<ClickHouseValue>> {
+    values
+        .into_iter()
+        .map(|value| cell_to_clickhouse_value(value.map_or(Cell::Null, &cell)))
+        .collect()
 }
 
 /// Maps a `Vec<Option<T>>` to `Vec<ClickHouseValue>`, applying `f` to each
@@ -176,7 +219,7 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
                 "NULL value for non-nullable ClickHouse column"
             ));
         }
-        ClickHouseValue::Bool(b) => buf.push(b as u8),
+        ClickHouseValue::Bool(b) => buf.push(u8::from(b)),
         ClickHouseValue::Int16(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Int32(v) => buf.extend_from_slice(&v.to_le_bytes()),
         ClickHouseValue::Int64(v) => buf.extend_from_slice(&v.to_le_bytes()),
@@ -211,30 +254,30 @@ pub(crate) fn rb_encode_value(val: ClickHouseValue, buf: &mut Vec<u8>) -> EtlRes
     Ok(())
 }
 
-/// Encodes a complete row into `buf`, selecting nullable vs non-nullable
-/// encoding per column.
+/// Encodes a complete row into `buf`, selecting the encoding per column.
 pub(crate) fn encode_to_row_binary(
     values: Vec<ClickHouseValue>,
-    nullable_flags: &[bool],
+    column_encodings: &[ColumnEncoding],
     buf: &mut Vec<u8>,
 ) -> EtlResult<()> {
-    if values.len() != nullable_flags.len() {
+    if values.len() != column_encodings.len() {
         return Err(etl_error!(
             ErrorKind::ConversionError,
             "ClickHouse RowBinary row width mismatch",
             format!(
-                "values length {} does not match nullable flags length {}",
+                "values length {} does not match column encodings length {}",
                 values.len(),
-                nullable_flags.len()
+                column_encodings.len()
             )
         ));
     }
 
-    for (val, &is_nullable) in values.into_iter().zip(nullable_flags.iter()) {
-        if is_nullable {
-            rb_encode_nullable(val, buf)?;
-        } else {
-            rb_encode_value(val, buf)?;
+    for (val, &encoding) in values.into_iter().zip(column_encodings.iter()) {
+        match (encoding, val) {
+            (ColumnEncoding::Nullable, val) => rb_encode_nullable(val, buf)?,
+            // An empty array is a single zero length varint.
+            (ColumnEncoding::Array, ClickHouseValue::Null) => rb_varint(0, buf),
+            (ColumnEncoding::Array | ColumnEncoding::Required, val) => rb_encode_value(val, buf)?,
         }
     }
     Ok(())
@@ -243,30 +286,36 @@ pub(crate) fn encode_to_row_binary(
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
-    use etl::data::Cell;
+    use etl::data::{Cell, Date, Timestamp};
     use uuid::Uuid;
 
     use super::*;
 
     #[test]
     fn cell_to_clickhouse_value_null() {
-        assert!(matches!(cell_to_clickhouse_value(Cell::Null), ClickHouseValue::Null));
+        assert!(matches!(cell_to_clickhouse_value(Cell::Null).unwrap(), ClickHouseValue::Null));
     }
 
     #[test]
     fn cell_to_clickhouse_value_bool() {
-        assert!(matches!(cell_to_clickhouse_value(Cell::Bool(true)), ClickHouseValue::Bool(true)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Bool(true)).unwrap(),
+            ClickHouseValue::Bool(true)
+        ));
     }
 
     #[test]
     fn cell_to_clickhouse_value_i32() {
-        assert!(matches!(cell_to_clickhouse_value(Cell::I32(42)), ClickHouseValue::Int32(42)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::I32(42)).unwrap(),
+            ClickHouseValue::Int32(42)
+        ));
     }
 
     #[test]
     fn cell_to_clickhouse_value_string() {
         if let ClickHouseValue::String(s) =
-            cell_to_clickhouse_value(Cell::String("hello".to_owned()))
+            cell_to_clickhouse_value(Cell::String("hello".to_owned())).unwrap()
         {
             assert_eq!(s, "hello");
         } else {
@@ -277,16 +326,22 @@ mod tests {
     #[test]
     fn cell_to_clickhouse_value_date() {
         let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-        assert!(matches!(cell_to_clickhouse_value(Cell::Date(epoch)), ClickHouseValue::Date32(0)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Date(Date::Value(epoch))).unwrap(),
+            ClickHouseValue::Date32(0)
+        ));
 
         let day1 = NaiveDate::from_ymd_opt(1970, 1, 2).unwrap();
-        assert!(matches!(cell_to_clickhouse_value(Cell::Date(day1)), ClickHouseValue::Date32(1)));
+        assert!(matches!(
+            cell_to_clickhouse_value(Cell::Date(Date::Value(day1))).unwrap(),
+            ClickHouseValue::Date32(1)
+        ));
 
         // Pre-1970 dates round-trip through Date32 as a negative offset rather
         // than being silently clamped to the epoch.
         let pre_epoch = NaiveDate::from_ymd_opt(1969, 12, 31).unwrap();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(pre_epoch)),
+            cell_to_clickhouse_value(Cell::Date(Date::Value(pre_epoch))).unwrap(),
             ClickHouseValue::Date32(-1)
         ));
     }
@@ -297,7 +352,7 @@ mod tests {
         let expected_too_old =
             i32::try_from(too_old.signed_duration_since(unix_epoch()).num_days()).unwrap();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(too_old)),
+            cell_to_clickhouse_value(Cell::Date(Date::Value(too_old))).unwrap(),
             ClickHouseValue::Date32(days) if days == expected_too_old
         ));
 
@@ -305,7 +360,7 @@ mod tests {
         let expected_too_new =
             i32::try_from(too_new.signed_duration_since(unix_epoch()).num_days()).unwrap();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Date(too_new)),
+            cell_to_clickhouse_value(Cell::Date(Date::Value(too_new))).unwrap(),
             ClickHouseValue::Date32(days) if days == expected_too_new
         ));
     }
@@ -314,7 +369,7 @@ mod tests {
     fn cell_to_clickhouse_value_timestamp() {
         let epoch = chrono::DateTime::from_timestamp(0, 0).unwrap().naive_utc();
         assert!(matches!(
-            cell_to_clickhouse_value(Cell::Timestamp(epoch)),
+            cell_to_clickhouse_value(Cell::Timestamp(Timestamp::Value(epoch))).unwrap(),
             ClickHouseValue::DateTime64(0)
         ));
     }
@@ -323,7 +378,7 @@ mod tests {
     fn cell_to_clickhouse_value_uuid() {
         let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let expected_bytes = *u.as_bytes();
-        if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)) {
+        if let ClickHouseValue::Uuid(bytes) = cell_to_clickhouse_value(Cell::Uuid(u)).unwrap() {
             assert_eq!(bytes, expected_bytes);
         } else {
             panic!("expected Uuid variant");
@@ -333,7 +388,7 @@ mod tests {
     #[test]
     fn cell_to_clickhouse_value_bytes_hex() {
         let bytes = vec![0xde, 0xad, 0xbe, 0xef];
-        if let ClickHouseValue::String(s) = cell_to_clickhouse_value(Cell::Bytes(bytes)) {
+        if let ClickHouseValue::String(s) = cell_to_clickhouse_value(Cell::Bytes(bytes)).unwrap() {
             assert_eq!(s, "deadbeef");
         } else {
             panic!("expected String variant");
@@ -426,45 +481,72 @@ mod tests {
         assert_eq!(bytes_to_hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
-    /// # GIVEN
-    /// A NULL ClickHouseValue passed to the non-nullable encoder.
-    ///
-    /// # WHEN
-    /// `rb_encode_value` is called.
-    ///
-    /// # THEN
-    /// It returns a ConversionError rather than writing invalid RowBinary.
+    /// NULL for a non-nullable column is a conversion error that writes no
+    /// bytes.
     #[test]
     fn rb_encode_value_rejects_null_for_non_nullable_column() {
+        // GIVEN: an empty buffer.
         let mut buf = Vec::new();
+
+        // WHEN: NULL is encoded without a null marker.
         let result = rb_encode_value(ClickHouseValue::Null, &mut buf);
 
+        // THEN: encoding fails and the buffer stays empty.
         assert!(result.is_err(), "NULL in non-nullable column must error");
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConversionError);
         assert!(buf.is_empty(), "no bytes should be written on error");
     }
 
+    /// A top-level NULL array is stored as an empty array, while the row's
+    /// other columns keep their own encodings.
     #[test]
-    fn encode_to_row_binary_rejects_fewer_values_than_nullable_flags() {
-        let mut buf = vec![0xaa];
-        let result =
-            encode_to_row_binary(vec![ClickHouseValue::Int32(1)], &[false, false], &mut buf);
+    fn encode_to_row_binary_writes_null_array_as_empty_array() {
+        let encodings = [ColumnEncoding::Array, ColumnEncoding::Nullable, ColumnEncoding::Required];
+        let mut buf = Vec::new();
+        encode_to_row_binary(
+            vec![ClickHouseValue::Null, ClickHouseValue::Null, ClickHouseValue::Int32(7)],
+            &encodings,
+            &mut buf,
+        )
+        .unwrap();
 
-        assert!(result.is_err(), "row width mismatch must error");
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::ConversionError);
-        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
-        assert_eq!(err.detail(), Some("values length 1 does not match nullable flags length 2"));
-        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
+        let mut expected = Vec::new();
+        encode_to_row_binary(
+            vec![
+                ClickHouseValue::Array(Vec::new()),
+                ClickHouseValue::Null,
+                ClickHouseValue::Int32(7),
+            ],
+            &encodings,
+            &mut expected,
+        )
+        .unwrap();
+        assert_eq!(buf, expected);
+        assert_eq!(buf, [0x00, 0x01, 0x07, 0x00, 0x00, 0x00]);
     }
 
+    /// Only array columns turn NULL into a value; a required scalar column
+    /// still rejects it.
     #[test]
-    fn encode_to_row_binary_rejects_more_values_than_nullable_flags() {
+    fn encode_to_row_binary_rejects_null_for_required_column() {
+        let error = encode_to_row_binary(
+            vec![ClickHouseValue::Null],
+            &[ColumnEncoding::Required],
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConversionError);
+    }
+
+    /// A row narrower than its layout is rejected before any byte is written.
+    #[test]
+    fn encode_to_row_binary_rejects_fewer_values_than_column_encodings() {
         let mut buf = vec![0xaa];
         let result = encode_to_row_binary(
-            vec![ClickHouseValue::Int32(1), ClickHouseValue::Int32(2)],
-            &[false],
+            vec![ClickHouseValue::Int32(1)],
+            &[ColumnEncoding::Required, ColumnEncoding::Required],
             &mut buf,
         );
 
@@ -472,7 +554,42 @@ mod tests {
         let err = result.unwrap_err();
         assert_eq!(err.kind(), ErrorKind::ConversionError);
         assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
-        assert_eq!(err.detail(), Some("values length 2 does not match nullable flags length 1"));
+        assert_eq!(err.detail(), Some("values length 1 does not match column encodings length 2"));
         assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
+    }
+
+    /// A row wider than its layout is rejected before any byte is written.
+    #[test]
+    fn encode_to_row_binary_rejects_more_values_than_column_encodings() {
+        let mut buf = vec![0xaa];
+        let result = encode_to_row_binary(
+            vec![ClickHouseValue::Int32(1), ClickHouseValue::Int32(2)],
+            &[ColumnEncoding::Required],
+            &mut buf,
+        );
+
+        assert!(result.is_err(), "row width mismatch must error");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::ConversionError);
+        assert_eq!(err.description(), Some("ClickHouse RowBinary row width mismatch"));
+        assert_eq!(err.detail(), Some("values length 2 does not match column encodings length 1"));
+        assert_eq!(buf, vec![0xaa], "no bytes should be written on error");
+    }
+
+    #[test]
+    fn special_temporal_values_require_faithful_wire_encodings() {
+        for cell in [
+            Cell::Date(Date::PosInfinity),
+            Cell::Date(Date::NegInfinity),
+            Cell::Timestamp(Timestamp::PosInfinity),
+            Cell::TimestampTz(Timestamp::NegInfinity),
+            Cell::Array(ArrayCell::Date(vec![None, Some(Date::PosInfinity)])),
+            Cell::Array(ArrayCell::Timestamp(vec![None, Some(Timestamp::NegInfinity)])),
+            Cell::Array(ArrayCell::TimestampTz(vec![None, Some(Timestamp::PosInfinity)])),
+        ] {
+            assert!(cell_to_clickhouse_value(cell).is_err());
+        }
+        let value = cell_to_clickhouse_value(Cell::Time(etl::data::PgTime::EndOfDay)).unwrap();
+        assert!(matches!(value, ClickHouseValue::String(value) if value == "24:00:00"));
     }
 }

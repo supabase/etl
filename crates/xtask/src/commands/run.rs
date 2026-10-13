@@ -1,4 +1,4 @@
-//! Local process runners for the API and standalone replicator.
+//! Local process runners for the standalone replicator.
 
 use std::process::Command;
 
@@ -7,8 +7,8 @@ use clap::{Args, Subcommand};
 
 use crate::{
     commands::setup::{
-        api_config_dir, api_config_exists, detect_replicator_destination, replicator_config_dir,
-        replicator_config_exists, replicator_config_has_placeholders,
+        detect_replicator_destination, replicator_config_dir, replicator_config_exists,
+        replicator_config_has_placeholders,
     },
     utils::{DestinationPreset, workspace_root},
 };
@@ -18,7 +18,6 @@ use crate::{
 #[command(after_help = "\
 Examples:
   cargo x init
-  cargo x setup api && cargo x run api
   cargo x setup replicator && cargo x seed && cargo x run replicator
 ")]
 pub(crate) struct RunArgs {
@@ -29,8 +28,6 @@ pub(crate) struct RunArgs {
 /// Service that can be started with generated local configuration.
 #[derive(Subcommand)]
 enum RunTarget {
-    /// Start etl-api with the generated local configuration.
-    Api,
     /// Start etl-replicator with the generated local configuration.
     Replicator(RunReplicatorArgs),
 }
@@ -48,42 +45,9 @@ impl RunArgs {
     /// Starts the selected local service.
     pub(crate) fn run(self) -> Result<()> {
         match self.target {
-            RunTarget::Api => run_api(),
             RunTarget::Replicator(args) => run_replicator(args),
         }
     }
-}
-
-/// Starts etl-api using generated local configuration.
-fn run_api() -> Result<()> {
-    let workspace_root = workspace_root()?;
-    std::env::set_current_dir(&workspace_root)
-        .with_context(|| format!("Failed to change directory to {}", workspace_root.display()))?;
-
-    if !api_config_exists()? {
-        bail!(
-            "No local API configuration found.\n\nInitialize the API first (Postgres, Kubernetes \
-             resources, and config):\n  cargo x setup api\n\nThen start it:\n  cargo x run api"
-        );
-    }
-
-    let config_dir = api_config_dir()?;
-    println!("▶️  Starting etl-api");
-    println!("   config: {}", config_dir.display());
-    println!("   health: http://127.0.0.1:8010/health_check");
-    println!("   swagger: http://127.0.0.1:8010/swagger-ui");
-    let status = Command::new("cargo")
-        .args(["run", "-p", "etl-api", "--bin", "etl-api"])
-        .env("APP_ENVIRONMENT", "dev")
-        .env("APP_CONFIG_DIR", &config_dir)
-        .status()
-        .context("Failed to start etl-api")?;
-
-    if !status.success() {
-        bail!("etl-api exited unsuccessfully");
-    }
-
-    Ok(())
 }
 
 /// Starts etl-replicator using generated local configuration.

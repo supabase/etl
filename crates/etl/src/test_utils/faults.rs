@@ -1,12 +1,12 @@
 //! Fault injection primitives for destination test wrappers.
 //!
-//! Destinations report through two channels: the method return value
-//! (dispatch) and the async result handle (completion). Faults target either
-//! channel: [`FaultAction::Reject`] refuses work before the inner destination
-//! runs, while the response actions let the inner destination run and then
-//! fail, hold, or delay what the apply loop observes. Faults are queued FIFO
-//! per operation and consumed one per call; an empty queue means fully
-//! transparent behavior.
+//! Destinations report through two channels: the method return value (dispatch)
+//! and the async result handle (completion). Faults target either channel:
+//! [`FaultAction::Reject`] refuses work before the inner destination runs,
+//! while the response actions let the inner destination run and then fail,
+//! hold, or delay what the apply loop observes. Faults are queued FIFO per
+//! operation and consumed one per call; an empty queue means fully transparent
+//! behavior.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -62,16 +62,16 @@ impl InjectedError {
 /// Scripted fault behavior, consumed FIFO per operation.
 #[derive(Debug)]
 pub enum FaultAction {
-    /// The destination refuses the work; the method returns `Err` and the
-    /// inner destination never runs.
+    /// The destination refuses the work; the method returns `Err` and the inner
+    /// destination never runs.
     Reject(InjectedError),
     /// The inner destination does the work, then reports failure.
     ///
     /// This models the lost-response ambiguity: the destination applied the
     /// write but the apply loop observes a failure.
     FailAfterWrite(InjectedError),
-    /// The inner destination does the work, then never answers until the
-    /// paired [`HoldHandle`] releases the response.
+    /// The inner destination does the work, then never answers until the paired
+    /// [`HoldHandle`] releases the response.
     HoldResponse(HoldGate),
     /// The inner destination does the work; its response is delayed by the
     /// duration and then passes through unchanged.
@@ -335,8 +335,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_response_fault_passes_through_or_replaces_the_inner_result() {
-        // GIVEN: an inner result of Ok(7)
-        // WHEN: no fault is scripted
+        // GIVEN: an inner result of Ok(7) WHEN: no fault is scripted
         let ok = apply_response_fault(None, Ok::<_, EtlError>(7)).await;
 
         // THEN: the inner result passes through unchanged

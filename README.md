@@ -21,7 +21,7 @@
   <a href="https://github.com/supabase/etl/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/supabase/etl/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://coveralls.io/github/supabase/etl?branch=main"><img alt="Coverage" src="https://coveralls.io/repos/github/supabase/etl/badge.svg?branch=main"></a>
   <a href="https://github.com/supabase/etl/actions/workflows/docs.yml"><img alt="Docs" src="https://github.com/supabase/etl/actions/workflows/docs.yml/badge.svg?branch=main"></a>
-  <a href="https://github.com/supabase/etl/actions/workflows/audit.yml"><img alt="Security audit" src="https://github.com/supabase/etl/actions/workflows/audit.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/supabase/etl/actions/workflows/dependency-audit.yml"><img alt="Dependency audit" src="https://github.com/supabase/etl/actions/workflows/dependency-audit.yml/badge.svg?branch=main"></a>
   <a href="LICENSE"><img alt="Apache 2.0 license" src="https://img.shields.io/badge/License-Apache_2.0-blue.svg"></a>
 </p>
 
@@ -73,6 +73,16 @@ Copy and change data capture (CDC) are replication paths, not customer-visible
 phases. Initial sync uses the copy path followed by CDC catch-up; ongoing
 replication uses the CDC path after the table is ready.
 
+Each table's initial copy holds `ACCESS SHARE` locks from before snapshot
+creation until its source copy workers finish. On a primary, ordinary DML can
+continue while `ACCESS EXCLUSIVE` DDL waits; queued DDL can delay later queries.
+Long copies can also retain WAL and old row versions. Review
+[source impact and migration planning](https://supabase.github.io/etl/guides/configure-postgres/#planning-long-initial-copies)
+before starting a large initial sync.
+Schema-change handling is in public beta, with known catalog-visibility, concurrent-DDL,
+and relation-metadata risks. Read [Schema Changes](https://supabase.github.io/etl/explanation/schema-changes/)
+before planning migrations alongside a running pipeline.
+
 ## Start Here
 
 | Goal | Documentation |
@@ -123,11 +133,14 @@ for versions, measurement methodology, and configuration differences.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `clickhouse` | ClickHouse | In progress |
+| `clickhouse` | ClickHouse | Private alpha |
 | `bigquery` | Google BigQuery | Stable |
-| `ducklake` | DuckLake | In progress |
-| `snowflake` | Snowflake | In progress |
+| `ducklake` | DuckLake | Private alpha |
+| `snowflake` | Snowflake | Private alpha |
 | `iceberg` | Apache Iceberg | Deprecated |
+
+Private alpha refers to managed-service access and does not restrict local or
+self-hosted use of the open-source destinations.
 
 ClickHouse is the fastest way to start locally: `cargo x init` runs it, and
 `cargo x setup replicator` configures it by default. BigQuery is the most
@@ -146,15 +159,33 @@ The source must use `wal_level = logical`, and the replication user needs the
 `REPLICATION` role. See [Configure Postgres](https://supabase.github.io/etl/guides/configure-postgres/)
 for the complete setup and production guidance.
 
+## Container images
+
+The standalone replicator is publicly available; no private registry credentials
+are required. Set `IMAGE_TAG` to a published full commit SHA or release tag:
+
+```bash
+docker pull "public.ecr.aws/supabase/etl-replicator:$IMAGE_TAG"
+```
+
+Each newly published tag contains Linux AMD64 and ARM64 images. Docker selects
+the host architecture automatically; use `--platform linux/amd64` or
+`--platform linux/arm64` to select it explicitly. Pin deployments to a commit,
+release tag, or digest. `latest` follows the current `main` tip and is mutable.
+Manual builds publish only `<full-commit-sha>-experimental`, even for commits on `main`.
+
+The image includes the replicator, the DuckLake maintenance binary, and DuckDB
+extensions. Supply configuration at runtime; see the
+[replicator guide](crates/etl-replicator/README.md).
+
 ## Development
 
 ```bash
 cargo x init              # Docker, databases, migrations
-cargo x setup api && cargo x run api
 cargo x setup replicator && cargo x seed && cargo x run replicator
 ```
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) to start the replicator or API, pick a
+See [DEVELOPMENT.md](DEVELOPMENT.md) to start the replicator, pick a
 destination, and run tests. The workspace uses Rust 1.95.0 from
 `rust-toolchain.toml`.
 

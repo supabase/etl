@@ -5,8 +5,8 @@ use etl::{
     error::{EtlError, EtlResult},
     schema::{PgLsn, SnapshotId, TableId, TableSchema},
     store::{
-        SchemaStore, StateStore, TableRetryPolicy, TableState, TableStateLifecycleStore,
-        TableStateOperation, TableStates, WorkerType,
+        CachedStore, SchemaStore, StateStore, TableRetryPolicy, TableState,
+        TableStateLifecycleStore, TableStateOperation, TableStates, WorkerType,
     },
 };
 use tracing::info;
@@ -15,11 +15,11 @@ use crate::{error_notification::ErrorNotificationClient, sentry};
 
 /// State store decorator that reports persisted table replication errors.
 ///
-/// After [`StateStore::update_table_states`] succeeds, this wrapper
-/// reports each terminal [`TableState::Errored`] update to Sentry and, when
-/// configured, to the Supabase error-notification endpoint. Errors with a
-/// timed retry remain visible in the state store but are not reported while
-/// automatic recovery is still in progress.
+/// After [`StateStore::update_table_states`] succeeds, this wrapper reports
+/// each terminal [`TableState::Errored`] update to Sentry and, when configured,
+/// to the Supabase error-notification endpoint. Errors with a timed retry
+/// remain visible in the state store but are not reported while automatic
+/// recovery is still in progress.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorReportingStateStore<S> {
     inner: S,
@@ -76,9 +76,18 @@ impl<S> ErrorReportingStateStore<S> {
     }
 }
 
+impl<S> CachedStore for ErrorReportingStateStore<S>
+where
+    S: CachedStore + Sync,
+{
+    async fn load_cache(&self) -> EtlResult<()> {
+        self.inner.load_cache().await
+    }
+}
+
 impl<S> StateStore for ErrorReportingStateStore<S>
 where
-    S: StateStore + Send + Sync,
+    S: StateStore + Sync,
 {
     async fn get_table_state(&self, table_id: TableId) -> EtlResult<Option<TableState>> {
         self.inner.get_table_state(table_id).await
@@ -88,12 +97,9 @@ where
         self.inner.get_table_states().await
     }
 
-    async fn load_table_states(&self) -> EtlResult<usize> {
-        self.inner.load_table_states().await
-    }
-
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
-        // We collect all errors in advance, to avoid cloning the whole set of updates.
+        // We collect all errors in advance, to avoid cloning the whole set of
+        // updates.
         let reportable_errors = Self::collect_reportable_errors(&updates);
 
         self.inner.update_table_states(updates).await?;
@@ -137,10 +143,6 @@ where
         self.inner.get_destination_table_metadata(table_id).await
     }
 
-    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
-        self.inner.load_destination_tables_metadata().await
-    }
-
     async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -152,7 +154,7 @@ where
 
 impl<S> SchemaStore for ErrorReportingStateStore<S>
 where
-    S: SchemaStore + Send + Sync,
+    S: SchemaStore + Sync,
 {
     async fn get_table_schema(
         &self,
@@ -164,10 +166,6 @@ where
 
     async fn get_table_schemas(&self) -> EtlResult<Vec<Arc<TableSchema>>> {
         self.inner.get_table_schemas().await
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        self.inner.load_table_schemas().await
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
@@ -184,12 +182,9 @@ where
 
 impl<S> TableStateLifecycleStore for ErrorReportingStateStore<S>
 where
-    S: TableStateLifecycleStore + Send + Sync,
+    S: TableStateLifecycleStore + Sync,
 {
-    async fn apply_table_state_operation(
-        &self,
-        operation: TableStateOperation,
-    ) -> EtlResult<usize> {
+    async fn apply_table_state_operation(&self, operation: TableStateOperation) -> EtlResult<()> {
         self.inner.apply_table_state_operation(operation).await
     }
 

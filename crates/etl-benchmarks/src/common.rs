@@ -43,7 +43,7 @@ use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
     Destination as SnowflakeDestination,
 };
-use etl_telemetry::tracing::{LogFlusher, init_tracing};
+use etl_telemetry::tracing::{LogFlusher, init_tracing_for_environment};
 use serde::Serialize;
 use sqlx::{
     Connection, Executor, PgConnection, PgPool,
@@ -515,9 +515,9 @@ impl BenchDestination {
         not(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake")),
         expect(clippy::unused_async)
     )]
-    #[allow(
-        unused_variables,
-        reason = "pipeline_id and store are consumed only by feature-gated arms"
+    #[cfg_attr(
+        not(any(feature = "bigquery", feature = "snowflake")),
+        expect(unused_variables, reason = "pipeline_id is only used by BigQuery and Snowflake")
     )]
     pub async fn new(
         destination_args: &DestinationArgs,
@@ -844,9 +844,7 @@ impl Destination for BenchDestination {
 
 /// Initializes benchmark logging.
 pub fn init_benchmark_tracing(log_target: LogTarget, name: &str) -> Result<LogFlusher> {
-    let environment: Environment = log_target.into();
-    environment.set();
-    Ok(init_tracing(name)?)
+    Ok(init_tracing_for_environment(name, log_target.into())?)
 }
 
 /// Builds Postgres connection options for benchmark helpers.
@@ -943,6 +941,7 @@ pub fn pipeline_config(
         memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
         table_sync_monitor_refresh_interval_ms:
             PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+        settle_durable_interval_ms: None,
         memory_backpressure: if tuning.disable_memory_backpressure {
             None
         } else {

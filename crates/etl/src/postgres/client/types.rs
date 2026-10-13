@@ -55,8 +55,8 @@ pub(super) enum SnapshotAction {
 /// for logical replication.
 #[derive(Debug, Clone)]
 pub struct CreateSlotResult {
-    /// The LSN at which the slot was created, representing a consistent point
-    /// in the WAL.
+    /// Safe logical decoding start established by the initial consistent
+    /// snapshot. This is not necessarily a transaction's commit end LSN.
     pub consistent_point: PgLsn,
 }
 
@@ -66,7 +66,12 @@ pub struct CreateSlotResult {
 /// progressed.
 #[derive(Debug, Clone)]
 pub struct GetSlotResult {
-    /// The LSN up to which changes have been confirmed as processed by ETL.
+    /// The slot's confirmed flush position, initialized at its consistent
+    /// point and advanced by receiver feedback.
+    ///
+    /// ETL can acknowledge received WAL while quiescent, so this need not be
+    /// a commit end LSN. PostgreSQL may not have persisted its latest value
+    /// across a server restart.
     pub confirmed_flush_lsn: PgLsn,
 }
 

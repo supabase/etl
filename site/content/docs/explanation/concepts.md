@@ -116,19 +116,22 @@ See [Configure Postgres](/guides/configure-postgres/#wal-buildup-and-disk-usage)
 
 When Postgres decodes WAL for logical replication, it uses a **decoder plugin**. ETL uses `pgoutput`, Postgres's built-in decoder.
 
-The decoder transforms binary WAL records into structured messages:
+The decoder transforms WAL into logical messages, which do not necessarily
+correspond one-to-one to physical WAL records:
 
-| Message | Meaning |
-|---------|---------|
-| `BEGIN` | Transaction started |
-| `RELATION` | Table schema (columns, types) |
-| `INSERT` | Row added |
-| `UPDATE` | Row modified |
-| `DELETE` | Row removed |
-| `TRUNCATE` | Table cleared |
-| `COMMIT` | Transaction completed |
+| Message | Origin |
+|---------|--------|
+| `BEGIN` | Synthesized transaction framing |
+| `RELATION`, `TYPE` | Synthesized relation and type catalog metadata |
+| `ORIGIN` | Synthesized transaction provenance |
+| `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE` | Decoded WAL changes selected for the publication |
+| `COMMIT` | Decoded COMMIT WAL record |
+| `MESSAGE` | Decoded logical-message WAL record |
 
-ETL receives these messages and converts them to events.
+Publication row filters can transform an `UPDATE` into an `INSERT` or `DELETE`.
+ETL also derives its own `RelationEvent` schema barriers, which need not map
+one-to-one to pgoutput `RELATION` messages. See
+[Events](/explanation/events/) for event and field semantics.
 
 ## Why Two Phases?
 
@@ -204,7 +207,7 @@ Sequenced ETL events include a commit LSN and transaction-local ordinal:
 
 | Field | Meaning |
 |-------|---------|
-| `commit_lsn` | LSN of the commit message in the WAL |
+| `commit_lsn` | Start of the transaction's COMMIT WAL record |
 | `tx_ordinal` | Zero-based event order within the transaction |
 
 Multiple events in the same transaction share the same `commit_lsn`; their

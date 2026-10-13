@@ -1,0 +1,31 @@
+name: Publish image
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Optional full commit SHA to build; defaults to the selected workflow ref"
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  image:
+    name: Publish image
+    if: |
+      github.event_name == 'workflow_dispatch' || (
+        github.event.pull_request.merged == true &&
+        !contains(github.event.pull_request.labels.*.name, 'release')
+      )
+    uses: ./.github/workflows/reusable-publish-image.yml
+    with:
+      commit: ${{ github.event_name == 'workflow_dispatch' && inputs.commit || '' }}
+    secrets:
+      PROD_AWS_ROLE: ${{ secrets.PROD_AWS_ROLE }}

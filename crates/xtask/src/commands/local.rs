@@ -13,12 +13,6 @@ use crate::commands::migrate;
 
 /// Docker Compose file used by the local development stack.
 const COMPOSE_FILE: &str = "scripts/docker/docker-compose.yaml";
-/// Local Kubernetes manifests required by the API data plane.
-const LOCAL_K8S_DIR: &str = "scripts/k8s/local";
-/// Local Kubernetes context used for OrbStack.
-const ORBSTACK_CONTEXT: &str = "orbstack";
-/// Kubernetes namespace configured by the local manifests.
-const DATA_PLANE_NAMESPACE: &str = "etl-data-plane";
 /// Docker Compose service for the source Postgres instance.
 const SOURCE_POSTGRES_SERVICE: &str = "source-postgres";
 /// Docker Compose service for the source Postgres read replica.
@@ -46,7 +40,7 @@ pub(crate) fn prepare_local_databases() -> Result<InitConfig> {
     if let Some(compose) = &compose {
         wait_for_docker_services(compose, &config)?;
     } else {
-        wait_for_external_postgres(&database_url)?;
+        wait_for_external_postgres(&config)?;
     }
 
     if compose.is_some() {
@@ -274,10 +268,25 @@ fn compose_service_is_running(
 }
 
 /// Waits for an externally managed Postgres instance.
-fn wait_for_external_postgres(database_url: &str) -> Result<()> {
+fn wait_for_external_postgres(config: &InitConfig) -> Result<()> {
     wait_until("Postgres", || {
+        // The requested database may not exist until the migration command
+        // creates it. Probe the maintenance database used for that creation.
         let mut cmd = Command::new("psql");
-        cmd.args([database_url, "-c", "select 1"]);
+        cmd.args([
+            "-X",
+            "-h",
+            &config.db_host,
+            "-p",
+            &config.db_port,
+            "-U",
+            &config.db_user,
+            "-d",
+            "postgres",
+            "-c",
+            "select 1",
+        ]);
+        cmd.env("PGPASSWORD", &config.db_password);
         command_succeeds_silent(&mut cmd)
     })?;
 
@@ -298,46 +307,7 @@ fn run_migrations(config: &InitConfig, database_url: &str) -> Result<()> {
         ("POSTGRES_HOST", config.db_host.as_str()),
         ("DATABASE_URL", database_url),
     ];
-    migrate::run_migrations_with_env(&[], envs).context("Failed to run database migrations")
-}
-
-/// Seeds the default replicator image through the API database function.
-pub(crate) fn seed_default_replicator_image(database_url: &str) -> Result<()> {
-    println!("🖼️ Seeding default replicator image...");
-
-    let image = env_or("REPLICATOR_IMAGE", "public.ecr.aws/supabase/etl-replicator:latest");
-    let sql = format!("select app.update_default_image({});", sql_string_literal(&image));
-
-    let mut cmd = Command::new("psql");
-    cmd.args([database_url, "-v", "ON_ERROR_STOP=1", "-c", &sql]);
-    run_command(cmd, "Failed to seed default replicator image")
-}
-
-/// Ensures local Kubernetes resources exist in OrbStack.
-pub(crate) fn configure_kubernetes() -> Result<()> {
-    if !kubectl_context_exists(ORBSTACK_CONTEXT)? {
-        bail!(
-            "Kubernetes context '{ORBSTACK_CONTEXT}' not found. Install OrbStack and enable \
-             Kubernetes in its settings."
-        );
-    }
-
-    let mut nodes = Command::new("kubectl");
-    nodes.args(["--context", ORBSTACK_CONTEXT, "get", "nodes"]);
-    if !command_succeeds_silent(&mut nodes)? {
-        bail!(
-            "OrbStack Kubernetes cluster is not reachable. Start OrbStack and ensure Kubernetes \
-             is enabled and running."
-        );
-    }
-
-    println!("☸️ Configuring Kubernetes environment...");
-    let mut apply = Command::new("kubectl");
-    apply.args(["--context", ORBSTACK_CONTEXT, "apply", "-f", LOCAL_K8S_DIR]);
-    run_command(apply, "Failed to apply local Kubernetes resources")?;
-
-    println!("✅ Applied required Kubernetes resources in {DATA_PLANE_NAMESPACE}");
-    Ok(())
+    migrate::run_migrations_with_env(envs).context("Failed to run database migrations")
 }
 
 /// Adds Docker Compose environment variables to a command.
@@ -422,21 +392,6 @@ where
     }
 }
 
-/// Returns whether a kubectl context exists.
-fn kubectl_context_exists(context: &str) -> Result<bool> {
-    let output = Command::new("kubectl")
-        .args(["config", "get-contexts", "-o", "name"])
-        .output()
-        .context("Failed to list Kubernetes contexts")?;
-
-    if !output.status.success() {
-        bail!("Failed to list Kubernetes contexts");
-    }
-
-    let contexts = String::from_utf8_lossy(&output.stdout);
-    Ok(contexts.lines().any(|line| line == context))
-}
-
 /// Requires a command to be callable.
 pub(crate) fn require_command(program: &str, args: &[&str], message: &'static str) -> Result<()> {
     if command_succeeds(program, args) {
@@ -478,11 +433,6 @@ fn env_or(key: &str, default: &str) -> String {
 /// Returns a non-empty environment variable.
 fn optional_env(key: &str) -> Option<String> {
     env::var(key).ok().filter(|value| !value.is_empty())
-}
-
-/// Escapes a value as a SQL string literal.
-fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(test)]

@@ -171,12 +171,19 @@ function rewriteAgentCallouts(markdown: string) {
   );
 }
 
+/** Plain-text labels for `<DestinationStatus>` badges in the agent Markdown export. */
+const destinationStatusLabels: Record<string, string> = {
+  stable: 'Stable',
+  'private-alpha': 'Private alpha',
+  'in-progress': 'In progress',
+  deprecated: 'Deprecated',
+};
+
 function rewriteAgentLayout(markdown: string) {
   return markdown
     .replace(
-      /<DestinationStatus status="(stable|in-progress|deprecated)"\s*\/>/g,
-      (_match, status: string) =>
-        `**Status: ${{ stable: 'Stable', 'in-progress': 'In progress', deprecated: 'Deprecated' }[status]}**`,
+      /<DestinationStatus status="(stable|private-alpha|in-progress|deprecated)"\s*\/>/g,
+      (_match, status: string) => `**Status: ${destinationStatusLabels[status]}**`,
     )
     .replace(/^\s*<div className="fd-(?:steps|step)">\s*$/gm, '')
     .replace(/^\s*<\/div>\s*$/gm, '')

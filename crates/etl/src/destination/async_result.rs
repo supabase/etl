@@ -14,7 +14,6 @@ use tracing::debug;
 use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    runtime::concurrency::{ShutdownResult, ShutdownRx},
     schema::TableId,
     source_payload_metadata::StreamingPayloadMetadata,
 };
@@ -35,9 +34,12 @@ pub enum DestinationWriteStatus {
     /// [`DestinationWriteStatus::Durable`] result covers it. If no later write
     /// is dispatched before shutdown, ETL normally leaves progress at the last
     /// persisted checkpoint so restart can replay the accepted write. A
-    /// keepalive while idle or a terminal table-sync catchup may instead issue
-    /// an empty [`WriteEventsDurability::RequireDurable`] write to settle this
-    /// debt.
+    /// keepalive while idle may instead issue an empty
+    /// [`WriteEventsDurability::RequireDurable`] write to settle this debt.
+    /// `None` for `settle_durable_interval_ms` allows forced durability at any
+    /// keepalive. `Some` guarantees at least that window before a later
+    /// keepalive can force durability. A terminal table-sync catchup may issue
+    /// the same empty write without waiting.
     ///
     /// For table-copy writes through
     /// [`crate::destination::Destination::write_table_rows`], ETL may request
@@ -62,8 +64,8 @@ pub enum DestinationWriteStatus {
     /// `Accepted`, ETL still sends a terminal empty write after every copy
     /// worker finishes. `Durable` from that barrier must cover every accepted
     /// write in the current table-copy attempt before ETL stores
-    /// `FinishedCopy`. Empty and skipped tables must also return `Durable`
-    /// from their empty initialization write before the copy can finish.
+    /// `FinishedCopy`. Empty and skipped tables must also return `Durable` from
+    /// their empty initialization write before the copy can finish.
     Durable,
 }
 
@@ -98,9 +100,8 @@ pub type DropTableForCopyResult<T = ()> = AsyncResult<T>;
 /// Durability requirement for a streaming destination write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteEventsDurability {
-    /// The destination may report either
-    /// [`DestinationWriteStatus::Accepted`] or
-    /// [`DestinationWriteStatus::Durable`].
+    /// The destination may report either [`DestinationWriteStatus::Accepted`]
+    /// or [`DestinationWriteStatus::Durable`].
     MayDefer,
     /// The destination must report [`DestinationWriteStatus::Durable`] for the
     /// write and all earlier accepted writes in the same ordered apply-loop
@@ -135,9 +136,9 @@ pub(crate) struct ApplyLoopAsyncResultMetadata {
     /// For immediate destinations this can advance the last flush LSN and
     /// persisted checkpoint when the write returns
     /// [`DestinationWriteStatus::Durable`]. For deferred destinations, the
-    /// apply loop carries this LSN across
-    /// [`DestinationWriteStatus::Accepted`] results and advances only when a
-    /// later cumulative durable result covers the carried LSN.
+    /// apply loop carries this LSN across [`DestinationWriteStatus::Accepted`]
+    /// results and advances only when a later cumulative durable result covers
+    /// the carried LSN.
     pub commit_end_lsn: Option<PgLsn>,
     /// Durability requirement supplied with the dispatched write.
     pub durability: WriteEventsDurability,
@@ -225,22 +226,6 @@ impl<T, M> Future for PendingAsyncResult<T, M> {
     }
 }
 
-impl<T, M> PendingAsyncResult<T, M> {
-    /// Waits for completion or returns when shutdown is requested.
-    pub(crate) async fn with_shutdown(
-        self,
-        shutdown_rx: &mut ShutdownRx,
-    ) -> ShutdownResult<CompletedAsyncResult<T, M>, ()> {
-        tokio::select! {
-            biased;
-
-            _ = shutdown_rx.changed() => ShutdownResult::Shutdown(()),
-
-            completed = self => ShutdownResult::Ok(completed),
-        }
-    }
-}
-
 /// Completed typed asynchronous result.
 #[derive(Debug)]
 pub(crate) struct CompletedAsyncResult<T, M> {
@@ -267,7 +252,6 @@ impl<T, M> CompletedAsyncResult<T, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::concurrency::create_shutdown_channel;
 
     #[tokio::test]
     async fn async_result_round_trips_success() {
@@ -316,42 +300,5 @@ mod tests {
 
         assert!(metadata.is_none());
         assert_eq!(result.unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_completes_before_shutdown() {
-        let (_shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
-        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        result_tx.send(Ok(7));
-
-        let ShutdownResult::Ok(completed) = pending_result.with_shutdown(&mut shutdown_rx).await
-        else {
-            panic!("async result should complete before shutdown");
-        };
-
-        assert_eq!(completed.into_result().unwrap(), 7);
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_stops_waiting_on_shutdown() {
-        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
-        let (_result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        shutdown_tx.shutdown().unwrap();
-
-        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
-
-        assert!(matches!(result, ShutdownResult::Shutdown(())));
-    }
-
-    #[tokio::test]
-    async fn pending_async_result_prioritizes_shutdown_over_completion() {
-        let (shutdown_tx, mut shutdown_rx) = create_shutdown_channel();
-        let (result_tx, pending_result) = WriteTableRowsResult::<u64>::new(());
-        result_tx.send(Ok(7));
-        shutdown_tx.shutdown().unwrap();
-
-        let result = pending_result.with_shutdown(&mut shutdown_rx).await;
-
-        assert!(matches!(result, ShutdownResult::Shutdown(())));
     }
 }

@@ -1,10 +1,15 @@
+use std::io;
+
 use etl_config::shared::ReplicatorConfig;
 use etl_telemetry::metrics::init_metrics;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
 
 /// Initializes the Prometheus recorder and HTTP listener.
-pub(crate) fn init(replicator_config: &ReplicatorConfig) -> ReplicatorResult<()> {
+pub(crate) fn init(
+    replicator_config: &ReplicatorConfig,
+) -> ReplicatorResult<AbortOnDropHandle<io::Result<()>>> {
     init_metrics(
         replicator_config.project_ref(),
         Some(replicator_config.pipeline.id),

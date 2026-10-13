@@ -563,8 +563,8 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
         .await;
 
     // Both schema versions occur in one transaction. On retry, the first
-    // Relation must resolve the pre-DDL schema instead of reusing the
-    // post-DDL runtime schema cached by the failed attempt.
+    // Relation must resolve the pre-DDL schema instead of reusing the post-DDL
+    // runtime schema cached by the failed attempt.
     let transaction = database.begin_transaction().await;
     transaction
         .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before", &1])
@@ -926,7 +926,8 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     assert_eq!(commit_lsns[0], commit_lsns[1]);
     let first_commit_lsn = commit_lsns[0];
 
-    // THEN: the persisted checkpoint never advanced past the unacknowledged write.
+    // THEN: the persisted checkpoint never advanced past the unacknowledged
+    // write.
     assert!(flush_lsn_at_kill < first_commit_lsn);
 
     // THEN: streaming continues without loss after the replay.
@@ -985,7 +986,8 @@ async fn apply_disconnect_with_write_released_before_reconnect_recovers_without_
 
     hold.wait_reached().await;
 
-    // WHEN: the apply connection dies and the response releases before reconnect
+    // WHEN: the apply connection dies and the response releases before
+    // reconnect
     let client = database.client.as_ref().unwrap();
     let (_, active_pid) = replication_slot_state(client, &apply_slot_name).await;
     let old_pid = active_pid.expect("apply walsender should be active");

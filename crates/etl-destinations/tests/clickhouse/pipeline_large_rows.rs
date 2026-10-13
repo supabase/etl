@@ -2,11 +2,11 @@
 //! single-row JSONB payloads.
 //!
 //! Each row is a two-field JSON object: `{"x":"aaa...","y":"aaa..."}`. The
-//! field values are built server-side with PostgreSQL's `repeat('a', N)`,
-//! and on read-back the row is summarised in ClickHouse into a small
-//! `(id, len, a_count, head, tail)` tuple -- the payload bytes never leave
-//! the database. That keeps both the SQL we send and test-process memory
-//! tiny no matter how large the row is.
+//! field values are built server-side with PostgreSQL's `repeat('a', N)`, and
+//! on read-back the row is summarised in ClickHouse into a small `(id, len,
+//! a_count, head, tail)` tuple -- the payload bytes never leave the database.
+//! That keeps both the SQL we send and test-process memory tiny no matter how
+//! large the row is.
 
 use etl::{
     event::EventType,
@@ -40,22 +40,22 @@ const PUBLICATION_NAME: &str = "test_pub_ch_large_rows";
 ///
 /// Postgres `jsonb_out` emits a canonical form with spaces after `:` and `,`
 /// (e.g. `{"x": "", "y": ""}` = 18 bytes), but ETL parses jsonb through
-/// `serde_json` (see `crates/etl/src/conversions/text.rs`) and re-serialises
-/// in compact form (`{"x":"","y":""}` = 15 bytes). The destination only ever
-/// sees the compact representation, so byte-exact assertions key off 15.
+/// `serde_json` (see `crates/etl/src/conversions/text.rs`) and re-serialises in
+/// compact form (`{"x":"","y":""}` = 15 bytes). The destination only ever sees
+/// the compact representation, so byte-exact assertions key off 15.
 const PAYLOAD_OVERHEAD: usize = 15;
 
 /// First 16 bytes of the payload as ClickHouse sees it: 6 framing bytes
 /// (`{"x":"`) followed by 10 `'a'`s from the first field value.
 const EXPECTED_HEAD: &str = r#"{"x":"aaaaaaaaaa"#;
 
-/// Last 16 bytes of the payload: 14 `'a'`s from the second field value
-/// followed by the 2-byte closer `"}`.
+/// Last 16 bytes of the payload: 14 `'a'`s from the second field value followed
+/// by the 2-byte closer `"}`.
 const EXPECTED_TAIL: &str = r#"aaaaaaaaaaaaaa"}"#;
 
-/// ClickHouse-side projection summarising each row server-side. The
-/// `length` / `countSubstrings` aggregates and the boundary `substring`s are
-/// all bounded, so the response stays tiny regardless of payload size.
+/// ClickHouse-side projection summarising each row server-side. The `length` /
+/// `countSubstrings` aggregates and the boundary `substring`s are all bounded,
+/// so the response stays tiny regardless of payload size.
 const SUMMARY_PROJECTION: &str = concat!(
     "id, ",
     "toUInt64(length(payload)) AS len, ",
@@ -208,8 +208,8 @@ async fn large_row_16mib_merge_tree() {
     large_row_inner(ClickHouseEngine::MergeTree, 8 * MIB).await;
 }
 
-/// 64 MiB exceeds `ClickHouseInserterConfig::DEFAULT_MAX_BYTES_PER_INSERT`
-/// (64 MiB), validating the one-row-per-INSERT path in `insert_rows`.
+/// 64 MiB exceeds `ClickHouseInserterConfig::DEFAULT_MAX_BYTES_PER_INSERT` (64
+/// MiB), validating the one-row-per-INSERT path in `insert_rows`.
 #[tokio::test(flavor = "multi_thread")]
 async fn large_row_64mib_merge_tree() {
     large_row_inner(ClickHouseEngine::MergeTree, 32 * MIB).await;

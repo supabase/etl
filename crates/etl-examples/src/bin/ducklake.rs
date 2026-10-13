@@ -85,8 +85,8 @@ struct DbArgs {
     /// Postgres database user name (must have REPLICATION privileges)
     #[arg(long)]
     db_username: String,
-    /// Postgres database user password (optional if using trust authentication)
-    #[arg(long)]
+    /// Postgres database user password (optional with trust authentication).
+    #[arg(long, env = "TESTS_DATABASE_PASSWORD", hide_env_values = true)]
     db_password: Option<String>,
 }
 
@@ -209,6 +209,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         max_table_sync_workers: args.ducklake_args.max_table_sync_workers,
         memory_refresh_interval_ms: 100,
         table_sync_monitor_refresh_interval_ms: 10_000,
+        settle_durable_interval_ms: None,
         memory_backpressure: None,
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
@@ -251,13 +252,23 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         info!("received ctrl+c signal, initiating graceful shutdown");
     };
 
+    // Keep the same completion future alive through shutdown. Dropping it
+    // would abort apply work and skip asynchronous destination cleanup.
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+
     tokio::select! {
-        result = pipeline.wait() => {
-            info!("pipeline completed normally (this usually indicates an error condition)");
+        result = &mut pipeline_wait => {
             result?;
+
+            info!("pipeline completed");
         }
+
         _ = shutdown_signal => {
             info!("gracefully shutting down pipeline and cleaning up resources");
+
+            pipeline.shutdown();
+            pipeline_wait.await?;
         }
     }
 

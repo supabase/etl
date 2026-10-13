@@ -394,6 +394,7 @@ async fn wait_for_table_copies(
             let table_id = notification.table_id;
             tokio::select! {
                 () = notification.finished.inner().notified() => Ok(()),
+
                 () = notification.errored.inner().notified() => {
                     bail!("Table {table_id} entered errored state during table-copy benchmark")
                 }
@@ -402,13 +403,23 @@ async fn wait_for_table_copies(
     }
 
     while let Some(result) = tasks.join_next().await {
-        result.context("Table-copy wait task panicked")??;
+        if let Err(error) = result.context("Table-copy wait task panicked").flatten() {
+            tasks.shutdown().await;
+            return Err(error);
+        }
     }
 
     Ok(())
 }
 
 /// Counts snapshots in the PostgreSQL-backed DuckLake metadata catalog.
+#[cfg_attr(
+    not(feature = "ducklake"),
+    expect(
+        clippy::unused_async,
+        reason = "DuckLake operations are async when the feature is enabled"
+    )
+)]
 async fn collect_ducklake_snapshot_count(destination: &DestinationArgs) -> Result<Option<u64>> {
     if destination.destination != DestinationType::DuckLake {
         return Ok(None);
@@ -457,6 +468,13 @@ async fn collect_ducklake_snapshot_count(destination: &DestinationArgs) -> Resul
 }
 
 /// Optionally measures one adjacent-file compaction after the copy completes.
+#[cfg_attr(
+    not(feature = "ducklake"),
+    expect(
+        clippy::unused_async,
+        reason = "DuckLake operations are async when the feature is enabled"
+    )
+)]
 async fn run_ducklake_compaction(args: &RunArgs) -> Result<Option<DuckLakeCompactionReport>> {
     if !args.ducklake_compact_after_copy {
         return Ok(None);

@@ -1,4 +1,8 @@
-use std::{collections::HashSet, fmt, num::NonZeroI32};
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+    num::NonZeroI32,
+};
 
 use etl_postgres::{below_version, version::POSTGRES_15};
 use pg_escape::{quote_identifier, quote_literal};
@@ -8,7 +12,7 @@ use tracing::warn;
 
 use super::{
     child::ChildPgReplicationClient,
-    query::PgReplicationQueryTarget,
+    query::{PgReplicationQueryTarget, classify_table_copy_error},
     raw::{PgReplicationClient, PgReplicationConnectionConfig},
     types::{CtidPartition, PostgresConnectionUpdate},
     utils::get_row_value,
@@ -21,10 +25,28 @@ use crate::{
     schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
-/// Builds a `COPY ... TO STDOUT` query that selects rows within a ctid range.
+/// Enumerates a table's inheritance tree using the transaction's MVCC snapshot.
 ///
-/// The query applies an optional publication row filter in addition to the ctid
-/// bounds.
+/// `pg_partition_tree` uses current catalog metadata, which can include a
+/// partition attached after the copy snapshot. Detach-pending entries visible
+/// in the copy snapshot are excluded.
+fn table_copy_relations_cte(table_id: TableId) -> String {
+    format!(
+        "with recursive copy_relations(oid) as (
+             select {table_id}::oid
+             union
+             select i.inhrelid
+             from pg_catalog.pg_inherits i
+             join copy_relations r on r.oid = i.inhparent
+             where not i.inhdetachpending
+         )"
+    )
+}
+
+/// Builds a `COPY ... TO STDOUT` query for a physical table's ctid range.
+///
+/// The query excludes inherited descendants because each ctid range belongs to
+/// one physical table. It also applies an optional publication row filter.
 fn build_ctid_copy_query(
     table_name: &TableName,
     column_list: &str,
@@ -50,12 +72,12 @@ fn build_ctid_copy_query(
 
     if let Some(row_filter) = row_filter {
         format!(
-            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate} and \
+            "copy (select {column_list} from only {quoted_table_name} where {ctid_predicate} and \
              ({row_filter})) to stdout with (format text);",
         )
     } else {
         format!(
-            "copy (select {column_list} from {quoted_table_name} where {ctid_predicate}) to \
+            "copy (select {column_list} from only {quoted_table_name} where {ctid_predicate}) to \
              stdout with (format text);",
         )
     }
@@ -122,11 +144,11 @@ fn plan_ctid_partitions_for_table_blocks(
 
 /// Planning statistics used to split table copy work.
 ///
-/// These values are cheap physical/catalog estimates observed at planning
-/// time, not MVCC snapshot-visible row counts. They are used only to size CTID
-/// work ranges; the actual copied rows are selected later by COPY queries that
-/// run inside the exported snapshot. CTID planning therefore keeps the first
-/// and last ranges open-ended so a stale physical-size estimate cannot exclude
+/// These values are cheap physical/catalog estimates observed at planning time,
+/// not MVCC snapshot-visible row counts. They are used only to size CTID work
+/// ranges; the actual copied rows are selected later by COPY queries that run
+/// inside the exported snapshot. CTID planning therefore keeps the first and
+/// last ranges open-ended so a stale physical-size estimate cannot exclude
 /// visible tuples at the relation edges.
 #[derive(Debug)]
 pub struct TableCopyPlanningEstimate {
@@ -223,20 +245,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
 
     /// Returns this transaction as a query target.
     fn target(&self) -> PgReplicationQueryTarget<'_, 'a> {
-        PgReplicationQueryTarget::Transaction(&self.transaction)
-    }
-
-    /// Retrieves the schema information for the supplied table.
-    async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
-        let (table_name, columns, identity) = self.get_table_schema_snapshot(table_id).await?;
-
-        Ok(build_table_schema(
-            table_id,
-            table_name,
-            columns,
-            identity.primary_key_attnums,
-            SnapshotId::initial(),
-        ))
+        PgReplicationQueryTarget::new(&self.transaction)
     }
 
     /// Retrieves the schema and identity information for the supplied table.
@@ -250,6 +259,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
             table_name,
             columns,
             identity.primary_key_attnums.clone(),
+            identity.primary_key_condeferrable,
             SnapshotId::initial(),
         );
 
@@ -264,8 +274,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
         table_schema: &TableSchema,
         publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
-        // Column filtering in publications was added in Postgres 15. For earlier
-        // versions, all columns are replicated.
+        // Column filtering in publications was added in Postgres 15. For
+        // earlier versions, all columns are replicated.
         if below_version!(self.server_version, POSTGRES_15) {
             return Ok(table_schema
                 .column_schemas
@@ -274,19 +284,53 @@ impl<'a> PgReplicationTransactionCore<'a> {
                 .collect());
         }
 
-        // Query pg_publication_tables using unnest() to properly decode the attnames
-        // array. This correctly handles column names containing special
-        // characters (spaces, commas, quotes) that would break naive string
-        // parsing.
+        // Read publication membership and column lists from MVCC catalogs.
+        // Expansion helpers consult current catalog caches and open unrelated
+        // published tables, potentially waiting behind queued DDL. Only
+        // declarative partition ancestors contribute inherited membership.
+        let publication_name_sql = quote_literal(publication_name);
         let column_query = format!(
-            "select true as table_in_publication, u.column_name
-             from pg_publication_tables pt
-             left join lateral unnest(pt.attnames) as u(column_name) on true
-             join pg_namespace n on n.nspname = pt.schemaname
-             join pg_class c on c.relnamespace = n.oid and c.relname = pt.tablename
-             where pt.pubname = {} and c.oid = {};",
-            quote_literal(publication_name),
-            table_id,
+            "with recursive ancestors as (
+                 select oid, relnamespace, relispartition from pg_catalog.pg_class
+                 where oid = {table_id}
+                 union all
+                 select c.oid, c.relnamespace, c.relispartition
+                 from ancestors a
+                 join pg_catalog.pg_inherits i on i.inhrelid = a.oid
+                 join pg_catalog.pg_class c on c.oid = i.inhparent
+                 where a.relispartition and not i.inhdetachpending
+             ), published_ancestors as (
+                 select a.oid, p.oid as pubid
+                 from ancestors a cross join pg_catalog.pg_publication p
+                 where p.pubname = {publication_name_sql} and (p.puballtables or exists (
+                     select 1 from pg_catalog.pg_publication_rel pr
+                     where pr.prpubid = p.oid and pr.prrelid = a.oid
+                 ) or exists (
+                     select 1 from pg_catalog.pg_publication_namespace pn
+                     where pn.pnpubid = p.oid and pn.pnnspid = a.relnamespace
+                 ))
+             )
+             select a.attname as column_name
+             from pg_catalog.pg_publication p
+             join pg_catalog.pg_class c on c.oid = {table_id}
+             left join pg_catalog.pg_publication_rel pr
+               on pr.prpubid = p.oid and pr.prrelid = c.oid
+             left join pg_catalog.pg_attribute a
+               on a.attrelid = c.oid and a.attnum = any(pr.prattrs)
+               and not p.puballtables
+               and not exists (
+                   select 1 from pg_catalog.pg_publication_namespace pn
+                   where pn.pnpubid = p.oid and pn.pnnspid = c.relnamespace
+               )
+             where p.pubname = {publication_name_sql} and exists (
+                 select 1 from published_ancestors pa where pa.pubid = p.oid
+             ) and (
+                 (not p.pubviaroot and c.relkind != 'p') or
+                 (p.pubviaroot and not exists (
+                     select 1 from published_ancestors pa
+                     where pa.pubid = p.oid and pa.oid != c.oid
+                 ))
+             )",
         );
 
         let rows = self.transaction.simple_query(&column_query).await?;
@@ -326,64 +370,6 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Ok(column_names)
     }
 
-    /// Creates a COPY stream for reading data from the specified table.
-    async fn get_table_copy_stream(
-        &self,
-        table_id: TableId,
-        column_schemas: &[ColumnSchema],
-        publication_name: Option<&str>,
-    ) -> EtlResult<CopyOutStream> {
-        self.get_table_copy_stream_with_filter_table(
-            table_id,
-            table_id,
-            column_schemas,
-            publication_name,
-        )
-        .await
-    }
-
-    /// Creates a COPY stream for reading data from `table_id`, using
-    /// `filter_table_id` to resolve publication row filters.
-    ///
-    /// Serial copy passes the same table ID for both values. Parallel copy of a
-    /// partitioned table can pass a leaf partition as the physical copy source
-    /// while resolving row filters from the tracked published root or subtree.
-    async fn get_table_copy_stream_with_filter_table(
-        &self,
-        table_id: TableId,
-        filter_table_id: TableId,
-        column_schemas: &[ColumnSchema],
-        publication_name: Option<&str>,
-    ) -> EtlResult<CopyOutStream> {
-        let column_list = column_schemas
-            .iter()
-            .map(|col| quote_identifier(&col.name))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(filter_table_id, publication_name).await?;
-
-        let copy_query = if let Some(row_filter) = row_filter {
-            format!(
-                r#"copy (select {} from {} where {}) to stdout with (format text);"#,
-                column_list,
-                table_name.as_quoted_identifier(),
-                row_filter,
-            )
-        } else {
-            format!(
-                r#"copy (select {} from {}) to stdout with (format text);"#,
-                column_list,
-                table_name.as_quoted_identifier(),
-            )
-        };
-
-        let stream = self.transaction.client().copy_out_simple(&copy_query).await?;
-
-        Ok(stream)
-    }
-
     /// Exports the current transaction snapshot.
     async fn export_snapshot(&self) -> EtlResult<String> {
         let results = self.transaction.simple_query("select pg_export_snapshot();").await?;
@@ -406,44 +392,48 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Err(etl_error!(ErrorKind::InvalidState, "PostgreSQL pg_export_snapshot returned no rows"))
     }
 
-    /// Returns quick planner statistics for table copy.
-    async fn get_table_copy_planning_estimate(
+    /// Returns quick planner statistics for the requested physical tables in
+    /// one query. Empty input requires no database work.
+    async fn get_table_copy_planning_estimates(
         &self,
-        table_id: TableId,
-    ) -> EtlResult<TableCopyPlanningEstimate> {
-        // This query does not use MVCC, so it reflects the relation size at the
-        // time partition planning runs. The row count is an estimate from
-        // pg_class so planning stays cheap for huge tables.
+        table_ids: &[TableId],
+    ) -> EtlResult<BTreeMap<TableId, TableCopyPlanningEstimate>> {
+        if table_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+
+        // Relation sizes reflect planning time rather than the MVCC snapshot.
+        // Planner row estimates keep this cheap without scanning source rows.
+        let table_ids_sql = table_ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
         let estimate_query = format!(
-            "select pg_relation_size({table_id}::regclass)::bigint / \
-             current_setting('block_size')::bigint as table_blocks,
+            "select c.oid as table_id,
+             pg_relation_size(c.oid)::bigint / current_setting('block_size')::bigint as \
+             table_blocks,
              greatest(c.reltuples, 0)::bigint as estimated_rows
              from pg_class c
-             where c.oid = {table_id};"
+             where c.oid = any(array[{table_ids_sql}]::oid[]);"
         );
 
+        let mut estimates = BTreeMap::new();
         for message in self.transaction.simple_query(&estimate_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
-                let Some(table_blocks) = row.try_get::<&str>("table_blocks")? else {
-                    continue;
-                };
-                let Some(estimated_rows) = row.try_get::<&str>("estimated_rows")? else {
-                    continue;
-                };
-
-                if let (Ok(table_blocks), Ok(estimated_rows)) =
-                    (table_blocks.parse::<u64>(), estimated_rows.parse::<u64>())
-                {
-                    return Ok(TableCopyPlanningEstimate::new(table_blocks, estimated_rows));
-                }
+                let table_id = get_row_value(&row, "table_id", "pg_class")?;
+                let table_blocks = get_row_value(&row, "table_blocks", "pg_class")?;
+                let estimated_rows = get_row_value(&row, "estimated_rows", "pg_class")?;
+                estimates
+                    .insert(table_id, TableCopyPlanningEstimate::new(table_blocks, estimated_rows));
             }
         }
 
-        Err(etl_error!(
-            ErrorKind::SourceSchemaError,
-            "Could not retrieve table copy planning estimate",
-            format!("table_id: {table_id}")
-        ))
+        if table_ids.iter().any(|table_id| !estimates.contains_key(table_id)) {
+            return Err(etl_error!(
+                ErrorKind::SourceSchemaError,
+                "Could not retrieve table copy planning estimates",
+                "One or more source tables were not found"
+            ));
+        }
+
+        Ok(estimates)
     }
 
     /// Checks whether the given table is a partitioned parent (`relkind =
@@ -452,18 +442,33 @@ impl<'a> PgReplicationTransactionCore<'a> {
         self.target().has_partitioned_tables(&[table_id]).await
     }
 
-    /// Returns the OIDs of all leaf partitions for a partitioned table.
+    /// Returns heap leaf partitions, rejecting sources that CTID copying cannot
+    /// read.
     async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
         let query = format!(
-            "select relid::oid as oid from pg_partition_tree({table_id}::regclass) where isleaf \
-             and relid != {table_id}::regclass order by relid::oid;"
+            "{}
+             select c.oid, c.relkind
+             from copy_relations r
+             join pg_catalog.pg_class c on c.oid = r.oid
+             where c.relkind != 'p' and c.oid != {table_id}
+             order by c.oid",
+            table_copy_relations_cte(table_id),
         );
 
         let mut leaves = Vec::new();
         for msg in self.transaction.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = msg {
-                let oid = get_row_value::<TableId>(&row, "oid", "pg_class")?;
-                leaves.push(oid);
+                let leaf_id = get_row_value::<TableId>(&row, "oid", "pg_class")?;
+                // Foreign partitions have no local heap to scan. Skipping one
+                // would make an incomplete root copy appear successful.
+                if row.try_get("relkind")? != Some("r") {
+                    bail!(
+                        ErrorKind::SourceSchemaError,
+                        "Unsupported partition in table copy",
+                        format!("Table {table_id} contains non-heap partition {leaf_id}")
+                    );
+                }
+                leaves.push(leaf_id);
             }
         }
 
@@ -483,8 +488,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
         publication_name: Option<&str>,
         partition: &CtidPartition,
     ) -> EtlResult<CopyOutStream> {
-        let table_name = self.get_table_name(table_id).await?;
-        let row_filter = self.get_row_filter(filter_table_id, publication_name).await?;
+        let (table_name, row_filter) =
+            self.get_table_copy_metadata(table_id, filter_table_id, publication_name).await?;
 
         let column_list = column_schemas
             .iter()
@@ -500,21 +505,89 @@ impl<'a> PgReplicationTransactionCore<'a> {
         Ok(stream)
     }
 
-    /// Loads the table name.
-    async fn get_table_name(&self, table_id: TableId) -> EtlResult<TableName> {
-        let table_info_query = format!(
-            "select n.nspname as schema_name, c.relname as table_name
-            from pg_class c
-            join pg_namespace n on c.relnamespace = n.oid
-            where c.oid = {table_id}",
+    /// Locks a copy source or filter relation without queuing behind DDL.
+    ///
+    /// The parent waits for this worker before releasing its own lock. Waiting
+    /// behind an exclusive locker here would create an application-level
+    /// deadlock that PostgreSQL cannot detect. Locks remain held by the worker
+    /// transaction across all of its CTID ranges.
+    /// Already-locked relations are reused by the caller, so this check does
+    /// not detect DDL queued after the worker acquired its lock.
+    ///
+    /// Conflicts return [`ErrorKind::SourceTableCopyLockConflict`], requiring
+    /// the entire copy attempt to restart.
+    async fn lock_copy_relation(&self, table_id: TableId) -> EtlResult<()> {
+        let (table_name, _) = self.get_table_copy_metadata(table_id, table_id, None).await?;
+        let quoted_name = table_name.as_quoted_identifier();
+
+        // Name resolution uses current catalogs, whereas the name above came
+        // from the imported snapshot. Never copy a replacement relation.
+        let query = format!(
+            "lock table only {quoted_name} in access share mode nowait;
+             select {}::regclass::oid = {table_id} as matches",
+            quote_literal(&quoted_name),
+        );
+        for message in
+            self.transaction.simple_query(&query).await.map_err(classify_table_copy_error)?
+        {
+            if let SimpleQueryMessage::Row(row) = message
+                && row.try_get("matches")? == Some("t")
+            {
+                return Ok(());
+            }
+        }
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "Copy source changed during name resolution",
+            format!("Table ID: {table_id}")
+        );
+    }
+
+    /// Loads the physical table name and publication row filter in one query.
+    ///
+    /// Read filters directly from MVCC catalogs. Publication-expansion helpers
+    /// use current catalog caches and could otherwise change filters between
+    /// workers even when they import the same snapshot.
+    async fn get_table_copy_metadata(
+        &self,
+        table_id: TableId,
+        filter_table_id: TableId,
+        publication_name: Option<&str>,
+    ) -> EtlResult<(TableName, Option<String>)> {
+        let row_filter = match publication_name {
+            Some(publication_name) if !below_version!(self.server_version, POSTGRES_15) => {
+                format!(
+                    "(select pg_catalog.pg_get_expr(pr.prqual, pr.prrelid)
+                      from pg_catalog.pg_publication p
+                      join pg_catalog.pg_publication_rel pr on pr.prpubid = p.oid
+                      join pg_catalog.pg_class fc on fc.oid = pr.prrelid
+                      where p.pubname = {} and pr.prrelid = {filter_table_id}
+                        and not p.puballtables
+                        and not exists (
+                            select 1 from pg_catalog.pg_publication_namespace pn
+                            where pn.pnpubid = p.oid and pn.pnnspid = fc.relnamespace
+                        ))",
+                    quote_literal(publication_name),
+                )
+            }
+            // PostgreSQL 14 has no publication row filters or rowfilter column.
+            _ => "null::text".to_owned(),
+        };
+        let query = format!(
+            "select n.nspname as schema_name, c.relname as table_name,
+                    {row_filter} as row_filter
+             from pg_class c
+             join pg_namespace n on c.relnamespace = n.oid
+             where c.oid = {table_id}",
         );
 
-        for message in self.transaction.simple_query(&table_info_query).await? {
+        for message in self.transaction.simple_query(&query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;
                 let table_name = get_row_value::<String>(&row, "table_name", "pg_class")?;
+                let row_filter = row.try_get("row_filter")?.map(str::to_owned);
 
-                return Ok(TableName { schema: schema_name, name: table_name });
+                return Ok((TableName { schema: schema_name, name: table_name }, row_filter));
             }
         }
 
@@ -606,8 +679,8 @@ impl<'a> PgReplicationTransactionCore<'a> {
         );
 
         // TODO: there's a lot of code using simple_query but only checking for
-        // SimpleQueryMessage::Row, a small optimization could be done here if we
-        // upgraded tokio-postgres to a newer version in order to use
+        // SimpleQueryMessage::Row, a small optimization could be done here if
+        // we upgraded tokio-postgres to a newer version in order to use
         // https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw
         // to filter on SimpleQueryMessage::Row and avoid useless allocations.
         for message in self.transaction.simple_query(&schema_snapshot_query).await? {
@@ -648,51 +721,6 @@ impl<'a> PgReplicationTransactionCore<'a> {
             "Table schema snapshot not found in source database",
             format!("Table with ID {} not found in database", table_id)
         )
-    }
-
-    /// Retrieves the publication row filter for a table.
-    async fn get_row_filter(
-        &self,
-        table_id: TableId,
-        publication_name: Option<&str>,
-    ) -> EtlResult<Option<String>> {
-        // Row filters on publications were added in Postgres 15. For any earlier
-        // versions we know that there is no row filter.
-        if below_version!(self.server_version, POSTGRES_15) {
-            return Ok(None);
-        }
-
-        // If we don't have a publication the row filter is implicitly non-existent.
-        let Some(publication_name) = publication_name else {
-            return Ok(None);
-        };
-
-        // This uses the same query as the `pg_publication_tables`, but with some minor
-        // tweaks (COALESCE, only return the rowfilter, filter on oid and
-        // pubname). All of these are available >= Postgres 15.
-        let row_filter_query = format!(
-            "select pt.rowfilter as row_filter
-                from pg_publication_tables pt
-                join pg_namespace n on n.nspname = pt.schemaname
-                join pg_class c on c.relnamespace = n.oid AND c.relname = pt.tablename
-                where pt.pubname = {} and c.oid = {};",
-            quote_literal(publication_name),
-            table_id,
-        );
-
-        let row_filters = self.transaction.simple_query(&row_filter_query).await?;
-
-        for row_filter in row_filters {
-            if let SimpleQueryMessage::Row(row) = row_filter {
-                let row_filter = row.try_get("row_filter")?;
-                match row_filter {
-                    None => return Ok(None),
-                    Some(row_filter) => return Ok(Some(row_filter.to_owned())),
-                }
-            }
-        }
-
-        Ok(None)
     }
 
     /// Returns a receiver for background connection task updates.
@@ -746,13 +774,8 @@ impl<'a> PgReplicationTransaction<'a> {
         Self { core, connection_config }
     }
 
-    /// Retrieves the schema information for the supplied table.
-    pub async fn get_table_schema(&self, table_id: TableId) -> EtlResult<TableSchema> {
-        self.core.get_table_schema(table_id).await
-    }
-
     /// Retrieves the schema and identity information for the supplied table.
-    pub(crate) async fn get_table_schema_with_identity(
+    pub async fn get_table_schema_with_identity(
         &self,
         table_id: TableId,
     ) -> EtlResult<(TableSchema, IdentityMessage)> {
@@ -763,8 +786,8 @@ impl<'a> PgReplicationTransaction<'a> {
     /// publication.
     ///
     /// Returns a [`HashSet`] containing the names of columns from the given
-    /// [`TableSchema`] that are included in the specified publication for
-    /// the given [`TableId`].
+    /// [`TableSchema`] that are included in the specified publication for the
+    /// given [`TableId`].
     pub async fn get_replicated_column_names(
         &self,
         table_id: TableId,
@@ -772,18 +795,6 @@ impl<'a> PgReplicationTransaction<'a> {
         publication_name: &str,
     ) -> EtlResult<HashSet<String>> {
         self.core.get_replicated_column_names(table_id, table_schema, publication_name).await
-    }
-
-    /// Creates a COPY stream for reading data from the specified table.
-    ///
-    /// The stream will include only the columns specified in `column_schemas`.
-    pub async fn get_table_copy_stream(
-        &self,
-        table_id: TableId,
-        column_schemas: &[ColumnSchema],
-        publication_name: Option<&str>,
-    ) -> EtlResult<CopyOutStream> {
-        self.core.get_table_copy_stream(table_id, column_schemas, publication_name).await
     }
 
     /// Exports the current transaction snapshot so child connections can share
@@ -795,12 +806,13 @@ impl<'a> PgReplicationTransaction<'a> {
         self.core.export_snapshot().await
     }
 
-    /// Returns quick planner statistics for table copy.
-    pub async fn get_table_copy_planning_estimate(
+    /// Returns quick planner statistics for the requested physical tables in
+    /// one query, keyed by table ID.
+    pub async fn get_table_copy_planning_estimates(
         &self,
-        table_id: TableId,
-    ) -> EtlResult<TableCopyPlanningEstimate> {
-        self.core.get_table_copy_planning_estimate(table_id).await
+        table_ids: &[TableId],
+    ) -> EtlResult<BTreeMap<TableId, TableCopyPlanningEstimate>> {
+        self.core.get_table_copy_planning_estimates(table_ids).await
     }
 
     /// Checks whether the given table is a partitioned parent (`relkind =
@@ -811,9 +823,10 @@ impl<'a> PgReplicationTransaction<'a> {
 
     /// Returns the OIDs of all leaf partitions for a partitioned table.
     ///
-    /// Walks `pg_inherits` recursively and returns only leaf nodes (`relkind =
-    /// 'r'`). For a non-partitioned table this returns an empty vec.
-    pub(crate) async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
+    /// Walks `pg_inherits` recursively and returns heap leaf nodes. Foreign
+    /// partitions are rejected because CTID copying requires a local heap.
+    /// A table without descendants returns an empty vector.
+    pub async fn get_leaf_partitions(&self, table_id: TableId) -> EtlResult<Vec<TableId>> {
         self.core.get_leaf_partitions(table_id).await
     }
 
@@ -828,6 +841,41 @@ impl<'a> PgReplicationTransaction<'a> {
         PgReplicationClient::connect_child_from_config(self.connection_config.clone()).await
     }
 
+    /// Rejects a snapshot containing relations not locked before slot creation.
+    ///
+    /// The pre-snapshot lock command must protect the original OID and every
+    /// descendant visible in the snapshot, including empty tables. A concurrent
+    /// attach or name replacement must restart the copy with a fresh snapshot.
+    pub(super) async fn validate_table_copy_locks(&self, table_id: TableId) -> EtlResult<()> {
+        let query = format!(
+            "{}
+             select exists (
+                 select 1 from copy_relations r
+                 where not exists (
+                     select 1 from pg_catalog.pg_locks l
+                     where l.locktype = 'relation' and l.pid = pg_backend_pid()
+                       and l.database = (select oid from pg_catalog.pg_database
+                                         where datname = current_database())
+                       and l.relation = r.oid and l.mode = 'AccessShareLock' and l.granted
+                 )
+             ) as missing_lock",
+            table_copy_relations_cte(table_id),
+        );
+        for message in self.core.transaction.simple_query(&query).await? {
+            if let SimpleQueryMessage::Row(row) = message
+                && row.try_get("missing_lock")? == Some("f")
+            {
+                return Ok(());
+            }
+        }
+
+        bail!(
+            ErrorKind::SourceTableCopyLockConflict,
+            "Source table changed while acquiring copy locks",
+            format!("Retry the copy with a fresh snapshot for table {table_id}")
+        );
+    }
+
     /// Commits the current transaction.
     pub async fn commit(self) -> EtlResult<()> {
         self.core.commit().await
@@ -838,13 +886,15 @@ impl<'a> PgReplicationTransaction<'a> {
 ///
 /// The transaction borrows the child connection for its full lifetime, ensuring
 /// no other commands can be issued on that connection until it is committed or
-/// dropped. The exported parent snapshot it imports must remain valid for the
-/// duration of the child transaction; this dependency is maintained by callers
-/// rather than by this type's lifetime.
+/// dropped. The parent must remain open for snapshot import and, under the copy
+/// protocol, retain its relation locks until all workers finish. Callers
+/// enforce that dependency; this type's lifetime does not.
 #[derive(Debug)]
 pub struct PgChildReplicationTransaction<'a> {
     /// Common transaction state and query helpers.
     core: PgReplicationTransactionCore<'a>,
+    /// Copy and filter relations already locked and checked by this worker.
+    locked_relations: HashSet<TableId>,
 }
 
 impl<'a> PgChildReplicationTransaction<'a> {
@@ -857,7 +907,7 @@ impl<'a> PgChildReplicationTransaction<'a> {
         let core =
             PgReplicationTransactionCore::new(transaction, server_version, connection_updates_rx);
 
-        Self { core }
+        Self { core, locked_relations: HashSet::new() }
     }
 
     /// Creates a COPY stream for a ctid partition of `table_id`.
@@ -866,13 +916,24 @@ impl<'a> PgChildReplicationTransaction<'a> {
     /// table used to resolve publication row filters, which can differ when
     /// copying a leaf partition for a partitioned table.
     pub async fn get_table_copy_stream_with_ctid_partition(
-        &self,
+        &mut self,
         table_id: TableId,
         filter_table_id: TableId,
         column_schemas: &[ColumnSchema],
         publication_name: Option<&str>,
         partition: &CtidPartition,
     ) -> EtlResult<CopyOutStream> {
+        // The parent already holds these locks from before the snapshot and
+        // retains them until all workers finish. This connection needs its own
+        // NOWAIT locks to avoid queuing behind DDL waiting on the parent.
+        // Include the filter relation because pg_get_expr can open it before
+        // COPY opens the physical leaf. Reuse worker locks across CTID ranges.
+        for source_id in [filter_table_id, table_id] {
+            if !self.locked_relations.contains(&source_id) {
+                self.core.lock_copy_relation(source_id).await?;
+                self.locked_relations.insert(source_id);
+            }
+        }
         self.core
             .get_table_copy_stream_with_ctid_partition(
                 table_id,
@@ -911,8 +972,8 @@ mod tests {
             &CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() },
         );
 
-        assert!(query.contains("from public.\"User\""));
-        assert!(!query.contains("from public.User"));
+        assert!(query.contains("from only public.\"User\""));
+        assert!(!query.contains("from only public.User"));
     }
 
     #[test]
@@ -924,9 +985,9 @@ mod tests {
             &CtidPartition::OpenStart { end_tid: "(10,1)".to_owned() },
         );
 
-        assert!(query.contains("from public.\"CommentReadStatus\""));
+        assert!(query.contains("from only public.\"CommentReadStatus\""));
         assert!(query.contains("and (\"tenantId\" is not null)"));
-        assert!(!query.contains("from public.CommentReadStatus"));
+        assert!(!query.contains("from only public.CommentReadStatus"));
     }
 
     #[test]

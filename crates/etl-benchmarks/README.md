@@ -266,6 +266,58 @@ cargo x benchmark \
 
 `BENCH_SNOWFLAKE_CONNECTION` is the only Snowflake benchmark credential input. It is a JSON object with `account`, `user`, `database`, `schema`, optional `role`, optional `private_key_passphrase`, and `private_key`. Snowflake credentials are read from the environment and are not accepted as benchmark CLI arguments.
 
+### Snowflake Encoder Micro-Benchmark
+
+`snowflake_encoder` measures encoding CPU, compressed output bytes, request count,
+and request fill without Postgres, Snowflake, or credentials. It borrows prebuilt
+rows and times encoding, finalization, and output accounting. Payload generation
+and row allocation happen outside the timer. Each workload discards one warm-up,
+then reports the middle measured run by elapsed time (upper middle for an even
+sample count). JSON also retains every measured duration in execution order.
+
+```bash
+cargo run --locked --release -p etl-benchmarks --features snowflake \
+  --bin snowflake_encoder -- --repeat 3
+```
+
+Use `--json` for one JSON object per workload and `--filter <text>` to select
+workloads by name. A filter matching nothing and `--repeat 0` are errors. Debug
+builds print a warning; compare release builds using the same machine, toolchain,
+fixture definitions, sample count, and dependency versions. Record the revision
+and whether local changes were present alongside the JSON output.
+
+| Workloads | Purpose |
+| --- | --- |
+| 1 KiB, 64 KiB, and mixed small/1 MiB rows | Ordinary encoding and transitions between shared and independent frames. |
+| Independent 200/300 KiB and near-duplicate 200 KiB/1 MiB rows | Contrast the paths below and above the 256 KiB **serialized-row** threshold. |
+| Independent 1 MiB and 2.5 MiB rows | Request packing and independent-frame throughput. |
+| Consecutive 13.6 MB rows | A baseline for detecting repeated boundary retries in future grouping experiments. |
+| 16 MiB rows repeating 3 MiB blocks | Preserve acceptance and measure long-distance matching. |
+| 16 MiB rows with a 12 MiB zero prefix and 4 MiB pseudo-random tail | Detect wasted work when a future grouping attempt discovers overflow late. |
+
+Near-duplicate fixtures change only a 16-byte prefix and intentionally favor
+shared compression history; they are stress cases, not estimates of typical
+traffic. Other fixtures use independent seeds and byte-bounded pools that avoid
+short repetition periods. All fixtures must fit with the baseline encoder. A
+row-size rejection is reported as `status: "rejected"` without throughput; that
+workload stops, the others still run, and the command exits unsuccessfully.
+Other encoding or accounting errors stop the command immediately. Every run
+checks emitted row counts, nonempty requests, and the 4 MiB request cap.
+
+MiB/s and compression ratio use TEXT payload bytes, excluding IDs and the JSON
+and CDC envelope. Request fill excludes the trailing request; it is `null`/`n/a`
+when there are no earlier requests. JSON includes sampled maximum scratch and
+open-body capacities, not true allocation peaks: sampling misses rotation and
+finalization, and excludes temporary row frames, compressor workspace, source
+rows, and process RSS.
+
+Each workload uses one uninterrupted builder. Production finishes builders at
+source batch boundaries and barriers; the default preferred source batch ceiling
+is 32 MiB, with a potentially smaller adaptive target and single-row overshoot.
+These results isolate encoder behavior and do not predict production request
+counts, latency, or cloud cost. Compare revisions containing the same benchmark;
+pre-PIPE-1170 encoders require a benchmark-only API adapter.
+
 ## ClickHouse Runs
 
 Start the local ClickHouse server from `scripts/docker/docker-compose.yaml`:

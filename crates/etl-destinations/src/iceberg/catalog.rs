@@ -220,9 +220,8 @@ impl SupabaseClient {
     /// Creates a new table using Supabase-specific API format.
     ///
     /// Converts the standard [`TableCreation`] request to Supabase's expected
-    /// format and handles the non-standard response structure. Returns a
-    /// fully configured [`Table`] instance with metadata and file I/O
-    /// capabilities.
+    /// format and handles the non-standard response structure. Returns a fully
+    /// configured [`Table`] instance with metadata and file I/O capabilities.
     async fn create_table(
         &self,
         namespace: &NamespaceIdent,
@@ -320,8 +319,8 @@ impl SupabaseClient {
     /// Creates a configured file I/O instance for table operations.
     ///
     /// Builds a [`FileIO`] instance from the metadata location and additional
-    /// configuration properties. The file I/O instance is used for reading
-    /// and writing table data and metadata files.
+    /// configuration properties. The file I/O instance is used for reading and
+    /// writing table data and metadata files.
     fn load_file_io(
         &self,
         metadata_location: Option<&str>,
@@ -348,8 +347,8 @@ impl SupabaseClient {
     /// Sends an authenticated HTTP request to the Supabase catalog API.
     ///
     /// Configures the request with bearer token authentication and JSON content
-    /// type. Includes optional request body and query parameters. Returns
-    /// an error for non-successful HTTP status codes.
+    /// type. Includes optional request body and query parameters. Returns an
+    /// error for non-successful HTTP status codes.
     async fn send_request(
         &self,
         method: reqwest::Method,
@@ -431,9 +430,9 @@ pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> 
 ///
 /// Represents the JSON payload expected by Supabase's create table API.
 /// Optional fields are omitted from serialization when `None` to match
-/// Supabase's requirement for absent properties rather than null values.
-/// Note that the partition specification field is named `spec` instead
-/// of the standard `partition-spec`.
+/// Supabase's requirement for absent properties rather than null values. Note
+/// that the partition specification field is named `spec` instead of the
+/// standard `partition-spec`.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
 struct CreateTableRequest {
@@ -469,8 +468,8 @@ struct CreateTableRequest {
 
 /// Response structure from Supabase table operations.
 ///
-/// Contains the table metadata and configuration returned by Supabase
-/// catalog endpoints for table creation and loading operations.
+/// Contains the table metadata and configuration returned by Supabase catalog
+/// endpoints for table creation and loading operations.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 struct LoadTableResponse {

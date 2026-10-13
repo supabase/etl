@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use metrics::{Unit, describe_gauge, gauge};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 
 use crate::metrics::{APP_TYPE_LABEL, APP_TYPE_VALUE};
@@ -79,64 +79,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Label key for worker identifier.
 const WORKER_ID_LABEL: &str = "worker_id";
-
-/// Emits a structured debug log for the current Tokio runtime metrics snapshot.
-#[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-fn log_runtime_metrics(
-    num_workers: usize,
-    alive_tasks: f64,
-    global_queue_depth: f64,
-    blocking_threads: f64,
-    idle_blocking_threads: f64,
-    blocking_queue_depth: f64,
-    remote_schedule_total: f64,
-    budget_forced_yield_total: f64,
-) {
-    debug!(
-        num_workers,
-        alive_tasks,
-        global_queue_depth,
-        blocking_threads,
-        idle_blocking_threads,
-        blocking_queue_depth,
-        remote_schedule_total,
-        budget_forced_yield_total,
-        "tokio runtime stats updated"
-    );
-}
-
-/// Emits a structured debug log for the current Tokio runtime metrics snapshot.
-#[cfg(all(tokio_unstable, not(target_has_atomic = "64")))]
-fn log_runtime_metrics(
-    num_workers: usize,
-    alive_tasks: f64,
-    global_queue_depth: f64,
-    blocking_threads: f64,
-    idle_blocking_threads: f64,
-    blocking_queue_depth: f64,
-) {
-    debug!(
-        num_workers,
-        alive_tasks,
-        global_queue_depth,
-        blocking_threads,
-        idle_blocking_threads,
-        blocking_queue_depth,
-        "tokio runtime stats updated"
-    );
-}
-
-/// Emits a structured debug log for the current Tokio runtime metrics snapshot.
-#[cfg(all(not(tokio_unstable), target_has_atomic = "64"))]
-fn log_runtime_metrics(num_workers: usize, alive_tasks: f64, global_queue_depth: f64) {
-    debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
-}
-
-/// Emits a structured debug log for the current Tokio runtime metrics snapshot.
-#[cfg(all(not(tokio_unstable), not(target_has_atomic = "64")))]
-fn log_runtime_metrics(num_workers: usize, alive_tasks: f64, global_queue_depth: f64) {
-    debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
-}
 
 /// Registers Tokio runtime metric descriptions with the global metrics
 /// recorder.
@@ -235,12 +177,12 @@ fn register_metrics() {
 /// Stable metrics are always exported. Additional metrics guarded by
 /// `tokio_unstable` are exported only when the binary is compiled with that cfg
 /// enabled.
-pub(super) fn spawn_tokio_metrics_task() -> JoinHandle<()> {
+pub(super) fn spawn_tokio_metrics_task() -> AbortOnDropHandle<()> {
     register_metrics();
 
     let handle = tokio::runtime::Handle::current();
 
-    tokio::spawn(async move {
+    AbortOnDropHandle::new(tokio::spawn(async move {
         loop {
             let runtime_metrics = handle.metrics();
             let num_workers = runtime_metrics.num_workers();
@@ -335,7 +277,7 @@ pub(super) fn spawn_tokio_metrics_task() -> JoinHandle<()> {
             }
 
             #[cfg(all(tokio_unstable, target_has_atomic = "64"))]
-            log_runtime_metrics(
+            debug!(
                 num_workers,
                 alive_tasks,
                 global_queue_depth,
@@ -344,22 +286,22 @@ pub(super) fn spawn_tokio_metrics_task() -> JoinHandle<()> {
                 blocking_queue_depth,
                 remote_schedule_total,
                 budget_forced_yield_total,
+                "tokio runtime stats updated"
             );
             #[cfg(all(tokio_unstable, not(target_has_atomic = "64")))]
-            log_runtime_metrics(
+            debug!(
                 num_workers,
                 alive_tasks,
                 global_queue_depth,
                 blocking_threads,
                 idle_blocking_threads,
                 blocking_queue_depth,
+                "tokio runtime stats updated"
             );
-            #[cfg(all(not(tokio_unstable), target_has_atomic = "64"))]
-            log_runtime_metrics(num_workers, alive_tasks, global_queue_depth);
-            #[cfg(all(not(tokio_unstable), not(target_has_atomic = "64")))]
-            log_runtime_metrics(num_workers, alive_tasks, global_queue_depth);
+            #[cfg(not(tokio_unstable))]
+            debug!(num_workers, alive_tasks, global_queue_depth, "tokio runtime stats updated");
 
             tokio::time::sleep(POLL_INTERVAL).await;
         }
-    })
+    }))
 }

@@ -1,8 +1,11 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use etl::{
-    data::{ArrayCell, Cell, PgNumeric, PgTimeTz, TableRow},
+    data::{ArrayCell, Cell, Date, PgNumeric, PgTime, PgTimeTz, TableRow, Timestamp},
     error::EtlResult,
-    postgres::client::PgReplicationClient,
+    postgres::{
+        ReplicationMessageStream,
+        client::{CtidPartition, PgReplicationClient},
+    },
     schema::{ColumnSchema, SnapshotId, TableId, TableName},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -19,10 +22,7 @@ use etl_postgres::{
 use etl_telemetry::tracing::init_test_tracing;
 use futures::StreamExt;
 use pg_escape::quote_identifier;
-use postgres_replication::{
-    LogicalReplicationStream,
-    protocol::{LogicalReplicationMessage, ReplicationMessage},
-};
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use serde_json::{Value as JsonValue, json};
 use tokio::{
     pin,
@@ -79,7 +79,7 @@ impl StreamMarker {
 
 /// Collects protocol markers while preserving their decoded order.
 async fn collect_stream_markers(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     expected_count: usize,
 ) -> Vec<StreamMarker> {
     timeout(Duration::from_secs(10), async {
@@ -168,7 +168,7 @@ async fn collect_stream_markers(
 /// LSN.
 async fn assert_stream_markers_and_replay(
     initial_client: PgReplicationClient,
-    initial_stream: LogicalReplicationStream,
+    initial_stream: ReplicationMessageStream,
     database: &PgDatabase<Client>,
     publication_name: &str,
     slot_name: &str,
@@ -212,8 +212,8 @@ async fn assert_stream_markers_and_replay(
     database.wait_for_slot_inactive(slot_name).await;
 
     let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let replay_stream = replay_client
-        .start_logical_replication(publication_name, slot_name, start_lsn)
+    let (replay_stream, _) = replay_client
+        .start_logical_replication(publication_name, slot_name, start_lsn, None)
         .await
         .unwrap();
     let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
@@ -226,171 +226,249 @@ async fn start_replayable_stream(
     database: &PgDatabase<Client>,
     publication_name: &str,
     slot_suffix: &str,
-) -> (PgReplicationClient, LogicalReplicationStream, String, PgLsn) {
-    let client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+) -> (PgReplicationClient, ReplicationMessageStream, String, PgLsn) {
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name(slot_suffix);
     let start_lsn = client.create_slot(&slot_name, false).await.unwrap().consistent_point;
-    let stream =
-        client.start_logical_replication(publication_name, &slot_name, start_lsn).await.unwrap();
+    let (stream, feedback) = client
+        .start_logical_replication(publication_name, &slot_name, start_lsn, None)
+        .await
+        .unwrap();
+    assert!(feedback.is_none());
 
     (client, stream, slot_name, start_lsn)
 }
 
-struct UnsupportedParserCase {
+/// A Postgres temporal expression and its expected decoding outcome.
+struct TemporalParserCase {
+    /// Stable case identifier used in test diagnostics.
     name: &'static str,
+    /// Source SQL type, including its array suffix when present.
     data_type: &'static str,
+    /// Source SQL expression that produces the value.
     expression: &'static str,
+    /// Decoded value, or `None` for values beyond chrono's finite range.
+    expected: Option<Cell>,
 }
 
-fn unsupported_parser_cases() -> &'static [UnsupportedParserCase] {
-    &[
-        UnsupportedParserCase {
+/// Covers special temporal values and the retained finite-range boundary.
+fn temporal_parser_cases() -> Vec<TemporalParserCase> {
+    let date = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+    let bc_date = NaiveDate::from_ymd_opt(-43, 2, 1).unwrap();
+    let timestamp = date.and_hms_opt(0, 0, 0).unwrap();
+    let bc_timestamp = bc_date.and_hms_opt(11, 12, 13).unwrap();
+    let time = NaiveTime::from_hms_opt(12, 30, 0).unwrap();
+    let offset = chrono::FixedOffset::east_opt(7200).unwrap();
+
+    vec![
+        TemporalParserCase {
             name: "time_24_hour_boundary",
             data_type: "time",
             expression: "'24:00:00'::time",
+            expected: Some(Cell::Time(PgTime::EndOfDay)),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timetz_24_hour_boundary",
             data_type: "timetz",
             expression: "'24:00:00+02'::timetz",
+            expected: Some(Cell::TimeTz(PgTimeTz::new(PgTime::EndOfDay, offset))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "time_array_24_hour_boundary",
             data_type: "time[]",
             expression: "array['12:30:00'::time, '24:00:00'::time]::time[]",
+            expected: Some(Cell::Array(ArrayCell::Time(vec![
+                Some(PgTime::Value(time)),
+                Some(PgTime::EndOfDay),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timetz_array_24_hour_boundary",
             data_type: "timetz[]",
             expression: "array['12:30:00+02'::timetz, '24:00:00+02'::timetz]::timetz[]",
+            expected: Some(Cell::Array(ArrayCell::TimeTz(vec![
+                Some(PgTimeTz::new(time, offset)),
+                Some(PgTimeTz::new(PgTime::EndOfDay, offset)),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_infinity",
             data_type: "date",
             expression: "'infinity'::date",
+            expected: Some(Cell::Date(Date::PosInfinity)),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_negative_infinity",
             data_type: "date",
             expression: "'-infinity'::date",
+            expected: Some(Cell::Date(Date::NegInfinity)),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_array_infinity",
             data_type: "date[]",
             expression: "array['2026-01-01'::date, 'infinity'::date]::date[]",
+            expected: Some(Cell::Array(ArrayCell::Date(vec![
+                Some(Date::Value(date)),
+                Some(Date::PosInfinity),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_array_negative_infinity",
             data_type: "date[]",
             expression: "array['2026-01-01'::date, '-infinity'::date]::date[]",
+            expected: Some(Cell::Array(ArrayCell::Date(vec![
+                Some(Date::Value(date)),
+                Some(Date::NegInfinity),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_bc",
             data_type: "date",
             expression: "'0044-02-01 BC'::date",
+            expected: Some(Cell::Date(Date::Value(bc_date))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_array_bc",
             data_type: "date[]",
             expression: "array['2026-01-01'::date, '0044-02-01 BC'::date]::date[]",
+            expected: Some(Cell::Array(ArrayCell::Date(vec![
+                Some(Date::Value(date)),
+                Some(Date::Value(bc_date)),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_beyond_chrono_range",
             data_type: "date",
             expression: "'300000-01-01'::date",
+            expected: None,
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "date_array_beyond_chrono_range",
             data_type: "date[]",
             expression: "array['2026-01-01'::date, '300000-01-01'::date]::date[]",
+            expected: None,
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_infinity",
             data_type: "timestamp",
             expression: "'infinity'::timestamp",
+            expected: Some(Cell::Timestamp(Timestamp::PosInfinity)),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_negative_infinity",
             data_type: "timestamp",
             expression: "'-infinity'::timestamp",
+            expected: Some(Cell::Timestamp(Timestamp::NegInfinity)),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_infinity",
             data_type: "timestamptz",
             expression: "'infinity'::timestamptz",
+            expected: Some(Cell::TimestampTz(Timestamp::PosInfinity)),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_negative_infinity",
             data_type: "timestamptz",
             expression: "'-infinity'::timestamptz",
+            expected: Some(Cell::TimestampTz(Timestamp::NegInfinity)),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_bc",
             data_type: "timestamp",
             expression: "'0044-02-01 11:12:13 BC'::timestamp",
+            expected: Some(Cell::Timestamp(Timestamp::Value(bc_timestamp))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_bc",
             data_type: "timestamptz",
             expression: "'0044-02-01 11:12:13+00 BC'::timestamptz",
+            expected: Some(Cell::TimestampTz(Timestamp::Value(bc_timestamp.and_utc()))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_beyond_chrono_range",
             data_type: "timestamp",
             expression: "'270000-01-01 00:00:00'::timestamp",
+            expected: None,
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_beyond_chrono_range",
             data_type: "timestamptz",
             expression: "'270000-01-01 00:00:00+00'::timestamptz",
+            expected: None,
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_array_infinity",
             data_type: "timestamp[]",
             expression: "array['2026-01-01 00:00:00'::timestamp, \
                          'infinity'::timestamp]::timestamp[]",
+            expected: Some(Cell::Array(ArrayCell::Timestamp(vec![
+                Some(Timestamp::Value(timestamp)),
+                Some(Timestamp::PosInfinity),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_array_negative_infinity",
             data_type: "timestamp[]",
             expression: "array['2026-01-01 00:00:00'::timestamp, \
                          '-infinity'::timestamp]::timestamp[]",
+            expected: Some(Cell::Array(ArrayCell::Timestamp(vec![
+                Some(Timestamp::Value(timestamp)),
+                Some(Timestamp::NegInfinity),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_array_infinity",
             data_type: "timestamptz[]",
             expression: "array['2026-01-01 00:00:00+00'::timestamptz, \
                          'infinity'::timestamptz]::timestamptz[]",
+            expected: Some(Cell::Array(ArrayCell::TimestampTz(vec![
+                Some(Timestamp::Value(timestamp.and_utc())),
+                Some(Timestamp::PosInfinity),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_array_negative_infinity",
             data_type: "timestamptz[]",
             expression: "array['2026-01-01 00:00:00+00'::timestamptz, \
                          '-infinity'::timestamptz]::timestamptz[]",
+            expected: Some(Cell::Array(ArrayCell::TimestampTz(vec![
+                Some(Timestamp::Value(timestamp.and_utc())),
+                Some(Timestamp::NegInfinity),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_array_bc",
             data_type: "timestamp[]",
             expression: "array['2026-01-01 00:00:00'::timestamp, '0044-02-01 11:12:13 \
                          BC'::timestamp]::timestamp[]",
+            expected: Some(Cell::Array(ArrayCell::Timestamp(vec![
+                Some(Timestamp::Value(timestamp)),
+                Some(Timestamp::Value(bc_timestamp)),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_array_bc",
             data_type: "timestamptz[]",
             expression: "array['2026-01-01 00:00:00+00'::timestamptz, '0044-02-01 11:12:13+00 \
                          BC'::timestamptz]::timestamptz[]",
+            expected: Some(Cell::Array(ArrayCell::TimestampTz(vec![
+                Some(Timestamp::Value(timestamp.and_utc())),
+                Some(Timestamp::Value(bc_timestamp.and_utc())),
+            ]))),
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamp_array_beyond_chrono_range",
             data_type: "timestamp[]",
             expression: "array['2026-01-01 00:00:00'::timestamp, '270000-01-01 \
                          00:00:00'::timestamp]::timestamp[]",
+            expected: None,
         },
-        UnsupportedParserCase {
+        TemporalParserCase {
             name: "timestamptz_array_beyond_chrono_range",
             data_type: "timestamptz[]",
             expression: "array['2026-01-01 00:00:00+00'::timestamptz, '270000-01-01 \
                          00:00:00+00'::timestamptz]::timestamptz[]",
+            expected: None,
         },
     ]
 }
@@ -652,7 +730,7 @@ async fn collect_single_copy_parse_result(
 }
 
 async fn collect_insert_row(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     column_schemas: &[ColumnSchema],
 ) -> TableRow {
     pin!(stream);
@@ -675,7 +753,7 @@ async fn collect_insert_row(
 }
 
 async fn collect_insert_parse_result(
-    stream: LogicalReplicationStream,
+    stream: ReplicationMessageStream,
     column_schemas: &[ColumnSchema],
 ) -> EtlResult<TableRow> {
     pin!(stream);
@@ -840,11 +918,11 @@ fn assert_type_matrix_row(row: &TableRow, column_schemas: &[ColumnSchema]) {
     assert_eq!(cell(row, column_schemas, "bytea_col"), &Cell::Bytes(vec![0x01, 0x02, 0xff]));
     assert_eq!(
         cell(row, column_schemas, "date_col"),
-        &Cell::Date(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap())
+        &Cell::Date(Date::Value(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()))
     );
     assert_eq!(
         cell(row, column_schemas, "time_col"),
-        &Cell::Time(NaiveTime::from_hms_micro_opt(12, 30, 45, 123_456).unwrap())
+        &Cell::Time(PgTime::Value(NaiveTime::from_hms_micro_opt(12, 30, 45, 123_456).unwrap()))
     );
     assert_eq!(
         cell(row, column_schemas, "timetz_col"),
@@ -852,19 +930,19 @@ fn assert_type_matrix_row(row: &TableRow, column_schemas: &[ColumnSchema]) {
     );
     assert_eq!(
         cell(row, column_schemas, "timestamp_col"),
-        &Cell::Timestamp(
+        &Cell::Timestamp(Timestamp::Value(
             NaiveDateTime::parse_from_str("2026-01-02 03:04:05.123456", "%Y-%m-%d %H:%M:%S%.f")
                 .unwrap()
-        )
+        ))
     );
     assert_eq!(
         cell(row, column_schemas, "timestamptz_col"),
-        &Cell::TimestampTz(
+        &Cell::TimestampTz(Timestamp::Value(
             Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5)
                 .unwrap()
                 .with_nanosecond(123_456_000)
                 .unwrap()
-        )
+        ))
     );
     assert_eq!(cell(row, column_schemas, "uuid_col"), &Cell::Uuid(MATRIX_UUID.parse().unwrap()));
     assert_eq!(cell(row, column_schemas, "json_col"), &Cell::Json(json!({"kind": "json", "n": 1})));
@@ -932,17 +1010,17 @@ fn assert_type_matrix_row(row: &TableRow, column_schemas: &[ColumnSchema]) {
     assert_eq!(
         cell(row, column_schemas, "date_arr"),
         &Cell::Array(ArrayCell::Date(vec![
-            Some(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()),
+            Some(Date::Value(NaiveDate::from_ymd_opt(2026, 1, 2).unwrap())),
             None,
-            Some(NaiveDate::from_ymd_opt(2026, 1, 3).unwrap()),
+            Some(Date::Value(NaiveDate::from_ymd_opt(2026, 1, 3).unwrap())),
         ]))
     );
     assert_eq!(
         cell(row, column_schemas, "time_arr"),
         &Cell::Array(ArrayCell::Time(vec![
-            Some(NaiveTime::from_hms_micro_opt(12, 30, 45, 123_456).unwrap()),
+            Some(PgTime::Value(NaiveTime::from_hms_micro_opt(12, 30, 45, 123_456).unwrap())),
             None,
-            Some(NaiveTime::from_hms_opt(23, 59, 59).unwrap()),
+            Some(PgTime::Value(NaiveTime::from_hms_opt(23, 59, 59).unwrap())),
         ]))
     );
     assert_eq!(
@@ -957,29 +1035,31 @@ fn assert_type_matrix_row(row: &TableRow, column_schemas: &[ColumnSchema]) {
         cell(row, column_schemas, "timestamp_arr"),
         &Cell::Array(ArrayCell::Timestamp(vec![
             Some(
-                NaiveDateTime::parse_from_str(
-                    "2026-01-02 03:04:05.123456",
-                    "%Y-%m-%d %H:%M:%S%.f",
+                Timestamp::Value(
+                    NaiveDateTime::parse_from_str(
+                        "2026-01-02 03:04:05.123456",
+                        "%Y-%m-%d %H:%M:%S%.f",
+                    )
+                    .unwrap()
                 )
-                .unwrap()
             ),
             None,
-            Some(
+            Some(Timestamp::Value(
                 NaiveDateTime::parse_from_str("2026-01-03 04:05:06", "%Y-%m-%d %H:%M:%S").unwrap()
-            ),
+            )),
         ]))
     );
     assert_eq!(
         cell(row, column_schemas, "timestamptz_arr"),
         &Cell::Array(ArrayCell::TimestampTz(vec![
-            Some(
+            Some(Timestamp::Value(
                 Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5)
                     .unwrap()
                     .with_nanosecond(123_456_000)
                     .unwrap()
-            ),
+            )),
             None,
-            Some(Utc.with_ymd_and_hms(2026, 1, 3, 4, 5, 6).unwrap()),
+            Some(Timestamp::Value(Utc.with_ymd_and_hms(2026, 1, 3, 4, 5, 6).unwrap())),
         ]))
     );
     assert_eq!(
@@ -1068,15 +1148,25 @@ async fn table_copy_stream_converts_postgres_type_matrix() {
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = client
-        .create_slot_with_transaction(&test_slot_name("copy_type_matrix"), false)
+        .create_table_copy_slot(&test_slot_name("copy_type_matrix"), table_id, false)
         .await
         .unwrap();
-    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
-    let stream = transaction
-        .get_table_copy_stream(table_id, &table_schema.column_schemas, None)
+    let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
+    let snapshot = transaction.export_snapshot().await.unwrap();
+    let mut copy_child = transaction.fork_child().await.unwrap();
+    let mut copy_transaction = copy_child.begin_transaction(&snapshot).await.unwrap();
+    let stream = copy_transaction
+        .get_table_copy_stream_with_ctid_partition(
+            table_id,
+            table_id,
+            &table_schema.column_schemas,
+            None,
+            &CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() },
+        )
         .await
         .unwrap();
     let rows = collect_copy_rows(stream, &table_schema.column_schemas).await;
+    copy_transaction.commit().await.unwrap();
     transaction.commit().await.unwrap();
 
     assert_eq!(rows.len(), 1);
@@ -1093,12 +1183,13 @@ async fn logical_replication_stream_converts_postgres_type_matrix() {
 
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("cdc_type_matrix");
-    let (transaction, slot) = client.create_slot_with_transaction(&slot_name, false).await.unwrap();
-    let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+    let (transaction, slot) =
+        client.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+    let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
     transaction.commit().await.unwrap();
 
-    let stream = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point)
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
         .await
         .unwrap();
     insert_type_matrix_row(&database, &table_name).await;
@@ -1108,12 +1199,13 @@ async fn logical_replication_stream_converts_postgres_type_matrix() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn table_copy_stream_rejects_known_unsupported_postgres_values() {
+async fn table_copy_stream_handles_temporal_boundaries() {
     init_test_tracing();
     let database = spawn_source_database().await;
-    let mut tables = Vec::new();
+    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
 
-    for (index, case) in unsupported_parser_cases().iter().enumerate() {
+    let cases = temporal_parser_cases();
+    for (index, case) in cases.iter().enumerate() {
         let (table_name, table_id) = create_single_value_table_in(
             &database,
             &format!("copy_unsupported_{index}"),
@@ -1121,40 +1213,45 @@ async fn table_copy_stream_rejects_known_unsupported_postgres_values() {
         )
         .await;
         insert_single_value_row(&database, &table_name, case.expression).await;
-        tables.push((case, table_id));
-    }
-
-    let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let (transaction, _) = client
-        .create_slot_with_transaction(&test_slot_name("copy_unsupported"), false)
-        .await
-        .unwrap();
-
-    for (case, table_id) in tables {
-        let table_schema = transaction.get_table_schema(table_id).await.unwrap();
-        let stream = transaction
-            .get_table_copy_stream(table_id, &table_schema.column_schemas, None)
+        let slot_name = test_slot_name(&format!("copy_unsupported_{index}"));
+        let (transaction, _) =
+            client.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+        let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
+        let snapshot = transaction.export_snapshot().await.unwrap();
+        let mut copy_child = transaction.fork_child().await.unwrap();
+        let mut copy_transaction = copy_child.begin_transaction(&snapshot).await.unwrap();
+        let stream = copy_transaction
+            .get_table_copy_stream_with_ctid_partition(
+                table_id,
+                table_id,
+                &table_schema.column_schemas,
+                None,
+                &CtidPartition::OpenEnd { start_tid: "(0,1)".to_owned() },
+            )
             .await
             .unwrap();
         let result = collect_single_copy_parse_result(stream, &table_schema.column_schemas).await;
 
-        assert!(
-            result.is_err(),
-            "COPY parsing unexpectedly succeeded for {}; move this case to the supported type \
-             matrix",
-            case.name
-        );
-    }
+        match &case.expected {
+            Some(expected) => {
+                assert_eq!(result.unwrap().values().last(), Some(expected), "{}", case.name);
+            }
+            None => assert!(result.is_err(), "{}", case.name),
+        }
 
-    transaction.commit().await.unwrap();
+        copy_transaction.commit().await.unwrap();
+        transaction.commit().await.unwrap();
+        client.delete_slot_if_exists(&slot_name).await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_stream_rejects_known_unsupported_postgres_values() {
+async fn logical_replication_stream_handles_temporal_boundaries() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    for (index, case) in unsupported_parser_cases().iter().enumerate() {
+    let cases = temporal_parser_cases();
+    for (index, case) in cases.iter().enumerate() {
         let (table_name, table_id) = create_single_value_table_in(
             &database,
             &format!("cdc_unsupported_{index}"),
@@ -1170,23 +1267,23 @@ async fn logical_replication_stream_rejects_known_unsupported_postgres_values() 
         let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
         let slot_name = test_slot_name(&format!("cdc_unsupported_{index}"));
         let (transaction, slot) =
-            client.create_slot_with_transaction(&slot_name, false).await.unwrap();
-        let table_schema = transaction.get_table_schema(table_id).await.unwrap();
+            client.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+        let (table_schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
         transaction.commit().await.unwrap();
 
-        let stream = client
-            .start_logical_replication(&publication_name, &slot_name, slot.consistent_point)
+        let (stream, _) = client
+            .start_logical_replication(&publication_name, &slot_name, slot.consistent_point, None)
             .await
             .unwrap();
         insert_single_value_row(&database, &table_name, case.expression).await;
         let result = collect_insert_parse_result(stream, &table_schema.column_schemas).await;
 
-        assert!(
-            result.is_err(),
-            "logical replication parsing unexpectedly succeeded for {}; move this case to the \
-             supported type matrix",
-            case.name
-        );
+        match &case.expected {
+            Some(expected) => {
+                assert_eq!(result.unwrap().values().last(), Some(expected), "{}", case.name);
+            }
+            None => assert!(result.is_err(), "{}", case.name),
+        }
     }
 }
 
@@ -1212,8 +1309,8 @@ async fn logical_replication_replays_consecutive_ddl_only_transactions_without_r
     )
     .await;
 
-    // Each ALTER runs in its own transaction. With no DML, pgoutput carries
-    // the self-describing DDL messages but has no reason to emit Relation.
+    // Each ALTER runs in its own transaction. With no DML, pgoutput carries the
+    // self-describing DDL messages but has no reason to emit Relation.
     database
         .run_sql(&format!("alter table {quoted_table_name} add column b integer"))
         .await
@@ -1501,8 +1598,8 @@ async fn logical_replication_orders_concurrent_ddl_transactions_by_commit_lsn() 
     database.wait_for_slot_inactive(&slot_name).await;
 
     let replay_client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let replay_stream = replay_client
-        .start_logical_replication(publication_name, &slot_name, start_lsn)
+    let (replay_stream, _) = replay_client
+        .start_logical_replication(publication_name, &slot_name, start_lsn, None)
         .await
         .unwrap();
     let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
@@ -1591,6 +1688,8 @@ async fn logical_replication_omits_relation_after_noop_alter_table_commands() {
     .await;
 }
 
+/// Checks truncate relation ordering with warm caches, table DDL, publication
+/// column-list changes, and replay.
 #[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_emits_relation_before_truncate() {
     init_test_tracing();
@@ -1639,9 +1738,12 @@ async fn logical_replication_emits_relation_before_truncate() {
         .await
         .unwrap();
 
+    // Plain truncate refreshes relation metadata even with a warm cache.
+    database.run_sql(&format!("truncate table {first_quoted}, {second_quoted}")).await.unwrap();
+
     // No-op DDL stores a new schema snapshot without invalidating pgoutput's
-    // relation cache. Truncate still emits a protocol relation per table
-    // before the truncate message, unlike a later insert.
+    // relation cache. Truncate still emits a protocol relation per table before
+    // the truncate message, unlike a later insert.
     database.run_sql(&format!("alter table {first_quoted} owner to current_user")).await.unwrap();
     database.run_sql(&format!("alter table {second_quoted} owner to current_user")).await.unwrap();
     database.run_sql(&format!("truncate table {first_quoted}, {second_quoted}")).await.unwrap();
@@ -1649,12 +1751,12 @@ async fn logical_replication_emits_relation_before_truncate() {
     // A schema change that adds a column invalidates the relation cache.
     // Truncate still emits a protocol relation, now including the new column.
     database.run_sql(&format!("alter table {first_quoted} add column email text")).await.unwrap();
-    database.truncate_table(first_table_name).await.unwrap();
+    database.truncate_table(first_table_name.clone()).await.unwrap();
 
     let columns = vec!["id".to_owned(), "name".to_owned(), "age".to_owned()];
     let columns_with_email =
         vec!["id".to_owned(), "name".to_owned(), "age".to_owned(), "email".to_owned()];
-    let expected = vec![
+    let mut expected = vec![
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns.clone()),
         ExpectedStreamMarker::Insert(first_table_id.into_inner()),
@@ -1662,6 +1764,14 @@ async fn logical_replication_emits_relation_before_truncate() {
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(second_table_id.into_inner(), columns.clone()),
         ExpectedStreamMarker::Insert(second_table_id.into_inner()),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Relation(second_table_id.into_inner(), columns.clone()),
+        ExpectedStreamMarker::Truncate(vec![
+            first_table_id.into_inner(),
+            second_table_id.into_inner(),
+        ]),
         ExpectedStreamMarker::Commit,
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::DdlMessage(first_table_id.into_inner(), None, columns.clone()),
@@ -1685,10 +1795,38 @@ async fn logical_replication_emits_relation_before_truncate() {
         ),
         ExpectedStreamMarker::Commit,
         ExpectedStreamMarker::Begin,
-        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns_with_email),
+        ExpectedStreamMarker::Relation(first_table_id.into_inner(), columns_with_email.clone()),
         ExpectedStreamMarker::Truncate(vec![first_table_id.into_inner()]),
         ExpectedStreamMarker::Commit,
     ];
+
+    if !below_version!(database.server_version(), POSTGRES_15) {
+        // The DDL snapshot still has all columns; the following relation
+        // supplies the new publication mask before truncate, without any row.
+        database
+            .run_sql(&format!(
+                "alter publication {publication_name} set table {first_quoted} (id, name)"
+            ))
+            .await
+            .unwrap();
+        database.truncate_table(first_table_name).await.unwrap();
+        expected.extend([
+            ExpectedStreamMarker::Begin,
+            ExpectedStreamMarker::DdlMessage(
+                first_table_id.into_inner(),
+                Some(publication_name.to_owned()),
+                columns_with_email,
+            ),
+            ExpectedStreamMarker::Commit,
+            ExpectedStreamMarker::Begin,
+            ExpectedStreamMarker::Relation(
+                first_table_id.into_inner(),
+                vec!["id".to_owned(), "name".to_owned()],
+            ),
+            ExpectedStreamMarker::Truncate(vec![first_table_id.into_inner()]),
+            ExpectedStreamMarker::Commit,
+        ]);
+    }
 
     assert_stream_markers_and_replay(
         client,

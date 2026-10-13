@@ -7,7 +7,8 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::clickhouse::{
-    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig, sql::quote_identifier,
+    ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
+    sql::{quote_identifier, quote_string_literal},
 };
 
 /// ClickHouse HTTP URL (e.g. `http://localhost:8123`).
@@ -62,6 +63,9 @@ pub struct ClickHouseTestDatabase {
     user: String,
     password: Option<String>,
     database: String,
+    /// User created by [`Self::use_user_with_settings`], dropped with the
+    /// database.
+    settings_user: Option<String>,
 }
 
 impl ClickHouseTestDatabase {
@@ -84,6 +88,7 @@ impl ClickHouseTestDatabase {
             user,
             password,
             database,
+            settings_user: None,
         }
     }
 
@@ -115,6 +120,37 @@ impl ClickHouseTestDatabase {
             .expect("Failed to drop test ClickHouse database");
     }
 
+    /// Routes destinations built afterward through a new user whose profile
+    /// applies `settings`, a ClickHouse `SETTINGS` list such as
+    /// `async_insert = 1`.
+    ///
+    /// The user can access only this database and is dropped with it. Query
+    /// helpers keep using the original user.
+    pub async fn use_user_with_settings(&mut self, settings: &str) {
+        let user = format!("etl_tests_user_{}", Uuid::new_v4().simple());
+        let password = Uuid::new_v4().simple().to_string();
+        let quoted_user = quote_identifier(&user);
+        self.root_client
+            .query(&format!(
+                "create user {quoted_user} identified with plaintext_password by {} settings \
+                 {settings}",
+                quote_string_literal(&password)
+            ))
+            .execute()
+            .await
+            .expect("Failed to create test ClickHouse user");
+        // Record the user before granting so `Drop` removes it if the grant
+        // fails.
+        self.settings_user = Some(user.clone());
+        self.root_client
+            .query(&format!("grant all on {}.* to {quoted_user}", quote_identifier(&self.database)))
+            .execute()
+            .await
+            .expect("Failed to grant test ClickHouse user access");
+        self.user = user;
+        self.password = Some(password);
+    }
+
     /// Builds a [`ClickHouseDestination`] scoped to this test database with
     /// default inserter config (100 MiB per INSERT -- large enough that tests
     /// never hit an intermediate flush). Validates engine support eagerly so
@@ -143,8 +179,8 @@ impl ClickHouseTestDatabase {
         .await
     }
 
-    /// Builds a [`ClickHouseDestination`] scoped to this test database with
-    /// a caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
+    /// Builds a [`ClickHouseDestination`] scoped to this test database with a
+    /// caller-supplied [`ClickHouseInserterConfig`]. Validates engine support
     /// eagerly so tests fail fast on engine/version mismatch.
     pub async fn build_destination_with_config<S>(
         &self,
@@ -196,7 +232,7 @@ impl ClickHouseTestDatabase {
 
     /// Returns the column names and ClickHouse type strings in position order,
     /// excluding both engines' trailing CDC columns (`cdc_operation`,
-    /// `cdc_lsn`, `_etl_version`, `_etl_deleted`).
+    /// `cdc_lsn`, `cdc_tx_ordinal`, `_etl_version`, `_etl_deleted`).
     pub async fn column_types(&self, table_name: &str) -> Vec<(String, String)> {
         #[derive(clickhouse::Row, serde::Deserialize)]
         struct Col {
@@ -206,8 +242,8 @@ impl ClickHouseTestDatabase {
         self.db_client
             .query(
                 "SELECT name, type AS type_name FROM system.columns WHERE database = ? AND table \
-                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', '_etl_version', '_etl_deleted') \
-                 ORDER BY position",
+                 = ? AND name NOT IN ('cdc_operation', 'cdc_lsn', 'cdc_tx_ordinal', \
+                 '_etl_version', '_etl_deleted') ORDER BY position",
             )
             .bind(&self.database)
             .bind(table_name)
@@ -224,6 +260,7 @@ impl Drop for ClickHouseTestDatabase {
     fn drop(&mut self) {
         let root_client = self.root_client.clone();
         let database = quote_identifier(&self.database);
+        let settings_user = self.settings_user.as_deref().map(quote_identifier);
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             tokio::task::block_in_place(move || {
@@ -234,6 +271,14 @@ impl Drop for ClickHouseTestDatabase {
                         .await
                     {
                         eprintln!("warning: failed to drop test ClickHouse database: {error}");
+                    }
+                    if let Some(user) = settings_user
+                        && let Err(error) = root_client
+                            .query(&format!("drop user if exists {user}"))
+                            .execute()
+                            .await
+                    {
+                        eprintln!("warning: failed to drop test ClickHouse user: {error}");
                     }
                 });
             });

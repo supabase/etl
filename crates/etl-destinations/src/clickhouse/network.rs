@@ -92,7 +92,8 @@ pub(super) async fn new_public_client(
     let mut connector = HttpConnector::new_with_resolver(PublicDnsResolver::new());
     connector.set_keepalive(Some(TCP_KEEPALIVE));
 
-    // The outer connector enforces HTTPS and passes its URI through this connector.
+    // The outer connector enforces HTTPS and passes its URI through this
+    // connector.
     connector.enforce_http(false);
 
     let connector = HttpsConnectorBuilder::new()

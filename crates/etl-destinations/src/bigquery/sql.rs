@@ -47,6 +47,33 @@ pub(super) fn quote_identifier(identifier: &str, context: &str) -> EtlResult<Str
     Ok(format!("`{}`", escape_identifier(identifier, context)?))
 }
 
+/// Quotes a GoogleSQL string literal.
+///
+/// Takes the decoded string value, not a literal from another SQL dialect.
+/// PostgreSQL literals must be decoded first because PostgreSQL doubles single
+/// quotes and treats a backslash as an ordinary character, while GoogleSQL
+/// rejects doubled quotes, treats a backslash as an escape, and does not allow
+/// raw newlines inside single-quoted literals.
+pub(super) fn quote_string_literal(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '\'' => quoted.push_str("\\'"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            ch if ch.is_control() => quoted.push_str(&format!("\\u{:04x}", u32::from(ch))),
+            _ => quoted.push(ch),
+        }
+    }
+
+    quoted.push('\'');
+    quoted
+}
+
 /// Quotes a fully qualified BigQuery table path as one GoogleSQL path
 /// expression.
 ///
@@ -99,6 +126,12 @@ mod tests {
             result,
             Err(err) if err.kind() == ErrorKind::DestinationTableNameInvalid
         ));
+    }
+
+    #[test]
+    fn quote_string_literal_escapes_quotes_backslashes_and_controls() {
+        assert_eq!(quote_string_literal(r"don't C:\temp"), r"'don\'t C:\\temp'");
+        assert_eq!(quote_string_literal("line\nnext\ttab\u{1}"), r"'line\nnext\ttab\u0001'");
     }
 
     #[test]

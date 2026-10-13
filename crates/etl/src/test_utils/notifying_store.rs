@@ -20,7 +20,7 @@ use crate::{
     },
     schema::{SnapshotId, TableId, TableSchema},
     store::{
-        DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
+        CachedStore, DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
         TableStateLifecycleStore, TableStateOperation, TableStates,
     },
     test_utils::notify::TimedNotify,
@@ -30,7 +30,6 @@ use crate::{
 pub enum StateStoreMethod {
     GetTableState,
     GetTableStates,
-    LoadTableStates,
     StoreTableState,
     RollbackTableState,
 }
@@ -178,8 +177,8 @@ impl NotifyingStore {
     /// the expected table state type.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the expected state is not reached. This
-    /// prevents tests from hanging indefinitely.
+    /// specified timeout if the expected state is not reached. This prevents
+    /// tests from hanging indefinitely.
     pub async fn notify_on_table_state_type(
         &self,
         table_id: TableId,
@@ -230,8 +229,8 @@ impl NotifyingStore {
     /// custom condition.
     ///
     /// Returns a [`TimedNotify`] that will automatically timeout after the
-    /// specified timeout if the condition is not met. This prevents tests
-    /// from hanging indefinitely.
+    /// specified timeout if the condition is not met. This prevents tests from
+    /// hanging indefinitely.
     pub async fn notify_on_table_state<F>(&self, table_id: TableId, condition: F) -> TimedNotify
     where
         F: Fn(&TableState) -> bool + Send + Sync + 'static,
@@ -270,8 +269,7 @@ impl NotifyingStore {
         TimedNotify::new(notify)
     }
 
-    /// Resets one table to [`TableState::Init`] and clears its state
-    /// history.
+    /// Resets one table to [`TableState::Init`] and clears its state history.
     pub async fn reset_table_state(&self, table_id: TableId) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         inner.table_state_history.remove(&table_id);
@@ -288,6 +286,12 @@ impl NotifyingStore {
 impl Default for NotifyingStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl CachedStore for NotifyingStore {
+    async fn load_cache(&self) -> EtlResult<()> {
+        Ok(())
     }
 }
 
@@ -308,15 +312,6 @@ impl StateStore for NotifyingStore {
         inner.dispatch_method_notification(StateStoreMethod::GetTableStates);
 
         result
-    }
-
-    async fn load_table_states(&self) -> EtlResult<usize> {
-        let inner = self.inner.read().await;
-        let table_states_len = inner.table_states.len();
-
-        inner.dispatch_method_notification(StateStoreMethod::LoadTableStates);
-
-        Ok(table_states_len)
     }
 
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
@@ -407,11 +402,6 @@ impl StateStore for NotifyingStore {
         Ok(inner.destination_tables_metadata.get(&table_id).cloned())
     }
 
-    async fn load_destination_tables_metadata(&self) -> EtlResult<usize> {
-        let inner = self.inner.read().await;
-        Ok(inner.destination_tables_metadata.len())
-    }
-
     async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
@@ -438,12 +428,6 @@ impl SchemaStore for NotifyingStore {
         let inner = self.inner.read().await;
 
         Ok(inner.table_schemas.all())
-    }
-
-    async fn load_table_schemas(&self) -> EtlResult<usize> {
-        let inner = self.inner.read().await;
-
-        Ok(inner.table_schemas.total_snapshots_count())
     }
 
     async fn store_table_schema(&self, table_schema: TableSchema) -> EtlResult<Arc<TableSchema>> {
@@ -474,10 +458,7 @@ impl SchemaStore for NotifyingStore {
 }
 
 impl TableStateLifecycleStore for NotifyingStore {
-    async fn apply_table_state_operation(
-        &self,
-        operation: TableStateOperation,
-    ) -> EtlResult<usize> {
+    async fn apply_table_state_operation(&self, operation: TableStateOperation) -> EtlResult<()> {
         match operation {
             TableStateOperation::PrepareForCopy { table_id } => {
                 let mut inner = self.inner.write().await;
@@ -486,7 +467,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                 inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
                 inner.check_conditions();
 
-                Ok(0)
+                Ok(())
             }
             TableStateOperation::ResetForResync => {
                 let mut guard = self.inner.write().await;
@@ -494,7 +475,6 @@ impl TableStateLifecycleStore for NotifyingStore {
 
                 let states = Arc::make_mut(&mut inner.table_states);
                 let table_ids = states.keys().copied().collect::<Vec<_>>();
-                let reset_count = table_ids.len();
 
                 for table_id in table_ids {
                     if let Some(current_state) = states.get(&table_id).cloned() {
@@ -511,11 +491,10 @@ impl TableStateLifecycleStore for NotifyingStore {
                 inner.replication_checkpoints.remove(&WorkerType::Apply);
                 inner.check_conditions();
 
-                Ok(reset_count)
+                Ok(())
             }
             TableStateOperation::Delete { table_id } => {
                 let mut inner = self.inner.write().await;
-                let affected_table_count = usize::from(inner.table_states.contains_key(&table_id));
 
                 Arc::make_mut(&mut inner.table_states).remove(&table_id);
                 inner.table_state_history.remove(&table_id);
@@ -524,7 +503,7 @@ impl TableStateLifecycleStore for NotifyingStore {
                 inner.replication_checkpoints.remove(&WorkerType::TableSync { table_id });
                 inner.check_conditions();
 
-                Ok(affected_table_count)
+                Ok(())
             }
         }
     }

@@ -15,10 +15,10 @@ pub(crate) const DEFAULT_BASE_PORT: u16 = 5430;
 /// Offset applied to local read-replica Postgres ports.
 pub(crate) const READ_REPLICA_PORT_OFFSET: u16 = 1000;
 /// Nightly rustfmt toolchain used by formatting commands.
-pub(crate) const NIGHTLY_TOOLCHAIN: &str = "nightly-2026-04-15";
+pub(crate) const NIGHTLY_TOOLCHAIN: &str = "nightly-2026-09-16";
 
 /// Packages covered by destination-focused xtask presets.
-const DESTINATION_PACKAGES: &[&str] = &["etl-destinations", "etl-api", "etl-replicator"];
+const DESTINATION_PACKAGES: &[&str] = &["etl-destinations", "etl-replicator"];
 /// ANSI yellow foreground color.
 const YELLOW: &str = "\x1b[33m";
 /// ANSI cyan foreground color.

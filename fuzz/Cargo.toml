@@ -11,7 +11,7 @@ cargo-fuzz = true
 
 [dependencies]
 etl = { path = "../crates/etl", default-features = false, features = ["fuzzing", "tls-rustls-ring"] }
-libfuzzer-sys = "0.4"
+libfuzzer-sys = "0.4.0"
 
 [[bin]]
 name = "parse_bytea_hex_string"

@@ -8,10 +8,9 @@ pub(super) const REPLICATION_PATH_LABEL: &str = "replication_path";
 pub(super) const COPY_REPLICATION_PATH: &str = "copy";
 pub(super) const CDC_REPLICATION_PATH: &str = "cdc";
 
-/// Duration of DDL operations sent to ClickHouse.
-/// Labels: `kind` (`create_table`, `add_column`, `drop_column`,
-/// `rename_column`, `truncate_table`, `drop_table`, `create_view`,
-/// `drop_view`).
+/// Duration of DDL operations sent to ClickHouse. Labels: `kind`
+/// (`create_table`, `add_column`, `drop_column`, `rename_column`,
+/// `truncate_table`, `drop_table`, `create_view`, `drop_view`).
 pub(super) const ETL_CLICKHOUSE_DDL_DURATION_SECONDS: &str = "etl_clickhouse_ddl_duration_seconds";
 
 /// DDL failures sent to ClickHouse. Labels: `kind` (same set as
@@ -24,12 +23,12 @@ pub(super) const ETL_CLICKHOUSE_DDL_ERRORS_TOTAL: &str = "etl_clickhouse_ddl_err
 pub(super) const ETL_CLICKHOUSE_INSERT_DURATION_SECONDS: &str =
     "etl_clickhouse_insert_duration_seconds";
 
-/// Rows committed in a single RowBinary INSERT statement.
-/// Labels: `replication_path` (`copy`, `cdc`).
+/// Rows committed in a single RowBinary INSERT statement. Labels:
+/// `replication_path` (`copy`, `cdc`).
 pub(super) const ETL_CLICKHOUSE_INSERT_ROWS: &str = "etl_clickhouse_insert_rows";
 
-/// Uncompressed RowBinary payload bytes per INSERT statement.
-/// Labels: `replication_path` (`copy`, `cdc`).
+/// Uncompressed RowBinary payload bytes per INSERT statement. Labels:
+/// `replication_path` (`copy`, `cdc`).
 pub(super) const ETL_CLICKHOUSE_INSERT_BYTES: &str = "etl_clickhouse_insert_bytes";
 
 /// Rows rejected by RowBinary encoding before any network round-trip.
@@ -44,8 +43,8 @@ pub(super) const ETL_CLICKHOUSE_INSERT_ENCODING_ERRORS_TOTAL: &str =
 /// (`copy`, `cdc`) and `outcome` (`timeout`, `failed`).
 pub(super) const ETL_CLICKHOUSE_INSERT_ERRORS_TOTAL: &str = "etl_clickhouse_insert_errors_total";
 
-/// Number of INSERT statements committed for a single logical write batch.
-/// Goes above 1 when
+/// Number of INSERT statements committed for a single logical write batch. Goes
+/// above 1 when
 /// [`crate::clickhouse::ClickHouseInserterConfig::max_bytes_per_insert`] forces
 /// a mid-batch flush. Labels: `replication_path` (`copy`, `cdc`).
 pub(super) const ETL_CLICKHOUSE_STATEMENTS_PER_BATCH: &str = "etl_clickhouse_statements_per_batch";

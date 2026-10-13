@@ -20,12 +20,12 @@
 //! controls against the container leaf in that arrangement and accounts for
 //! ancestors only when the runtime exposes them. An unconstrained Linux process
 //! instead uses host-wide memory, avoiding a misleading ratio based only on the
-//! process's leaf-cgroup charge divided by all host RAM.
-//! The full cgroup charge is used instead of resident set size because the
-//! kernel's memory controller also accounts for page cache, socket buffers,
-//! and kernel memory that contribute to the enforced limit. If a previously
-//! available cgroup read fails transiently, the last cgroup snapshot is kept
-//! rather than falling back to a potentially larger host limit.
+//! process's leaf-cgroup charge divided by all host RAM. The full cgroup charge
+//! is used instead of resident set size because the kernel's memory controller
+//! also accounts for page cache, socket buffers, and kernel memory that
+//! contribute to the enforced limit. If a previously available cgroup read
+//! fails transiently, the last cgroup snapshot is kept rather than falling back
+//! to a potentially larger host limit.
 //!
 //! Platforms without Linux memory cgroups, including macOS, use sysinfo's
 //! system-wide used and total memory readings. One shared sampler performs
@@ -33,15 +33,15 @@
 //! operating-system files themselves.
 //!
 //! Emergency backpressure pauses new source polling while destination results
-//! and already-owned batches continue to drain. Resume is deliberately based
-//! on the same full-domain measurement. If measured usage keeps that domain
-//! above the resume threshold, the pipeline stays paused rather than probing
-//! with more source data and risking an OOM kill.
+//! and already-owned batches continue to drain. Resume is deliberately based on
+//! the same full-domain measurement. If measured usage keeps that domain above
+//! the resume threshold, the pipeline stays paused rather than probing with
+//! more source data and risking an OOM kill.
 
 use std::{
     pin::Pin,
     sync::{
-        Arc, Mutex, PoisonError, RwLock,
+        Arc, PoisonError, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -51,21 +51,15 @@ use std::{
 use etl_config::shared::MemoryBackpressureConfig;
 use futures::Stream;
 use metrics::{counter, gauge, histogram};
-use tokio::{
-    sync::watch,
-    task::{JoinError, JoinHandle},
-    time::MissedTickBehavior,
-};
+use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_stream::wrappers::WatchStream;
-use tracing::{info, trace};
+use tokio_util::task::AbortOnDropHandle;
+use tracing::trace;
 
-use crate::{
-    observability::{
-        DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-        ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
-        ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
-    },
-    runtime::concurrency::ShutdownRx,
+use crate::observability::{
+    DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+    ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
 };
 
 /// Identifies the memory domain represented by a [`MemorySnapshot`].
@@ -156,9 +150,9 @@ impl MemorySnapshot {
             return MemoryRefresh::fresh(snapshot);
         }
 
-        // Once the process cgroup has been observed, a missing read is treated as
-        // transient. Falling back to host memory could momentarily expand the batch
-        // budget far beyond the pod's actual limit.
+        // Once the process cgroup has been observed, a missing read is treated
+        // as transient. Falling back to host memory could momentarily expand
+        // the batch budget far beyond the pod's actual limit.
         if let Some(previous @ Self { source: MemorySnapshotSource::ProcessCgroup, .. }) = previous
         {
             trace!(
@@ -201,8 +195,8 @@ impl MemorySnapshot {
     /// visible hierarchy and is not necessarily the literal `memory.current` of
     /// any one cgroup.
     fn from_cgroup_limits(cgroup: &sysinfo::CGroupLimits, source: MemorySnapshotSource) -> Self {
-        // `rss` only contains anonymous resident memory and misses other charges
-        // enforced by the memory controller.
+        // `rss` only contains anonymous resident memory and misses other
+        // charges enforced by the memory controller.
         Self {
             used: cgroup.total_memory.saturating_sub(cgroup.free_memory),
             total: cgroup.total_memory,
@@ -235,16 +229,12 @@ impl MemorySnapshot {
 /// Internal shared state for memory backpressure.
 #[derive(Debug)]
 struct MemoryMonitorInner {
-    /// Handle for the task that refreshes memory snapshots.
-    refresh_task: Mutex<Option<JoinHandle<()>>>,
     /// Optional backpressure state derived from memory snapshots.
     backpressure: Option<BackpressureMonitor>,
     /// Latest coherent used and total memory snapshot.
     snapshot: RwLock<MemorySnapshot>,
-    /// Revision incremented after each complete snapshot update.
-    snapshot_revision: AtomicU64,
-    /// Interval between memory refreshes in milliseconds.
-    memory_refresh_interval_ms: u64,
+    /// Revision incremented only when sampled memory capacity changes.
+    capacity_revision: AtomicU64,
 }
 
 /// Shared backpressure state that exists only when backpressure is configured.
@@ -258,9 +248,9 @@ struct BackpressureMonitor {
 
 /// Shared memory monitor and emergency backpressure controller.
 ///
-/// This component owns a periodic task that samples memory usage and updates a
-/// boolean backpressure signal. Consumers can subscribe and pause polling when
-/// backpressure is active.
+/// A separately owned periodic task publishes memory snapshots and updates the
+/// backpressure signal. Consumers can share these readings without retaining
+/// the task handle.
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryMonitor {
     /// Shared sampler state and optional emergency backpressure controller.
@@ -268,13 +258,16 @@ pub(crate) struct MemoryMonitor {
 }
 
 impl MemoryMonitor {
-    /// Creates a new memory monitor and starts its refresh task.
-    pub(crate) fn new(
-        mut shutdown_rx: ShutdownRx,
+    /// Starts memory sampling and returns the shared readings and task handle.
+    ///
+    /// The caller owns the task and must abort and join it after consumers
+    /// drain.
+    pub(crate) fn spawn(
         memory_backpressure_config: Option<MemoryBackpressureConfig>,
         memory_refresh_interval_ms: u64,
-    ) -> Self {
-        // sysinfo docs suggest using a single `System` instance across the program.
+    ) -> (Self, AbortOnDropHandle<()>) {
+        // sysinfo docs suggest using a single `System` instance across the
+        // program.
         let mut system = sysinfo::System::new();
         let current_pid = sysinfo::get_current_pid().ok();
         if let Some(current_pid) = current_pid {
@@ -285,8 +278,8 @@ impl MemoryMonitor {
             );
         }
 
-        // Initialize from a real memory snapshot so startup state reflects current
-        // pressure.
+        // Initialize from a real memory snapshot so startup state reflects
+        // current pressure.
         let startup_snapshot = MemorySnapshot::refresh(&mut system, current_pid, None).snapshot;
         emit_memory_snapshot_metrics(startup_snapshot, None);
         let backpressure = memory_backpressure_config.map(|config| {
@@ -303,100 +296,80 @@ impl MemoryMonitor {
 
         let this = Self {
             inner: Arc::new(MemoryMonitorInner {
-                refresh_task: Mutex::new(None),
                 backpressure,
                 snapshot: RwLock::new(startup_snapshot),
-                snapshot_revision: AtomicU64::new(0),
-                memory_refresh_interval_ms,
+                capacity_revision: AtomicU64::new(0),
             }),
         };
 
+        // Shared readings do not own the task, so retaining them creates no
+        // cycle.
         let this_clone = this.clone();
-        let refresh_task = tokio::spawn(async move {
-            let refresh_interval =
-                Duration::from_millis(this_clone.inner.memory_refresh_interval_ms);
+        let mut currently_backpressure_active = this.is_backpressure_active();
+        let refresh_task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let refresh_interval = Duration::from_millis(memory_refresh_interval_ms);
 
             let mut ticker = tokio::time::interval(refresh_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-            let mut currently_backpressure_active = this_clone.is_backpressure_active();
             let mut activation_started_at = currently_backpressure_active.then(Instant::now);
 
             loop {
-                tokio::select! {
-                    biased;
+                ticker.tick().await;
+                let previous_snapshot = this_clone.current_snapshot();
+                let refresh =
+                    MemorySnapshot::refresh(&mut system, current_pid, Some(previous_snapshot));
+                let snapshot = refresh.snapshot;
+                this_clone.publish_refresh(refresh);
 
-                    _ = shutdown_rx.changed() => {
-                        info!("memory monitor stopped due to shutdown");
+                if let Some(backpressure) = this_clone.inner.backpressure.as_ref() {
+                    let used_percent = snapshot.used_percent();
+                    let next_backpressure_active = compute_next_backpressure_active(
+                        currently_backpressure_active,
+                        used_percent,
+                        backpressure.config.activate_threshold,
+                        backpressure.config.resume_threshold,
+                    );
 
-                        return;
-                    }
+                    trace!(
+                        used_memory_bytes = snapshot.used,
+                        total_memory_bytes = snapshot.total,
+                        memory_source = snapshot.source.as_str(),
+                        used_percent,
+                        backpressure_active = currently_backpressure_active,
+                        next_backpressure_active,
+                        "memory monitor refreshed memory snapshot"
+                    );
 
-                    _ = ticker.tick() => {
-                        let previous_snapshot = this_clone.current_snapshot();
-                        let refresh = MemorySnapshot::refresh(
-                            &mut system,
-                            current_pid,
-                            Some(previous_snapshot),
+                    if next_backpressure_active != currently_backpressure_active {
+                        trace!(
+                            backpressure_active = currently_backpressure_active,
+                            next_backpressure_active, used_percent, "memory monitor state changed"
                         );
-                        let snapshot = refresh.snapshot;
-                        this_clone.publish_refresh(refresh);
 
-                        if let Some(backpressure) = this_clone.inner.backpressure.as_ref() {
-                            let used_percent = snapshot.used_percent();
-                            let next_backpressure_active = compute_next_backpressure_active(
-                                currently_backpressure_active,
-                                used_percent,
-                                backpressure.config.activate_threshold,
-                                backpressure.config.resume_threshold,
-                            );
+                        emit_backpressure_active_metric(next_backpressure_active);
+                        emit_transition_metric(next_backpressure_active);
 
-                            trace!(
-                                used_memory_bytes = snapshot.used,
-                                total_memory_bytes = snapshot.total,
-                                memory_source = snapshot.source.as_str(),
-                                used_percent,
-                                backpressure_active = currently_backpressure_active,
-                                next_backpressure_active,
-                                "memory monitor refreshed memory snapshot"
-                            );
-
-                            if next_backpressure_active != currently_backpressure_active {
-                                trace!(
-                                    backpressure_active = currently_backpressure_active,
-                                    next_backpressure_active,
-                                    used_percent,
-                                    "memory monitor state changed"
-                                );
-
-                                emit_backpressure_active_metric(next_backpressure_active);
-                                emit_transition_metric(next_backpressure_active);
-
-                                if next_backpressure_active {
-                                    activation_started_at = Some(Instant::now());
-                                } else if let Some(started_at) = activation_started_at.take() {
-                                    emit_activation_duration_metric(started_at.elapsed());
-                                }
-                            }
-
-                            currently_backpressure_active = next_backpressure_active;
-                            this_clone.set_backpressure_active(next_backpressure_active);
-                        } else {
-                            trace!(
-                                used_memory_bytes = snapshot.used,
-                                total_memory_bytes = snapshot.total,
-                                memory_source = snapshot.source.as_str(),
-                                "memory monitor refreshed memory snapshot without backpressure"
-                            );
+                        if next_backpressure_active {
+                            activation_started_at = Some(Instant::now());
+                        } else if let Some(started_at) = activation_started_at.take() {
+                            emit_activation_duration_metric(started_at.elapsed());
                         }
                     }
+
+                    currently_backpressure_active = next_backpressure_active;
+                    this_clone.set_backpressure_active(next_backpressure_active);
+                } else {
+                    trace!(
+                        used_memory_bytes = snapshot.used,
+                        total_memory_bytes = snapshot.total,
+                        memory_source = snapshot.source.as_str(),
+                        "memory monitor refreshed memory snapshot without backpressure"
+                    );
                 }
             }
-        });
-        *this.inner.refresh_task.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some(refresh_task);
-
-        this
+        }));
+        (this, refresh_task)
     }
 
     /// Returns `true` when memory pressure currently activates backpressure.
@@ -413,8 +386,8 @@ impl MemoryMonitor {
     pub(crate) fn subscribe(&self) -> Option<MemoryMonitorSubscription> {
         let backpressure = self.inner.backpressure.as_ref()?;
 
-        // Retain a receiver for current-state reads while the stream yields only
-        // changes that occur after subscription.
+        // Retain a receiver for current-state reads while the stream yields
+        // only changes that occur after subscription.
         let rx = backpressure.active_tx.subscribe();
         let updates = WatchStream::from_changes(rx.clone());
 
@@ -426,30 +399,18 @@ impl MemoryMonitor {
         let snapshot = self.inner.snapshot.read().unwrap_or_else(PoisonError::into_inner);
 
         MemoryCapacitySnapshot {
-            revision: self.inner.snapshot_revision.load(Ordering::Relaxed),
+            revision: self.inner.capacity_revision.load(Ordering::Relaxed),
             total_memory_bytes: snapshot.total,
         }
     }
 
-    /// Returns the revision of the latest complete memory snapshot.
+    /// Returns the revision of the latest sampled memory capacity.
     ///
     /// The revision is only a change-detection hint. Snapshot contents are
     /// synchronized independently by their [`RwLock`], so this load does not
     /// publish any associated data.
-    pub(crate) fn snapshot_revision(&self) -> u64 {
-        self.inner.snapshot_revision.load(Ordering::Relaxed)
-    }
-
-    /// Waits for the refresh task to finish after shutdown.
-    pub(crate) async fn wait_for_refresh_task(&self) -> Result<(), JoinError> {
-        let refresh_task =
-            self.inner.refresh_task.lock().unwrap_or_else(PoisonError::into_inner).take();
-
-        if let Some(refresh_task) = refresh_task {
-            refresh_task.await?;
-        }
-
-        Ok(())
+    pub(crate) fn capacity_revision(&self) -> u64 {
+        self.inner.capacity_revision.load(Ordering::Relaxed)
     }
 
     /// Updates the backpressure active state and notifies subscribers when it
@@ -482,19 +443,21 @@ impl MemoryMonitor {
         }
     }
 
-    /// Publishes one coherent memory snapshot and advances its wrapping
-    /// revision.
+    /// Publishes one coherent memory snapshot, advancing the governor revision
+    /// only when capacity changes.
     fn publish_snapshot(&self, snapshot: MemorySnapshot) {
         let previous_source = {
             let mut current = self.inner.snapshot.write().unwrap_or_else(PoisonError::into_inner);
             let previous_source = current.source;
-            *current = snapshot;
 
-            // Wrapping is intentional. Governor readers compare revisions for
-            // inequality, so `u64::MAX -> 0` still denotes a new snapshot. Update
-            // it while the snapshot is write-locked so readers cannot pair this
-            // snapshot with the preceding revision.
-            self.inner.snapshot_revision.fetch_add(1, Ordering::Relaxed);
+            // Usage still updates every sample for backpressure and metrics,
+            // but it does not affect the governor's capacity-derived target.
+            // Keep capacity and its wrapping revision under the same lock so
+            // readers cannot pair a new capacity with the preceding revision.
+            if current.total != snapshot.total {
+                self.inner.capacity_revision.fetch_add(1, Ordering::Relaxed);
+            }
+            *current = snapshot;
 
             previous_source
         };
@@ -578,7 +541,6 @@ impl MemoryMonitor {
     pub(crate) fn new_for_test_with_backpressure(config: Option<MemoryBackpressureConfig>) -> Self {
         Self {
             inner: Arc::new(MemoryMonitorInner {
-                refresh_task: Mutex::new(None),
                 backpressure: config.map(|config| BackpressureMonitor {
                     active_tx: watch::channel(false).0,
                     config,
@@ -588,8 +550,7 @@ impl MemoryMonitor {
                     total: 0,
                     source: MemorySnapshotSource::System,
                 }),
-                snapshot_revision: AtomicU64::new(0),
-                memory_refresh_interval_ms: 100,
+                capacity_revision: AtomicU64::new(0),
             }),
         }
     }
@@ -611,16 +572,16 @@ impl MemoryMonitor {
         self.publish_snapshot(MemorySnapshot { used, total, source: MemorySnapshotSource::System });
     }
 
-    /// Sets the snapshot revision directly for wrapping tests.
-    pub(crate) fn set_snapshot_revision_for_test(&self, revision: u64) {
-        self.inner.snapshot_revision.store(revision, Ordering::Relaxed);
+    /// Sets the capacity revision directly for wrapping tests.
+    pub(crate) fn set_capacity_revision_for_test(&self, revision: u64) {
+        self.inner.capacity_revision.store(revision, Ordering::Relaxed);
     }
 }
 
 /// System or cgroup memory capacity used for batch governance.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct MemoryCapacitySnapshot {
-    /// Revision identifying this exact coherent snapshot.
+    /// Revision identifying the sampled memory capacity.
     pub(crate) revision: u64,
     /// Latest system or cgroup memory capacity in bytes.
     pub(crate) total_memory_bytes: u64,
@@ -671,6 +632,28 @@ mod tests {
 
     use super::*;
     use crate::runtime::BatchMemoryGovernor;
+
+    /// Joining the sampler releases its state even when shared readers remain.
+    #[tokio::test(start_paused = true)]
+    async fn stopping_sampler_preserves_readings_without_refreshing() {
+        let (monitor, task) = MemoryMonitor::spawn(None, 100);
+        let reader = monitor.clone();
+        drop(monitor);
+        // Force a capacity change so a real sample is observable before
+        // exercising owner-driven teardown.
+        reader.set_total_memory_bytes_for_test(0);
+        let initial_revision = reader.capacity_revision();
+        while reader.capacity_revision() == initial_revision {
+            tokio::task::yield_now().await;
+        }
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let revision = reader.capacity_revision();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(reader.capacity_revision(), revision);
+        assert_eq!(Arc::strong_count(&reader.inner), 1);
+    }
 
     /// One captured gauge assignment.
     #[derive(Debug, PartialEq)]
@@ -922,7 +905,7 @@ mod tests {
 
         let snapshot = memory_monitor.capacity_snapshot();
 
-        assert_eq!(snapshot.revision, memory_monitor.snapshot_revision());
+        assert_eq!(snapshot.revision, memory_monitor.capacity_revision());
         assert_eq!(snapshot.total_memory_bytes, 6_000);
     }
 
@@ -931,26 +914,44 @@ mod tests {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(790, 1_000);
         let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 1.0, 1_000);
-        let revision = memory_monitor.snapshot_revision();
+        let revision = memory_monitor.capacity_revision();
         let snapshot = memory_monitor.current_snapshot();
 
         memory_monitor.publish_refresh(MemoryRefresh::retained(snapshot));
 
-        assert_eq!(memory_monitor.snapshot_revision(), revision);
+        assert_eq!(memory_monitor.capacity_revision(), revision);
         assert_eq!(governor.batch_size_target_bytes(), 1_000);
 
-        // A genuinely new sample advances the revision even when its values and
-        // resulting target are unchanged.
+        // A fresh reading of the same capacity also leaves the target valid.
         memory_monitor.publish_refresh(MemoryRefresh::fresh(snapshot));
 
-        assert_eq!(memory_monitor.snapshot_revision(), revision.wrapping_add(1));
+        assert_eq!(memory_monitor.capacity_revision(), revision);
         assert_eq!(governor.batch_size_target_bytes(), 1_000);
     }
 
     #[test]
-    fn snapshot_revision_wraps_without_losing_the_update() {
+    fn usage_refresh_publishes_without_invalidating_the_capacity() {
         let memory_monitor = MemoryMonitor::new_for_test();
-        memory_monitor.set_snapshot_revision_for_test(u64::MAX);
+        memory_monitor.set_memory_snapshot_for_test(200, 1_000);
+        let revision = memory_monitor.capacity_revision();
+
+        memory_monitor.publish_refresh(MemoryRefresh::fresh(MemorySnapshot {
+            used: 900,
+            total: 1_000,
+            source: MemorySnapshotSource::ProcessCgroup,
+        }));
+
+        let snapshot = memory_monitor.current_snapshot();
+        assert_eq!(snapshot.used, 900);
+        assert_eq!(snapshot.source, MemorySnapshotSource::ProcessCgroup);
+        assert_eq!(memory_monitor.capacity_revision(), revision);
+        assert_eq!(memory_monitor.capacity_snapshot().total_memory_bytes, 1_000);
+    }
+
+    #[test]
+    fn capacity_revision_wraps_without_losing_the_update() {
+        let memory_monitor = MemoryMonitor::new_for_test();
+        memory_monitor.set_capacity_revision_for_test(u64::MAX);
 
         memory_monitor.set_memory_snapshot_for_test(4_000, 6_000);
 

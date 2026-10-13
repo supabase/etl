@@ -1,21 +1,27 @@
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
-    schema::{ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression},
+    schema::{
+        ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression,
+        unquote_postgres_string_literal,
+    },
 };
 use etl_config::shared::ClickHouseEngine;
 use tracing::warn;
 
-use crate::clickhouse::sql::quote_identifier;
+use crate::clickhouse::sql::{quote_identifier, quote_string_literal};
 
 /// (For MergeTree engine) CDC operation column.
 pub(crate) const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
 /// (For MergeTree engine) CDC LSN column (commit_lsn).
 pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
+/// (For MergeTree engine) zero-based source event ordinal within its
+/// transaction.
+pub(crate) const CDC_TX_ORDINAL_COLUMN_NAME: &str = "cdc_tx_ordinal";
 /// (For ReplacingMergeTree engine) version column. Holds the packed
-/// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the
-/// low 64 bits) as a UInt128, giving ReplacingMergeTree a total order across
-/// all events for tie-breaking under `FINAL`.
+/// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the low 64
+/// bits) as a UInt128, giving ReplacingMergeTree a total order across all
+/// events for tie-breaking under `FINAL`.
 pub(crate) const ETL_VERSION_COLUMN_NAME: &str = "_etl_version";
 /// (For ReplacingMergeTree engine) tombstone column.
 pub(crate) const ETL_DELETED_COLUMN_NAME: &str = "_etl_deleted";
@@ -28,16 +34,25 @@ pub(crate) const CURRENT_VIEW_SUFFIX: &str = "__current";
 /// The returned string does not include `Nullable(...)` wrapping — callers are
 /// responsible for applying that when the column is nullable. Arrays always use
 /// `Array(Nullable(T))` since Postgres array elements are nullable.
+///
+/// Names are ClickHouse's canonical spellings (`Bool`, not the `Boolean`
+/// alias), because `system.columns` reports them and the
+/// `RowBinaryWithNamesAndTypes` header check compares them literally.
+///
+/// `timestamp` and `timestamptz` both map to `DateTime64(6, 'UTC')`. ETL
+/// encodes a `timestamp` wall-clock value as if it were UTC, and a column
+/// without a timezone would render it in the reader's server or session
+/// timezone instead.
 fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
     match *typ {
-        Type::BOOL => "Boolean",
+        Type::BOOL => "Bool",
         Type::INT2 => "Int16",
         Type::INT4 => "Int32",
         Type::INT8 => "Int64",
         Type::FLOAT4 => "Float32",
         Type::FLOAT8 => "Float64",
         Type::DATE => "Date32",
-        Type::TIMESTAMP => "DateTime64(6)",
+        Type::TIMESTAMP => "DateTime64(6, 'UTC')",
         Type::TIMESTAMPTZ => "DateTime64(6, 'UTC')",
         Type::UUID => "UUID",
         Type::OID => "UInt32",
@@ -48,14 +63,14 @@ fn postgres_column_type_to_clickhouse_sql(typ: &Type) -> &'static str {
 /// Returns the ClickHouse array element type for a Postgres array type.
 fn postgres_array_element_clickhouse_sql(typ: &Type) -> &'static str {
     match *typ {
-        Type::BOOL_ARRAY => "Boolean",
+        Type::BOOL_ARRAY => "Bool",
         Type::INT2_ARRAY => "Int16",
         Type::INT4_ARRAY => "Int32",
         Type::INT8_ARRAY => "Int64",
         Type::FLOAT4_ARRAY => "Float32",
         Type::FLOAT8_ARRAY => "Float64",
         Type::DATE_ARRAY => "Date32",
-        Type::TIMESTAMP_ARRAY => "DateTime64(6)",
+        Type::TIMESTAMP_ARRAY => "DateTime64(6, 'UTC')",
         Type::TIMESTAMPTZ_ARRAY => "DateTime64(6, 'UTC')",
         Type::UUID_ARRAY => "UUID",
         Type::OID_ARRAY => "UInt32",
@@ -115,49 +130,63 @@ pub(super) fn clickhouse_default_expression(
 }
 
 /// Renders a parsed default expression as ClickHouse SQL.
+///
+/// Re-quotes PostgreSQL string literals to preserve backslashes in ClickHouse.
 fn render_clickhouse_default_expression(
     expression: &DefaultExpression,
     typ: &Type,
 ) -> Option<String> {
     match expression {
-        DefaultExpression::StringLiteral(expression) => {
-            is_clickhouse_string_default_type(typ).then(|| expression.clone())
+        DefaultExpression::StringLiteral(expression) if is_clickhouse_string_default_type(typ) => {
+            clickhouse_string_literal(expression)
         }
         DefaultExpression::NumericLiteral(expression) => {
             if is_clickhouse_numeric_default_type(typ) {
                 Some(expression.clone())
             } else if is_clickhouse_numeric_string_default_type(typ) {
-                Some(quote_numeric_literal_as_string(expression))
+                Some(quote_string_literal(expression))
             } else {
                 None
             }
         }
-        DefaultExpression::BooleanLiteral(expression) => {
-            matches!(typ, &Type::BOOL).then(|| expression.clone())
+        DefaultExpression::BooleanLiteral(expression) if matches!(typ, &Type::BOOL) => {
+            Some(expression.clone())
         }
-        DefaultExpression::TimeLiteral(expression) => {
-            matches!(typ, &Type::TIME).then(|| expression.clone())
+        DefaultExpression::TimeLiteral(expression) if matches!(typ, &Type::TIME) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::TimeTzLiteral(expression) => {
-            matches!(typ, &Type::TIMETZ).then(|| expression.clone())
+        DefaultExpression::TimeTzLiteral(expression) if matches!(typ, &Type::TIMETZ) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::IntervalLiteral(expression) => {
-            matches!(typ, &Type::INTERVAL).then(|| expression.clone())
+        DefaultExpression::IntervalLiteral(expression) if matches!(typ, &Type::INTERVAL) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::JsonLiteral(expression) => is_json_type(typ).then(|| expression.clone()),
-        DefaultExpression::DateLiteral(expression) => {
-            matches!(typ, &Type::DATE).then(|| format!("toDate32({expression})"))
+        DefaultExpression::JsonLiteral(expression) if is_json_type(typ) => {
+            clickhouse_string_literal(expression)
         }
-        DefaultExpression::TimestampLiteral(expression) => {
-            matches!(typ, &Type::TIMESTAMP).then(|| format!("toDateTime64({expression}, 6, 'UTC')"))
+        DefaultExpression::DateLiteral(expression) if matches!(typ, &Type::DATE) => {
+            clickhouse_string_literal(expression).map(|literal| format!("toDate32({literal})"))
         }
-        // `parseDateTime64BestEffort` (not `toDateTime64`) because Postgres renders
-        // `timestamptz` defaults with a UTC offset (for example
-        // `'2026-01-01 12:30:00+00'`), which `toDateTime64` string parsing rejects.
-        // The best-effort parser accepts the offset and normalizes to the timezone.
-        DefaultExpression::TimestampTzLiteral(expression) => matches!(typ, &Type::TIMESTAMPTZ)
-            .then(|| format!("parseDateTime64BestEffort({expression}, 6, 'UTC')")),
+        DefaultExpression::TimestampLiteral(expression) if matches!(typ, &Type::TIMESTAMP) => {
+            clickhouse_string_literal(expression)
+                .map(|literal| format!("toDateTime64({literal}, 6, 'UTC')"))
+        }
+        // `parseDateTime64BestEffort` (not `toDateTime64`) because Postgres renders `timestamptz`
+        // defaults with a UTC offset (for example `'2026-01-01 12:30:00+00'`), which `toDateTime64`
+        // string parsing rejects. The best-effort parser accepts the offset and normalizes to the
+        // timezone.
+        DefaultExpression::TimestampTzLiteral(expression) if matches!(typ, &Type::TIMESTAMPTZ) => {
+            clickhouse_string_literal(expression)
+                .map(|literal| format!("parseDateTime64BestEffort({literal}, 6, 'UTC')"))
+        }
+        _ => None,
     }
+}
+
+/// Re-quotes one parser-validated PostgreSQL string literal with ClickHouse
+/// escapes.
+fn clickhouse_string_literal(expression: &str) -> Option<String> {
+    unquote_postgres_string_literal(expression).map(|value| quote_string_literal(&value))
 }
 
 /// Returns whether a Postgres type is a ClickHouse numeric column.
@@ -200,16 +229,20 @@ fn is_json_type(typ: &Type) -> bool {
     matches!(typ, &Type::JSON | &Type::JSONB)
 }
 
-/// Quotes a parser-validated numeric literal as a SQL string literal.
-fn quote_numeric_literal_as_string(expression: &str) -> String {
-    format!("'{expression}'")
-}
-
-/// Trailing CDC column names appended to each replicated row, by engine.
-pub(super) fn trailing_cdc_column_names(engine: ClickHouseEngine) -> &'static [&'static str] {
+/// Trailing CDC columns appended to each replicated row, by engine, as
+/// `(name, ClickHouse type)` pairs.
+pub(super) fn trailing_cdc_columns(
+    engine: ClickHouseEngine,
+) -> &'static [(&'static str, &'static str)] {
     match engine {
-        ClickHouseEngine::MergeTree => &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME],
-        ClickHouseEngine::ReplacingMergeTree => &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME],
+        ClickHouseEngine::MergeTree => &[
+            (CDC_OPERATION_COLUMN_NAME, "String"),
+            (CDC_LSN_COLUMN_NAME, "UInt64"),
+            (CDC_TX_ORDINAL_COLUMN_NAME, "UInt64"),
+        ],
+        ClickHouseEngine::ReplacingMergeTree => {
+            &[(ETL_VERSION_COLUMN_NAME, "UInt128"), (ETL_DELETED_COLUMN_NAME, "UInt8")]
+        }
     }
 }
 
@@ -231,15 +264,15 @@ where
     }
 }
 
-/// `MergeTree` DDL: appends `cdc_operation String` and `cdc_lsn UInt64`,
-/// `ORDER BY tuple()`.
+/// `MergeTree` DDL: appends `cdc_operation String`, `cdc_lsn UInt64`, and
+/// `cdc_tx_ordinal UInt64`, then uses `ORDER BY tuple()`.
 pub(super) fn create_merge_tree_sql<'a, I>(table_name: &str, column_schemas: I) -> String
 where
     I: IntoIterator<Item = &'a ColumnSchema>,
     I::IntoIter: ExactSizeIterator,
 {
     let iter = column_schemas.into_iter();
-    let mut cols = Vec::with_capacity(iter.len() + 2);
+    let mut cols = Vec::with_capacity(iter.len() + 3);
 
     for col in iter {
         let col_type = clickhouse_column_type(col, false);
@@ -247,8 +280,9 @@ where
         cols.push(format!("  {} {}{}", quote_identifier(&col.name), col_type, default_clause));
     }
 
-    cols.push(format!("  {} String", quote_identifier(CDC_OPERATION_COLUMN_NAME)));
-    cols.push(format!("  {} UInt64", quote_identifier(CDC_LSN_COLUMN_NAME)));
+    for (name, type_name) in trailing_cdc_columns(ClickHouseEngine::MergeTree) {
+        cols.push(format!("  {} {type_name}", quote_identifier(name)));
+    }
 
     let col_defs = cols.join(",\n");
     let quoted_table_name = quote_identifier(table_name);
@@ -259,12 +293,11 @@ where
 }
 
 /// Emits `CREATE TABLE ... ENGINE = ReplacingMergeTree(_etl_version,
-/// _etl_deleted) ORDER BY (<pk cols>)`, with `<pk cols>` taken from the
-/// source primary key in `primary_key_ordinal_position` order. ClickHouse
-/// uses that `ORDER BY` as the sort + dedup key, so it must match the
-/// source PK exactly. Two trailing columns are appended after the user
-/// columns: `_etl_version UInt128` (packed `EventSequenceKey`) and
-/// `_etl_deleted UInt8` (tombstone).
+/// _etl_deleted) ORDER BY (<pk cols>)`, with `<pk cols>` taken from the source
+/// primary key in `primary_key_ordinal_position` order. ClickHouse uses that
+/// `ORDER BY` as the sort + dedup key, so it must match the source PK exactly.
+/// Two trailing columns are appended after the user columns: `_etl_version
+/// UInt128` (packed `EventSequenceKey`) and `_etl_deleted UInt8` (tombstone).
 ///
 /// Errors when the source schema has no PK columns.
 pub(super) fn create_replacing_merge_tree_sql<'a, I>(
@@ -290,8 +323,9 @@ where
             )
         })
         .collect();
-    col_defs.push(format!("  {} UInt128", quote_identifier(ETL_VERSION_COLUMN_NAME)));
-    col_defs.push(format!("  {} UInt8", quote_identifier(ETL_DELETED_COLUMN_NAME)));
+    for (name, type_name) in trailing_cdc_columns(ClickHouseEngine::ReplacingMergeTree) {
+        col_defs.push(format!("  {} {type_name}", quote_identifier(name)));
+    }
 
     let order_by =
         pk_columns.iter().map(|c| quote_identifier(&c.name)).collect::<Vec<_>>().join(", ");
@@ -377,8 +411,8 @@ mod tests {
             nullable: false,
             default_expression: None,
         }];
-        // Pre-encoded table name with embedded quotes to verify the SQL
-        // builder quotes/escapes the identifier itself.
+        // Pre-encoded table name with embedded quotes to verify the SQL builder
+        // quotes/escapes the identifier itself.
         let sql = create_merge_tree_sql("sche\"ma_ta\"ble", &schemas);
 
         assert!(
@@ -393,7 +427,7 @@ mod tests {
 
     #[test]
     fn scalar_type_mapping() {
-        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Boolean");
+        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BOOL), "Bool");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::CHAR), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::BPCHAR), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::VARCHAR), "String");
@@ -409,7 +443,10 @@ mod tests {
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::DATE), "Date32");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIME), "String");
         assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMETZ), "String");
-        assert_eq!(postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP), "DateTime64(6)");
+        assert_eq!(
+            postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMP),
+            "DateTime64(6, 'UTC')"
+        );
         assert_eq!(
             postgres_column_type_to_clickhouse_sql(&Type::TIMESTAMPTZ),
             "DateTime64(6, 'UTC')"
@@ -424,7 +461,7 @@ mod tests {
 
     #[test]
     fn array_type_mapping() {
-        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Boolean");
+        assert_eq!(postgres_array_element_clickhouse_sql(&Type::BOOL_ARRAY), "Bool");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TEXT_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::MONEY_ARRAY), "String");
         assert_eq!(postgres_array_element_clickhouse_sql(&Type::TIMETZ_ARRAY), "String");
@@ -534,6 +571,34 @@ mod tests {
         }
     }
 
+    /// Defaults preserve literal backslashes and quotes in ClickHouse.
+    #[test]
+    fn clickhouse_default_clause_escapes_backslashes_for_clickhouse() {
+        let cases = [
+            (Type::TEXT, r"'C:\temp'::text", r" DEFAULT 'C:\\temp'"),
+            (Type::TEXT, r"'abc\'::text", r" DEFAULT 'abc\\'"),
+            (Type::TEXT, "'it''s'::text", r" DEFAULT 'it\'s'"),
+            (Type::VARCHAR, r"'\'", r" DEFAULT '\\'"),
+            (Type::JSONB, r#"'{"p":"C:\\dir"}'::jsonb"#, r#" DEFAULT '{"p":"C:\\\\dir"}'"#),
+            (Type::INTERVAL, r"'1 day\'::interval", r" DEFAULT '1 day\\'"),
+            (Type::DATE, r"'2026-01-01\'::date", r" DEFAULT toDate32('2026-01-01\\')"),
+            (
+                Type::TIMESTAMP,
+                r"'2026-01-01 00:00:00\'::timestamp",
+                r" DEFAULT toDateTime64('2026-01-01 00:00:00\\', 6, 'UTC')",
+            ),
+        ];
+
+        for (typ, expression, expected) in cases {
+            let column = ColumnSchema::new("value".to_owned(), typ, -1, 1, true)
+                .with_default_expression(expression.to_owned());
+
+            let clause = clickhouse_default_clause(&column);
+
+            assert_eq!(clause.as_deref(), Some(expected));
+        }
+    }
+
     #[test]
     fn create_merge_tree_sql_cdc_columns() {
         let schemas = vec![ColumnSchema {
@@ -548,6 +613,7 @@ mod tests {
         let sql = create_merge_tree_sql("public_t", &schemas);
         assert!(sql.contains("\"cdc_operation\" String"), "cdc_operation should be non-nullable");
         assert!(sql.contains("\"cdc_lsn\" UInt64"), "cdc_lsn should be non-nullable UInt64");
+        assert!(sql.contains("\"cdc_tx_ordinal\" UInt64"));
         assert!(sql.contains("ENGINE = MergeTree()"));
         assert!(sql.contains("ORDER BY tuple()"));
     }
@@ -572,7 +638,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_single_pk() {
-        // --- GIVEN: single-column PK with a nullable non-PK column ---
+        // GIVEN: a single-column PK with a nullable non-PK column.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -593,9 +659,11 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
-        // --- THEN: trailing etl columns, engine, and ORDER BY are correct ---
+
+        // THEN: the trailing ETL columns, engine, and ORDER BY are correct.
         assert!(sql.contains("\"id\" Int32"));
         assert!(sql.contains("\"name\" Nullable(String)"));
         assert!(sql.contains("\"_etl_version\" UInt128"));
@@ -606,7 +674,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_composite_pk_orders_by_ordinal() {
-        // --- GIVEN: composite PK whose ordinal order differs from table order ---
+        // GIVEN: a composite PK whose ordinal order differs from table order.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -636,9 +704,11 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let sql = create_replacing_merge_tree_sql("public_users", &schemas).unwrap();
-        // --- THEN: ORDER BY follows PK ordinal, not table ordinal ---
+
+        // THEN: ORDER BY follows the PK ordinal, not the table ordinal.
         assert!(
             sql.contains("ORDER BY (\"tenant_id\", \"id\")"),
             "ORDER BY must follow PK ordinal: {sql}"
@@ -647,7 +717,7 @@ mod tests {
 
     #[test]
     fn create_replacing_merge_tree_sql_rejects_pkless_schema() {
-        // --- GIVEN: schema with no PK columns ---
+        // GIVEN: a schema with no PK columns.
         let schemas = vec![ColumnSchema {
             name: "value".to_owned(),
             typ: Type::TEXT,
@@ -657,15 +727,17 @@ mod tests {
             nullable: true,
             default_expression: None,
         }];
-        // --- WHEN: build the ReplacingMergeTree DDL ---
+
+        // WHEN: the ReplacingMergeTree DDL is built.
         let err = create_replacing_merge_tree_sql("public_events", &schemas).unwrap_err();
-        // --- THEN: builder rejects with SourceSchemaError ---
+
+        // THEN: the builder rejects it with SourceSchemaError.
         assert_eq!(err.kind(), ErrorKind::SourceSchemaError);
     }
 
     #[test]
     fn create_table_sql_dispatches_on_engine() {
-        // --- GIVEN: a schema with a single PK column ---
+        // GIVEN: a schema with a single PK column.
         let schemas = vec![ColumnSchema {
             name: "id".to_owned(),
             typ: Type::INT4,
@@ -675,7 +747,9 @@ mod tests {
             nullable: false,
             default_expression: None,
         }];
-        // --- WHEN/THEN: dispatcher selects the matching engine branch ---
+
+        // WHEN: the DDL is built for each engine.
+        // THEN: the dispatcher selects the matching engine branch.
         let merge_tree =
             create_table_sql(ClickHouseEngine::MergeTree, "public_t", &schemas).unwrap();
         assert!(merge_tree.contains("ENGINE = MergeTree()"));
@@ -686,7 +760,7 @@ mod tests {
 
     #[test]
     fn create_current_view_sql_selects_user_columns_only() {
-        // --- GIVEN: a two-column schema ---
+        // GIVEN: a two-column schema.
         let schemas = vec![
             ColumnSchema {
                 name: "id".to_owned(),
@@ -707,9 +781,12 @@ mod tests {
                 default_expression: None,
             },
         ];
-        // --- WHEN: build the current-state view DDL ---
+
+        // WHEN: the current-state view DDL is built.
         let sql = create_current_view_sql("public_users", &schemas);
-        // --- THEN: __current suffix, FINAL read, tombstone filter, no etl cols ---
+
+        // THEN: the view uses the __current suffix, reads FINAL, filters
+        // tombstones, and omits ETL columns.
         assert!(sql.contains("CREATE VIEW IF NOT EXISTS \"public_users__current\""));
         assert!(sql.contains("SELECT \"id\", \"name\""));
         assert!(sql.contains("FROM \"public_users\" FINAL"));
@@ -722,17 +799,5 @@ mod tests {
         let sql = drop_current_view_sql("public_us\"ers");
 
         assert_eq!(sql, "DROP VIEW IF EXISTS \"public_us\\\"ers__current\"");
-    }
-
-    #[test]
-    fn trailing_cdc_column_names_by_engine() {
-        assert_eq!(
-            trailing_cdc_column_names(ClickHouseEngine::MergeTree),
-            &[CDC_OPERATION_COLUMN_NAME, CDC_LSN_COLUMN_NAME]
-        );
-        assert_eq!(
-            trailing_cdc_column_names(ClickHouseEngine::ReplacingMergeTree),
-            &[ETL_VERSION_COLUMN_NAME, ETL_DELETED_COLUMN_NAME]
-        );
     }
 }

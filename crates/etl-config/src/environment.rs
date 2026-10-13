@@ -14,8 +14,8 @@ const DEV_ENV_NAME: &str = "dev";
 
 /// Runtime environment for the application.
 ///
-/// Used to distinguish between development, staging, and production modes
-/// for configuration loading and feature toggles.
+/// Used to distinguish between development, staging, and production modes for
+/// configuration loading and feature toggles.
 #[derive(Debug, Clone, Copy)]
 pub enum Environment {
     /// Production environment.
@@ -38,7 +38,18 @@ impl Environment {
 
     /// Sets the `APP_ENVIRONMENT` environment variable to this environment's
     /// value.
-    pub fn set(&self) {
+    ///
+    /// Prefer configuring child processes with [`std::process::Command::env`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the safety requirements of [`std::env::set_var`].
+    /// On non-Windows platforms, no other thread may concurrently read or write
+    /// the process environment outside [`mod@std::env`], including through
+    /// library calls. In practice, only call this before starting any other
+    /// threads.
+    pub unsafe fn set(&self) {
+        // SAFETY: The caller guarantees the environment access requirements.
         unsafe { std::env::set_var(APP_ENVIRONMENT_ENV_NAME, self.to_string()) }
     }
 

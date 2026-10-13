@@ -1132,7 +1132,7 @@ fn run_benchmark_binary(
     report_path: &Path,
 ) -> Result<Value> {
     let mut command = Command::new("cargo");
-    command.args(["run", "--quiet", "-p", "etl-benchmarks", "--release"]);
+    command.args(["run", "--locked", "--quiet", "-p", "etl-benchmarks", "--release"]);
     if !matches!(destination, Destination::Null) {
         command.args(["--features", destination.as_arg()]);
     }
