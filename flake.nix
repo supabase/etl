@@ -76,6 +76,11 @@
 
           buildAndTestSubdir = "crates/etl-replicator";
 
+          # Match the release image's compiler flags (crates/etl-replicator/Dockerfile).
+          # Unlike the image, this package bundles no DuckDB extensions, so DuckLake
+          # downloads them at runtime unless ETL_DUCKDB_EXTENSION_ROOT points at a copy.
+          env.RUSTFLAGS = "--cfg tokio_unstable -C panic=abort";
+
           nativeBuildInputs = with pkgs; [
             cmake
             pkg-config
