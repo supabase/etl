@@ -1,15 +1,17 @@
 use std::{collections::HashSet, sync::Arc};
 
 use etl::{
-    data::{Cell, Date, TableRow},
-    destination::{Destination as _, WriteEventsDurability},
-    event::{Event, InsertEvent, RelationEvent, TruncateEvent},
+    data::{Cell, Date, OldTableRow, TableRow, UpdatedTableRow},
+    destination::{Destination as _, TableCopyAttemptId, TableCopyBatchId, WriteEventsDurability},
+    event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
         Type,
     },
     store::{MemoryStore, SchemaStore, StateStore, TableStateLifecycleStore},
-    test_utils::destination::{drop_table_for_copy, write_events, write_table_rows},
+    test_utils::destination::{
+        drop_table_for_copy, write_events, write_table_rows, write_table_rows_with_batch_id,
+    },
 };
 use etl_config::shared::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
@@ -46,6 +48,103 @@ fn make_users_schema_with_id(table_id: u32, table_name: &str) -> TableSchema {
 fn test_snapshot_id(value: u64) -> SnapshotId {
     let lsn = PgLsn::from(value);
     SnapshotId::new(lsn, lsn)
+}
+
+/// Parallel copy preserves distinct keys, and replaying a transaction split
+/// across streaming batches preserves its final rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_then_transaction_replay_preserves_current_rows() {
+    install_crypto_provider();
+    init_test_tracing();
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    let database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let schema = make_users_schema("replay_ordering");
+    store.store_table_schema(schema.clone()).await.unwrap();
+    let schema = ReplicatedTableSchema::all(Arc::new(schema));
+    let destination = database.build_destination(1, store).await;
+    let first_copy_rows = vec![
+        TableRow::new(vec![Cell::I32(1), Cell::String("snapshot".to_owned()), Cell::I32(10)]),
+        TableRow::new(vec![Cell::I32(3), Cell::String("snapshot".to_owned()), Cell::I32(10)]),
+    ];
+    let second_copy_rows =
+        vec![TableRow::new(vec![Cell::I32(2), Cell::String("snapshot".to_owned()), Cell::I32(10)])];
+    let attempt_id = TableCopyAttemptId::from_u128(1);
+    let first_copy_id = TableCopyBatchId::new(attempt_id, 0);
+    let second_copy_id = TableCopyBatchId::new(attempt_id, 1);
+
+    tokio::try_join!(
+        write_table_rows_with_batch_id(&destination, &schema, first_copy_id, first_copy_rows),
+        write_table_rows_with_batch_id(&destination, &schema, second_copy_id, second_copy_rows),
+    )
+    .unwrap();
+
+    let rows = database.query_table(schema.name().clone()).await.unwrap();
+    let users: Vec<BigQueryUser> = parse_bigquery_table_rows(rows);
+    assert_eq!(
+        users,
+        vec![
+            BigQueryUser::new(1, "snapshot", 10),
+            BigQueryUser::new(2, "snapshot", 10),
+            BigQueryUser::new(3, "snapshot", 10),
+        ]
+    );
+
+    let commit_lsn = PgLsn::from(10);
+    let first_batch: Vec<_> = [1, 2]
+        .into_iter()
+        .map(|id| {
+            Event::Update(UpdateEvent {
+                commit_lsn,
+                tx_ordinal: u64::try_from(id).unwrap(),
+                replicated_table_schema: schema.clone(),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(id),
+                    Cell::String("first".to_owned()),
+                    Cell::I32(20),
+                ])),
+                old_table_row: None,
+            })
+        })
+        .collect();
+    let second_batch = vec![
+        Event::Update(UpdateEvent {
+            commit_lsn,
+            tx_ordinal: 3,
+            replicated_table_schema: schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("second".to_owned()),
+                Cell::I32(30),
+            ])),
+            old_table_row: None,
+        }),
+        Event::Delete(DeleteEvent {
+            commit_lsn,
+            tx_ordinal: 4,
+            replicated_table_schema: schema.clone(),
+            old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(2)]))),
+        }),
+    ];
+
+    // ETL may split one transaction across batches, but can checkpoint only
+    // its commit. If checkpointing fails after the writes land, it replays the
+    // whole transaction in source order with the same sequence keys.
+    for batch in [first_batch.clone(), second_batch.clone(), first_batch, second_batch] {
+        write_events(&destination, WriteEventsDurability::MayDefer, batch).await.unwrap();
+    }
+
+    destination.shutdown().await.unwrap();
+
+    let rows = database.query_table(schema.name().clone()).await.unwrap();
+    let users: Vec<BigQueryUser> = parse_bigquery_table_rows(rows);
+    assert_eq!(
+        users,
+        vec![BigQueryUser::new(1, "second", 30), BigQueryUser::new(3, "snapshot", 10)]
+    );
 }
 
 /// Checks physical versions and logical views retain distinct names across

@@ -902,34 +902,9 @@ impl EventBatchFences {
 
         let mut guards = Vec::with_capacity(fences.len());
         for fence in fences {
-            #[cfg(feature = "test-utils")]
-            if fence.try_lock().is_err() {
-                notify_fence_wait_for_tests();
-            }
             guards.push(fence.lock_owned().await);
         }
         guards
-    }
-}
-
-/// Tests waiting to hear that a batch dispatch had to wait for a fence.
-#[cfg(feature = "test-utils")]
-static FENCE_WAIT_OBSERVERS: Mutex<Vec<tokio::sync::oneshot::Sender<()>>> = Mutex::new(Vec::new());
-
-/// Returns a receiver that fires the next time a batch dispatch has to wait
-/// for a fence held by an earlier batch. Each receiver fires once.
-#[cfg(feature = "test-utils")]
-pub fn notify_on_fence_wait_for_tests() -> tokio::sync::oneshot::Receiver<()> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    FENCE_WAIT_OBSERVERS.lock().push(sender);
-    receiver
-}
-
-/// Fires every armed fence-wait observer.
-#[cfg(feature = "test-utils")]
-fn notify_fence_wait_for_tests() {
-    for observer in FENCE_WAIT_OBSERVERS.lock().drain(..) {
-        let _ = observer.send(());
     }
 }
 

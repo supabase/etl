@@ -16,6 +16,7 @@ use etl::{
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
     failpoints::{
+        APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP,
         SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
         STORE_REPLICATION_CHECKPOINT_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
@@ -25,13 +26,13 @@ use etl::{
     store::{StateStore, TableRetryPolicy, TableState, TableStateType, WorkerType},
     test_utils::{
         database::{
-            replication_slot_state, spawn_source_database, test_table_name,
+            replication_slot_state, spawn_source_database, terminate_walsender, test_table_name,
             wait_for_replication_slot_flush_lsn,
         },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp, HoldGate},
         memory_destination::MemoryDestination,
-        notify::DEFAULT_NOTIFY_TIMEOUT,
+        notify::{DEFAULT_NOTIFY_TIMEOUT, notify_on_failpoint},
         notifying_store::NotifyingStore,
         pipeline::{
             PipelineBuilder, create_database_and_sync_done_pipeline_with_table, create_pipeline,
@@ -47,7 +48,7 @@ use etl::{
         },
     },
 };
-use etl_config::shared::TableSyncCopyConfig;
+use etl_config::shared::{PipelineConfig, TableSyncCopyConfig};
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     below_version,
@@ -2710,10 +2711,14 @@ impl IdleDurabilityTest {
         )
         .with_table_sync_copy_config(TableSyncCopyConfig::SkipAllTables)
         .with_settle_durable_interval_ms(settle_durable_interval_ms)
+        .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1)
         .build();
         let synced = store.notify_on_table_sync_complete(table_id).await;
+
         pipeline.start().await.unwrap();
+
         synced.notified().await;
+
         Self { database, table_name, pipeline, store, slot_name, writes_rx }
     }
 
@@ -2725,10 +2730,7 @@ impl IdleDurabilityTest {
     /// Receives the next event batch, failing if an unexpected barrier
     /// overtakes it.
     async fn next_batch(&mut self) -> (PgLsn, WriteEventsResult) {
-        let write = tokio::time::timeout(Duration::from_secs(50), self.writes_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let write = self.writes_rx.recv().await.unwrap();
         let DeferredEventsWrite::Batch { commit_end_lsn, result } = write else {
             panic!("expected an event batch");
         };
@@ -2738,10 +2740,7 @@ impl IdleDurabilityTest {
     /// Receives an empty barrier driven by an incoming primary keepalive,
     /// including a reply requested by ETL's periodic feedback.
     async fn next_barrier(&mut self) -> WriteEventsResult {
-        let write = tokio::time::timeout(Duration::from_secs(50), self.writes_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let write = self.writes_rx.recv().await.unwrap();
         let DeferredEventsWrite::DurabilityBarrier { result } = write else {
             panic!("expected an idle durability barrier");
         };
@@ -2762,6 +2761,123 @@ impl IdleDurabilityTest {
         )
         .await;
     }
+}
+
+/// A failed attempt observes its dispatched result before replay, but only a
+/// successful replay may checkpoint that batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_disconnect_waits_for_pending_write_without_checkpointing() {
+    let _scenario = FailScenario::setup();
+    let mut test = IdleDurabilityTest::start().await;
+
+    test.insert(1).await;
+
+    let (commit_lsn, result) = test.next_batch().await;
+    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    let client = test.database.client.as_ref().unwrap();
+    let (_, active_pid) = replication_slot_state(client, &test.slot_name).await;
+    let active_pid = active_pid.unwrap();
+    let retry_wait = notify_on_failpoint(APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP);
+
+    assert!(terminate_walsender(client, active_pid).await.unwrap());
+
+    tokio::select! {
+        biased;
+
+        _ = test.writes_rx.recv() => panic!("Replay overtook the pending write"),
+
+        result = retry_wait => result.unwrap(),
+    }
+    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
+    result.send(Ok(DestinationWriteStatus::Durable));
+
+    let (replay_lsn, replay_result) = test.next_batch().await;
+    assert_eq!(replay_lsn, commit_lsn);
+    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
+    replay_result.send(Ok(DestinationWriteStatus::Durable));
+
+    test.wait_for_flush(commit_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+
+    assert_eq!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+        Some(commit_lsn)
+    );
+}
+
+/// A catchup failure cannot reset the table while its old write is pending.
+#[tokio::test(flavor = "multi_thread")]
+async fn catchup_retry_waits_for_pending_write_before_recopy() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = schema.users_schema().id;
+    let store = NotifyingStore::new();
+    let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        schema.publication_name(),
+        store.clone(),
+        destination,
+    );
+    let finished_copy =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+
+    finished_copy.notified().await;
+
+    insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+
+    // Move the catchup target beyond the held transaction so its write uses
+    // MayDefer, independently of the terminal durability barrier.
+    let other_database = spawn_source_database().await;
+    let other_table = test_table_name("retry_catchup_wal");
+    other_database.create_table(other_table.clone(), true, &[("value", "int4")]).await.unwrap();
+    other_database.insert_values(other_table, &["value"], &[&1_i32]).await.unwrap();
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    let errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let copied_again =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+    let retry_wait = notify_on_failpoint(APPLY_LOOP_PENDING_FLUSH_BEFORE_RETRY_FP);
+
+    fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(table_sync)").unwrap();
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    let write = writes_rx.recv().await.unwrap();
+    let DeferredEventsWrite::Batch { result, .. } = write else {
+        panic!("Expected a catchup batch");
+    };
+    tokio::select! {
+        biased;
+
+        _ = errored.notified() => panic!("Table retry overtook the pending write"),
+
+        result = retry_wait => result.unwrap(),
+    }
+    assert_eq!(
+        store.get_table_state(table_id).await.unwrap().unwrap().as_type(),
+        TableStateType::FinishedCopy
+    );
+
+    result.send(Ok(DestinationWriteStatus::Durable));
+
+    errored.notified().await;
+    copied_again.notified().await;
+    synced.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(writes_rx.try_recv().is_err());
 }
 
 /// A single accepted batch settles without another source write.

@@ -328,6 +328,12 @@ impl SizeHint for Event {
 
 /// Pair used to build a CDC sequence key for destinations.
 ///
+/// Identifies a source event by transaction commit position and event ordinal,
+/// independent of delivery batch boundaries. Replaying the event retains this
+/// key even when size limits or timing put it in a different batch. Initial
+/// copy batches instead carry [`crate::destination::TableCopyBatchId`], which
+/// identifies work within one snapshot attempt and does not order row versions.
+///
 /// Destinations choose their own storage and wire representation instead of
 /// relying on a generic string encoding for this domain value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

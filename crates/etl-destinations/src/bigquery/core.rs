@@ -57,6 +57,14 @@ const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
 /// Internal CDC sequence ordinal for generated upserts after generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
 
+/// Snapshot rows use a baseline sequence below every WAL event.
+///
+/// BigQuery compares sequences only within a primary key. Distinct copied keys
+/// remain distinct with this shared baseline; retries of one key contain the
+/// same snapshot values. Copy batch IDs and row offsets do not add ordering
+/// information because copy partitions read disjoint rows from one snapshot.
+const BIGQUERY_COPY_SEQUENCE_NUMBER: &str = "0/0/0";
+
 /// BigQuery-reserved column prefixes, compared case-insensitively.
 const BIGQUERY_RESERVED_COLUMN_PREFIXES: [&str; 9] = [
     "_TABLE_",
@@ -288,18 +296,18 @@ struct PreparedTableSchema {
     snapshot_id: SnapshotId,
     /// Replicated columns represented by the descriptor.
     replication_mask: ReplicationMask,
-    /// CDC allows omitted scalar columns and adds sequence numbers.
-    use_cdc_sequence_column: bool,
+    /// CDC delete rows may omit non-key scalar columns.
+    allow_missing_columns: bool,
     /// Shared descriptor, cloned into SDK requests only after unlocking.
     descriptor: Arc<TableDescriptor>,
 }
 
 impl PreparedTableSchema {
     /// Checks the snapshot, replication mask, and copy/CDC mode before reuse.
-    fn matches(&self, schema: &ReplicatedTableSchema, use_cdc_sequence_column: bool) -> bool {
+    fn matches(&self, schema: &ReplicatedTableSchema, allow_missing_columns: bool) -> bool {
         self.snapshot_id == schema.inner().snapshot_id
             && self.replication_mask == *schema.replication_mask()
-            && self.use_cdc_sequence_column == use_cdc_sequence_column
+            && self.allow_missing_columns == allow_missing_columns
     }
 }
 
@@ -326,20 +334,20 @@ impl TableState {
     fn prepare_descriptor(
         &mut self,
         schema: &ReplicatedTableSchema,
-        use_cdc_sequence_column: bool,
+        allow_missing_columns: bool,
     ) -> Arc<TableDescriptor> {
         if let Some(prepared) = &self.prepared_schema
-            && prepared.matches(schema, use_cdc_sequence_column)
+            && prepared.matches(schema, allow_missing_columns)
         {
             return Arc::clone(&prepared.descriptor);
         }
 
         let descriptor =
-            Arc::new(column_schemas_to_table_descriptor(schema, use_cdc_sequence_column));
+            Arc::new(column_schemas_to_table_descriptor(schema, allow_missing_columns));
         self.prepared_schema = Some(PreparedTableSchema {
             snapshot_id: schema.inner().snapshot_id,
             replication_mask: schema.replication_mask().clone(),
-            use_cdc_sequence_column,
+            allow_missing_columns,
             descriptor: Arc::clone(&descriptor),
         });
 
@@ -355,22 +363,36 @@ impl TableState {
 /// A short registry lock locates each table's state. Preparation and lifecycle
 /// operations serialize per table, so unrelated tables can proceed during DDL.
 ///
-/// Table locks protect preparation and metadata/view transitions, not row
-/// appends. Callers must preserve the per-table write and DDL ordering required
-/// by [`etl::destination::Destination`]; taking a table lock does not drain
-/// previously dispatched appends.
+/// ETL waits for each streaming completion before dispatching its successor,
+/// including across retryable apply failures. Table locks therefore cover
+/// preparation and lifecycle transitions without serializing row appends.
+/// Copy partitions append disjoint rows from one snapshot in parallel; a
+/// restarted copy receives a fresh physical table identity.
+///
+/// Submitted view DDL can outlive a cancelled copy attempt and race a later
+/// reset of the same logical view. Remote job reconciliation is not
+/// implemented.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
+    /// Client for BigQuery table management, queries, and Storage Write
+    /// requests.
     client: BigQueryClient,
+    /// Dataset containing the logical views and their physical tables.
     dataset_id: BigQueryDatasetId,
+    /// Optional maximum CDC query staleness, in minutes, for created tables.
     max_staleness_mins: Option<u16>,
+    /// Partitioning and clustering options keyed by source table identity.
     table_options: Arc<HashMap<TableId, BigQueryTableOptions>>,
+    /// Pipeline identity included in Storage Write request trace IDs.
     pipeline_id: PipelineId,
+    /// Store for source schemas and authoritative destination table metadata.
     state_store: S,
     /// Stable per-table locks shared by all destination clones. Entries remain
     /// allocated across resets so existing waiters cannot acquire an old lock
     /// while new callers acquire a replacement lock for the same table.
     tables: Arc<Mutex<HashMap<TableId, Arc<Mutex<TableState>>>>>,
+    /// Tracks streaming writes and obsolete-table cleanup for reaping and
+    /// shutdown.
     tasks: TaskRegistry,
 }
 
@@ -717,7 +739,7 @@ where
     async fn prepare_table_for_writes(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        use_cdc_sequence_column: bool,
+        allow_missing_columns: bool,
     ) -> EtlResult<(Arc<TableTarget>, Arc<TableDescriptor>)> {
         // Copy partitions share preparation for this table, while other tables
         // can prepare and write independently of its DDL.
@@ -728,7 +750,7 @@ where
         self.ensure_view_points_to_table(&mut table, &table_target).await?;
 
         let table_descriptor =
-            table.prepare_descriptor(replicated_table_schema, use_cdc_sequence_column);
+            table.prepare_descriptor(replicated_table_schema, allow_missing_columns);
 
         Ok((table_target, table_descriptor))
     }
@@ -766,8 +788,8 @@ where
         table: &mut TableState,
         table_target: &Arc<TableTarget>,
     ) -> EtlResult<()> {
-        // A failed or cancelled request may still change the remote view. Stop
-        // certifying its old target before DDL so a later write reinstalls it.
+        // Invalidate before DDL so failed or cancelled requests cannot leave
+        // the previous view target certified in the cache.
         table.invalidate();
 
         let bigquery_table_id = table_target.versioned_id.base_table_id();
@@ -791,22 +813,26 @@ where
     /// Adds an `Upsert` operation type to each row, splits them into optimal
     /// batches based on the client's row-data target, and streams them to
     /// BigQuery concurrently.
+    ///
+    /// All rows use [`BIGQUERY_COPY_SEQUENCE_NUMBER`]. Request retries preserve
+    /// the encoded rows and physical target; a restarted copy uses a fresh
+    /// physical target for its new source snapshot.
     async fn write_table_rows(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-        mut table_rows: Vec<TableRow>,
+        table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        // Prepare table for streaming.
+        // Copy partitions share preparation, but append independently to the
+        // same snapshot's physical target.
         let (table_target, table_descriptor) =
             self.prepare_table_for_writes(replicated_table_schema, false).await?;
 
-        // Add the CDC operation type to all rows (no lock needed).
-        for table_row in &mut table_rows {
-            table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
-        }
+        // BigQuery requires sequence numbers consistently for custom ordering.
+        // A snapshot row is older than every subsequent WAL mutation, and its
+        // retries always contain the same values for a given primary key.
         let table_rows = table_rows
             .into_iter()
-            .map(BigQueryTableRow::try_from)
+            .map(|row| bigquery_upsert_row(row, BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned()))
             .collect::<EtlResult<Vec<BigQueryTableRow>>>()?;
 
         // Calculate optimal target batches based on estimated row size.
@@ -1436,6 +1462,7 @@ where
         // delete its old physical targets cannot expose stale data after
         // recopy.
         self.client.drop_view_if_exists(&self.dataset_id, &base_bigquery_table_id).await?;
+
         delete_table_versions(&self.client, &self.dataset_id, table_ids).await;
 
         // Release Storage Write API connections that may still refer to the
@@ -2112,11 +2139,16 @@ mod tests {
         data::Cell,
         schema::{ColumnSchema, IdentityMask, PgLsn, SnapshotId, TableId, TableSchema, Type},
         store::{MemoryStore, StateStore},
+        test_utils::destination::write_table_rows,
     };
     use gcp_bigquery_client::{
-        auth::Authenticator, client_builder::ClientBuilder, error::BQError, storage::ColumnMode,
+        auth::Authenticator,
+        client_builder::ClientBuilder,
+        error::BQError,
+        storage::{ColumnMode, StorageApiConfig},
     };
     use prost::Message;
+    use tokio::sync::{Semaphore, mpsc};
 
     use super::*;
 
@@ -2135,11 +2167,33 @@ mod tests {
         }
     }
 
-    /// Builds a destination whose remote operations fail or remain pending.
-    async fn unavailable_destination(pending: bool) -> BigQueryDestination<MemoryStore> {
+    /// Pauses real SDK requests before authentication can reach the network.
+    #[derive(Clone)]
+    struct PausedAuthenticator {
+        /// Reports when an append has passed table preparation.
+        reached: mpsc::UnboundedSender<()>,
+        /// Closing this gate releases all requests with an authentication
+        /// error.
+        release: Arc<Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl Authenticator for PausedAuthenticator {
+        async fn access_token(&self) -> Result<String, BQError> {
+            let _ = self.reached.send(());
+            let _ = self.release.acquire().await;
+            Err(BQError::NoToken)
+        }
+    }
+
+    /// Builds a destination with controlled authentication and two SDK workers.
+    async fn destination_with_authenticator(
+        authenticator: Arc<dyn Authenticator>,
+    ) -> BigQueryDestination<MemoryStore> {
         let client = ClientBuilder::new()
             .with_v2_base_url("http://127.0.0.1:1".to_owned())
-            .build_from_authenticator(Arc::new(UnavailableAuthenticator { pending }))
+            .with_storage_config(StorageApiConfig::default().with_connection_pool_size(2))
+            .build_from_authenticator(authenticator)
             .await
             .unwrap();
         BigQueryDestination::new(
@@ -2149,6 +2203,11 @@ mod tests {
             1,
             MemoryStore::new(),
         )
+    }
+
+    /// Builds a destination whose remote operations fail or remain pending.
+    async fn unavailable_destination(pending: bool) -> BigQueryDestination<MemoryStore> {
+        destination_with_authenticator(Arc::new(UnavailableAuthenticator { pending })).await
     }
 
     /// Builds a cached physical target matching the test schema's logical name.
@@ -2177,6 +2236,33 @@ mod tests {
         };
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Builds distinct keyed tables for concurrency tests.
+    fn schema_for_table(id: u32) -> ReplicatedTableSchema {
+        let mut schema = replicated_schema(IdentityType::PrimaryKey).inner().clone();
+        schema.id = TableId::new(id);
+        schema.name = TableName::new("public".to_owned(), format!("table_{id}"));
+        ReplicatedTableSchema::all(Arc::new(schema))
+    }
+
+    /// Seeds metadata and the view cache so requests reach append without DDL.
+    async fn seed_table(
+        destination: &BigQueryDestination<MemoryStore>,
+        schema: &ReplicatedTableSchema,
+    ) {
+        let target = table_target(schema);
+        let metadata = DestinationTableMetadata::new_applied(
+            target.physical_id.clone(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        destination
+            .state_store
+            .store_destination_table_metadata(schema.id(), metadata)
+            .await
+            .unwrap();
+        destination.lock_table(schema.id()).await.view_target = Some(target);
     }
 
     /// Builds a keyed schema with one caller-named non-key column.
@@ -2241,6 +2327,49 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    /// Disjoint copy partitions must both reach append while the first is
+    /// pending; whole streaming-batch ordering is unnecessary for snapshot
+    /// rows.
+    #[tokio::test]
+    async fn copy_partitions_append_concurrently() {
+        let (reached, mut requests) = mpsc::unbounded_channel();
+        let release = Arc::new(Semaphore::new(0));
+        let destination = destination_with_authenticator(Arc::new(PausedAuthenticator {
+            reached,
+            release: Arc::clone(&release),
+        }))
+        .await;
+        let schema = schema_for_table(1);
+        seed_table(&destination, &schema).await;
+
+        let first = write_table_rows(
+            &destination,
+            &schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::Null])],
+        );
+        tokio::pin!(first);
+        assert!(futures::poll!(&mut first).is_pending());
+
+        requests.recv().await.unwrap();
+
+        let second = write_table_rows(
+            &destination,
+            &schema,
+            vec![TableRow::new(vec![Cell::I32(2), Cell::Null])],
+        );
+        tokio::pin!(second);
+        assert!(futures::poll!(&mut second).is_pending());
+
+        requests.recv().await.unwrap();
+
+        release.close();
+
+        assert!(first.await.is_err());
+        assert!(second.await.is_err());
+
+        destination.shutdown().await.unwrap();
+    }
+
     /// Warm descriptors are reused, but each schema endpoint and write mode
     /// must produce the corresponding wire fields.
     #[test]
@@ -2249,7 +2378,7 @@ mod tests {
         let mut table = TableState::default();
         let copy = table.prepare_descriptor(&schema, false);
         assert!(Arc::ptr_eq(&copy, &table.prepare_descriptor(&schema, false)));
-        assert_eq!(copy.field_descriptors.len(), 3);
+        assert_eq!(copy.field_descriptors.len(), 4);
         assert!(matches!(copy.field_descriptors[0].mode, ColumnMode::Required));
 
         let cdc = table.prepare_descriptor(&schema, true);
