@@ -45,6 +45,8 @@
           cargo-sort
           postgresql
           python3
+          # `cargo x init` runs SQLx migrations.
+          sqlx-cli
         ];
 
         src = pkgs.lib.cleanSourceWith {
