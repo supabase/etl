@@ -40,11 +40,15 @@
         ];
 
         devTools = with pkgs; [
+          actionlint
+          cargo-deny
           cargo-llvm-cov
           cargo-nextest
           cargo-sort
           postgresql
           python3
+          # actionlint checks workflow `run:` scripts with shellcheck, as in CI.
+          shellcheck
           # `cargo x init` runs SQLx migrations.
           sqlx-cli
         ];
