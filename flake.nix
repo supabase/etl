@@ -59,9 +59,12 @@
             && base != "node_modules";
         };
 
+        # Follow the crate's metadata, including `cargo set-version` releases.
+        cargoPackage = (pkgs.lib.importTOML ./crates/etl-replicator/Cargo.toml).package;
+
         etl-replicator = rustPlatform.buildRustPackage {
-          pname = "etl-replicator";
-          version = "0.1.0";
+          pname = cargoPackage.name;
+          inherit (cargoPackage) version;
           inherit src;
 
           cargoLock = {
@@ -89,7 +92,7 @@
           doCheck = false;
 
           meta = {
-            description = "Standalone binary for Supabase ETL Postgres replication pipelines.";
+            inherit (cargoPackage) description;
             mainProgram = "etl-replicator";
           };
         };
