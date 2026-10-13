@@ -2735,6 +2735,7 @@ impl IdleDurabilityTest {
         let DeferredEventsWrite::Batch { commit_end_lsn, result } = write else {
             panic!("expected an event batch");
         };
+
         (commit_end_lsn, result)
     }
 
@@ -2745,6 +2746,7 @@ impl IdleDurabilityTest {
         let DeferredEventsWrite::DurabilityBarrier { result } = write else {
             panic!("expected an idle durability barrier");
         };
+
         result
     }
 

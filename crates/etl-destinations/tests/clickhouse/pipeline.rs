@@ -1029,7 +1029,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
         .wait_for_events(vec![EventCondition::TableCount(EventType::Truncate, table_id, 1)])
         .await;
 
-    database.run_sql(&format!("TRUNCATE {}", table_name.as_quoted_identifier())).await.unwrap();
+    database.run_sql(&format!("truncate {}", table_name.as_quoted_identifier())).await.unwrap();
 
     // Releasing the in-flight insert lets it land, which lets the replay
     // proceed to its INSERT. The wrapper records the replayed insert as well.
