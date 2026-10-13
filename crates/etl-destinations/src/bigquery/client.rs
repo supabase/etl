@@ -735,6 +735,12 @@ pub struct BigQueryClient {
 }
 
 impl BigQueryClient {
+    /// Wraps an SDK client with controlled authentication for local unit tests.
+    #[cfg(test)]
+    pub(super) fn from_test_client(client: Client) -> Self {
+        Self { project_id: "test-project".to_owned(), client }
+    }
+
     /// Creates a new [`BigQueryClient`] from a service account key file.
     ///
     /// Authenticates with BigQuery using the service account key at the

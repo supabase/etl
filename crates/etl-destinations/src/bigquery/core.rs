@@ -306,16 +306,22 @@ impl PreparedTableSchema {
 /// Derived view state protected by one table's preparation and lifecycle lock.
 ///
 /// Durable destination metadata remains authoritative and is checked on every
-/// write, even when the view is cached.
+/// write, even when the view is cached. ETL exclusively owns these destination
+/// objects; external table or view changes have undefined behavior.
 #[derive(Debug, Default)]
 struct TableState {
-    /// Physical target of the last successfully installed logical view.
+    /// Confirmed view target; absent while view DDL may be incomplete.
     view_target: Option<Arc<TableTarget>>,
-    /// Last compiled row schema; cleared when a view target changes or resets.
+    /// Last compiled row schema; cleared before view DDL, including resets.
     prepared_schema: Option<PreparedTableSchema>,
 }
 
 impl TableState {
+    /// Clears the cached view target and descriptor before view DDL.
+    fn invalidate(&mut self) {
+        *self = Self::default();
+    }
+
     /// Compiles once per endpoint and mode; warm batches only clone an Arc.
     fn prepare_descriptor(
         &mut self,
@@ -556,26 +562,6 @@ where
         self
     }
 
-    /// Writes table-copy rows through the destination write path in tests.
-    #[cfg(feature = "test-utils")]
-    pub async fn write_table_rows_for_tests(
-        &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        self.write_table_rows(replicated_table_schema, table_rows).await
-    }
-
-    /// Drops destination table objects through the destination drop path in
-    /// tests.
-    #[cfg(feature = "test-utils")]
-    pub async fn drop_table_for_copy_for_tests(
-        &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<()> {
-        self.drop_table_for_copy_inner(replicated_table_schema).await
-    }
-
     /// Locks one table without holding the registry during preparation or DDL.
     async fn lock_table(&self, table_id: TableId) -> OwnedMutexGuard<TableState> {
         let table = {
@@ -739,9 +725,7 @@ where
         let table_target = self
             .resolve_or_create_table_for_schema(replicated_table_schema, table.view_target.as_ref())
             .await?;
-        let bigquery_table_id = table_target.versioned_id.base_table_id();
-
-        self.ensure_view_points_to_table(&mut table, bigquery_table_id, &table_target).await?;
+        self.ensure_view_points_to_table(&mut table, &table_target).await?;
 
         let table_descriptor =
             table.prepare_descriptor(replicated_table_schema, use_cdc_sequence_column);
@@ -762,70 +746,40 @@ where
         Ok(metadata)
     }
 
-    /// Ensures a view points to the specified target table, creating or
-    /// updating as needed.
-    ///
-    /// Returns `true` if the view was created or updated, `false` if already
-    /// correct.
+    /// Installs the target view unless this table's cache already certifies it.
     async fn ensure_view_points_to_table(
         &self,
         table: &mut TableState,
-        bigquery_table_id: &BigQueryTableId,
         table_target: &Arc<TableTarget>,
-    ) -> EtlResult<bool> {
-        if let Some(current_target) = table.view_target.as_ref()
-            && current_target == table_target
-        {
-            debug!(
-                %bigquery_table_id,
-                %table_target,
-                "view already points to target, skipping creation"
-            );
-
-            return Ok(false);
+    ) -> EtlResult<()> {
+        if table.view_target.as_ref() == Some(table_target) {
+            return Ok(());
         }
 
+        self.recreate_view_for_table(table, table_target).await
+    }
+
+    /// Recreates a view even when its target is unchanged, refreshing its
+    /// schema.
+    async fn recreate_view_for_table(
+        &self,
+        table: &mut TableState,
+        table_target: &Arc<TableTarget>,
+    ) -> EtlResult<()> {
+        // A failed or cancelled request may still change the remote view. Stop
+        // certifying its old target before DDL so a later write reinstalls it.
+        table.invalidate();
+
+        let bigquery_table_id = table_target.versioned_id.base_table_id();
         self.client
             .create_or_replace_view(&self.dataset_id, bigquery_table_id, &table_target.physical_id)
             .await?;
 
-        // We insert/overwrite the cached view target.
-        table.prepared_schema = None;
         table.view_target = Some(Arc::clone(table_target));
 
         debug!(
             %bigquery_table_id,
             %table_target,
-            "view created/updated to point to target"
-        );
-
-        Ok(true)
-    }
-
-    /// Recreates a view for a target table even when the cached target is
-    /// unchanged.
-    async fn recreate_view_for_table(
-        &self,
-        table: &mut TableState,
-        bigquery_table_id: &BigQueryTableId,
-        versioned_table_id: &VersionedBigQueryTableId,
-        source_name: &TableName,
-    ) -> EtlResult<()> {
-        self.client
-            .create_or_replace_view(
-                &self.dataset_id,
-                bigquery_table_id,
-                &versioned_table_id.to_string(),
-            )
-            .await?;
-
-        table.prepared_schema = None;
-        table.view_target =
-            Some(Arc::new(TableTarget::new(versioned_table_id.clone(), source_name.clone())));
-
-        debug!(
-            %bigquery_table_id,
-            %versioned_table_id,
             "view recreated for target table"
         );
 
@@ -1019,14 +973,11 @@ where
             return Err(err);
         }
 
-        let bigquery_table_id = versioned_table_id.base_table_id();
-        self.recreate_view_for_table(
-            &mut table,
-            bigquery_table_id,
-            &versioned_table_id,
-            new_replicated_table_schema.name(),
-        )
-        .await?;
+        let table_target = Arc::new(TableTarget::new(
+            versioned_table_id,
+            new_replicated_table_schema.name().clone(),
+        ));
+        self.recreate_view_for_table(&mut table, &table_target).await?;
 
         // Mark as applied after successful changes.
         self.state_store
@@ -1420,8 +1371,7 @@ where
                 .await?;
 
             // Update the view to point to the new table.
-            self.ensure_view_points_to_table(&mut table, &bigquery_table_id, &next_table_target)
-                .await?;
+            self.ensure_view_points_to_table(&mut table, &next_table_target).await?;
 
             // Update the metadata to point to the new table.
             let metadata = DestinationTableMetadata::new_applied(
@@ -1478,6 +1428,10 @@ where
 
         table_ids.extend(self.list_table_versions_for_cleanup(&base_bigquery_table_id).await);
 
+        // Invalidate before DDL: cancellation or an ambiguous error can leave
+        // the view removed even when this call does not report success.
+        table.invalidate();
+
         // Removing the logical view is required. Once it is gone, failures to
         // delete its old physical targets cannot expose stale data after
         // recopy.
@@ -1487,10 +1441,6 @@ where
         // Release Storage Write API connections that may still refer to the
         // deleted physical tables. Subsequent copies allocate fresh names.
         self.client.invalidate_all_connections().await;
-
-        // The view was removed even if physical cleanup left unused tables.
-        table.view_target = None;
-        table.prepared_schema = None;
 
         info!(table_id = table_id.0, "removed bigquery view before copy");
 
@@ -2156,15 +2106,58 @@ fn split_table_rows(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{future::pending, sync::Arc};
 
     use etl::{
         data::Cell,
         schema::{ColumnSchema, IdentityMask, PgLsn, SnapshotId, TableId, TableSchema, Type},
+        store::{MemoryStore, StateStore},
+    };
+    use gcp_bigquery_client::{
+        auth::Authenticator, client_builder::ClientBuilder, error::BQError, storage::ColumnMode,
     };
     use prost::Message;
 
     use super::*;
+
+    /// Stops requests at authentication so lifecycle tests never contact
+    /// BigQuery.
+    #[derive(Clone)]
+    struct UnavailableAuthenticator {
+        /// Leaves authentication pending when testing cancellation.
+        pending: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Authenticator for UnavailableAuthenticator {
+        async fn access_token(&self) -> Result<String, BQError> {
+            if self.pending { pending().await } else { Err(BQError::NoToken) }
+        }
+    }
+
+    /// Builds a destination whose remote operations fail or remain pending.
+    async fn unavailable_destination(pending: bool) -> BigQueryDestination<MemoryStore> {
+        let client = ClientBuilder::new()
+            .with_v2_base_url("http://127.0.0.1:1".to_owned())
+            .build_from_authenticator(Arc::new(UnavailableAuthenticator { pending }))
+            .await
+            .unwrap();
+        BigQueryDestination::new(
+            BigQueryClient::from_test_client(client),
+            "test_dataset".to_owned(),
+            None,
+            1,
+            MemoryStore::new(),
+        )
+    }
+
+    /// Builds a cached physical target matching the test schema's logical name.
+    fn table_target(schema: &ReplicatedTableSchema) -> Arc<TableTarget> {
+        Arc::new(TableTarget::new(
+            VersionedBigQueryTableId::new(table_name_to_bigquery_table_id(schema.name()).unwrap()),
+            schema.name().clone(),
+        ))
+    }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
         let table_schema = Arc::new(TableSchema::new(
@@ -2246,6 +2239,190 @@ mod tests {
         ]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Warm descriptors are reused, but each schema endpoint and write mode
+    /// must produce the corresponding wire fields.
+    #[test]
+    fn descriptor_cache_tracks_snapshot_mask_and_write_mode() {
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        let mut table = TableState::default();
+        let copy = table.prepare_descriptor(&schema, false);
+        assert!(Arc::ptr_eq(&copy, &table.prepare_descriptor(&schema, false)));
+        assert_eq!(copy.field_descriptors.len(), 3);
+        assert!(matches!(copy.field_descriptors[0].mode, ColumnMode::Required));
+
+        let cdc = table.prepare_descriptor(&schema, true);
+        assert!(!Arc::ptr_eq(&copy, &cdc));
+        assert_eq!(cdc.field_descriptors.len(), 4);
+        assert!(matches!(cdc.field_descriptors[0].mode, ColumnMode::Nullable));
+        assert_eq!(cdc.field_descriptors[3].name, "_CHANGE_SEQUENCE_NUMBER");
+
+        let projected = ReplicatedTableSchema::from_mask(
+            Arc::new(schema.inner().clone()),
+            ReplicationMask::from_bytes(vec![1, 0]),
+        );
+        let projected_descriptor = table.prepare_descriptor(&projected, true);
+        assert!(!Arc::ptr_eq(&cdc, &projected_descriptor));
+        assert_eq!(projected_descriptor.field_descriptors.len(), 3);
+        assert_eq!(projected_descriptor.field_descriptors[1].name, "_CHANGE_TYPE");
+
+        let mut next_schema = schema.inner().clone();
+        next_schema.snapshot_id = SnapshotId::new(PgLsn::from(1), PgLsn::from(1));
+        next_schema.column_schemas[0].name = "renamed_id".to_owned();
+        let next_schema = ReplicatedTableSchema::from_mask(
+            Arc::new(next_schema),
+            projected.replication_mask().clone(),
+        );
+        let next = table.prepare_descriptor(&next_schema, true);
+        assert!(!Arc::ptr_eq(&projected_descriptor, &next));
+        assert_eq!(next.field_descriptors[0].name, "renamed_id");
+        assert!(Arc::ptr_eq(&next, &table.prepare_descriptor(&next_schema, true)));
+    }
+
+    /// A warm view cache cannot bypass authoritative schema state or identity.
+    #[tokio::test]
+    async fn warm_cache_revalidates_destination_metadata() {
+        let destination = unavailable_destination(false).await;
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        let target = table_target(&schema);
+        let metadata = DestinationTableMetadata::new_applied(
+            target.physical_id.clone(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        destination
+            .state_store
+            .store_destination_table_metadata(schema.id(), metadata.clone())
+            .await
+            .unwrap();
+        destination.lock_table(schema.id()).await.view_target = Some(Arc::clone(&target));
+
+        let (resolved, descriptor) =
+            destination.prepare_table_for_writes(&schema, false).await.unwrap();
+        assert!(Arc::ptr_eq(&target, &resolved));
+        let (_, reused) = destination.prepare_table_for_writes(&schema, false).await.unwrap();
+        assert!(Arc::ptr_eq(&descriptor, &reused));
+
+        // The cached target and descriptor do not authorize a different
+        // endpoint, even when its physical table is unchanged.
+        for (snapshot_id, mask) in [
+            (SnapshotId::new(PgLsn::from(1), PgLsn::from(1)), schema.replication_mask().clone()),
+            (schema.inner().snapshot_id, ReplicationMask::from_bytes(vec![1, 0])),
+        ] {
+            destination
+                .state_store
+                .store_destination_table_metadata(
+                    schema.id(),
+                    DestinationTableMetadata::new_applied(
+                        target.physical_id.clone(),
+                        snapshot_id,
+                        mask,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                destination.prepare_table_for_writes(&schema, false).await.unwrap_err().kind(),
+                ErrorKind::DestinationSchemaRewind
+            );
+        }
+
+        let applying = metadata
+            .with_schema_change(
+                SnapshotId::new(PgLsn::from(1), PgLsn::from(1)),
+                schema.replication_mask().clone(),
+            )
+            .unwrap();
+        destination
+            .state_store
+            .store_destination_table_metadata(schema.id(), applying)
+            .await
+            .unwrap();
+        assert_eq!(
+            destination.prepare_table_for_writes(&schema, false).await.unwrap_err().kind(),
+            ErrorKind::InvalidState
+        );
+
+        let replacement = table_target(&schema);
+        let metadata = DestinationTableMetadata::new_applied(
+            replacement.physical_id.clone(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        destination
+            .state_store
+            .store_destination_table_metadata(schema.id(), metadata)
+            .await
+            .unwrap();
+        // A different durable target requires view DDL, which this fixture
+        // rejects.
+        assert_eq!(
+            destination.prepare_table_for_writes(&schema, false).await.unwrap_err().kind(),
+            ErrorKind::DestinationAuthenticationError
+        );
+        let table = destination.lock_table(schema.id()).await;
+        assert!(table.view_target.is_none());
+        assert!(table.prepared_schema.is_none());
+    }
+
+    /// Even a same-target schema refresh must discard cached state on failure.
+    #[tokio::test]
+    async fn failed_view_refresh_invalidates_cache() {
+        let destination = unavailable_destination(false).await;
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        let target = table_target(&schema);
+        let mut table = destination.lock_table(schema.id()).await;
+        table.view_target = Some(Arc::clone(&target));
+        table.prepare_descriptor(&schema, false);
+
+        destination.ensure_view_points_to_table(&mut table, &target).await.unwrap();
+        assert_eq!(
+            destination.recreate_view_for_table(&mut table, &target).await.unwrap_err().kind(),
+            ErrorKind::DestinationAuthenticationError
+        );
+        assert!(table.view_target.is_none());
+        assert!(table.prepared_schema.is_none());
+    }
+
+    /// Cancelling in-flight view DDL must not leave the old target certified.
+    #[tokio::test]
+    async fn cancelled_view_refresh_invalidates_cache() {
+        let destination = unavailable_destination(true).await;
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        let target = table_target(&schema);
+        let mut table = destination.lock_table(schema.id()).await;
+        table.view_target = Some(Arc::clone(&target));
+        table.prepare_descriptor(&schema, false);
+
+        {
+            let refresh = destination.recreate_view_for_table(&mut table, &target);
+            tokio::pin!(refresh);
+            assert!(futures::poll!(refresh).is_pending());
+        }
+
+        assert!(table.view_target.is_none());
+        assert!(table.prepared_schema.is_none());
+    }
+
+    /// Reset invalidates before attempting the drop, including failed drops.
+    #[tokio::test]
+    async fn failed_view_drop_invalidates_cache() {
+        let destination = unavailable_destination(false).await;
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        {
+            let mut table = destination.lock_table(schema.id()).await;
+            table.view_target = Some(table_target(&schema));
+            table.prepare_descriptor(&schema, false);
+        }
+
+        assert_eq!(
+            destination.drop_table_for_copy_inner(&schema).await.unwrap_err().kind(),
+            ErrorKind::DestinationAuthenticationError
+        );
+        let table = destination.lock_table(schema.id()).await;
+        assert!(table.view_target.is_none());
+        assert!(table.prepared_schema.is_none());
     }
 
     #[test]
