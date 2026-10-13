@@ -183,6 +183,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
         run_source_migrations: true,
+        drain_on_shutdown: true,
         max_copy_connections_per_table: 2,
     };
 

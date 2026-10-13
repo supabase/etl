@@ -288,9 +288,10 @@ where
     /// Initiates graceful shutdown of the pipeline.
     ///
     /// Cancels the shared shutdown token. Apply loops stop new intake and
-    /// drain pending destination writes; initial sync workers interrupt their
-    /// copy waits and stop. The request is retained even if no workers have
-    /// started yet. Repeated requests are harmless.
+    /// drain pending destination writes, or abandon them for replay when
+    /// [`PipelineConfig::drain_on_shutdown`] is disabled; initial sync workers
+    /// interrupt their copy waits and stop. The request is retained even if no
+    /// workers have started yet. Repeated requests are harmless.
     ///
     /// This method returns immediately without waiting for workers to stop.
     ///
