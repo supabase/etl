@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use etl::{
     data::{Cell, Date, TableRow},
@@ -48,7 +48,7 @@ fn test_snapshot_id(value: u64) -> SnapshotId {
     SnapshotId::new(lsn, lsn)
 }
 
-/// Checks physical generations and logical views retain distinct names across
+/// Checks physical versions and logical views retain distinct names across
 /// copy, CDC, restart, truncate, and reset.
 #[tokio::test(flavor = "multi_thread")]
 async fn boundary_underscore_names_survive_destination_lifecycle() {
@@ -72,7 +72,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
             .await
             .unwrap();
         let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-        assert_eq!(metadata.table_id(), format!("{name}_0"));
+        assert!(metadata.table_id().starts_with(&format!("{name}_")));
         original_metadata.push(metadata);
     }
     destination.shutdown().await.unwrap();
@@ -119,11 +119,11 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     )
     .await
     .unwrap();
-    // Join generation cleanup before checking or resetting the physical tables.
+    // Join version cleanup before checking or resetting the physical tables.
     restarted.shutdown().await.unwrap();
     let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-    assert_eq!(metadata.table_id(), format!("{name}_1"));
-    assert!(database.get_table_metadata_by_id(&format!("{name}_0")).await.is_none());
+    assert_ne!(metadata.table_id(), original_metadata[0].table_id());
+    assert!(database.get_table_metadata_by_id(original_metadata[0].table_id()).await.is_none());
     let rows = database.query_table(schema.name().clone()).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -742,6 +742,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
 
     let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
 
+    let mut physical_ids = HashSet::new();
     for iteration in 1..=3 {
         let users_rows = vec![
             TableRow::new(vec![
@@ -757,6 +758,9 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
         ];
 
         destination.write_table_rows_for_tests(&replicated_table_schema, users_rows).await.unwrap();
+        let metadata =
+            store.get_destination_table_metadata(table_schema.id).await.unwrap().unwrap();
+        assert!(physical_ids.insert(metadata.table_id().to_owned()));
 
         let mut rows = parse_bigquery_table_rows::<BigQueryUser>(
             bigquery_database.query_table(table_schema.name.clone()).await.unwrap(),
@@ -780,6 +784,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
     }
 }
 
+/// Interrupted creation must abandon its old identity even if it still exists.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_creation_recovers_after_destination_restart() {
     install_crypto_provider();
@@ -790,40 +795,74 @@ async fn table_creation_recovers_after_destination_restart() {
     }
 
     let bigquery_database = setup_bigquery_database().await;
-    let store = MemoryStore::new();
-    let table_name = format!("destination_creation_recovery_{}", uuid::Uuid::new_v4().simple());
-    let table_schema = make_users_schema(&table_name);
-    let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
-    let table_id = replicated_table_schema.id();
+    for delete_before_restart in [false, true] {
+        let store = MemoryStore::new();
+        let table_name = format!("destination_creation_recovery_{}", uuid::Uuid::new_v4().simple());
+        let table_schema = make_users_schema(&table_name);
+        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+        let table_id = replicated_table_schema.id();
+        store.store_table_schema(table_schema).await.unwrap();
 
-    store.store_table_schema(table_schema).await.unwrap();
+        let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
+        destination.write_table_rows_for_tests(&replicated_table_schema, Vec::new()).await.unwrap();
+        destination.shutdown().await.unwrap();
+        let applied_metadata =
+            store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
 
-    let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-    destination.write_table_rows_for_tests(&replicated_table_schema, Vec::new()).await.unwrap();
+        // Both a surviving creation and a deleted incarnation must be
+        // abandoned.
+        if delete_before_restart {
+            destination.drop_table_for_copy_for_tests(&replicated_table_schema).await.unwrap();
+        }
+        let creating_metadata = etl::destination::DestinationTableMetadata::new_creating(
+            applied_metadata.table_id().to_owned(),
+            applied_metadata.snapshot_id(),
+            applied_metadata.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(table_id, creating_metadata).await.unwrap();
 
-    let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(applied_metadata.is_applied());
+        let restarted_destination = bigquery_database.build_destination(1_u64, store.clone()).await;
+        restarted_destination
+            .write_table_rows_for_tests(
+                &replicated_table_schema,
+                vec![TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("recovered".to_owned()),
+                    Cell::I32(42),
+                ])],
+            )
+            .await
+            .unwrap();
+        restarted_destination.shutdown().await.unwrap();
 
-    // Simulate a crash after `Creating` was stored and the idempotent table DDL
-    // completed, but before the final `Applied` metadata write.
-    let creating_metadata = etl::destination::DestinationTableMetadata::new_creating(
-        applied_metadata.table_id().to_owned(),
-        applied_metadata.snapshot_id(),
-        applied_metadata.replication_mask().clone(),
-    );
-    store.store_destination_table_metadata(table_id, creating_metadata).await.unwrap();
+        let recovered_metadata =
+            store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+        assert!(recovered_metadata.is_applied());
+        assert_ne!(recovered_metadata.table_id(), applied_metadata.table_id());
+        assert_eq!(recovered_metadata.snapshot_id(), applied_metadata.snapshot_id());
+        assert_eq!(recovered_metadata.replication_mask(), applied_metadata.replication_mask());
 
-    let restarted_destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-    restarted_destination
-        .write_table_rows_for_tests(&replicated_table_schema, Vec::new())
-        .await
-        .unwrap();
+        // Recovery does not clean up the abandoned target. Explicit reset
+        // below provides the next cleanup opportunity.
+        assert_eq!(
+            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_some(),
+            !delete_before_restart
+        );
 
-    let recovered_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(recovered_metadata.is_applied());
-    assert_eq!(recovered_metadata.table_id(), applied_metadata.table_id());
-    assert_eq!(recovered_metadata.snapshot_id(), applied_metadata.snapshot_id());
-    assert_eq!(recovered_metadata.replication_mask(), applied_metadata.replication_mask());
+        let rows =
+            bigquery_database.query_table(replicated_table_schema.name().clone()).await.unwrap();
+        assert_eq!(
+            parse_bigquery_table_rows::<BigQueryUser>(rows),
+            vec![BigQueryUser::new(1, "recovered", 42)]
+        );
+        restarted_destination
+            .drop_table_for_copy_for_tests(&replicated_table_schema)
+            .await
+            .unwrap();
+        assert!(
+            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_none()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

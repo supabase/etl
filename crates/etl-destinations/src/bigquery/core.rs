@@ -9,9 +9,8 @@ use etl::{
     bail,
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
     destination::{
-        Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
-        DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
-        WriteTableRowsResult,
+        Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
+        TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
@@ -30,6 +29,7 @@ use metrics::histogram;
 use prost::Message;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::{
     bigquery::{
@@ -46,10 +46,16 @@ use crate::{
     table_name::try_stringify_table_name,
 };
 
+/// Width of a full 128-bit UUID encoded in base 36, distinct from legacy u64
+/// IDs.
+const TABLE_VERSION_ID_LENGTH: usize = 25;
+
 /// Internal CDC sequence ordinal for single-row changes and generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
+
 /// Internal CDC sequence ordinal for generated upserts after generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_SECOND: u64 = 1;
+
 /// BigQuery-reserved column prefixes, compared case-insensitively.
 const BIGQUERY_RESERVED_COLUMN_PREFIXES: [&str; 9] = [
     "_TABLE_",
@@ -70,133 +76,168 @@ pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> EtlResult<BigQ
     try_stringify_table_name(table_name)
 }
 
-/// A BigQuery table identifier with version sequence for truncate operations.
-///
-/// Combines a base table name with a sequence number to enable versioned
-/// tables. Used for truncate handling where each truncate creates a new table
-/// version.
+/// A physical table version, including identifiers from older releases.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
-struct SequencedBigQueryTableId(BigQueryTableId, u64);
+enum TableVersionId {
+    /// A legacy numeric suffix, retained only for reading existing metadata.
+    Legacy(u64),
+    /// A random identity independent of clocks, resets, and metadata history.
+    Random(Uuid),
+}
 
-impl SequencedBigQueryTableId {
-    /// Creates a new sequenced table ID starting at version 0.
+impl Display for TableVersionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Legacy(version) => write!(f, "{version}"),
+            Self::Random(uuid) => {
+                // Base 36 retains every UUID bit in 25 lowercase characters.
+                // Fixed width distinguishes it from every legacy u64 suffix;
+                // lowercase also works in case-insensitive BigQuery datasets.
+                let mut value = uuid.as_u128();
+                let mut digits = ['0'; TABLE_VERSION_ID_LENGTH];
+                for digit in digits.iter_mut().rev() {
+                    // The remainder is below 36, so both conversions succeed.
+                    let remainder = u32::try_from(value % 36).unwrap();
+                    *digit = char::from_digit(remainder, 36).unwrap();
+                    value /= 36;
+                }
+                for digit in digits {
+                    write!(f, "{digit}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A physical BigQuery table identifier distinct from its stable logical view.
+///
+/// Each creation attempt receives a fresh UUID. A deleted physical name must
+/// never be deliberately reused: Storage Write API appends can otherwise be
+/// acknowledged without reaching the replacement table.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct VersionedBigQueryTableId(BigQueryTableId, TableVersionId);
+
+impl VersionedBigQueryTableId {
+    /// Allocates a fresh physical identity without consulting wall-clock time.
     fn new(table_id: BigQueryTableId) -> Self {
-        Self(table_id, 0)
+        Self(table_id, TableVersionId::Random(Uuid::new_v4()))
     }
 
-    /// Returns the next version of this sequenced table ID.
-    fn next(&self) -> Self {
-        Self(self.0.clone(), self.1 + 1)
+    /// Borrows the logical BigQuery table ID without the version suffix.
+    fn base_table_id(&self) -> &BigQueryTableId {
+        &self.0
     }
 
-    /// Extracts the base BigQuery table ID without the sequence number.
-    fn to_bigquery_table_id(&self) -> BigQueryTableId {
-        self.0.clone()
-    }
-
-    /// Returns whether this sequenced table belongs to `base_table_id`.
+    /// Returns whether this physical table belongs to `base_table_id`.
     fn belongs_to_base(&self, base_table_id: &BigQueryTableId) -> bool {
         &self.0 == base_table_id
     }
 
-    /// Parses a sequenced table id only when it belongs to `base_table_id`.
+    /// Parses a physical table ID only when it belongs to `base_table_id`.
     fn parse_for_base(table_id: &str, base_table_id: &BigQueryTableId) -> Option<Self> {
         table_id.parse::<Self>().ok().filter(|table_id| table_id.belongs_to_base(base_table_id))
     }
 }
 
-impl FromStr for SequencedBigQueryTableId {
+impl FromStr for VersionedBigQueryTableId {
     type Err = EtlError;
 
-    /// Parses a sequenced table ID from string format `table_name_sequence`.
-    ///
-    /// Expects the last underscore to separate the table name from the sequence
-    /// number.
+    /// Parses legacy numeric suffixes and fixed-width lowercase base-36 UUIDs.
     fn from_str(table_id: &str) -> Result<Self, Self::Err> {
-        if let Some(last_underscore) = table_id.rfind('_') {
-            let table_name = &table_id[..last_underscore];
-            let sequence_str = &table_id[last_underscore + 1..];
-
-            if table_name.is_empty() {
-                bail!(
-                    ErrorKind::DestinationTableNameInvalid,
-                    "Invalid sequenced BigQuery table ID format",
-                    format!(
-                        "Table name cannot be empty in sequenced table ID '{table_id}'. Expected \
-                         format: 'table_name_sequence'"
-                    )
-                )
+        let parsed = table_id.rsplit_once('_').and_then(|(base, suffix)| {
+            if base.is_empty() || suffix.is_empty() {
+                return None;
             }
 
-            if sequence_str.is_empty() {
-                bail!(
-                    ErrorKind::DestinationTableNameInvalid,
-                    "Invalid sequenced BigQuery table ID format",
-                    format!(
-                        "Sequence number cannot be empty in sequenced table ID '{table_id}'. \
-                         Expected format: 'table_name_sequence'"
-                    )
-                )
-            }
+            let version = if suffix.len() == TABLE_VERSION_ID_LENGTH {
+                if !suffix.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()) {
+                    return None;
+                }
+                TableVersionId::Random(Uuid::from_u128(u128::from_str_radix(suffix, 36).ok()?))
+            } else {
+                if suffix.len() > 20
+                    || (suffix.len() > 1 && suffix.starts_with('0'))
+                    || !suffix.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return None;
+                }
+                TableVersionId::Legacy(suffix.parse().ok()?)
+            };
 
-            let sequence_number = sequence_str.parse::<u64>().map_err(|e| {
-                etl_error!(
-                    ErrorKind::DestinationTableNameInvalid,
-                    "Invalid sequence number in BigQuery table ID",
-                    format!(
-                        "Failed to parse sequence number '{sequence_str}' in table ID \
-                         '{table_id}': {e}. Expected a non-negative integer (0-{max})",
-                        max = u64::MAX
-                    )
-                )
-            })?;
+            Some(Self(base.to_owned(), version))
+        });
 
-            Ok(SequencedBigQueryTableId(table_name.to_owned(), sequence_number))
-        } else {
-            bail!(
+        parsed.ok_or_else(|| {
+            etl_error!(
                 ErrorKind::DestinationTableNameInvalid,
-                "Invalid sequenced BigQuery table ID format",
+                "Invalid versioned BigQuery table ID",
                 format!(
-                    "No underscore found in table ID '{table_id}'. Expected format: \
-                     'table_name_sequence' where sequence is a non-negative integer"
+                    "Table ID '{table_id}' must end in a u64 version or a 25-character lowercase \
+                     base-36 version"
                 )
             )
-        }
+        })
     }
 }
 
-impl Display for SequencedBigQueryTableId {
+impl Display for VersionedBigQueryTableId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}_{}", self.0, self.1)
     }
 }
 
-/// Returns the sequenced table id stored in destination metadata.
-fn metadata_sequenced_table_id_for_base(
+/// Returns the versioned table id stored in destination metadata.
+fn metadata_versioned_table_id_for_base(
     metadata: &DestinationTableMetadata,
     base_bigquery_table_id: &BigQueryTableId,
-) -> EtlResult<SequencedBigQueryTableId> {
-    let sequenced_bigquery_table_id = metadata.table_id().parse::<SequencedBigQueryTableId>()?;
+) -> EtlResult<VersionedBigQueryTableId> {
+    let versioned_table_id = metadata.table_id().parse::<VersionedBigQueryTableId>()?;
 
-    if !sequenced_bigquery_table_id.belongs_to_base(base_bigquery_table_id) {
+    if !versioned_table_id.belongs_to_base(base_bigquery_table_id) {
         bail!(
             ErrorKind::InvalidState,
             "Destination table metadata points to a different BigQuery table",
             format!(
                 "Destination table metadata points to '{}', but BigQuery table resolution \
-                 expected a sequenced table for '{}'",
+                 expected a versioned table for '{}'",
                 metadata.table_id(),
                 base_bigquery_table_id
             )
         );
     }
 
-    Ok(sequenced_bigquery_table_id)
+    Ok(versioned_table_id)
+}
+
+/// Attempts physical-table deletion without making replication depend on
+/// cleanup.
+///
+/// Call only for obsolete versions after switching the view and persisting
+/// metadata, or after dropping the logical view during an explicit reset.
+/// Failed deletions leave orphans for a later cleanup attempt or the operator.
+async fn delete_table_versions(
+    client: &BigQueryClient,
+    dataset_id: &BigQueryDatasetId,
+    table_ids: HashSet<VersionedBigQueryTableId>,
+) {
+    for table_id in table_ids {
+        if let Err(error) = client.drop_table_if_exists(dataset_id, &table_id.to_string()).await {
+            warn!(
+                %dataset_id,
+                %table_id,
+                error = %error,
+                "failed to delete obsolete bigquery table; manual cleanup may be required"
+            );
+        } else {
+            info!(%dataset_id, %table_id, "deleted obsolete bigquery table");
+        }
+    }
 }
 
 /// Ensures BigQuery metadata is ready for streaming operations.
 fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlResult<()> {
-    if matches!(metadata.table_schema(), DestinationTableSchema::Applied { .. }) {
+    if metadata.is_applied() {
         return Ok(());
     }
 
@@ -225,7 +266,7 @@ struct Inner {
     ///
     /// # Example
     /// `{ users_table: users_table_10, orders_table: orders_table_3 }`
-    created_views: HashMap<BigQueryTableId, SequencedBigQueryTableId>,
+    created_views: HashMap<BigQueryTableId, VersionedBigQueryTableId>,
 }
 
 impl Inner {
@@ -448,33 +489,77 @@ where
         self
     }
 
-    /// Resolves or creates the sequenced BigQuery table for a schema endpoint.
+    /// Discovers cleanup candidates without making listing a replication
+    /// prerequisite.
     ///
-    /// Applied metadata is authoritative: it selects the current truncate
-    /// sequence and proves that ETL completed table preparation for the
+    /// The caller adds the durable metadata target even when listing fails or
+    /// lags. Collect candidates under serialization before creating a
+    /// replacement.
+    async fn list_table_versions_for_cleanup(
+        &self,
+        base_table_id: &BigQueryTableId,
+    ) -> HashSet<VersionedBigQueryTableId> {
+        match self.client.list_physical_table_ids(&self.dataset_id, base_table_id).await {
+            Ok(physical_table_ids) => physical_table_ids
+                .into_iter()
+                .filter_map(|physical_table_id| {
+                    VersionedBigQueryTableId::parse_for_base(&physical_table_id, base_table_id)
+                })
+                .collect(),
+            Err(error) => {
+                warn!(
+                    dataset_id = %self.dataset_id,
+                    %base_table_id,
+                    error = %error,
+                    "failed to list bigquery table versions; unlisted tables may require manual cleanup"
+                );
+                HashSet::new()
+            }
+        }
+    }
+
+    /// Schedules optimistic deletion only after the replacement is
+    /// authoritative.
+    ///
+    /// Failures are logged and leave unused tables behind. A later truncate or
+    /// explicit reset can retry cleanup; there is no persistent cleanup queue.
+    async fn schedule_table_cleanup(&self, obsolete_table_ids: HashSet<VersionedBigQueryTableId>) {
+        let client = self.client.clone();
+        let dataset_id = self.dataset_id.clone();
+        self.tasks
+            .spawn_with(move || async move {
+                delete_table_versions(&client, &dataset_id, obsolete_table_ids).await;
+            })
+            .await;
+    }
+
+    /// Resolves or creates the versioned BigQuery table for a schema endpoint.
+    ///
+    /// Applied metadata is authoritative: it selects the current physical
+    /// version and proves that ETL completed table preparation for the
     /// recorded snapshot and replication mask. The physical table is not probed
     /// or recreated in that state because replacing a missing applied table
     /// with an empty table would silently discard replicated data.
     ///
-    /// Initial creation is bracketed by `Creating` and `Applied`. A matching
-    /// `Creating` endpoint safely resumes the idempotent DDL after a crash;
+    /// Initial creation is bracketed by `Creating` and `Applied`. Interrupted
+    /// creation abandons its old identity and creates a fresh version;
     /// `Applying` remains blocked because BigQuery schema DDL can be partially
     /// applied.
     async fn resolve_or_create_table_for_schema(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<SequencedBigQueryTableId> {
+    ) -> EtlResult<VersionedBigQueryTableId> {
         let table_id = replicated_table_schema.id();
         let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let existing_metadata = self.state_store.get_destination_table_metadata(table_id).await?;
-        let sequenced_bigquery_table_id = match &existing_metadata {
-            Some(metadata) => metadata_sequenced_table_id_for_base(metadata, &bigquery_table_id)?,
-            None => SequencedBigQueryTableId::new(bigquery_table_id),
-        };
-        let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
 
-        match existing_metadata {
-            Some(metadata) if metadata.is_applying() => {
+        // Applied metadata supplies the physical identity without probing
+        // BigQuery.
+        if let Some(metadata) = existing_metadata {
+            let versioned_table_id =
+                metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
+
+            if metadata.is_applying() {
                 return Err(etl_error!(
                     ErrorKind::InvalidState,
                     "BigQuery table schema is still being applied",
@@ -484,63 +569,48 @@ where
                     )
                 ));
             }
-            Some(metadata) => {
-                ensure_destination_schema_matches_metadata(
-                    "BigQuery",
-                    table_id,
-                    &metadata,
-                    replicated_table_schema,
-                )?;
 
-                if metadata.is_creating() {
-                    validate_bigquery_table_shape(replicated_table_schema)?;
-                    self.client
-                        .create_table_if_missing(
-                            &self.dataset_id,
-                            &sequenced_bigquery_table_id_string,
-                            replicated_table_schema,
-                            self.max_staleness_mins,
-                            self.table_options.get(&table_id),
-                        )
-                        .await?;
-                    self.state_store
-                        .store_destination_table_metadata(table_id, metadata.to_applied())
-                        .await?;
+            ensure_destination_schema_matches_metadata(
+                "BigQuery",
+                table_id,
+                &metadata,
+                replicated_table_schema,
+            )?;
 
-                    debug!(
-                        %sequenced_bigquery_table_id,
-                        "recovered interrupted bigquery table creation"
-                    );
-                }
-            }
-            None => {
-                validate_bigquery_table_shape(replicated_table_schema)?;
-                let metadata = DestinationTableMetadata::new_creating(
-                    sequenced_bigquery_table_id_string.clone(),
-                    replicated_table_schema.inner().snapshot_id,
-                    replicated_table_schema.replication_mask().clone(),
-                );
-                self.state_store
-                    .store_destination_table_metadata(table_id, metadata.clone())
-                    .await?;
-                self.client
-                    .create_table_if_missing(
-                        &self.dataset_id,
-                        &sequenced_bigquery_table_id_string,
-                        replicated_table_schema,
-                        self.max_staleness_mins,
-                        self.table_options.get(&table_id),
-                    )
-                    .await?;
-                self.state_store
-                    .store_destination_table_metadata(table_id, metadata.to_applied())
-                    .await?;
-
-                debug!(%sequenced_bigquery_table_id, "created sequenced bigquery table");
+            if metadata.is_applied() {
+                return Ok(versioned_table_id);
             }
         }
 
-        Ok(sequenced_bigquery_table_id)
+        // We validate that the table is compatible with BigQuery.
+        validate_bigquery_table_shape(replicated_table_schema)?;
+
+        // A Creating target is abandoned without deletion here. Truncate or
+        // explicit reset can collect it after redirecting or removing the view.
+        let versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id);
+        let metadata = DestinationTableMetadata::new_creating(
+            versioned_table_id.to_string(),
+            replicated_table_schema.inner().snapshot_id,
+            replicated_table_schema.replication_mask().clone(),
+        );
+
+        self.state_store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+
+        self.client
+            .create_table(
+                &self.dataset_id,
+                &versioned_table_id.to_string(),
+                replicated_table_schema,
+                self.max_staleness_mins,
+                self.table_options.get(&table_id),
+            )
+            .await?;
+
+        self.state_store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+
+        debug!(%versioned_table_id, "created physical bigquery table");
+
+        Ok(versioned_table_id)
     }
 
     /// Prepares a table for BigQuery writes with schema-aware table creation.
@@ -548,21 +618,17 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(SequencedBigQueryTableId, TableDescriptor)> {
+    ) -> EtlResult<(VersionedBigQueryTableId, TableDescriptor)> {
         // Serialize the complete table/view preparation so concurrent copy
         // workers cannot race the durable metadata transition or derived view
         // cache.
         let mut inner = self.inner.lock().await;
-        let sequenced_bigquery_table_id =
+        let versioned_table_id =
             self.resolve_or_create_table_for_schema(replicated_table_schema).await?;
-        let bigquery_table_id = sequenced_bigquery_table_id.to_bigquery_table_id();
+        let bigquery_table_id = versioned_table_id.base_table_id();
 
-        self.ensure_view_points_to_table(
-            &mut inner,
-            &bigquery_table_id,
-            &sequenced_bigquery_table_id,
-        )
-        .await?;
+        self.ensure_view_points_to_table(&mut inner, bigquery_table_id, &versioned_table_id)
+            .await?;
 
         // Note: We return TableDescriptor by value for simplicity, which means
         // callers clone it when creating multiple batches. This is acceptable
@@ -573,7 +639,7 @@ where
         let table_descriptor =
             column_schemas_to_table_descriptor(replicated_table_schema, use_cdc_sequence_column);
 
-        Ok((sequenced_bigquery_table_id, table_descriptor))
+        Ok((versioned_table_id, table_descriptor))
     }
 
     /// Loads destination metadata and requires an applied schema state.
@@ -598,14 +664,14 @@ where
         &self,
         inner: &mut Inner,
         bigquery_table_id: &BigQueryTableId,
-        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        versioned_table_id: &VersionedBigQueryTableId,
     ) -> EtlResult<bool> {
         if let Some(current_target) = inner.created_views.get(bigquery_table_id)
-            && current_target == sequenced_bigquery_table_id
+            && current_target == versioned_table_id
         {
             debug!(
                 %bigquery_table_id,
-                %sequenced_bigquery_table_id,
+                %versioned_table_id,
                 "view already points to target, skipping creation"
             );
 
@@ -616,16 +682,16 @@ where
             .create_or_replace_view(
                 &self.dataset_id,
                 bigquery_table_id,
-                &sequenced_bigquery_table_id.to_string(),
+                &versioned_table_id.to_string(),
             )
             .await?;
 
         // We insert/overwrite the cached view target.
-        inner.created_views.insert(bigquery_table_id.clone(), sequenced_bigquery_table_id.clone());
+        inner.created_views.insert(bigquery_table_id.clone(), versioned_table_id.clone());
 
         debug!(
             %bigquery_table_id,
-            %sequenced_bigquery_table_id,
+            %versioned_table_id,
             "view created/updated to point to target"
         );
 
@@ -637,22 +703,22 @@ where
     async fn recreate_view_for_table(
         &self,
         bigquery_table_id: &BigQueryTableId,
-        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        versioned_table_id: &VersionedBigQueryTableId,
     ) -> EtlResult<()> {
         self.client
             .create_or_replace_view(
                 &self.dataset_id,
                 bigquery_table_id,
-                &sequenced_bigquery_table_id.to_string(),
+                &versioned_table_id.to_string(),
             )
             .await?;
 
         let mut inner = self.inner.lock().await;
-        inner.created_views.insert(bigquery_table_id.clone(), sequenced_bigquery_table_id.clone());
+        inner.created_views.insert(bigquery_table_id.clone(), versioned_table_id.clone());
 
         debug!(
             %bigquery_table_id,
-            %sequenced_bigquery_table_id,
+            %versioned_table_id,
             "view recreated for target table"
         );
 
@@ -670,7 +736,7 @@ where
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         // Prepare table for streaming.
-        let (sequenced_bigquery_table_id, table_descriptor) =
+        let (versioned_table_id, table_descriptor) =
             self.prepare_table_for_writes(replicated_table_schema, false).await?;
 
         // Add the CDC operation type to all rows (no lock needed).
@@ -687,7 +753,7 @@ where
 
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, target_batches);
-        let sequenced_bigquery_table_id_string = sequenced_bigquery_table_id.to_string();
+        let physical_table_id = versioned_table_id.to_string();
 
         // Create append requests from the split rows.
         let mut append_requests = Vec::with_capacity(table_rows_batches.len());
@@ -698,7 +764,7 @@ where
                     self.pipeline_id,
                     request_index,
                     &self.dataset_id,
-                    &sequenced_bigquery_table_id_string,
+                    &physical_table_id,
                     table_descriptor.clone(),
                     table_rows,
                 )?;
@@ -821,7 +887,7 @@ where
         let plan = current_schema
             .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_MAPPING)?;
         validate_bigquery_schema_plan(new_replicated_table_schema, &plan)?;
-        let sequenced_bigquery_table_id = metadata.table_id().parse()?;
+        let versioned_table_id = metadata.table_id().parse()?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and
         // mask).
@@ -841,9 +907,7 @@ where
             .store_destination_table_metadata(table_id, updated_metadata.clone())
             .await?;
 
-        if let Err(err) =
-            self.apply_schema_plan(&table_id, &sequenced_bigquery_table_id, &plan).await
-        {
+        if let Err(err) = self.apply_schema_plan(&table_id, &versioned_table_id, &plan).await {
             warn!(
                 table_id = %table_id,
                 error = %err,
@@ -852,8 +916,8 @@ where
             return Err(err);
         }
 
-        let bigquery_table_id = sequenced_bigquery_table_id.to_bigquery_table_id();
-        self.recreate_view_for_table(&bigquery_table_id, &sequenced_bigquery_table_id).await?;
+        let bigquery_table_id = versioned_table_id.base_table_id();
+        self.recreate_view_for_table(bigquery_table_id, &versioned_table_id).await?;
 
         // Mark as applied after successful changes.
         self.state_store
@@ -886,7 +950,7 @@ where
     async fn apply_schema_plan(
         &self,
         table_id: &TableId,
-        sequenced_bigquery_table_id: &SequencedBigQueryTableId,
+        versioned_table_id: &VersionedBigQueryTableId,
         plan: &SchemaPlan,
     ) -> EtlResult<()> {
         if plan.is_empty() {
@@ -896,12 +960,14 @@ where
 
         debug!(
             source_table_id = %table_id,
-            destination_table_id = %sequenced_bigquery_table_id,
+            destination_table_id = %versioned_table_id,
             added_column_count = plan.diff().added_columns.len(),
             removed_column_count = plan.diff().dropped_columns.len(),
             altered_column_count = plan.diff().altered_columns.len(),
             "applying bigquery table schema plan"
         );
+
+        let physical_table_id = versioned_table_id.to_string();
 
         // Apply the shared plan without regrouping operations.
         for operation in plan.ordered_operations() {
@@ -910,18 +976,14 @@ where
                     self.client
                         .drop_column(
                             &self.dataset_id,
-                            &sequenced_bigquery_table_id.to_string(),
+                            &physical_table_id,
                             &before_column_schema.name,
                         )
                         .await?;
                 }
                 SchemaOperation::AddColumn { after_column_schema, reason: _ } => {
                     self.client
-                        .add_column(
-                            &self.dataset_id,
-                            &sequenced_bigquery_table_id.to_string(),
-                            after_column_schema,
-                        )
+                        .add_column(&self.dataset_id, &physical_table_id, after_column_schema)
                         .await?;
 
                     // BigQuery adds the column as nullable, leaving existing
@@ -932,7 +994,7 @@ where
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
-                                &sequenced_bigquery_table_id.to_string(),
+                                &physical_table_id,
                                 &after_column_schema.name,
                                 &default_expression,
                             )
@@ -953,7 +1015,7 @@ where
                             self.client
                                 .rename_column(
                                     &self.dataset_id,
-                                    &sequenced_bigquery_table_id.to_string(),
+                                    &physical_table_id,
                                     &before.name,
                                     &after.name,
                                 )
@@ -962,7 +1024,7 @@ where
                         ColumnAlterationKind::Type => {
                             warn_unsupported_column_type_change(
                                 "bigquery",
-                                sequenced_bigquery_table_id,
+                                versioned_table_id,
                                 alteration,
                             );
                         }
@@ -974,7 +1036,7 @@ where
                                 self.client
                                     .drop_column_not_null(
                                         &self.dataset_id,
-                                        &sequenced_bigquery_table_id.to_string(),
+                                        &physical_table_id,
                                         &before.name,
                                     )
                                     .await?;
@@ -992,7 +1054,7 @@ where
                                 self.client
                                     .clear_column_default(
                                         &self.dataset_id,
-                                        &sequenced_bigquery_table_id.to_string(),
+                                        &physical_table_id,
                                         &before.name,
                                     )
                                     .await?;
@@ -1003,7 +1065,7 @@ where
                                     self.client
                                         .set_column_default(
                                             &self.dataset_id,
-                                            &sequenced_bigquery_table_id.to_string(),
+                                            &physical_table_id,
                                             &before.name,
                                             &default_expression,
                                         )
@@ -1023,7 +1085,7 @@ where
         }
 
         debug!(
-            destination_table_id = %sequenced_bigquery_table_id,
+            destination_table_id = %versioned_table_id,
             "bigquery table schema plan applied"
         );
 
@@ -1131,17 +1193,16 @@ where
                 for (request_index, (_, (replicated_table_schema, table_rows))) in
                     table_id_to_data.into_iter().enumerate()
                 {
-                    let (sequenced_bigquery_table_id, table_descriptor) =
+                    let (versioned_table_id, table_descriptor) =
                         self.prepare_table_for_writes(&replicated_table_schema, true).await?;
-                    let sequenced_bigquery_table_id_string =
-                        sequenced_bigquery_table_id.to_string();
+                    let physical_table_id = versioned_table_id.to_string();
                     histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                     let append_request = self.client.create_append_request(
                         self.pipeline_id,
                         request_index,
                         &self.dataset_id,
-                        &sequenced_bigquery_table_id_string,
+                        &physical_table_id,
                         table_descriptor,
                         table_rows,
                     )?;
@@ -1189,10 +1250,10 @@ where
     /// Handles table truncation by creating new versioned tables and updating
     /// views.
     ///
-    /// Creates fresh empty tables with incremented version numbers, updates
-    /// views to point to new tables, and schedules cleanup of old table
-    /// versions. Uses the provided schemas directly instead of looking them up
-    /// from a store.
+    /// Creates fresh empty tables with independently allocated version IDs,
+    /// updates views to point to new tables, and schedules cleanup of old
+    /// table versions. Uses the provided schemas directly instead of
+    /// looking them up from a store.
     async fn process_truncate_for_schemas(
         &self,
         replicated_table_schemas: impl IntoIterator<Item = ReplicatedTableSchema>,
@@ -1207,7 +1268,7 @@ where
             let bigquery_table_id =
                 table_name_to_bigquery_table_id(replicated_table_schema.name())?;
 
-            // We need to determine the current sequenced table ID for this
+            // We need to determine the current versioned table ID for this
             // table.
             //
             // If no destination table metadata exists, it means the table was
@@ -1228,38 +1289,22 @@ where
                 &metadata,
                 &replicated_table_schema,
             )?;
-            let sequenced_bigquery_table_id =
-                metadata_sequenced_table_id_for_base(&metadata, &bigquery_table_id)?;
+            let versioned_table_id =
+                metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
 
-            // Find a new sequence table ID for this truncate event. An earlier
-            // attempt may have created the next version before failing to
-            // update the view or metadata. We must not replace that table
-            // because its creation-only layout may differ from the pipeline's
-            // current table options.
-            let mut obsolete_sequenced_bigquery_table_ids =
-                vec![sequenced_bigquery_table_id.clone()];
-            let mut next_sequenced_bigquery_table_id = sequenced_bigquery_table_id.next();
-            while self
-                .client
-                .table_exists(&self.dataset_id, &next_sequenced_bigquery_table_id.to_string())
-                .await?
-            {
-                obsolete_sequenced_bigquery_table_ids
-                    .push(next_sequenced_bigquery_table_id.clone());
-                next_sequenced_bigquery_table_id = next_sequenced_bigquery_table_id.next();
-            }
+            // Capture candidates before creation while holding serialization.
+            // Metadata supplies the previous target even if listing fails or
+            // lags. Cleanup must never discover a newer table after the switch.
+            let mut obsolete_table_ids =
+                self.list_table_versions_for_cleanup(&bigquery_table_id).await;
+            obsolete_table_ids.insert(versioned_table_id);
+            let next_versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id.clone());
 
-            info!(
-                table_id = table_id.0,
-                %next_sequenced_bigquery_table_id,
-                "processing truncate, creating new version"
-            );
-
-            // Create the fresh table for this truncate generation.
+            // Create-only DDL fails on a collision instead of replacing data.
             self.client
-                .create_or_replace_table(
+                .create_table(
                     &self.dataset_id,
-                    &next_sequenced_bigquery_table_id.to_string(),
+                    &next_versioned_table_id.to_string(),
                     &replicated_table_schema,
                     self.max_staleness_mins,
                     self.table_options.get(&table_id),
@@ -1270,77 +1315,49 @@ where
             self.ensure_view_points_to_table(
                 &mut inner,
                 &bigquery_table_id,
-                &next_sequenced_bigquery_table_id,
+                &next_versioned_table_id,
             )
             .await?;
 
             // Update the metadata to point to the new table.
             let metadata = DestinationTableMetadata::new_applied(
-                next_sequenced_bigquery_table_id.to_string(),
+                next_versioned_table_id.to_string(),
                 replicated_table_schema.inner().snapshot_id,
                 replicated_table_schema.replication_mask().clone(),
             );
             self.state_store.store_destination_table_metadata(table_id, metadata).await?;
 
-            // The three statements above are not transactional. Retries use
-            // metadata as the durable authority and create another fresh table
-            // generation. For example,
-            // - Table created, but view update failed -> in this case the
-            //   system will still point to table 'n', so the restart will
-            //   reprocess events on table 'n', the already-created table 'n +
-            //   1' will be left unchanged, and a later fresh generation will be
-            //   created. No destination table metadata is changed.
-            // - Table created, view updated, but destination table metadata
-            //   update failed -> in this case the system will still point to
-            //   table 'n' but the customer will see the empty state of table 'n
-            //   + 1' until the system heals. Healing happens when the system is
-            //   restarted, the destination table metadata points to 'n' meaning
-            //   that events will be reprocessed and applied on table 'n' and
-            //   then once the truncate is successfully processed, the system
-            //   should be consistent.
+            // These operations are not transactional. If metadata persistence
+            // fails, replay still starts from the old authoritative target.
+            // The view can temporarily expose the empty new table, but replay
+            // creates another fresh version and switches it again. If
+            // metadata commits but acknowledgement or checkpointing fails,
+            // replay also allocates a fresh version for the truncate.
+            // Cleanup only targets obsolete identities after persistence;
+            // delayed deletion cannot affect a future incarnation of a name.
 
             info!(
                 table_id = table_id.0,
-                %next_sequenced_bigquery_table_id,
+                %next_versioned_table_id,
                 "successfully processed truncate, view updated"
             );
 
-            // Schedule tracked cleanup of the previous table and any abandoned
-            // generations. The task handles cleanup errors internally because
-            // the view already points to the new data.
-            let client = self.client.clone();
-            let dataset_id = self.dataset_id.clone();
-            self.tasks
-                .spawn_with(move || async move {
-                    for obsolete_table_id in obsolete_sequenced_bigquery_table_ids {
-                        if let Err(err) = client
-                            .drop_table_if_exists(&dataset_id, &obsolete_table_id.to_string())
-                            .await
-                        {
-                            warn!(
-                                %obsolete_table_id,
-                                error = %err,
-                                "failed to drop obsolete table"
-                            );
-                        } else {
-                            info!(
-                                %obsolete_table_id,
-                                "successfully cleaned up obsolete table"
-                            );
-                        }
-                    }
-                })
-                .await;
+            self.schedule_table_cleanup(obsolete_table_ids).await;
         }
 
         Ok(())
     }
 
-    /// Drops destination table objects before restarting a table copy.
+    /// Drops the logical view and optimistically deletes physical versions.
+    ///
+    /// View deletion must succeed before reset can proceed. Physical deletion
+    /// and discovery failures are logged and may leave tables for manual
+    /// cleanup.
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
         let base_bigquery_table_id =
             table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let table_id = replicated_table_schema.id();
@@ -1352,43 +1369,25 @@ where
         // pipeline last wrote to.
         if let Some(metadata) = self.state_store.get_destination_table_metadata(table_id).await? {
             table_ids
-                .insert(metadata_sequenced_table_id_for_base(&metadata, &base_bigquery_table_id)?);
+                .insert(metadata_versioned_table_id_for_base(&metadata, &base_bigquery_table_id)?);
         }
 
-        // Discover physical table versions from BigQuery instead of the local
-        // cache. Older processes may have created versions this process never
-        // cached.
-        let listed_table_ids =
-            self.client.list_sequenced_table_ids(&self.dataset_id, &base_bigquery_table_id).await?;
-        let listed_sequenced_table_ids =
-            listed_table_ids.into_iter().filter_map(|listed_table_id| {
-                SequencedBigQueryTableId::parse_for_base(&listed_table_id, &base_bigquery_table_id)
-            });
-        table_ids.extend(listed_sequenced_table_ids);
+        table_ids.extend(self.list_table_versions_for_cleanup(&base_bigquery_table_id).await);
 
-        // We first drop the view, so that the table is not queriable anymore.
+        // Removing the logical view is required. Once it is gone, failures to
+        // delete its old physical targets cannot expose stale data after
+        // recopy.
         self.client.drop_view_if_exists(&self.dataset_id, &base_bigquery_table_id).await?;
+        delete_table_versions(&self.client, &self.dataset_id, table_ids).await;
 
-        // We then drop each table individually. If any of these operations
-        // fail, on the next restart the tables will be cleaned up.
-        for sequenced_bigquery_table_id in &table_ids {
-            self.client
-                .drop_table_if_exists(&self.dataset_id, &sequenced_bigquery_table_id.to_string())
-                .await?;
-        }
-
-        // Invalidate Storage Write API connections after dropping the physical
-        // tables. A subsequent copy can recreate a table with the same ID, and
-        // a cached connection may still refer to the previous table
-        // incarnation.
+        // Release Storage Write API connections that may still refer to the
+        // deleted physical tables. Subsequent copies allocate fresh names.
         self.client.invalidate_all_connections().await;
 
-        // Once destination cleanup is done, remove the stale derived view
-        // target.
-        let mut inner = self.inner.lock().await;
+        // The view was removed even if physical cleanup left unused tables.
         inner.clear_view_cache(&base_bigquery_table_id);
 
-        info!(table_id = table_id.0, "dropped bigquery table before copy");
+        info!(table_id = table_id.0, "removed bigquery view before copy");
 
         Ok(())
     }
@@ -1483,6 +1482,7 @@ fn validate_bigquery_table_capabilities(
 /// Validates a complete schema before creating or writing a BigQuery table.
 fn validate_bigquery_table_shape(replicated_table_schema: &ReplicatedTableSchema) -> EtlResult<()> {
     replicated_table_schema.validate_destination_column_names(BIGQUERY_COLUMN_NAME_MAPPING)?;
+
     validate_bigquery_table_capabilities(replicated_table_schema)
 }
 
@@ -2179,8 +2179,8 @@ mod tests {
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_parses_and_roundtrips_valid_ids() {
-        for (input, base, sequence) in [
+    fn versioned_bigquery_table_id_parses_and_roundtrips_valid_ids() {
+        for (input, base, version) in [
             ("users_table_123", "users_table", 123),
             ("simple_table_0", "simple_table", 0),
             ("test_table_18446744073709551615", "test_table", u64::MAX),
@@ -2193,58 +2193,76 @@ mod tests {
             ("_0102_a_b__7", "_0102_a_b_", 7),
             ("_0607_Public__Orders_42", "_0607_Public__Orders", 42),
         ] {
-            let parsed = input.parse::<SequencedBigQueryTableId>().unwrap();
-            assert_eq!(parsed.to_bigquery_table_id(), base);
-            assert_eq!(parsed.1, sequence);
+            let parsed = input.parse::<VersionedBigQueryTableId>().unwrap();
+            assert_eq!(parsed.base_table_id(), base);
+            assert_eq!(parsed.1, TableVersionId::Legacy(version));
             assert_eq!(parsed.to_string(), input);
         }
     }
 
+    /// Covers every UUID bit and the fixed-width distinction from legacy IDs.
     #[test]
-    fn sequenced_bigquery_table_id_starts_at_zero_and_increments() {
-        let initial = SequencedBigQueryTableId::new("users_table".to_owned());
-        assert_eq!(initial, SequencedBigQueryTableId("users_table".to_owned(), 0));
-
-        for sequence in [0, 42, u64::MAX - 1] {
-            let current = SequencedBigQueryTableId("users_table".to_owned(), sequence);
-            assert_eq!(
-                current.next(),
-                SequencedBigQueryTableId("users_table".to_owned(), sequence + 1)
+    fn version_encoding_is_compact_and_lossless() {
+        for value in [0, 1, u128::from(u64::MAX), u128::MAX] {
+            let id = VersionedBigQueryTableId(
+                "users".to_owned(),
+                TableVersionId::Random(Uuid::from_u128(value)),
             );
+            let encoded = id.to_string();
+            assert_eq!(encoded.len(), "users_".len() + 25);
+            assert!(
+                encoded
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            );
+            assert_eq!(encoded.parse::<VersionedBigQueryTableId>().unwrap(), id);
         }
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_belongs_to_base() {
+    fn versioned_bigquery_table_id_belongs_to_base() {
         let base_table_id = "users_table".to_owned();
-        let users_table_id = SequencedBigQueryTableId(base_table_id.clone(), 2);
-        let orders_table_id = SequencedBigQueryTableId("orders_table".to_owned(), 2);
+        let users_table_id =
+            VersionedBigQueryTableId(base_table_id.clone(), TableVersionId::Legacy(2));
+        let orders_table_id =
+            VersionedBigQueryTableId("orders_table".to_owned(), TableVersionId::Legacy(2));
 
         assert!(users_table_id.belongs_to_base(&base_table_id));
         assert!(!orders_table_id.belongs_to_base(&base_table_id));
     }
 
     #[test]
-    fn sequenced_bigquery_table_id_parse_for_base_ignores_unrelated_tables() {
+    fn versioned_bigquery_table_id_parse_for_base_ignores_unrelated_tables() {
         let base_table_id = "users_table".to_owned();
 
         assert_eq!(
-            SequencedBigQueryTableId::parse_for_base("users_table_2", &base_table_id),
-            Some(SequencedBigQueryTableId("users_table".to_owned(), 2))
+            VersionedBigQueryTableId::parse_for_base("users_table_2", &base_table_id),
+            Some(VersionedBigQueryTableId("users_table".to_owned(), TableVersionId::Legacy(2)))
         );
         assert_eq!(
-            SequencedBigQueryTableId::parse_for_base("users_table_backup", &base_table_id),
+            VersionedBigQueryTableId::parse_for_base("users_table_backup", &base_table_id),
             None
         );
         assert_eq!(
-            SequencedBigQueryTableId::parse_for_base("orders_table_2", &base_table_id),
+            VersionedBigQueryTableId::parse_for_base("orders_table_2", &base_table_id),
             None
         );
-        assert_eq!(SequencedBigQueryTableId::parse_for_base("users_table", &base_table_id), None);
+        assert_eq!(VersionedBigQueryTableId::parse_for_base("users_table", &base_table_id), None);
+
+        let current = VersionedBigQueryTableId::new(base_table_id.clone());
+        let neighboring = VersionedBigQueryTableId::new(format!("{base_table_id}_archive"));
+        assert_eq!(
+            VersionedBigQueryTableId::parse_for_base(&current.to_string(), &base_table_id),
+            Some(current)
+        );
+        assert_eq!(
+            VersionedBigQueryTableId::parse_for_base(&neighboring.to_string(), &base_table_id),
+            None
+        );
     }
 
     #[test]
-    fn metadata_sequenced_table_id_for_base_uses_metadata_target() {
+    fn metadata_versioned_table_id_for_base_uses_metadata_target() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let metadata = DestinationTableMetadata::new_applied(
             "users_table_3".to_owned(),
@@ -2252,10 +2270,13 @@ mod tests {
             replicated_table_schema.replication_mask().clone(),
         );
 
-        let sequenced_table_id =
-            metadata_sequenced_table_id_for_base(&metadata, &"users_table".to_owned()).unwrap();
+        let versioned_table_id =
+            metadata_versioned_table_id_for_base(&metadata, &"users_table".to_owned()).unwrap();
 
-        assert_eq!(sequenced_table_id, SequencedBigQueryTableId("users_table".to_owned(), 3));
+        assert_eq!(
+            versioned_table_id,
+            VersionedBigQueryTableId("users_table".to_owned(), TableVersionId::Legacy(3))
+        );
     }
 
     #[test]
@@ -2284,7 +2305,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_sequenced_table_id_for_base_rejects_unrelated_metadata_target() {
+    fn metadata_versioned_table_id_for_base_rejects_unrelated_metadata_target() {
         let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
         let metadata = DestinationTableMetadata::new_applied(
             "orders_table_0".to_owned(),
@@ -2292,8 +2313,8 @@ mod tests {
             replicated_table_schema.replication_mask().clone(),
         );
 
-        let err = metadata_sequenced_table_id_for_base(&metadata, &"users_table".to_owned())
-            .expect_err("metadata target should belong to the reset table");
+        let err =
+            metadata_versioned_table_id_for_base(&metadata, &"users_table".to_owned()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidState);
     }
@@ -2303,12 +2324,13 @@ mod tests {
         let base_table_id = "users_table".to_owned();
         let mut inner = Inner::new();
 
-        inner
-            .created_views
-            .insert(base_table_id.clone(), SequencedBigQueryTableId(base_table_id.clone(), 1));
+        inner.created_views.insert(
+            base_table_id.clone(),
+            VersionedBigQueryTableId(base_table_id.clone(), TableVersionId::Legacy(1)),
+        );
         inner.created_views.insert(
             "orders_table".to_owned(),
-            SequencedBigQueryTableId("orders_table".to_owned(), 0),
+            VersionedBigQueryTableId("orders_table".to_owned(), TableVersionId::Legacy(0)),
         );
 
         inner.clear_view_cache(&base_table_id);
@@ -2317,7 +2339,7 @@ mod tests {
             inner.created_views,
             HashMap::from([(
                 "orders_table".to_owned(),
-                SequencedBigQueryTableId("orders_table".to_owned(), 0),
+                VersionedBigQueryTableId("orders_table".to_owned(), TableVersionId::Legacy(0)),
             )])
         );
     }
@@ -2602,23 +2624,36 @@ mod tests {
         }
     }
 
+    /// Malformed suffixes fail without slicing Unicode or accepting overflow.
     #[test]
-    fn sequenced_bigquery_table_id_rejects_invalid_ids() {
-        for (input, expected_detail) in [
-            ("tablewithoutsequence", "No underscore found"),
-            ("", "No underscore found"),
-            ("users_table_not_a_number", "Failed to parse sequence number"),
-            ("table_word", "Failed to parse sequence number"),
-            ("users_table_-123", "Failed to parse sequence number"),
-            ("users_table_18446744073709551616", "Failed to parse sequence number"),
-            ("users_table_", "Sequence number cannot be empty"),
-            ("_123", "Table name cannot be empty"),
+    fn versioned_bigquery_table_id_rejects_invalid_ids() {
+        for input in [
+            "",
+            "tablewithoutversion",
+            "users_table_00",
+            "users_table_01",
+            "users_table_not_a_number",
+            "table_word",
+            "users_table_-123",
+            "users_table_18446744073709551616",
+            "users_table_",
+            "_123",
+            "users_é",
+            "users_１２３",
+            "users_+1",
+            "users_ 1",
+            "users_1\n",
+            "users_000000000000000000000",
+            "users_000000000000000000000000",
+            "users_000000000000000000000000 ",
+            "_0000000000000000000000000",
+            "users_zzzzzzzzzzzzzzzzzzzzzzzzz",
+            "users_000000000000000000000000Z",
+            "users_00000000000000000000000é",
+            "users_00000000000000000000000000",
         ] {
-            let error = input.parse::<SequencedBigQueryTableId>().unwrap_err();
-
+            let error = input.parse::<VersionedBigQueryTableId>().unwrap_err();
             assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
-            assert!(error.to_string().contains(expected_detail), "input: {input}");
-            assert!(error.to_string().contains(input), "input: {input}");
         }
     }
 
