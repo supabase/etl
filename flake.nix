@@ -69,13 +69,9 @@
 
           cargoLock = {
             lockFile = ./Cargo.lock;
-            outputHashes = {
-              "gcp-bigquery-client-0.28.0" = "sha256-nAkVZrzVFEm7MZdSJJZ/FEbFX7gclmFfMdzerOzoSOY=";
-              "postgres-protocol-0.6.12" = "sha256-4NdccoaaQ4KQAMTLAxoiv6cg2hrKzYy5Nu8nBPOGvqo=";
-              "postgres-replication-0.6.7" = "sha256-4NdccoaaQ4KQAMTLAxoiv6cg2hrKzYy5Nu8nBPOGvqo=";
-              "postgres-types-0.2.14" = "sha256-4NdccoaaQ4KQAMTLAxoiv6cg2hrKzYy5Nu8nBPOGvqo=";
-              "tokio-postgres-0.7.18" = "sha256-4NdccoaaQ4KQAMTLAxoiv6cg2hrKzYy5Nu8nBPOGvqo=";
-            };
+            # Fetch git dependencies at their locked revisions, so changing a
+            # revision in Cargo.toml needs no hand-updated hash here.
+            allowBuiltinFetchGit = true;
           };
 
           buildAndTestSubdir = "crates/etl-replicator";
