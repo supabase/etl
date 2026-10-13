@@ -32,12 +32,13 @@
           rustc = rustToolchain;
         };
 
-        # Native build tools and libraries, shared by the package and dev shell.
+        # Native build tools and libraries, shared by the package and dev shell:
+        # protoc for prost-build (gcp-bigquery-client), and pkg-config with
+        # OpenSSL for openssl-sys (native-tls) on Linux. aws-lc-sys uses its cc
+        # builder on these systems, so CMake is not needed.
         nativeBuildDeps = with pkgs; [
-          cmake
           pkg-config
           protobuf
-          python3
         ];
         buildDeps = with pkgs; [ openssl ];
 
