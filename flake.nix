@@ -32,12 +32,14 @@
           rustc = rustToolchain;
         };
 
-        buildDeps = with pkgs; [
+        # Native build tools and libraries, shared by the package and dev shell.
+        nativeBuildDeps = with pkgs; [
           cmake
-          openssl
           pkg-config
           protobuf
+          python3
         ];
+        buildDeps = with pkgs; [ openssl ];
 
         devTools = with pkgs; [
           actionlint
@@ -46,7 +48,6 @@
           cargo-nextest
           cargo-sort
           postgresql
-          python3
           # actionlint checks workflow `run:` scripts with shellcheck, as in CI.
           shellcheck
           # `cargo x init` runs SQLx migrations.
@@ -87,13 +88,8 @@
           # downloads them at runtime unless ETL_DUCKDB_EXTENSION_ROOT points at a copy.
           env.RUSTFLAGS = "--cfg tokio_unstable -C panic=abort";
 
-          nativeBuildInputs = with pkgs; [
-            cmake
-            pkg-config
-            protobuf
-            python3
-          ];
-          buildInputs = with pkgs; [ openssl ];
+          nativeBuildInputs = nativeBuildDeps;
+          buildInputs = buildDeps;
 
           # Integration tests need a live Postgres cluster.
           doCheck = false;
@@ -116,7 +112,7 @@
           # (tikv-jemalloc-sys). Release builds, like the package, are unaffected.
           hardeningDisable = [ "fortify" ];
 
-          packages = [ devToolchain ] ++ buildDeps ++ devTools;
+          packages = [ devToolchain ] ++ nativeBuildDeps ++ buildDeps ++ devTools;
 
           shellHook = ''
             export RUST_SRC_PATH=${devToolchain}/lib/rustlib/src/rust/library
