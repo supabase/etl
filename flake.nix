@@ -17,21 +17,21 @@
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
 
-        # Toolchain and components from rust-toolchain.toml.
-        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        toolchainFile = (pkgs.lib.importTOML ./rust-toolchain.toml).toolchain;
 
-        # Dev shell toolchain: append editor and coverage components instead of
-        # replacing the components listed in rust-toolchain.toml. cargo-llvm-cov
-        # needs llvm-tools, and without rustup the toolchain must provide it.
-        devToolchain = rustToolchain.override (old: {
-          extensions = old.extensions ++ [ "llvm-tools" "rust-src" "rust-analyzer" ];
+        # Dev shell toolchain: the release and components from rust-toolchain.toml,
+        # plus editor and coverage components. cargo-llvm-cov needs llvm-tools, and
+        # without rustup the toolchain must provide it. The minimal profile skips
+        # the offline documentation.
+        devToolchain = pkgs.rust-bin.fromRustupToolchain (toolchainFile // {
+          profile = "minimal";
+          components = (toolchainFile.components or [ ])
+            ++ [ "llvm-tools" "rust-src" "rust-analyzer" ];
         });
 
-        # The package needs only rustc, cargo, and the standard library, so build it
-        # with the minimal profile of the same release instead of fetching the docs,
-        # rustfmt, and clippy.
+        # The package needs only rustc, cargo, and the standard library.
         buildToolchain = pkgs.rust-bin.fromRustupToolchain {
-          inherit ((pkgs.lib.importTOML ./rust-toolchain.toml).toolchain) channel;
+          inherit (toolchainFile) channel;
           profile = "minimal";
         };
 
