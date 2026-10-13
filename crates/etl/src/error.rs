@@ -650,7 +650,7 @@ impl error::Error for EtlError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match &self.repr {
             ErrorRepr::Single(payload) => {
-                payload.source.as_ref().map(|source| source as &(dyn error::Error + 'static))
+                payload.source.as_deref().map(|source| source as &(dyn error::Error + 'static))
             }
             // For aggregated errors, we forward the first contained error as the source.
             ErrorRepr::Many { errors, .. } => {
@@ -1454,8 +1454,8 @@ mod tests {
     fn error_source_preserved() {
         let io_err = std::io::Error::other("Boom");
         let err = EtlError::from(io_err);
-        let source = err.source().expect("missing source");
-        assert_eq!(source.to_string(), "Boom");
+        let source = err.source().unwrap();
+        assert_eq!(source.downcast_ref::<std::io::Error>().unwrap().to_string(), "Boom");
     }
 
     #[test]

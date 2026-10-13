@@ -1,7 +1,4 @@
-use std::{
-    fmt,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::{error::Error as _, fmt};
 
 use etl::{
     data::Cell,
@@ -45,13 +42,11 @@ use crate::{
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
+        query::execute_query,
         schema::{create_columns_spec, postgres_to_bigquery_type},
         sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
-    retry::{
-        ClassifiedError, RetryPolicy, classified_error, classified_error_with_detail,
-        retry_with_backoff,
-    },
+    retry::{ClassifiedError, classified_error, classified_error_with_detail},
 };
 
 /// Multiplier for calculating max inflight requests from pool size.
@@ -65,45 +60,42 @@ const MAX_INFLIGHT_REQUESTS_PER_CONNECTION: usize = 100;
 /// This upper bound ensures reasonable memory usage and prevents overflow when
 /// computing max inflight requests from connection pool size.
 const MAX_SAFE_INFLIGHT_REQUESTS: usize = 100_000;
-/// Maximum time to retry locally retryable BigQuery Storage Write append
-/// errors.
+
+/// Retry window for locally retryable BigQuery Storage Write append errors.
 ///
 /// The current retryable cases are Storage Write schema propagation and
 /// `NOT_FOUND` responses when the BigQuery table API confirms that the target
 /// table exists. Google documents schema update detection as happening on the
-/// order of minutes.
+/// order of minutes. This window is checked after completed attempts; it does
+/// not cancel in-flight appends or impose a deadline on SDK retries.
 const STORAGE_WRITE_RETRY_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Initial backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// Maximum backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
-/// Retry policy for transient BigQuery query job failures.
-const QUERY_RETRY_POLICY: RetryPolicy = RetryPolicy {
-    max_retries: 4,
-    initial_delay: Duration::from_secs(1),
-    max_delay: Duration::from_secs(8),
-};
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
 const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &[
     "backendError",
+    "internalError",
+    "badGateway",
     "jobBackendError",
     "jobInternalError",
     "jobRateLimitExceeded",
     "rateLimitExceeded",
 ];
-/// BigQuery response reasons documented as identifying a created, failed query
-/// job that should be retried as a new job.
-const FAILED_BIGQUERY_QUERY_JOB_REASONS: &[&str] =
-    &["jobBackendError", "jobInternalError", "jobRateLimitExceeded"];
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
 
 /// BigQuery project identifier.
 pub type BigQueryProjectId = String;
+
 /// BigQuery dataset identifier.
 pub type BigQueryDatasetId = String;
+
 /// BigQuery table identifier.
 pub type BigQueryTableId = String;
 
@@ -411,13 +403,17 @@ fn error_code_label(error: &BQError) -> &'static str {
 /// Transport failures, server errors, rate limits, schema updates that are
 /// still propagating to Storage Write, and the gRPC codes BigQuery documents as
 /// transient may succeed when sent again. Authentication failures, rejected
-/// requests, and local errors repeat.
+/// requests, malformed or redirected HTTP requests, and local errors repeat.
 impl ClassifiedError for BQError {
     fn retryability(&self) -> Retryability {
         match self {
-            BQError::RequestError(_) | BQError::TonicTransportError(_) => Retryability::Retryable,
+            BQError::RequestError(error) if !error.is_builder() && !error.is_redirect() => {
+                Retryability::Retryable
+            }
+            BQError::TonicTransportError(_) => Retryability::Retryable,
             BQError::ResponseError { error }
                 if error.error.code >= 500
+                    || error.error.code == 429
                     || error.error.errors.iter().any(|nested_error| {
                         nested_error.get("reason").is_some_and(|reason| {
                             TRANSIENT_BIGQUERY_RESPONSE_REASONS.contains(&reason.as_str())
@@ -442,61 +438,6 @@ impl ClassifiedError for BQError {
             _ => Retryability::Permanent,
         }
     }
-}
-
-/// Returns whether retrying a query error requires creating a new query job.
-fn query_retry_requires_new_request_id(error: &BQError) -> bool {
-    let BQError::ResponseError { error } = error else {
-        return false;
-    };
-
-    error.error.errors.iter().any(|nested_error| {
-        nested_error
-            .get("reason")
-            .is_some_and(|reason| FAILED_BIGQUERY_QUERY_JOB_REASONS.contains(&reason.as_str()))
-    })
-}
-
-/// Generates an idempotency key accepted by BigQuery request-ID fields.
-fn generate_bigquery_request_id() -> String {
-    format!("{:032x}", random::<u128>())
-}
-
-/// Ensures local retries of one BigQuery query job share an idempotency key.
-///
-/// BigQuery retains `jobs.query` request IDs for 15 minutes. The bounded retry
-/// policy below is shorter than that window, so one generated ID safely covers
-/// every in-process attempt while preserving an ID supplied by a caller.
-fn with_query_request_id(mut request: QueryRequest) -> QueryRequest {
-    request.request_id.get_or_insert_with(generate_bigquery_request_id);
-    request
-}
-
-/// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
-fn is_missing_column_default_error(error: &BQError) -> bool {
-    let BQError::ResponseError { error } = error else {
-        return false;
-    };
-
-    error.error.code == 400
-        && error.error.errors.iter().any(|nested_error| {
-            nested_error.get("reason").is_some_and(|reason| reason == "invalid")
-                && nested_error.get("message").is_some_and(|message| {
-                    message.starts_with("Cannot DROP DEFAULT value from column ")
-                        && message.ends_with(" which does not have a DEFAULT value.")
-                })
-        })
-}
-
-/// Logs a transient BigQuery query retry.
-fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
-    warn!(
-        retry_index = attempt.retry_index,
-        max_retries = attempt.max_retries,
-        sleep_ms = attempt.sleep_delay.as_millis(),
-        error = %attempt.error,
-        "retrying transient bigquery query error"
-    );
 }
 
 /// Builds the error returned when local Storage Write retries are exhausted.
@@ -537,7 +478,7 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
 /// Converts BigQuery errors to ETL errors with appropriate classification.
 ///
 /// Maps BigQuery error types to ETL error kinds for consistent error handling.
-fn bq_error_to_etl_error(err: BQError) -> EtlError {
+pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
     let (kind, description) = match &err {
         // Authentication related errors
         BQError::InvalidServiceAccountKey(_) => {
@@ -610,14 +551,20 @@ fn bq_error_to_etl_error(err: BQError) -> EtlError {
 
             Code::Cancelled => (ErrorKind::DestinationError, "BigQuery operation cancelled"),
 
+            // The append may have completed remotely. The Storage Write client
+            // retries the same CDC mutations before surfacing this failure.
             Code::DeadlineExceeded => (ErrorKind::DestinationError, "BigQuery deadline exceeded"),
 
             Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
 
+            // The library has already retried recognized stream-close cases.
+            // Remaining precondition failures require operator intervention.
             Code::FailedPrecondition => {
                 (ErrorKind::DestinationError, "BigQuery precondition failed")
             }
 
+            // Transport failures can leave the remote outcome unknown. The
+            // library handles recognized transient cases before this mapping.
             Code::Unknown => (ErrorKind::DestinationError, "BigQuery unknown error"),
 
             Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
@@ -706,11 +653,9 @@ fn is_retryable_schema_propagation_error(error: &BQError) -> bool {
     }
 
     let storage_error_codes = decode_storage_error_codes(status);
-    if storage_error_codes
-        .iter()
-        .any(|code| *code == StorageErrorCode::SchemaMismatchExtraFields.as_str_name())
-    {
-        return true;
+    if !storage_error_codes.is_empty() {
+        return storage_error_codes
+            .contains(&StorageErrorCode::SchemaMismatchExtraFields.as_str_name());
     }
 
     let message = status.message().to_ascii_lowercase();
@@ -779,6 +724,24 @@ async fn retryable_storage_write_error_detail(
     }
 
     Ok(None)
+}
+
+/// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
+fn is_missing_column_default_error(error: &EtlError) -> bool {
+    let Some(BQError::ResponseError { error }) =
+        error.source().and_then(|source| source.downcast_ref::<BQError>())
+    else {
+        return false;
+    };
+
+    error.error.code == 400
+        && error.error.errors.iter().any(|nested_error| {
+            nested_error.get("reason").is_some_and(|reason| reason == "invalid")
+                && nested_error.get("message").is_some_and(|message| {
+                    message.starts_with("Cannot DROP DEFAULT value from column ")
+                        && message.ends_with(" which does not have a DEFAULT value.")
+                })
+        })
 }
 
 /// Client for interacting with Google BigQuery.
@@ -906,84 +869,11 @@ impl BigQueryClient {
         quote_table_path(&self.project_id, dataset_id, table_id)
     }
 
-    /// Creates a table in BigQuery if it doesn't already exist, otherwise
-    /// efficiently truncates and recreates the table with the same schema.
-    ///
-    /// This method uses BigQuery's CREATE OR REPLACE TABLE statement which is
-    /// more efficient than dropping and recreating as it preserves table
-    /// metadata and permissions.
-    ///
-    /// Returns `true` if the table was created fresh, `false` if it already
-    /// existed and was replaced.
-    pub(super) async fn create_or_replace_table(
-        &self,
-        dataset_id: &BigQueryDatasetId,
-        table_id: &BigQueryTableId,
-        replicated_table_schema: &ReplicatedTableSchema,
-        max_staleness_mins: Option<u16>,
-        table_options: Option<&BigQueryTableOptions>,
-    ) -> EtlResult<bool> {
-        let table_exists = self.table_exists(dataset_id, table_id).await?;
-
-        let full_table_name = self.full_table_name(dataset_id, table_id)?;
-
-        let columns_spec = create_columns_spec(replicated_table_schema)?;
-        let table_options_sql = create_table_options_sql(table_options, replicated_table_schema)?;
-        let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
-            Self::max_staleness_option(max_staleness_mins)
-        } else {
-            "".to_owned()
-        };
-
-        info!(
-            %full_table_name,
-            %table_exists,
-            "creating or replacing table in bigquery"
-        );
-
-        let query = format!(
-            "create or replace table {full_table_name} {columns_spec} {table_options_sql} \
-             {max_staleness_option}"
-        );
-
-        let _ = self.query(QueryRequest::new(query)).await?;
-
-        // Return true if it was a fresh creation, false if it was a replacement
-        Ok(!table_exists)
-    }
-
-    /// Creates a table in BigQuery if it doesn't already exist.
-    ///
-    /// Returns `true` if the table was created, `false` if it already existed.
-    pub(super) async fn create_table_if_missing(
-        &self,
-        dataset_id: &BigQueryDatasetId,
-        table_id: &BigQueryTableId,
-        replicated_table_schema: &ReplicatedTableSchema,
-        max_staleness_mins: Option<u16>,
-        table_options: Option<&BigQueryTableOptions>,
-    ) -> EtlResult<bool> {
-        if self.table_exists(dataset_id, table_id).await? {
-            return Ok(false);
-        }
-
-        self.create_table(
-            dataset_id,
-            table_id,
-            replicated_table_schema,
-            max_staleness_mins,
-            table_options,
-        )
-        .await?;
-
-        Ok(true)
-    }
-
     /// Creates a new table in the BigQuery dataset.
     ///
     /// Builds and executes a CREATE TABLE statement with the provided column
     /// schemas and optional staleness configuration for CDC operations.
-    async fn create_table(
+    pub(super) async fn create_table(
         &self,
         dataset_id: &BigQueryDatasetId,
         table_id: &BigQueryTableId,
@@ -995,11 +885,8 @@ impl BigQueryClient {
 
         let columns_spec = create_columns_spec(replicated_table_schema)?;
         let table_options_sql = create_table_options_sql(table_options, replicated_table_schema)?;
-        let max_staleness_option = if let Some(max_staleness_mins) = max_staleness_mins {
-            Self::max_staleness_option(max_staleness_mins)
-        } else {
-            "".to_owned()
-        };
+        let max_staleness_option =
+            max_staleness_mins.map(Self::max_staleness_option).unwrap_or_default();
 
         info!(%full_table_name, "creating table in bigquery");
 
@@ -1095,17 +982,17 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Lists physical sequenced table ids for a base table.
+    /// Lists physical table ID strings matching a base table prefix.
     ///
     /// Queries `INFORMATION_SCHEMA.TABLES` instead of using the destination's
     /// local cache so reset cleanup can remove versions left behind by earlier
     /// processes.
-    pub async fn list_sequenced_table_ids(
+    pub(super) async fn list_physical_table_ids(
         &self,
         dataset_id: &BigQueryDatasetId,
         base_table_id: &BigQueryTableId,
     ) -> EtlResult<Vec<BigQueryTableId>> {
-        info!(%dataset_id, %base_table_id, "listing sequenced tables from bigquery");
+        info!(%dataset_id, %base_table_id, "listing versioned tables from bigquery");
 
         let information_schema_tables =
             quote_information_schema_tables_path(&self.project_id, dataset_id)?;
@@ -1128,17 +1015,17 @@ impl BigQueryClient {
         }]);
 
         let mut result_set = self.query(request).await?;
-        let mut table_ids = Vec::new();
+        let mut physical_table_ids = Vec::new();
 
         while result_set.next_row() {
-            if let Some(table_id) =
+            if let Some(physical_table_id) =
                 result_set.get_string_by_name("table_name").map_err(bq_error_to_etl_error)?
             {
-                table_ids.push(table_id);
+                physical_table_ids.push(physical_table_id);
             }
         }
 
-        Ok(table_ids)
+        Ok(physical_table_ids)
     }
 
     /// Adds a column to an existing BigQuery table.
@@ -1267,7 +1154,7 @@ impl BigQueryClient {
         let query =
             format!("alter table {full_table_name} alter column {column_name} drop default");
 
-        match self.query_with_bigquery_error(QueryRequest::new(query)).await {
+        match self.query(QueryRequest::new(query)).await {
             Ok(_) => {}
             Err(error) if is_missing_column_default_error(&error) => {
                 debug!(
@@ -1276,7 +1163,7 @@ impl BigQueryClient {
                     "column has no default in bigquery; skipping drop default"
                 );
             }
-            Err(error) => return Err(bq_error_to_etl_error(error)),
+            Err(error) => return Err(error),
         }
 
         Ok(())
@@ -1591,36 +1478,14 @@ impl BigQueryClient {
         })
     }
 
-    /// Executes a BigQuery SQL query and returns the result set.
+    /// Executes a query and waits up to ten minutes for all result pages.
+    ///
+    /// The budget covers submission, retries, and polling. Expiry leaves the
+    /// remote outcome unknown and requires manual recovery before replay.
     pub async fn query(&self, request: QueryRequest) -> EtlResult<ResultSet> {
-        self.query_with_bigquery_error(request).await.map_err(bq_error_to_etl_error)
-    }
-
-    /// Executes a BigQuery SQL query while preserving the provider error.
-    async fn query_with_bigquery_error(&self, request: QueryRequest) -> Result<ResultSet, BQError> {
-        let mut request = with_query_request_id(request);
-        let requires_new_request_id = AtomicBool::new(false);
-        let query_response = retry_with_backoff(
-            QUERY_RETRY_POLICY,
-            |_| false,
-            retry_delay_with_jitter,
-            |attempt| {
-                requires_new_request_id
-                    .store(query_retry_requires_new_request_id(attempt.error), Ordering::Relaxed);
-                log_query_retry(attempt);
-            },
-            || {
-                if requires_new_request_id.swap(false, Ordering::Relaxed) {
-                    request.request_id = Some(generate_bigquery_request_id());
-                }
-                let request = request.clone();
-                async move { self.client.job().query(&self.project_id, request).await }
-            },
-        )
-        .await
-        .map_err(|failure| failure.last_error)?;
-
-        Ok(ResultSet::new_from_query_response(query_response))
+        execute_query(&self.client, &self.project_id, request)
+            .await
+            .map(ResultSet::new_from_query_response)
     }
 
     /// Creates max staleness option clause for CDC table creation.
@@ -1870,46 +1735,6 @@ mod tests {
         assert!(!error.to_string().contains("customer@example.com"));
     }
 
-    fn query_response_error(code: i64, reason: &str) -> BQError {
-        BQError::ResponseError {
-            error: ResponseError {
-                error: NestedResponseError {
-                    code,
-                    errors: vec![[("reason".to_owned(), reason.to_owned())].into_iter().collect()],
-                    message: "Placeholder BigQuery error".to_owned(),
-                    status: "PLACEHOLDER_STATUS".to_owned(),
-                },
-            },
-        }
-    }
-
-    #[test]
-    fn query_retry_classification_matches_bigquery_job_lifecycle() {
-        let cases = [
-            ("jobBackendError", 400, Retryability::Retryable, true),
-            ("jobInternalError", 400, Retryability::Retryable, true),
-            ("jobRateLimitExceeded", 400, Retryability::Retryable, true),
-            ("backendError", 500, Retryability::Retryable, false),
-            ("internalError", 500, Retryability::Retryable, false),
-            ("rateLimitExceeded", 403, Retryability::Retryable, false),
-            ("unknownServerError", 503, Retryability::Retryable, false),
-            ("invalidQuery", 400, Retryability::Permanent, false),
-            ("resourcesExceeded", 400, Retryability::Permanent, false),
-            ("timeout", 400, Retryability::Permanent, false),
-        ];
-
-        for (reason, code, expected_retryability, expected_new_request_id) in cases {
-            let error = query_response_error(code, reason);
-
-            assert_eq!(error.retryability(), expected_retryability, "{reason}");
-            assert_eq!(
-                query_retry_requires_new_request_id(&error),
-                expected_new_request_id,
-                "{reason}"
-            );
-        }
-    }
-
     /// Storage Write statuses that BigQuery documents as transient, and schema
     /// updates that are still propagating, are retryable; rejected requests,
     /// missing permissions, and missing entities are not.
@@ -1949,28 +1774,6 @@ mod tests {
     }
 
     #[test]
-    fn query_request_id_is_generated_once_and_survives_cloning() {
-        let request = with_query_request_id(QueryRequest::new("select 1"));
-        let request_id = request.request_id.clone().unwrap();
-        let cloned_request = request.clone();
-
-        assert_eq!(request_id.len(), 32);
-        assert!(request_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        assert_eq!(cloned_request.request_id, Some(request_id.clone()));
-        assert_eq!(request.request_id, Some(request_id));
-    }
-
-    #[test]
-    fn query_request_id_preserves_caller_value() {
-        let mut request = QueryRequest::new("select 1");
-        request.request_id = Some("caller-request-id".to_owned());
-
-        let request = with_query_request_id(request);
-
-        assert_eq!(request.request_id.as_deref(), Some("caller-request-id"));
-    }
-
-    #[test]
     fn missing_column_default_error_matches_only_absent_default_response() {
         let error = BQError::ResponseError {
             error: ResponseError {
@@ -1995,15 +1798,61 @@ mod tests {
             },
         };
 
-        assert!(is_missing_column_default_error(&error));
-        assert!(!is_missing_column_default_error(&BQError::NoDataAvailable));
+        assert!(is_missing_column_default_error(&bq_error_to_etl_error(error)));
+        assert!(!is_missing_column_default_error(&bq_error_to_etl_error(BQError::NoDataAvailable)));
     }
 
+    /// Schema propagation can retry without treating permanent type errors as
+    /// temporary schema lag.
     #[test]
-    fn schema_update_detail_classifies_pure_schema_propagation_errors() {
-        let error = BQError::from(tonic::Status::invalid_argument("schema_mismatch_extra_fields"));
+    fn schema_update_detail_distinguishes_schema_lag_from_type_errors() {
+        for (code, message, retryable) in [
+            (Code::InvalidArgument, "schema_mismatch_extra_fields", true),
+            (Code::InvalidArgument, "Column is missing in the proto message", true),
+            (Code::InvalidArgument, "Incompatible field type: STRING instead of INT64", false),
+            (Code::InvalidArgument, "Invalid NUMERIC value", false),
+            (Code::InvalidArgument, "Could not deserialize row payload", false),
+            (Code::PermissionDenied, "schema_mismatch_extra_fields", false),
+        ] {
+            let error = BQError::from(tonic::Status::new(code, message));
 
-        assert!(retryable_storage_write_schema_update_detail(&error).is_some());
+            assert_eq!(
+                retryable_storage_write_schema_update_detail(&error).is_some(),
+                retryable,
+                "{code}: {message}"
+            );
+        }
+    }
+
+    /// Structured Storage errors take precedence over message heuristics.
+    #[test]
+    fn schema_update_detail_prefers_structured_error_codes() {
+        for (code, message, retryable) in [
+            (StorageErrorCode::SchemaMismatchExtraFields, "Schema update pending", true),
+            (StorageErrorCode::InvalidStreamType, "schema_mismatch_extra_fields", false),
+            (StorageErrorCode::KmsPermissionDenied, "extra proto fields", false),
+        ] {
+            let mut rpc_status = GoogleRpcStatus {
+                code: i32::from(Code::InvalidArgument),
+                message: message.to_owned(),
+                details: vec![Default::default()],
+            };
+            rpc_status.details[0].type_url =
+                format!("type.googleapis.com/{BIGQUERY_STORAGE_ERROR_TYPE_NAME}");
+            rpc_status.details[0].value =
+                StorageError { code: i32::from(code), ..Default::default() }.encode_to_vec();
+            let error = BQError::from(tonic::Status::with_details(
+                Code::InvalidArgument,
+                message,
+                rpc_status.encode_to_vec().into(),
+            ));
+
+            assert_eq!(
+                retryable_storage_write_schema_update_detail(&error).is_some(),
+                retryable,
+                "{code:?}"
+            );
+        }
     }
 
     #[test]

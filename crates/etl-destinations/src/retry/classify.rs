@@ -117,22 +117,15 @@ impl ClassifiedError for ValidationError {
 
 #[cfg(test)]
 mod tests {
-    use std::{error::Error, io, sync::Arc};
+    use std::{error::Error, io};
 
     use etl::error::{ErrorKind, EtlError, Retryability};
 
     use crate::retry::{ClassifiedError, classified_error, classified_error_with_detail};
 
-    /// Returns the ETL error stored behind an error's shared source.
+    /// Returns the ETL error stored as an error's source.
     fn etl_source(error: &EtlError) -> &EtlError {
-        error
-            .source()
-            .unwrap()
-            .downcast_ref::<Arc<dyn Error + Send + Sync>>()
-            .unwrap()
-            .as_ref()
-            .downcast_ref::<EtlError>()
-            .unwrap()
+        error.source().unwrap().downcast_ref::<EtlError>().unwrap()
     }
 
     /// Source classification overrides the kind's default retry policy.
