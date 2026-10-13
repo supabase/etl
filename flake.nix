@@ -103,11 +103,6 @@
           inherit etl-replicator;
         };
 
-        apps.default = {
-          type = "app";
-          program = "${etl-replicator}/bin/etl-replicator";
-        };
-
         devShells.default = pkgs.mkShell {
           # Debug builds compile jemalloc's configure probes at -O0, where Nix's
           # _FORTIFY_SOURCE breaks its -Werror `strerror_r` check
