@@ -18,7 +18,8 @@ use etl::{
     pipeline::PipelineId,
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, IdentityType, ReplicatedTableSchema,
-        SchemaOperation, SchemaPlan, TableId, TableName, is_array_type,
+        ReplicationMask, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName,
+        is_array_type,
     },
     store::DestinationStore,
     task::TaskRegistry,
@@ -27,7 +28,7 @@ use etl_config::shared::{BigQueryTableOptions, BigQueryTableOptionsConfig};
 use gcp_bigquery_client::storage::{MAX_BATCH_SIZE_BYTES, TableDescriptor};
 use metrics::histogram;
 use prost::Message;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -252,32 +253,91 @@ fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlR
     ))
 }
 
-/// Internal state for [`BigQueryDestination`] wrapped in `Arc<Mutex<>>`.
+/// An immutable physical target with its rendered Storage Write table ID.
 ///
-/// Contains the derived view targets that require synchronization across
-/// concurrent operations. Durable destination metadata owns table preparation
-/// state, while the main client and configuration remain lock-free.
-#[derive(Debug)]
-struct Inner {
-    /// Cache of views that have been created and the versioned table they point
-    /// to. This avoids redundant `CREATE OR REPLACE VIEW` calls for views that
-    /// already point to the correct table. Maps view name to the versioned
-    /// table it currently points to.
-    ///
-    /// # Example
-    /// `{ users_table: users_table_10, orders_table: orders_table_3 }`
-    created_views: HashMap<BigQueryTableId, VersionedBigQueryTableId>,
+/// Retaining the parsed and rendered forms avoids reparsing and formatting
+/// the UUID suffix on every batch. Metadata still validates each use.
+#[derive(Debug, PartialEq, Eq)]
+struct TableTarget {
+    /// Parsed identity used to validate the logical table name.
+    versioned_id: VersionedBigQueryTableId,
+    /// Rendered identity used by BigQuery requests and destination metadata.
+    physical_id: BigQueryTableId,
+    /// Source name whose encoding was validated against the physical identity.
+    source_name: TableName,
 }
 
-impl Inner {
-    /// Creates empty synchronized destination state.
-    fn new() -> Self {
-        Self { created_views: HashMap::new() }
+impl TableTarget {
+    /// Renders a physical identity once for all batches targeting it.
+    fn new(versioned_id: VersionedBigQueryTableId, source_name: TableName) -> Self {
+        Self { physical_id: versioned_id.to_string(), versioned_id, source_name }
     }
+}
 
-    /// Clears the cached view target for a destination table.
-    fn clear_view_cache(&mut self, base_table_id: &BigQueryTableId) {
-        self.created_views.remove(base_table_id);
+impl Display for TableTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.physical_id)
+    }
+}
+
+/// Cached Storage Write descriptor for one source schema endpoint and write
+/// mode.
+#[derive(Debug)]
+struct PreparedTableSchema {
+    /// Immutable source schema version represented by the descriptor.
+    snapshot_id: SnapshotId,
+    /// Replicated columns represented by the descriptor.
+    replication_mask: ReplicationMask,
+    /// CDC allows omitted scalar columns and adds sequence numbers.
+    use_cdc_sequence_column: bool,
+    /// Shared descriptor, cloned into SDK requests only after unlocking.
+    descriptor: Arc<TableDescriptor>,
+}
+
+impl PreparedTableSchema {
+    /// Checks the snapshot, replication mask, and copy/CDC mode before reuse.
+    fn matches(&self, schema: &ReplicatedTableSchema, use_cdc_sequence_column: bool) -> bool {
+        self.snapshot_id == schema.inner().snapshot_id
+            && self.replication_mask == *schema.replication_mask()
+            && self.use_cdc_sequence_column == use_cdc_sequence_column
+    }
+}
+
+/// Derived view state protected by one table's preparation and lifecycle lock.
+///
+/// Durable destination metadata remains authoritative and is checked on every
+/// write, even when the view is cached.
+#[derive(Debug, Default)]
+struct TableState {
+    /// Physical target of the last successfully installed logical view.
+    view_target: Option<Arc<TableTarget>>,
+    /// Last compiled row schema; cleared when a view target changes or resets.
+    prepared_schema: Option<PreparedTableSchema>,
+}
+
+impl TableState {
+    /// Compiles once per endpoint and mode; warm batches only clone an Arc.
+    fn prepare_descriptor(
+        &mut self,
+        schema: &ReplicatedTableSchema,
+        use_cdc_sequence_column: bool,
+    ) -> Arc<TableDescriptor> {
+        if let Some(prepared) = &self.prepared_schema
+            && prepared.matches(schema, use_cdc_sequence_column)
+        {
+            return Arc::clone(&prepared.descriptor);
+        }
+
+        let descriptor =
+            Arc::new(column_schemas_to_table_descriptor(schema, use_cdc_sequence_column));
+        self.prepared_schema = Some(PreparedTableSchema {
+            snapshot_id: schema.inner().snapshot_id,
+            replication_mask: schema.replication_mask().clone(),
+            use_cdc_sequence_column,
+            descriptor: Arc::clone(&descriptor),
+        });
+
+        descriptor
     }
 }
 
@@ -286,10 +346,13 @@ impl Inner {
 /// Provides Postgres-to-BigQuery data pipeline functionality including
 /// streaming inserts and CDC operation handling.
 ///
-/// Designed for high concurrency with minimal locking:
-/// - Configuration and client are accessible without locks
-/// - Only caches and destination table metadata require synchronization
-/// - Multiple write operations can execute concurrently
+/// A short registry lock locates each table's state. Preparation and lifecycle
+/// operations serialize per table, so unrelated tables can proceed during DDL.
+///
+/// Table locks protect preparation and metadata/view transitions, not row
+/// appends. Callers must preserve the per-table write and DDL ordering required
+/// by [`etl::destination::Destination`]; taking a table lock does not drain
+/// previously dispatched appends.
 #[derive(Debug, Clone)]
 pub struct BigQueryDestination<S> {
     client: BigQueryClient,
@@ -298,7 +361,10 @@ pub struct BigQueryDestination<S> {
     table_options: Arc<HashMap<TableId, BigQueryTableOptions>>,
     pipeline_id: PipelineId,
     state_store: S,
-    inner: Arc<Mutex<Inner>>,
+    /// Stable per-table locks shared by all destination clones. Entries remain
+    /// allocated across resets so existing waiters cannot acquire an old lock
+    /// while new callers acquire a replacement lock for the same table.
+    tables: Arc<Mutex<HashMap<TableId, Arc<Mutex<TableState>>>>>,
     tasks: TaskRegistry,
 }
 
@@ -328,7 +394,7 @@ where
             table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(Inner::new())),
+            tables: Arc::new(Mutex::new(HashMap::new())),
             tasks: TaskRegistry::new(),
         }
     }
@@ -362,7 +428,7 @@ where
             table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(Inner::new())),
+            tables: Arc::new(Mutex::new(HashMap::new())),
             tasks: TaskRegistry::new(),
         })
     }
@@ -394,10 +460,11 @@ where
             table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(Inner::new())),
+            tables: Arc::new(Mutex::new(HashMap::new())),
             tasks: TaskRegistry::new(),
         })
     }
+
     /// Creates a new [`BigQueryDestination`] using Application Default
     /// Credentials (ADC).
     ///
@@ -425,7 +492,7 @@ where
             table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store,
-            inner: Arc::new(Mutex::new(Inner::new())),
+            tables: Arc::new(Mutex::new(HashMap::new())),
             tasks: TaskRegistry::new(),
         })
     }
@@ -470,7 +537,7 @@ where
             table_options: Arc::new(HashMap::new()),
             pipeline_id,
             state_store: store,
-            inner: Arc::new(Mutex::new(Inner::new())),
+            tables: Arc::new(Mutex::new(HashMap::new())),
             tasks: TaskRegistry::new(),
         })
     }
@@ -487,6 +554,36 @@ where
         );
 
         self
+    }
+
+    /// Writes table-copy rows through the destination write path in tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn write_table_rows_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+        table_rows: Vec<TableRow>,
+    ) -> EtlResult<()> {
+        self.write_table_rows(replicated_table_schema, table_rows).await
+    }
+
+    /// Drops destination table objects through the destination drop path in
+    /// tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn drop_table_for_copy_for_tests(
+        &self,
+        replicated_table_schema: &ReplicatedTableSchema,
+    ) -> EtlResult<()> {
+        self.drop_table_for_copy_inner(replicated_table_schema).await
+    }
+
+    /// Locks one table without holding the registry during preparation or DDL.
+    async fn lock_table(&self, table_id: TableId) -> OwnedMutexGuard<TableState> {
+        let table = {
+            let mut tables = self.tables.lock().await;
+            Arc::clone(tables.entry(table_id).or_default())
+        };
+
+        table.lock_owned().await
     }
 
     /// Discovers cleanup candidates without making listing a replication
@@ -548,16 +645,29 @@ where
     async fn resolve_or_create_table_for_schema(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<VersionedBigQueryTableId> {
+        cached_target: Option<&Arc<TableTarget>>,
+    ) -> EtlResult<Arc<TableTarget>> {
         let table_id = replicated_table_schema.id();
-        let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let existing_metadata = self.state_store.get_destination_table_metadata(table_id).await?;
 
         // Applied metadata supplies the physical identity without probing
         // BigQuery.
         if let Some(metadata) = existing_metadata {
-            let versioned_table_id =
-                metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
+            let table_target = match cached_target {
+                Some(target)
+                    if target.physical_id == metadata.table_id()
+                        && &target.source_name == replicated_table_schema.name() =>
+                {
+                    Arc::clone(target)
+                }
+                _ => Arc::new(TableTarget::new(
+                    metadata_versioned_table_id_for_base(
+                        &metadata,
+                        &table_name_to_bigquery_table_id(replicated_table_schema.name())?,
+                    )?,
+                    replicated_table_schema.name().clone(),
+                )),
+            };
 
             if metadata.is_applying() {
                 return Err(etl_error!(
@@ -578,7 +688,7 @@ where
             )?;
 
             if metadata.is_applied() {
-                return Ok(versioned_table_id);
+                return Ok(table_target);
             }
         }
 
@@ -587,9 +697,13 @@ where
 
         // A Creating target is abandoned without deletion here. Truncate or
         // explicit reset can collect it after redirecting or removing the view.
-        let versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id);
+        let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
+        let table_target = Arc::new(TableTarget::new(
+            VersionedBigQueryTableId::new(bigquery_table_id),
+            replicated_table_schema.name().clone(),
+        ));
         let metadata = DestinationTableMetadata::new_creating(
-            versioned_table_id.to_string(),
+            table_target.physical_id.clone(),
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
@@ -599,7 +713,7 @@ where
         self.client
             .create_table(
                 &self.dataset_id,
-                &versioned_table_id.to_string(),
+                &table_target.physical_id,
                 replicated_table_schema,
                 self.max_staleness_mins,
                 self.table_options.get(&table_id),
@@ -608,9 +722,9 @@ where
 
         self.state_store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
 
-        debug!(%versioned_table_id, "created physical bigquery table");
+        debug!(%table_target, "created physical bigquery table");
 
-        Ok(versioned_table_id)
+        Ok(table_target)
     }
 
     /// Prepares a table for BigQuery writes with schema-aware table creation.
@@ -618,28 +732,21 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
         use_cdc_sequence_column: bool,
-    ) -> EtlResult<(VersionedBigQueryTableId, TableDescriptor)> {
-        // Serialize the complete table/view preparation so concurrent copy
-        // workers cannot race the durable metadata transition or derived view
-        // cache.
-        let mut inner = self.inner.lock().await;
-        let versioned_table_id =
-            self.resolve_or_create_table_for_schema(replicated_table_schema).await?;
-        let bigquery_table_id = versioned_table_id.base_table_id();
-
-        self.ensure_view_points_to_table(&mut inner, bigquery_table_id, &versioned_table_id)
+    ) -> EtlResult<(Arc<TableTarget>, Arc<TableDescriptor>)> {
+        // Copy partitions share preparation for this table, while other tables
+        // can prepare and write independently of its DDL.
+        let mut table = self.lock_table(replicated_table_schema.id()).await;
+        let table_target = self
+            .resolve_or_create_table_for_schema(replicated_table_schema, table.view_target.as_ref())
             .await?;
+        let bigquery_table_id = table_target.versioned_id.base_table_id();
 
-        // Note: We return TableDescriptor by value for simplicity, which means
-        // callers clone it when creating multiple batches. This is acceptable
-        // because the descriptor is small (one String per column) and the cost
-        // is negligible compared to network I/O. If profiling shows this is a
-        // bottleneck, we could wrap it in Arc here and use Arc::unwrap_or_clone
-        // at the call site to avoid redundant clones.
+        self.ensure_view_points_to_table(&mut table, bigquery_table_id, &table_target).await?;
+
         let table_descriptor =
-            column_schemas_to_table_descriptor(replicated_table_schema, use_cdc_sequence_column);
+            table.prepare_descriptor(replicated_table_schema, use_cdc_sequence_column);
 
-        Ok((versioned_table_id, table_descriptor))
+        Ok((table_target, table_descriptor))
     }
 
     /// Loads destination metadata and requires an applied schema state.
@@ -662,16 +769,16 @@ where
     /// correct.
     async fn ensure_view_points_to_table(
         &self,
-        inner: &mut Inner,
+        table: &mut TableState,
         bigquery_table_id: &BigQueryTableId,
-        versioned_table_id: &VersionedBigQueryTableId,
+        table_target: &Arc<TableTarget>,
     ) -> EtlResult<bool> {
-        if let Some(current_target) = inner.created_views.get(bigquery_table_id)
-            && current_target == versioned_table_id
+        if let Some(current_target) = table.view_target.as_ref()
+            && current_target == table_target
         {
             debug!(
                 %bigquery_table_id,
-                %versioned_table_id,
+                %table_target,
                 "view already points to target, skipping creation"
             );
 
@@ -679,19 +786,16 @@ where
         }
 
         self.client
-            .create_or_replace_view(
-                &self.dataset_id,
-                bigquery_table_id,
-                &versioned_table_id.to_string(),
-            )
+            .create_or_replace_view(&self.dataset_id, bigquery_table_id, &table_target.physical_id)
             .await?;
 
         // We insert/overwrite the cached view target.
-        inner.created_views.insert(bigquery_table_id.clone(), versioned_table_id.clone());
+        table.prepared_schema = None;
+        table.view_target = Some(Arc::clone(table_target));
 
         debug!(
             %bigquery_table_id,
-            %versioned_table_id,
+            %table_target,
             "view created/updated to point to target"
         );
 
@@ -702,8 +806,10 @@ where
     /// unchanged.
     async fn recreate_view_for_table(
         &self,
+        table: &mut TableState,
         bigquery_table_id: &BigQueryTableId,
         versioned_table_id: &VersionedBigQueryTableId,
+        source_name: &TableName,
     ) -> EtlResult<()> {
         self.client
             .create_or_replace_view(
@@ -713,8 +819,9 @@ where
             )
             .await?;
 
-        let mut inner = self.inner.lock().await;
-        inner.created_views.insert(bigquery_table_id.clone(), versioned_table_id.clone());
+        table.prepared_schema = None;
+        table.view_target =
+            Some(Arc::new(TableTarget::new(versioned_table_id.clone(), source_name.clone())));
 
         debug!(
             %bigquery_table_id,
@@ -736,7 +843,7 @@ where
         mut table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
         // Prepare table for streaming.
-        let (versioned_table_id, table_descriptor) =
+        let (table_target, table_descriptor) =
             self.prepare_table_for_writes(replicated_table_schema, false).await?;
 
         // Add the CDC operation type to all rows (no lock needed).
@@ -753,7 +860,7 @@ where
 
         // Split table rows into optimal batches for parallel execution.
         let table_rows_batches = split_table_rows(table_rows, target_batches);
-        let physical_table_id = versioned_table_id.to_string();
+        let physical_table_id = &table_target.physical_id;
 
         // Create append requests from the split rows.
         let mut append_requests = Vec::with_capacity(table_rows_batches.len());
@@ -764,8 +871,8 @@ where
                     self.pipeline_id,
                     request_index,
                     &self.dataset_id,
-                    &physical_table_id,
-                    table_descriptor.clone(),
+                    physical_table_id,
+                    table_descriptor.as_ref().clone(),
                     table_rows,
                 )?;
                 append_requests.push(append_request);
@@ -777,16 +884,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Writes table-copy rows through the destination write path in tests.
-    #[cfg(feature = "test-utils")]
-    pub async fn write_table_rows_for_tests(
-        &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        table_rows: Vec<TableRow>,
-    ) -> EtlResult<()> {
-        self.write_table_rows(replicated_table_schema, table_rows).await
     }
 
     /// Handles a schema change event (Relation) by computing the diff and
@@ -806,6 +903,7 @@ where
         validate_bigquery_table_capabilities(new_replicated_table_schema)?;
 
         let table_id = new_replicated_table_schema.id();
+        let mut table = self.lock_table(table_id).await;
         let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
 
         let Some(metadata) = self.get_applied_destination_table_metadata(table_id).await? else {
@@ -887,7 +985,12 @@ where
         let plan = current_schema
             .plan_schema_change(new_replicated_table_schema, BIGQUERY_COLUMN_NAME_MAPPING)?;
         validate_bigquery_schema_plan(new_replicated_table_schema, &plan)?;
-        let versioned_table_id = metadata.table_id().parse()?;
+        // The view cache certifies the source name as well as the physical
+        // target. Validate that association before changing durable state.
+        let bigquery_table_id =
+            table_name_to_bigquery_table_id(new_replicated_table_schema.name())?;
+        let versioned_table_id =
+            metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
 
         // Mark as applying before making changes (with the NEW snapshot_id and
         // mask).
@@ -917,7 +1020,13 @@ where
         }
 
         let bigquery_table_id = versioned_table_id.base_table_id();
-        self.recreate_view_for_table(bigquery_table_id, &versioned_table_id).await?;
+        self.recreate_view_for_table(
+            &mut table,
+            bigquery_table_id,
+            &versioned_table_id,
+            new_replicated_table_schema.name(),
+        )
+        .await?;
 
         // Mark as applied after successful changes.
         self.state_store
@@ -1193,17 +1302,17 @@ where
                 for (request_index, (_, (replicated_table_schema, table_rows))) in
                     table_id_to_data.into_iter().enumerate()
                 {
-                    let (versioned_table_id, table_descriptor) =
+                    let (table_target, table_descriptor) =
                         self.prepare_table_for_writes(&replicated_table_schema, true).await?;
-                    let physical_table_id = versioned_table_id.to_string();
+                    let physical_table_id = &table_target.physical_id;
                     histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                     let append_request = self.client.create_append_request(
                         self.pipeline_id,
                         request_index,
                         &self.dataset_id,
-                        &physical_table_id,
-                        table_descriptor,
+                        physical_table_id,
+                        table_descriptor.as_ref().clone(),
                         table_rows,
                     )?;
                     append_requests.push(append_request);
@@ -1258,13 +1367,9 @@ where
         &self,
         replicated_table_schemas: impl IntoIterator<Item = ReplicatedTableSchema>,
     ) -> EtlResult<()> {
-        // We want to lock for the entire processing to ensure that we don't
-        // have any race conditions and possible errors are easier to reason
-        // about.
-        let mut inner = self.inner.lock().await;
-
         for replicated_table_schema in replicated_table_schemas {
             let table_id = replicated_table_schema.id();
+            let mut table = self.lock_table(table_id).await;
             let bigquery_table_id =
                 table_name_to_bigquery_table_id(replicated_table_schema.name())?;
 
@@ -1298,13 +1403,16 @@ where
             let mut obsolete_table_ids =
                 self.list_table_versions_for_cleanup(&bigquery_table_id).await;
             obsolete_table_ids.insert(versioned_table_id);
-            let next_versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id.clone());
+            let next_table_target = Arc::new(TableTarget::new(
+                VersionedBigQueryTableId::new(bigquery_table_id.clone()),
+                replicated_table_schema.name().clone(),
+            ));
 
             // Create-only DDL fails on a collision instead of replacing data.
             self.client
                 .create_table(
                     &self.dataset_id,
-                    &next_versioned_table_id.to_string(),
+                    &next_table_target.physical_id,
                     &replicated_table_schema,
                     self.max_staleness_mins,
                     self.table_options.get(&table_id),
@@ -1312,16 +1420,12 @@ where
                 .await?;
 
             // Update the view to point to the new table.
-            self.ensure_view_points_to_table(
-                &mut inner,
-                &bigquery_table_id,
-                &next_versioned_table_id,
-            )
-            .await?;
+            self.ensure_view_points_to_table(&mut table, &bigquery_table_id, &next_table_target)
+                .await?;
 
             // Update the metadata to point to the new table.
             let metadata = DestinationTableMetadata::new_applied(
-                next_versioned_table_id.to_string(),
+                next_table_target.physical_id.clone(),
                 replicated_table_schema.inner().snapshot_id,
                 replicated_table_schema.replication_mask().clone(),
             );
@@ -1338,7 +1442,7 @@ where
 
             info!(
                 table_id = table_id.0,
-                %next_versioned_table_id,
+                %next_table_target,
                 "successfully processed truncate, view updated"
             );
 
@@ -1357,7 +1461,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let mut inner = self.inner.lock().await;
+        let mut table = self.lock_table(replicated_table_schema.id()).await;
         let base_bigquery_table_id =
             table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let table_id = replicated_table_schema.id();
@@ -1385,21 +1489,12 @@ where
         self.client.invalidate_all_connections().await;
 
         // The view was removed even if physical cleanup left unused tables.
-        inner.clear_view_cache(&base_bigquery_table_id);
+        table.view_target = None;
+        table.prepared_schema = None;
 
         info!(table_id = table_id.0, "removed bigquery view before copy");
 
         Ok(())
-    }
-
-    /// Drops destination table objects through the destination drop path in
-    /// tests.
-    #[cfg(feature = "test-utils")]
-    pub async fn drop_table_for_copy_for_tests(
-        &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<()> {
-        self.drop_table_for_copy_inner(replicated_table_schema).await
     }
 }
 
@@ -2047,13 +2142,14 @@ fn split_table_rows(
 
     let mut batches = Vec::with_capacity(num_sub_batches);
     let mut remaining = table_rows;
-    for i in 0..num_sub_batches {
-        // Distribute extra rows evenly across the first few batches.
-        let batch_size = rows_per_sub_batch + if i < extra_rows { 1 } else { 0 };
-        let rest = remaining.split_off(batch_size);
-        batches.push(remaining);
-        remaining = rest;
+    // Split from the end so each moved row is copied once, and retain the
+    // original allocation for the first batch.
+    for i in (1..num_sub_batches).rev() {
+        let batch_size = rows_per_sub_batch + usize::from(i < extra_rows);
+        batches.push(remaining.split_off(remaining.len() - batch_size));
     }
+    batches.push(remaining);
+    batches.reverse();
 
     batches
 }
@@ -2317,31 +2413,6 @@ mod tests {
             metadata_versioned_table_id_for_base(&metadata, &"users_table".to_owned()).unwrap_err();
 
         assert_eq!(err.kind(), ErrorKind::InvalidState);
-    }
-
-    #[test]
-    fn clear_view_cache_removes_only_the_requested_view() {
-        let base_table_id = "users_table".to_owned();
-        let mut inner = Inner::new();
-
-        inner.created_views.insert(
-            base_table_id.clone(),
-            VersionedBigQueryTableId(base_table_id.clone(), TableVersionId::Legacy(1)),
-        );
-        inner.created_views.insert(
-            "orders_table".to_owned(),
-            VersionedBigQueryTableId("orders_table".to_owned(), TableVersionId::Legacy(0)),
-        );
-
-        inner.clear_view_cache(&base_table_id);
-
-        assert_eq!(
-            inner.created_views,
-            HashMap::from([(
-                "orders_table".to_owned(),
-                VersionedBigQueryTableId("orders_table".to_owned(), TableVersionId::Legacy(0)),
-            )])
-        );
     }
 
     #[test]
@@ -2669,9 +2740,19 @@ mod tests {
             (10, 4, vec![3, 3, 2, 2]),
         ] {
             let rows = (0..row_count)
-                .map(|_| BigQueryTableRow::try_from(TableRow::new(vec![])).unwrap())
-                .collect();
+                .map(|i| {
+                    BigQueryTableRow::try_from(TableRow::new(vec![Cell::I32(
+                        i32::try_from(i).unwrap(),
+                    )]))
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let encoded_rows: Vec<_> = rows.iter().map(Message::encode_to_vec).collect();
             let batches = split_table_rows(rows, target_batches);
+            assert_eq!(
+                batches.iter().flatten().map(Message::encode_to_vec).collect::<Vec<_>>(),
+                encoded_rows
+            );
             let batch_sizes: Vec<_> = batches.iter().map(Vec::len).collect();
 
             assert_eq!(batch_sizes, expected_batch_sizes);

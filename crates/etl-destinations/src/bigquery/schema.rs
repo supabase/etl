@@ -260,7 +260,9 @@ pub(crate) fn column_schemas_to_table_descriptor(
     replicated_table_schema: &ReplicatedTableSchema,
     use_cdc_sequence_column: bool,
 ) -> TableDescriptor {
-    let mut field_descriptors = vec![];
+    let field_count =
+        replicated_table_schema.column_schemas().len() + 1 + usize::from(use_cdc_sequence_column);
+    let mut field_descriptors = Vec::with_capacity(field_count);
     let mut number = 1;
 
     for column_schema in replicated_table_schema.column_schemas() {
