@@ -141,7 +141,7 @@ async fn copy_then_transaction_replay_preserves_current_rows() {
 
     // ETL may split one transaction across batches, but can checkpoint only
     // its commit. If checkpointing fails after the writes land, it replays the
-    // whole transaction in source order with the same sequence keys.
+    // whole transaction in source order with the same event positions.
     for batch in [first_batch.clone(), second_batch.clone(), first_batch.clone()] {
         write_events(&destination, WriteEventsDurability::MayDefer, batch).await.unwrap();
     }
@@ -155,7 +155,7 @@ async fn copy_then_transaction_replay_preserves_current_rows() {
         vec![BigQueryUser::new(1, "second", 30), BigQueryUser::new(3, "snapshot", 10)]
     );
 
-    // Reconnect can change batch boundaries without changing sequence keys.
+    // Reconnect can change batch boundaries without changing event positions.
     let replay = first_batch.into_iter().chain(second_batch).collect();
     write_events(&destination, WriteEventsDurability::MayDefer, replay).await.unwrap();
 

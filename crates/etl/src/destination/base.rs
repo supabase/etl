@@ -151,7 +151,7 @@ pub trait Destination {
     /// multiple times with different streaming batches.
     ///
     /// Delivery batch boundaries may change on replay. Use source events'
-    /// [`crate::event::EventSequenceKey`] values for row ordering and replay
+    /// [`crate::event::EventPosition`] values for row ordering and replay
     /// identity, rather than assigning a copy-style batch ID or call counter.
     ///
     /// Streaming batches are built from size and time limits, not schema change

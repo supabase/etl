@@ -43,7 +43,7 @@ impl fmt::Display for TableCopyAttemptId {
 /// depends on parallel worker scheduling, so rerunning a copy does not recreate
 /// the same batch boundaries or IDs.
 ///
-/// Streaming uses [`crate::event::EventSequenceKey`] instead: WAL event
+/// Streaming uses [`crate::event::EventPosition`] instead: WAL event
 /// positions survive replay and changes in delivery batch boundaries. A copy
 /// batch ID identifies a delivery from one snapshot, not a version of a source
 /// row.

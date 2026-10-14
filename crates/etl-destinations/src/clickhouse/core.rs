@@ -13,7 +13,7 @@ use etl::{
     },
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    event::{Event, EventSequenceKey},
+    event::{Event, EventPosition},
     schema::{
         ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
         IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
@@ -82,7 +82,7 @@ struct PendingRow {
     /// Source ordering for this DML event. MergeTree exposes the LSN and
     /// transaction ordinal separately; ReplacingMergeTree stores the packed
     /// key in `_etl_version`.
-    sequence_key: EventSequenceKey,
+    event_position: EventPosition,
     /// User column values in source schema order. The trailing CDC columns are
     /// appended at encode time and are not present here.
     cells: Vec<Cell>,
@@ -111,22 +111,22 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
 ///
 /// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN), and
 /// `cdc_tx_ordinal` (UInt64 transaction ordinal). ReplacingMergeTree:
-/// `_etl_version` (UInt128 packed `EventSequenceKey`) and `_etl_deleted` (UInt8
+/// `_etl_version` (UInt128 packed `EventPosition`) and `_etl_deleted` (UInt8
 /// tombstone flag).
 fn append_cdc_columns(
     values: &mut Vec<ClickHouseValue>,
     operation: CdcOperation,
-    sequence_key: EventSequenceKey,
+    event_position: EventPosition,
     engine: ClickHouseEngine,
 ) {
     match engine {
         ClickHouseEngine::MergeTree => {
             values.push(ClickHouseValue::String(operation.to_string()));
-            values.push(cdc_lsn_to_clickhouse_value(sequence_key.commit_lsn));
-            values.push(ClickHouseValue::UInt64(sequence_key.tx_ordinal));
+            values.push(cdc_lsn_to_clickhouse_value(event_position.commit_lsn));
+            values.push(ClickHouseValue::UInt64(event_position.tx_ordinal));
         }
         ClickHouseEngine::ReplacingMergeTree => {
-            let version = sequence_key.as_u128();
+            let version = event_position.as_u128();
             values.push(ClickHouseValue::UInt128(version));
             values
                 .push(ClickHouseValue::UInt8(u8::from(matches!(operation, CdcOperation::Delete))));
@@ -1464,7 +1464,7 @@ where
                 append_cdc_columns(
                     &mut values,
                     CdcOperation::Insert,
-                    EventSequenceKey::new(PgLsn::from(0), 0),
+                    EventPosition::new(PgLsn::from(0), 0),
                     engine,
                 );
                 Ok(values)
@@ -1516,7 +1516,7 @@ where
 
         // A relation event identifies the exact target schema through its
         // snapshot ID and replication mask. It can therefore resume an
-        // interrupted change without inventing a DML event sequence key.
+        // interrupted change without inventing a DML event position.
         if metadata.is_pending() {
             let clickhouse_table_name = metadata.table_id().to_owned();
             self.recover_pending_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
@@ -1847,19 +1847,19 @@ where
                 };
                 match event {
                     Event::Insert(insert) => {
-                        let sequence_key = insert.event_sequence_key();
+                        let event_position = insert.event_position();
                         let table_id = insert.replicated_table_schema.id();
                         let entry = pending
                             .entry(table_id)
                             .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Insert,
-                            sequence_key,
+                            event_position,
                             cells: insert.table_row.into_values(),
                         });
                     }
                     Event::Update(update) => {
-                        let sequence_key = update.event_sequence_key();
+                        let event_position = update.event_position();
                         let source_updated_row = update.updated_table_row;
                         let source_old_row = update.old_table_row;
                         let rows_for_update = clickhouse_rows_for_update(
@@ -1880,19 +1880,19 @@ where
                         {
                             entry.1.push(PendingRow {
                                 operation: CdcOperation::Delete,
-                                sequence_key,
+                                event_position,
                                 cells: destination_old_key_tombstone.into_values(),
                             });
                         }
 
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
-                            sequence_key,
+                            event_position,
                             cells: rows_for_update.destination_updated_row.into_values(),
                         });
                     }
                     Event::Delete(delete) => {
-                        let sequence_key = delete.event_sequence_key();
+                        let event_position = delete.event_position();
                         let source_old_row = clickhouse_delete_old_row(
                             &delete.replicated_table_schema,
                             delete.old_table_row,
@@ -1909,7 +1909,7 @@ where
                             .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
-                            sequence_key,
+                            event_position,
                             cells: destination_old_row.into_values(),
                         });
                     }
@@ -1981,12 +1981,12 @@ where
             tasks.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
-                    .map(|PendingRow { operation, sequence_key, cells }| {
+                    .map(|PendingRow { operation, event_position, cells }| {
                         let mut values: Vec<ClickHouseValue> = cells
                             .into_iter()
                             .map(cell_to_clickhouse_value)
                             .collect::<EtlResult<Vec<_>>>()?;
-                        append_cdc_columns(&mut values, operation, sequence_key, engine);
+                        append_cdc_columns(&mut values, operation, event_position, engine);
                         Ok(values)
                     })
                     .collect::<EtlResult<_>>()?;
