@@ -4,10 +4,7 @@ use std::{
 };
 
 use chrono::Utc;
-use etl::{
-    error::{ErrorKind, EtlResult},
-    etl_error,
-};
+use etl::error::{ErrorKind, EtlResult};
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
@@ -16,9 +13,12 @@ use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
-use crate::ducklake::{
-    DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
-    inline_size::DuckLakePendingInlineSizeSampler,
+use crate::{
+    ducklake::{
+        DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
+        inline_size::DuckLakePendingInlineSizeSampler,
+    },
+    retry::classified_error_with_detail,
 };
 
 static REGISTER_METRICS: Once = Once::new();
@@ -470,11 +470,11 @@ pub(super) async fn query_table_storage_metrics(
         .fetch_one(metadata_pg_pool)
         .await
         .map_err(|source| {
-            etl_error!(
+            classified_error_with_detail(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake table storage metrics query failed",
                 format!("table={table_name}, metadata_schema={metadata_schema}"),
-                source: source
+                source,
             )
         })?;
 
@@ -506,11 +506,11 @@ pub(super) async fn query_catalog_maintenance_metrics(
         oldest_scheduled_deletion_epoch_ms,
     ): (i64, i64, Option<i64>, i64, i64, Option<i64>) =
         sqlx::query_as(AssertSqlSafe(sql)).fetch_one(metadata_pg_pool).await.map_err(|source| {
-            etl_error!(
+            classified_error_with_detail(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake catalog maintenance metrics query failed",
                 format!("metadata_schema={metadata_schema}"),
-                source: source
+                source,
             )
         })?;
 
@@ -641,11 +641,11 @@ pub(super) fn resolve_ducklake_metadata_schema_blocking(
         quote_literal(&metadata_catalog),
     );
     conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|err| {
-        etl_error!(
+        classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake metadata schema query failed",
             format_query_error_detail(&sql),
-            source: err
+            err,
         )
     })
 }

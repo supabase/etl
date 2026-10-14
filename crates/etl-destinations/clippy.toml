@@ -1,0 +1,3 @@
+disallowed-methods = [
+    { path = "etl::error::EtlError::with_source", reason = "use classified_error or classified_error_with_detail to preserve the source's retryability" },
+]

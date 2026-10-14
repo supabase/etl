@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::{
     bigquery::client::bq_error_to_etl_error,
-    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
+    retry::{RetryPolicy, retry_with_backoff},
 };
 
 /// Total budget for query submission, transient retries, and completion.
@@ -74,18 +74,6 @@ const QUERY_JOB_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_delay: QUERY_MAX_RETRY_DELAY,
 };
 
-/// BigQuery response reasons that are transient even when surfaced with a 4xx
-/// status code.
-const TRANSIENT_BIGQUERY_QUERY_REASONS: &[&str] = &[
-    "backendError",
-    "internalError",
-    "badGateway",
-    "jobBackendError",
-    "jobInternalError",
-    "jobRateLimitExceeded",
-    "rateLimitExceeded",
-];
-
 /// BigQuery response reasons documented as identifying a created, failed query
 /// job that should be retried as a new job.
 /// See <https://cloud.google.com/bigquery/docs/error-messages#jobBackendError>.
@@ -96,28 +84,6 @@ const FAILED_BIGQUERY_QUERY_JOB_REASONS: &[&str] =
 fn query_retry_delay(delay: Duration) -> Duration {
     let jitter = Duration::from_millis(random_range(0..=1000));
     delay.saturating_add(jitter).min(QUERY_MAX_RETRY_DELAY)
-}
-
-/// Returns whether a BigQuery query error is transient.
-fn is_transient_query_error(error: &BQError) -> RetryDecision {
-    match error {
-        BQError::RequestError(error) if !error.is_builder() && !error.is_redirect() => {
-            RetryDecision::Retry
-        }
-        BQError::ResponseError { error } if error.error.code >= 500 || error.error.code == 429 => {
-            RetryDecision::Retry
-        }
-        BQError::ResponseError { error }
-            if error.error.errors.iter().any(|nested_error| {
-                nested_error.get("reason").is_some_and(|reason| {
-                    TRANSIENT_BIGQUERY_QUERY_REASONS.contains(&reason.as_str())
-                })
-            }) =>
-        {
-            RetryDecision::Retry
-        }
-        _ => RetryDecision::Stop,
-    }
 }
 
 /// Returns whether retrying a query error requires creating a new query job.
@@ -131,17 +97,6 @@ fn query_retry_requires_new_request_id(error: &BQError) -> bool {
             .get("reason")
             .is_some_and(|reason| FAILED_BIGQUERY_QUERY_JOB_REASONS.contains(&reason.as_str()))
     })
-}
-
-/// Retries an HTTP request only when the same job can still complete.
-///
-/// A terminal job failure must reach the job retry loop to get a fresh ID.
-fn is_transient_query_request_error(error: &BQError) -> RetryDecision {
-    if query_retry_requires_new_request_id(error) {
-        RetryDecision::Stop
-    } else {
-        is_transient_query_error(error)
-    }
 }
 
 /// Generates an idempotency key accepted by BigQuery request-ID fields.
@@ -239,7 +194,7 @@ where
         Ok(response)
     })
     .await
-    .map_err(|error| query_timeout_error(request_id, Some(&reference)).with_source(error))??;
+    .map_err(|_| query_timeout_error(request_id, Some(&reference)))??;
 
     response.job_reference = Some(reference);
     Ok(response)
@@ -263,14 +218,14 @@ async fn execute_query_attempt(
         deadline,
         retry_with_backoff(
             QUERY_REQUEST_RETRY_POLICY,
-            is_transient_query_request_error,
+            query_retry_requires_new_request_id,
             query_retry_delay,
             log_query_retry,
             || client.job().query(project_id, request.clone()),
         ),
     )
     .await
-    .map_err(|error| query_timeout_error(request_id, None).with_source(error))?
+    .map_err(|_| query_timeout_error(request_id, None))?
     .map_err(|failure| bq_error_to_etl_error(failure.last_error))?;
 
     // Dry runs validate without creating an executable job to poll.
@@ -289,7 +244,7 @@ async fn execute_query_attempt(
 
         retry_with_backoff(
             QUERY_REQUEST_RETRY_POLICY,
-            is_transient_query_request_error,
+            query_retry_requires_new_request_id,
             query_retry_delay,
             log_query_retry,
             || {
@@ -329,12 +284,10 @@ where
     retry_with_backoff(
         QUERY_JOB_RETRY_POLICY,
         |error: &EtlError| {
-            let retry = error
+            !error
                 .source()
                 .and_then(|source| source.downcast_ref::<BQError>())
-                .is_some_and(query_retry_requires_new_request_id);
-
-            if retry { RetryDecision::Retry } else { RetryDecision::Stop }
+                .is_some_and(query_retry_requires_new_request_id)
         },
         |delay| query_retry_delay(delay).min(deadline.saturating_duration_since(Instant::now())),
         |attempt| {
@@ -384,7 +337,10 @@ mod tests {
         },
     };
 
-    use etl::{error::ErrorKind, etl_error};
+    use etl::{
+        error::{ErrorKind, Retryability},
+        etl_error,
+    };
     use gcp_bigquery_client::{
         Client,
         auth::Authenticator,
@@ -409,12 +365,11 @@ mod tests {
             client::bq_error_to_etl_error,
             query::{
                 QUERY_MAX_RETRY_DELAY, QUERY_TIMEOUT, QUERY_WAIT_TIMEOUT_MS, complete_query,
-                execute_query, execute_query_attempt, is_transient_query_error,
-                is_transient_query_request_error, query_retry_delay,
+                execute_query, execute_query_attempt, query_retry_delay,
                 query_retry_requires_new_request_id, retry_query_jobs,
             },
         },
-        retry::RetryDecision,
+        retry::ClassifiedError,
     };
 
     /// Counts request authentication and supplies an inert fixture token.
@@ -813,32 +768,27 @@ mod tests {
     #[test]
     fn query_retry_classification_matches_bigquery_job_lifecycle() {
         let cases = [
-            ("jobBackendError", 400, RetryDecision::Retry, true),
-            ("jobInternalError", 400, RetryDecision::Retry, true),
-            ("jobRateLimitExceeded", 400, RetryDecision::Retry, true),
-            ("backendError", 500, RetryDecision::Retry, false),
-            ("internalError", 500, RetryDecision::Retry, false),
-            ("rateLimitExceeded", 403, RetryDecision::Retry, false),
-            ("unknownServerError", 503, RetryDecision::Retry, false),
-            ("tooManyRequests", 429, RetryDecision::Retry, false),
-            ("invalid", 400, RetryDecision::Stop, false),
-            ("invalidQuery", 400, RetryDecision::Stop, false),
-            ("accessDenied", 403, RetryDecision::Stop, false),
-            ("quotaExceeded", 403, RetryDecision::Stop, false),
-            ("notFound", 404, RetryDecision::Stop, false),
-            ("resourcesExceeded", 400, RetryDecision::Stop, false),
-            ("timeout", 400, RetryDecision::Stop, false),
+            ("jobBackendError", 400, Retryability::Retryable, true),
+            ("jobInternalError", 400, Retryability::Retryable, true),
+            ("jobRateLimitExceeded", 400, Retryability::Retryable, true),
+            ("backendError", 500, Retryability::Retryable, false),
+            ("internalError", 500, Retryability::Retryable, false),
+            ("rateLimitExceeded", 403, Retryability::Retryable, false),
+            ("unknownServerError", 503, Retryability::Retryable, false),
+            ("tooManyRequests", 429, Retryability::Retryable, false),
+            ("invalid", 400, Retryability::Permanent, false),
+            ("invalidQuery", 400, Retryability::Permanent, false),
+            ("accessDenied", 403, Retryability::Permanent, false),
+            ("quotaExceeded", 403, Retryability::Permanent, false),
+            ("notFound", 404, Retryability::Permanent, false),
+            ("resourcesExceeded", 400, Retryability::Permanent, false),
+            ("timeout", 400, Retryability::Permanent, false),
         ];
 
-        for (reason, code, expected_decision, expected_new_request_id) in cases {
+        for (reason, code, expected_retryability, expected_new_request_id) in cases {
             let error = query_response_error(code, reason);
 
-            assert_eq!(is_transient_query_error(&error), expected_decision, "{reason}");
-            assert_eq!(
-                is_transient_query_request_error(&error),
-                if expected_new_request_id { RetryDecision::Stop } else { expected_decision },
-                "{reason}"
-            );
+            assert_eq!(error.retryability(), expected_retryability, "{reason}");
             assert_eq!(
                 query_retry_requires_new_request_id(&error),
                 expected_new_request_id,
@@ -872,7 +822,7 @@ mod tests {
                 ErrorKind::SerializationError,
             ),
         ] {
-            assert_eq!(is_transient_query_request_error(&provider_error), RetryDecision::Stop);
+            assert_eq!(provider_error.retryability(), Retryability::Permanent);
             let provider_type = std::mem::discriminant(&provider_error);
             let error = bq_error_to_etl_error(provider_error);
             let mut attempts = 0;

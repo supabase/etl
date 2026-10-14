@@ -11,7 +11,7 @@ use etl::{
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
     event::{Event, EventSequenceKey},
     schema::{
@@ -655,7 +655,8 @@ impl Default for ClickHouseClientConfig {
 ///
 /// Used to:
 /// - select the corresponding server-side budget,
-/// - map a generic clickhouse error onto the appropriate [`ErrorKind`].
+/// - name what failed when a generic clickhouse error maps onto an
+///   [`ErrorKind`].
 #[derive(Copy, Clone)]
 pub(crate) enum ClickHouseOperationKind {
     /// Connectivity check (`SELECT 1`).
@@ -672,19 +673,14 @@ impl ClickHouseOperationKind {
     /// Error kind used when the inner future returns a
     /// `clickhouse::error::Error`.
     ///
-    /// `retryable` says whether that error may succeed when sent again. DDL and
-    /// schema queries then get a timed retry instead of stopping for an
-    /// operator. Connectivity checks and inserts already get a timed retry.
-    pub(crate) fn failed_kind(self, retryable: bool) -> ErrorKind {
-        match (self, retryable) {
-            (ClickHouseOperationKind::Insert, _) => ErrorKind::DestinationAtomicBatchRetryable,
-            (ClickHouseOperationKind::ConnectivityCheck, _)
-            | (ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl, true) => {
-                ErrorKind::DestinationConnectionFailed
-            }
-            (ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl, false) => {
-                ErrorKind::DestinationQueryFailed
-            }
+    /// The kind names what failed. Whether a retry can succeed comes from the
+    /// error itself.
+    pub(crate) fn failed_kind(self) -> ErrorKind {
+        match self {
+            ClickHouseOperationKind::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
+            ClickHouseOperationKind::SchemaQuery
+            | ClickHouseOperationKind::Ddl
+            | ClickHouseOperationKind::Insert => ErrorKind::DestinationQueryFailed,
         }
     }
 }
@@ -747,24 +743,31 @@ struct ClickHouseTableCacheEntry {
 /// That happens when the table changed after the layout was loaded, for
 /// example through an external `ALTER`. Evicting makes the next write reload
 /// and check the table, which reports the drift as `CorruptedTableSchema`
-/// instead of retrying the same rejected header. Other failures, such as
-/// timeouts and network errors, keep the layout so a retry needs no extra
-/// schema query. The entry is removed only while it still holds `layout`, so a
-/// failed insert cannot evict a layout that a concurrent writer already
-/// reloaded.
+/// instead of retrying the same rejected header, so the rejection becomes
+/// retryable. Other failures, such as timeouts and network errors, keep the
+/// layout so a retry needs no extra schema query. The entry is removed only
+/// while it still holds `layout`, so a failed insert cannot evict a layout that
+/// a concurrent writer already reloaded.
 fn evict_layout_after_rejected_insert(
     table_cache: &RwLock<HashMap<TableId, Arc<ClickHouseTableCacheEntry>>>,
     table_id: TableId,
     layout: &Arc<RowBinaryLayout>,
     failure: InsertRowsError,
 ) -> EtlError {
-    if failure.is_layout_rejection() {
+    if !failure.is_layout_rejection() {
+        return failure.into();
+    }
+
+    {
         let mut guard = table_cache.write();
         if guard.get(&table_id).is_some_and(|entry| Arc::ptr_eq(&entry.layout, layout)) {
             guard.remove(&table_id);
         }
     }
-    failure.into()
+
+    // ClickHouse rejects the stale header on every resend, but the next
+    // attempt loads the current layout, so a retry makes progress.
+    EtlError::from(failure).with_retryability(Retryability::Retryable)
 }
 
 /// Execution context captured by ClickHouse background event tasks.

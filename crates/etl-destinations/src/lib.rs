@@ -20,7 +20,13 @@ pub mod iceberg;
     feature = "snowflake"
 ))]
 mod recovery;
-#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+#[cfg(any(
+    feature = "bigquery",
+    feature = "clickhouse",
+    feature = "ducklake",
+    feature = "iceberg",
+    feature = "snowflake"
+))]
 mod retry;
 #[cfg(feature = "snowflake")]
 pub mod snowflake;

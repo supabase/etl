@@ -2,7 +2,7 @@ use std::{error::Error as _, fmt};
 
 use etl::{
     data::Cell,
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
     pipeline::PipelineId,
     schema::{ColumnSchema, ReplicatedTableSchema, Type, is_array_type},
@@ -35,15 +35,18 @@ use tokio::time::{Duration, Instant, sleep};
 use tonic::Code;
 use tracing::{debug, error, info, warn};
 
-use crate::bigquery::{
-    BIGQUERY_COLUMN_NAME_MAPPING,
-    encoding::BigQueryTableRow,
-    metrics::{
-        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
+use crate::{
+    bigquery::{
+        BIGQUERY_COLUMN_NAME_MAPPING,
+        encoding::BigQueryTableRow,
+        metrics::{
+            ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
+        },
+        query::execute_query,
+        schema::{create_columns_spec, postgres_to_bigquery_type},
+        sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
     },
-    query::execute_query,
-    schema::{create_columns_spec, postgres_to_bigquery_type},
-    sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
+    retry::{ClassifiedError, classified_error, classified_error_with_detail},
 };
 
 /// Multiplier for calculating max inflight requests from pool size.
@@ -72,7 +75,17 @@ const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// Maximum backoff when retrying locally retryable Storage Write errors.
 const STORAGE_WRITE_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
-
+/// BigQuery response reasons that are transient even when surfaced with a 4xx
+/// status code.
+const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &[
+    "backendError",
+    "internalError",
+    "badGateway",
+    "jobBackendError",
+    "jobInternalError",
+    "jobRateLimitExceeded",
+    "rateLimitExceeded",
+];
 /// Protobuf type name for BigQuery storage errors embedded in gRPC status
 /// details.
 const BIGQUERY_STORAGE_ERROR_TYPE_NAME: &str = "google.cloud.bigquery.storage.v1.StorageError";
@@ -387,14 +400,55 @@ fn error_code_label(error: &BQError) -> &'static str {
     }
 }
 
+/// Transport failures, server errors, rate limits, schema updates that are
+/// still propagating to Storage Write, and the gRPC codes BigQuery documents as
+/// transient may succeed when sent again. Authentication failures, rejected
+/// requests, malformed or redirected HTTP requests, and local errors repeat.
+impl ClassifiedError for BQError {
+    fn retryability(&self) -> Retryability {
+        match self {
+            BQError::RequestError(error) if !error.is_builder() && !error.is_redirect() => {
+                Retryability::Retryable
+            }
+            BQError::TonicTransportError(_) => Retryability::Retryable,
+            BQError::ResponseError { error }
+                if error.error.code >= 500
+                    || error.error.code == 429
+                    || error.error.errors.iter().any(|nested_error| {
+                        nested_error.get("reason").is_some_and(|reason| {
+                            TRANSIENT_BIGQUERY_RESPONSE_REASONS.contains(&reason.as_str())
+                        })
+                    }) =>
+            {
+                Retryability::Retryable
+            }
+            BQError::TonicStatusError(status) => match status.code() {
+                Code::Unavailable
+                | Code::Internal
+                | Code::Aborted
+                | Code::Cancelled
+                | Code::DeadlineExceeded
+                | Code::ResourceExhausted
+                | Code::Unknown => Retryability::Retryable,
+                Code::InvalidArgument if is_retryable_schema_propagation_error(self) => {
+                    Retryability::Retryable
+                }
+                _ => Retryability::Permanent,
+            },
+            _ => Retryability::Permanent,
+        }
+    }
+}
+
 /// Builds the error returned when local Storage Write retries are exhausted.
 ///
 /// The destination absorbs common short Storage Write retry windows locally. If
 /// BigQuery still has not accepted the append once that bounded window expires,
-/// the worker-level timed retry policy should take over.
+/// the error is a retryable timeout, so the worker-level timed retry policy
+/// takes over.
 fn storage_write_retry_timeout_error(detail: &str) -> EtlError {
     etl_error!(
-        ErrorKind::DestinationAtomicBatchRetryable,
+        ErrorKind::DestinationTimeout,
         "BigQuery storage write retry timed out",
         format!(
             "BigQuery did not accept the storage write request within {} seconds after the \
@@ -489,34 +543,18 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
             (ErrorKind::InvalidData, "BigQuery invalid metadata value")
         }
         BQError::TonicStatusError(status) => match status.code() {
-            // Code::Unavailable (14) - Canonical "service unavailable" code. Indicates transient
-            // conditions like network issues, server overload, or intentional throttling. BigQuery
-            // returns this with messages like "Task is overloaded". Retriable per Google's Storage
-            // Write API guidance.
             Code::Unavailable => (ErrorKind::DestinationError, "BigQuery unavailable"),
 
-            // Code::Internal (13) - Internal server errors. In BigQuery context, often manifests as
-            // transient backend issues, GOAWAY frames, or temporary processing failures. Retriable
-            // per BigQuery backend team guidance.
             Code::Internal => (ErrorKind::DestinationError, "BigQuery internal error"),
 
-            // Code::Aborted (10) - Concurrency conflicts or server-initiated aborts. For Storage
-            // Write API, includes sequencer failures and stream aborts due to transient conditions.
-            // Retriable per BigQuery backend team guidance.
             Code::Aborted => (ErrorKind::DestinationError, "BigQuery operation aborted"),
 
-            // Code::Cancelled (1) - Server-cancelled operations. In streaming context, server may
-            // cancel in-flight appends due to internal reshuffling. Retriable per BigQuery backend
-            // team guidance.
             Code::Cancelled => (ErrorKind::DestinationError, "BigQuery operation cancelled"),
 
             // The append may have completed remotely. The Storage Write client
             // retries the same CDC mutations before surfacing this failure.
             Code::DeadlineExceeded => (ErrorKind::DestinationError, "BigQuery deadline exceeded"),
 
-            // Code::ResourceExhausted (8) - Quota or rate limit exhaustion. Requires exponential
-            // backoff to allow server capacity recovery. Retriable per Google's Storage Write API
-            // guidance, though may need longer backoff periods.
             Code::ResourceExhausted => (ErrorKind::DestinationError, "BigQuery resource exhausted"),
 
             // The library has already retried recognized stream-close cases.
@@ -529,45 +567,28 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
             // library handles recognized transient cases before this mapping.
             Code::Unknown => (ErrorKind::DestinationError, "BigQuery unknown error"),
 
-            // Code::PermissionDenied (7) - Authorization failure. Requires IAM permission changes.
-            // Never retry.
             Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
 
-            // Code::Unauthenticated (16) - Authentication failure. Requires credential refresh or
-            // configuration fix. Never retry.
             Code::Unauthenticated => {
                 (ErrorKind::DestinationError, "BigQuery authentication failed")
             }
 
-            // Code::InvalidArgument (3) - Malformed request or invalid data. Client bug that
-            // requires code changes. Never retry.
             Code::InvalidArgument => (ErrorKind::DestinationError, "BigQuery invalid argument"),
 
-            // Code::NotFound (5) - Resource doesn't exist. Requires creating the resource (table,
-            // dataset, stream) first. Never retry.
             Code::NotFound => (ErrorKind::DestinationTableMissing, "BigQuery entity not found"),
 
-            // Code::AlreadyExists (6) - Entity conflict during creation. For streaming with
-            // offsets, may indicate row was already written. Never retry.
             Code::AlreadyExists => {
                 (ErrorKind::DestinationTableAlreadyExists, "BigQuery entity already exists")
             }
 
-            // Code::OutOfRange (11) - Invalid offset for streaming. Offset beyond current stream
-            // end. Requires application-level recovery. Never retry.
             Code::OutOfRange => (ErrorKind::DestinationError, "BigQuery offset out of range"),
 
-            // Code::Unimplemented (12) - Operation not available. Feature not supported by
-            // BigQuery. Never retry.
             Code::Unimplemented => {
                 (ErrorKind::DestinationError, "BigQuery operation not supported")
             }
 
-            // Code::DataLoss (15) - Unrecoverable data corruption. Severe error requiring manual
-            // intervention. Never retry.
             Code::DataLoss => (ErrorKind::DestinationError, "BigQuery data loss"),
 
-            // Code::Ok (0) - Should never be an error
             Code::Ok => (ErrorKind::DestinationError, "BigQuery unexpected ok status"),
         },
 
@@ -591,10 +612,9 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
         None
     };
 
-    if let Some(detail) = detail {
-        etl_error!(kind, description, detail, source: err)
-    } else {
-        etl_error!(kind, description, source: err)
+    match detail {
+        Some(detail) => classified_error_with_detail(kind, description, detail, err),
+        None => classified_error(kind, description, err),
     }
 }
 
@@ -1715,6 +1735,44 @@ mod tests {
         assert!(!error.to_string().contains("customer@example.com"));
     }
 
+    /// Storage Write statuses that BigQuery documents as transient, and schema
+    /// updates that are still propagating, are retryable; rejected requests,
+    /// missing permissions, and missing entities are not.
+    #[test]
+    fn storage_write_statuses_classify_retryability() {
+        for status in [
+            tonic::Status::unavailable("Task is overloaded"),
+            tonic::Status::deadline_exceeded("Deadline exceeded"),
+            tonic::Status::resource_exhausted("Quota exceeded"),
+            tonic::Status::invalid_argument("schema_mismatch_extra_fields"),
+        ] {
+            let message = status.message().to_owned();
+            assert_eq!(BQError::from(status).retryability(), Retryability::Retryable, "{message}");
+        }
+        for status in [
+            tonic::Status::invalid_argument("Invalid row"),
+            tonic::Status::permission_denied("Permission denied"),
+            tonic::Status::not_found("Requested entity was not found"),
+        ] {
+            let message = status.message().to_owned();
+            assert_eq!(BQError::from(status).retryability(), Retryability::Permanent, "{message}");
+        }
+        assert_eq!(BQError::NoToken.retryability(), Retryability::Permanent);
+    }
+
+    /// The converted ETL error carries the BigQuery error's classification
+    /// together with its kind.
+    #[test]
+    fn bigquery_error_conversion_records_retryability() {
+        let unavailable = bq_error_to_etl_error(BQError::from(tonic::Status::unavailable("busy")));
+        let rejected = bq_error_to_etl_error(BQError::from(tonic::Status::invalid_argument("bad")));
+
+        assert_eq!(unavailable.kind(), ErrorKind::DestinationError);
+        assert_eq!(unavailable.retryability(), Retryability::Retryable);
+        assert_eq!(rejected.kind(), ErrorKind::DestinationError);
+        assert_eq!(rejected.retryability(), Retryability::Permanent);
+    }
+
     #[test]
     fn missing_column_default_error_matches_only_absent_default_response() {
         let error = BQError::ResponseError {
@@ -1884,7 +1942,7 @@ mod tests {
     fn storage_write_retry_timeout_error_is_worker_retryable() {
         let error = storage_write_retry_timeout_error("retryable storage write error");
 
-        assert_eq!(error.kind(), ErrorKind::DestinationAtomicBatchRetryable);
+        assert_eq!(error.retryability(), Retryability::Retryable);
         assert_eq!(error.description(), Some("BigQuery storage write retry timed out"));
     }
 }
