@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt,
     sync::Arc,
 };
@@ -14,8 +14,8 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventSequenceKey},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type},
-    store::SharedStateStore,
+    schema::{ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, Type},
+    store::DestinationStore,
     task::{TaskGroup, TaskRegistry},
 };
 use tokio::sync::Mutex;
@@ -116,18 +116,14 @@ pub struct IcebergDestination<S> {
 pub enum DestinationNamespace {
     /// A single namespace for all tables in the source
     Single(String),
-    /// One namespace for each schema in the source
+    /// One namespace for each schema in the source.
+    ///
+    /// Rejects distinct source schemas that normalize to the same namespace
+    /// within this destination instance.
     OnePerSchema,
 }
 
 impl DestinationNamespace {
-    fn get_or<'a>(&'a self, table_namespace: &'a str) -> &'a str {
-        match self {
-            DestinationNamespace::Single(ns) => ns,
-            DestinationNamespace::OnePerSchema => table_namespace,
-        }
-    }
-
     pub fn is_single(&self) -> bool {
         match self {
             DestinationNamespace::Single(_) => true,
@@ -153,17 +149,53 @@ struct Inner {
     /// either all tables will go in one namespace or there will be one
     /// namespace per source schema.
     namespace: DestinationNamespace,
+    /// Original source schema claiming each normalized destination namespace.
+    ///
+    /// Claims are retained for this instance's lifetime because removing ETL
+    /// state does not necessarily remove the destination tables.
+    namespace_sources: HashMap<String, String>,
+}
+
+impl Inner {
+    /// Resolves a namespace and rejects colliding source schemas before any
+    /// destination mutation. Callers serialize claims with the inner mutex.
+    fn claim_namespace(&mut self, source_schema: &str) -> EtlResult<String> {
+        if let DestinationNamespace::Single(namespace) = &self.namespace {
+            return Ok(namespace.clone());
+        }
+
+        let namespace = schema_to_namespace(source_schema);
+        match self.namespace_sources.entry(namespace.clone()) {
+            Entry::Occupied(entry) if entry.get() != source_schema => {
+                return Err(etl_error!(
+                    ErrorKind::InvalidState,
+                    "Iceberg namespace collision",
+                    format!(
+                        "Source schemas {:?} and {source_schema:?} both map to Iceberg namespace \
+                         {namespace:?}. OnePerSchema requires distinct destination namespaces.",
+                        entry.get()
+                    )
+                ));
+            }
+            Entry::Occupied(_) => {}
+            Entry::Vacant(entry) => {
+                entry.insert(source_schema.to_owned());
+            }
+        }
+
+        Ok(namespace)
+    }
 }
 
 impl<S> IcebergDestination<S>
 where
-    S: SharedStateStore,
+    S: DestinationStore,
 {
     /// Creates a new Iceberg destination instance.
     ///
     /// Initializes the destination with an Iceberg client, target namespace,
-    /// and state/schema store. The destination starts with an empty table
-    /// namespace cache and is ready to handle streaming operations.
+    /// and state/schema store. Pipeline startup restores namespace claims
+    /// from the loaded store before writes or copy recovery begin.
     pub fn new(
         client: IcebergClient,
         namespace: DestinationNamespace,
@@ -172,7 +204,11 @@ where
         IcebergDestination {
             client,
             store,
-            inner: Arc::new(Mutex::new(Inner { created_namespaces: HashSet::new(), namespace })),
+            inner: Arc::new(Mutex::new(Inner {
+                created_namespaces: HashSet::new(),
+                namespace,
+                namespace_sources: HashMap::new(),
+            })),
             tasks: TaskRegistry::new(),
         }
     }
@@ -186,6 +222,7 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
+        let namespace = inner.claim_namespace(&replicated_table_schema.name().schema)?;
         let table_id = replicated_table_schema.id();
 
         // Check if metadata exists for this table.
@@ -237,8 +274,6 @@ where
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
-        let namespace = schema_to_namespace(&replicated_table_schema.name().schema);
-        let namespace = inner.namespace.get_or(&namespace).to_owned();
         let namespace = if metadata.is_creating() {
             self.create_namespace_if_missing(&mut inner, namespace).await?
         } else {
@@ -275,12 +310,11 @@ where
     ) -> EtlResult<()> {
         let table_id = replicated_table_schema.id();
         let table_name = replicated_table_schema.name();
-        let table_namespace = schema_to_namespace(&table_name.schema);
         let (default_table_name, namespace) = {
-            let inner = self.inner.lock().await;
+            let mut inner = self.inner.lock().await;
             let default_table_name =
                 table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
-            let namespace = inner.namespace.get_or(&table_namespace).to_owned();
+            let namespace = inner.claim_namespace(&table_name.schema)?;
 
             (default_table_name, namespace)
         };
@@ -499,9 +533,7 @@ where
             .as_ref()
             .map_or(iceberg_table_name, |metadata| metadata.table_id().to_owned());
 
-        // We prepare the namespace.
-        let namespace = schema_to_namespace(&table_name.schema);
-        let namespace = inner.namespace.get_or(&namespace).to_owned();
+        let namespace = inner.claim_namespace(&table_name.schema)?;
 
         let creating_metadata = match existing_metadata {
             Some(metadata) if metadata.is_applied() => {
@@ -614,11 +646,44 @@ where
 
 impl<S> Destination for IcebergDestination<S>
 where
-    S: SharedStateStore,
+    S: DestinationStore,
 {
     /// Returns the identifier name for this destination type.
     fn name() -> &'static str {
         etl_config::shared::DestinationKind::Iceberg.as_str()
+    }
+
+    /// Restores namespace claims before writes or destructive copy recovery.
+    async fn startup(&self) -> EtlResult<()> {
+        let mut inner = self.inner.lock().await;
+        if inner.namespace.is_single() {
+            return Ok(());
+        }
+
+        let table_schemas = self.store.get_table_schemas().await?;
+        let table_ids: HashSet<_> = table_schemas.iter().map(|schema| schema.id).collect();
+        for table_id in table_ids {
+            // Metadata identifies the source schema that owns the existing
+            // destination table, even when a newer source snapshot is cached.
+            let metadata = self.store.get_destination_table_metadata(table_id).await?;
+            let snapshot_id =
+                metadata.as_ref().map_or(SnapshotId::max(), DestinationTableMetadata::snapshot_id);
+            let table_schema = self
+                .store
+                .get_table_schema(&table_id, snapshot_id)
+                .await?
+                .filter(|schema| metadata.is_none() || schema.snapshot_id == snapshot_id)
+                .ok_or_else(|| {
+                    etl_error!(
+                        ErrorKind::InvalidState,
+                        "Iceberg namespace source schema is missing",
+                        format!("Table {table_id} needs stored schema snapshot {snapshot_id}.")
+                    )
+                })?;
+            inner.claim_namespace(&table_schema.name.schema)?;
+        }
+
+        Ok(())
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
@@ -838,22 +903,27 @@ fn schema_to_namespace(schema: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
 
     use etl::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
-        destination::DestinationTableMetadata,
+        destination::{Destination, DestinationTableMetadata},
         error::ErrorKind,
         event::EventSequenceKey,
         schema::{
             ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
             TableId, TableName, TableSchema, Type,
         },
+        store::{MemoryStore, SchemaStore, StateStore},
     };
 
-    use crate::iceberg::core::{
-        CDC_OPERATION_COLUMN_NAME, ensure_iceberg_relation_is_unchanged, find_unique_column_name,
-        iceberg_delete_row, iceberg_sequence_key, iceberg_update_row, schema_to_namespace,
+    use crate::iceberg::{
+        DestinationNamespace, IcebergClient, IcebergDestination,
+        core::{
+            CDC_OPERATION_COLUMN_NAME, ensure_iceberg_relation_is_unchanged,
+            find_unique_column_name, iceberg_delete_row, iceberg_sequence_key, iceberg_update_row,
+            schema_to_namespace,
+        },
     };
 
     /// Creates a synthetic composite snapshot ID for tests.
@@ -898,6 +968,58 @@ mod tests {
         let identity_mask = IdentityMask::from_bytes(vec![1, 0]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// Startup claims the schema recorded by destination metadata, not an
+    /// unapplied newer name or every historical schema name.
+    #[tokio::test]
+    async fn namespace_startup_uses_exact_destination_snapshot() {
+        // Restoring claims must not need a reachable catalog.
+        let client = IcebergClient::new_with_rest_catalog(
+            "http://127.0.0.1:1".to_owned(),
+            "test_warehouse".to_owned(),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let store = MemoryStore::new();
+        let mut schema = replicated_schema().inner().clone();
+        schema.name.schema = "UserSchema".to_owned();
+        let schema = ReplicatedTableSchema::all(store.store_table_schema(schema).await.unwrap());
+        let metadata = DestinationTableMetadata::new_applied(
+            "users_changelog".to_owned(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+        let mut newer_schema = schema.inner().clone();
+        newer_schema.name.schema = "userschema".to_owned();
+        newer_schema.snapshot_id = test_snapshot_id(100, 100);
+        let newer_schema =
+            ReplicatedTableSchema::all(store.store_table_schema(newer_schema).await.unwrap());
+
+        let destination = IcebergDestination::new(
+            client.clone(),
+            DestinationNamespace::OnePerSchema,
+            store.clone(),
+        );
+        destination.startup().await.unwrap();
+        destination.write_table_rows(&schema, Vec::new()).await.unwrap();
+        let error = destination.write_table_rows(&newer_schema, Vec::new()).await.unwrap_err();
+        assert_eq!(error.description(), Some("Iceberg namespace collision"));
+
+        // A lookup at a missing snapshot returns an earlier schema. It cannot
+        // safely identify the namespace owned by the destination metadata.
+        let metadata = DestinationTableMetadata::new_creating(
+            "users_changelog".to_owned(),
+            test_snapshot_id(50, 50),
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+        let destination =
+            IcebergDestination::new(client, DestinationNamespace::OnePerSchema, store);
+        let error = destination.startup().await.unwrap_err();
+        assert_eq!(error.description(), Some("Iceberg namespace source schema is missing"));
     }
 
     #[test]
