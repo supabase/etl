@@ -188,26 +188,13 @@ impl Display for VersionedBigQueryTableId {
 }
 
 /// Returns the versioned table id stored in destination metadata.
-fn metadata_versioned_table_id_for_base(
+///
+/// This is the table ETL writes to. After a source rename it still has the old
+/// name, so callers must not derive it from the current source name.
+fn metadata_versioned_table_id(
     metadata: &DestinationTableMetadata,
-    base_bigquery_table_id: &BigQueryTableId,
 ) -> EtlResult<VersionedBigQueryTableId> {
-    let versioned_table_id = metadata.table_id().parse::<VersionedBigQueryTableId>()?;
-
-    if !versioned_table_id.belongs_to_base(base_bigquery_table_id) {
-        bail!(
-            ErrorKind::InvalidState,
-            "Destination table metadata points to a different BigQuery table",
-            format!(
-                "Destination table metadata points to '{}', but BigQuery table resolution \
-                 expected a versioned table for '{}'",
-                metadata.table_id(),
-                base_bigquery_table_id
-            )
-        );
-    }
-
-    Ok(versioned_table_id)
+    metadata.table_id().parse()
 }
 
 /// Attempts physical-table deletion without making replication depend on
@@ -550,14 +537,12 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<VersionedBigQueryTableId> {
         let table_id = replicated_table_schema.id();
-        let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let existing_metadata = self.state_store.get_destination_table_metadata(table_id).await?;
 
         // Applied metadata supplies the physical identity without probing
         // BigQuery.
         if let Some(metadata) = existing_metadata {
-            let versioned_table_id =
-                metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
+            let versioned_table_id = metadata_versioned_table_id(&metadata)?;
 
             if metadata.is_applying() {
                 return Err(etl_error!(
@@ -587,6 +572,7 @@ where
 
         // A Creating target is abandoned without deletion here. Truncate or
         // explicit reset can collect it after redirecting or removing the view.
+        let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id);
         let metadata = DestinationTableMetadata::new_creating(
             versioned_table_id.to_string(),
@@ -1265,9 +1251,6 @@ where
 
         for replicated_table_schema in replicated_table_schemas {
             let table_id = replicated_table_schema.id();
-            let bigquery_table_id =
-                table_name_to_bigquery_table_id(replicated_table_schema.name())?;
-
             // We need to determine the current versioned table ID for this
             // table.
             //
@@ -1289,8 +1272,8 @@ where
                 &metadata,
                 &replicated_table_schema,
             )?;
-            let versioned_table_id =
-                metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
+            let versioned_table_id = metadata_versioned_table_id(&metadata)?;
+            let bigquery_table_id = versioned_table_id.base_table_id().clone();
 
             // Capture candidates before creation while holding serialization.
             // Metadata supplies the previous target even if listing fails or
@@ -1358,19 +1341,24 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
-        let base_bigquery_table_id =
-            table_name_to_bigquery_table_id(replicated_table_schema.name())?;
         let table_id = replicated_table_schema.id();
         let mut table_ids = HashSet::new();
 
         // Always include the durable metadata target. BigQuery
         // INFORMATION_SCHEMA can lag behind recently-created tables, but
         // destination metadata is the source of truth for the table this
-        // pipeline last wrote to.
-        if let Some(metadata) = self.state_store.get_destination_table_metadata(table_id).await? {
-            table_ids
-                .insert(metadata_versioned_table_id_for_base(&metadata, &base_bigquery_table_id)?);
-        }
+        // pipeline last wrote to. After a source rename, it also still has the
+        // old name, so the view to drop comes from metadata too.
+        let base_bigquery_table_id =
+            match self.state_store.get_destination_table_metadata(table_id).await? {
+                Some(metadata) => {
+                    let versioned_table_id = metadata_versioned_table_id(&metadata)?;
+                    let base_bigquery_table_id = versioned_table_id.base_table_id().clone();
+                    table_ids.insert(versioned_table_id);
+                    base_bigquery_table_id
+                }
+                None => table_name_to_bigquery_table_id(replicated_table_schema.name())?,
+            };
 
         table_ids.extend(self.list_table_versions_for_cleanup(&base_bigquery_table_id).await);
 
@@ -2262,24 +2250,6 @@ mod tests {
     }
 
     #[test]
-    fn metadata_versioned_table_id_for_base_uses_metadata_target() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
-        let metadata = DestinationTableMetadata::new_applied(
-            "users_table_3".to_owned(),
-            replicated_table_schema.inner().snapshot_id,
-            replicated_table_schema.replication_mask().clone(),
-        );
-
-        let versioned_table_id =
-            metadata_versioned_table_id_for_base(&metadata, &"users_table".to_owned()).unwrap();
-
-        assert_eq!(
-            versioned_table_id,
-            VersionedBigQueryTableId("users_table".to_owned(), TableVersionId::Legacy(3))
-        );
-    }
-
-    #[test]
     fn bigquery_streaming_requires_applied_metadata() {
         let schema = replicated_schema(IdentityType::PrimaryKey);
         let creating_metadata = DestinationTableMetadata::new_creating(
@@ -2302,21 +2272,6 @@ mod tests {
             .unwrap();
         let error = ensure_bigquery_metadata_applied(&applying_metadata).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidState);
-    }
-
-    #[test]
-    fn metadata_versioned_table_id_for_base_rejects_unrelated_metadata_target() {
-        let replicated_table_schema = replicated_schema(IdentityType::PrimaryKey);
-        let metadata = DestinationTableMetadata::new_applied(
-            "orders_table_0".to_owned(),
-            replicated_table_schema.inner().snapshot_id,
-            replicated_table_schema.replication_mask().clone(),
-        );
-
-        let err =
-            metadata_versioned_table_id_for_base(&metadata, &"users_table".to_owned()).unwrap_err();
-
-        assert_eq!(err.kind(), ErrorKind::InvalidState);
     }
 
     #[test]
