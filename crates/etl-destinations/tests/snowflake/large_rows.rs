@@ -304,7 +304,7 @@ async fn request_limit_accepts_exactly_four_mebibytes_and_rejects_one_more_byte(
     with_table_cleanup(&sql, &[&table], || async {
         sql.create_table_if_not_exists(
             &table,
-            r#""id" NUMBER(10,0), "payload" VARCHAR, "_cdc_operation" VARCHAR, "_cdc_sequence_number" VARCHAR"#,
+            r#""id" NUMBER(10,0), "payload" VARCHAR, "_cdc_operation" VARCHAR, "_cdc_sequence_number" VARCHAR, "_cdc_missing_columns" ARRAY"#,
         )
         .await
         .unwrap();
@@ -425,7 +425,7 @@ async fn multi_frame_request_lands_every_row_in_one_append() {
     .await;
 }
 
-/// Exercises unchanged TOAST reconstruction through PostgreSQL and verifies the
+/// Exercises unchanged TOAST delivery through PostgreSQL and verifies the
 /// copied, inserted, and updated large values in Snowflake after durability.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires local Postgres and Snowflake credentials"]

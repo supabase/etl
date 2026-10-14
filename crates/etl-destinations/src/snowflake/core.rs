@@ -5,7 +5,7 @@ use std::{
 
 use etl::{
     bail,
-    data::{OldTableRow, TableRow, UpdatedTableRow},
+    data::TableRow,
     destination::{
         DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
@@ -26,7 +26,7 @@ use crate::{
     snowflake::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
-        encoding::{CdcMeta, CdcOperation},
+        encoding::{CdcMeta, CdcOperation, normalize_delete_row, normalize_update_row},
         metrics::register_metrics,
         schema,
         streaming::{Completed, OffsetToken, RestStreamClient, RowBatchBuilder, StreamClient},
@@ -52,6 +52,15 @@ fn ensure_snowflake_metadata_applied(
             metadata.table_schema()
         )
     ))
+}
+
+/// Cached Snowflake column definitions and the source schema they came from.
+/// Reused for later events from the same table while their schema is unchanged.
+struct CachedColumns {
+    /// Source schema, including which columns are replicated to Snowflake.
+    schema: ReplicatedTableSchema,
+    /// Snowflake column definitions, ordered to match the values in each row.
+    columns: Vec<ColumnSchema>,
 }
 
 type EventIter = std::iter::Peekable<std::vec::IntoIter<Event>>;
@@ -450,7 +459,7 @@ where
         &self,
         e: InsertEvent,
         builder: &mut RowBatchBuilder,
-        columns: &mut Option<Vec<ColumnSchema>>,
+        columns: &mut Option<CachedColumns>,
     ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
@@ -474,9 +483,11 @@ where
         &self,
         e: UpdateEvent,
         builder: &mut RowBatchBuilder,
-        columns: &mut Option<Vec<ColumnSchema>>,
+        columns: &mut Option<CachedColumns>,
     ) -> EtlResult<Completed> {
-        let full_row = snowflake_update_row(&e.replicated_table_schema, e.updated_table_row)?;
+        let (full_row, missing) =
+            normalize_update_row(&e.replicated_table_schema, e.updated_table_row, e.old_table_row)
+                .map_err(EtlError::from)?;
 
         let table_id = e.replicated_table_schema.id();
         let cols = self.prepare_columns(columns, &e.replicated_table_schema).await?;
@@ -486,7 +497,12 @@ where
         }
 
         builder
-            .push_row(cols, &full_row, CdcMeta::new(CdcOperation::Update, offset.as_ref()), &offset)
+            .push_row(
+                cols,
+                &full_row,
+                CdcMeta::new(CdcOperation::Update, offset.as_ref()).with_missing_columns(&missing),
+                &offset,
+            )
             .map_err(EtlError::from)
     }
 
@@ -495,7 +511,7 @@ where
         &self,
         e: DeleteEvent,
         builder: &mut RowBatchBuilder,
-        columns: &mut Option<Vec<ColumnSchema>>,
+        columns: &mut Option<CachedColumns>,
     ) -> EtlResult<Completed> {
         let table_id = e.replicated_table_schema.id();
         let offset = OffsetToken::new(e.commit_lsn, e.tx_ordinal);
@@ -504,43 +520,48 @@ where
             return Ok(Completed::default());
         }
 
-        match snowflake_delete_row(&e.replicated_table_schema, e.old_table_row)? {
-            SnowflakeDeleteRow::Full(row) => builder
-                .push_row(cols, &row, CdcMeta::new(CdcOperation::Delete, offset.as_ref()), &offset)
-                .map_err(EtlError::from),
-            SnowflakeDeleteRow::Key(key_row) => {
-                let identity_cols: Vec<_> = e
-                    .replicated_table_schema
-                    .identity_column_schemas()
-                    .map(|column| SNOWFLAKE_COLUMN_NAME_MAPPING.map_column_schema(column))
-                    .collect();
-                builder
-                    .push_row(
-                        &identity_cols,
-                        &key_row,
-                        CdcMeta::new(CdcOperation::Delete, offset.as_ref()),
-                        &offset,
-                    )
-                    .map_err(EtlError::from)
-            }
-        }
+        let (row, missing) = normalize_delete_row(&e.replicated_table_schema, e.old_table_row)
+            .map_err(EtlError::from)?;
+        builder
+            .push_row(
+                cols,
+                &row,
+                CdcMeta::new(CdcOperation::Delete, offset.as_ref()).with_missing_columns(&missing),
+                &offset,
+            )
+            .map_err(EtlError::from)
     }
 
-    /// Prepares the table and caches its projected columns on the first row.
+    /// Prepares the table and reuses its columns while the source schema is
+    /// unchanged.
     async fn prepare_columns<'a>(
         &self,
-        columns: &'a mut Option<Vec<ColumnSchema>>,
+        columns: &'a mut Option<CachedColumns>,
         table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<&'a [ColumnSchema]> {
         match columns {
-            Some(columns) => Ok(columns),
+            Some(cached) => {
+                // The snapshot identifies the table definition; the replicated
+                // column selection can change separately.
+                if cached.schema.inner().snapshot_id != table_schema.inner().snapshot_id
+                    || cached.schema.replication_mask() != table_schema.replication_mask()
+                {
+                    bail!(
+                        ErrorKind::DestinationLayoutUnsupported,
+                        "Snowflake data segment contains multiple schema snapshots or projections"
+                    );
+                }
+                Ok(&cached.columns)
+            }
             None => {
                 self.prepare_table_for_writes(table_schema).await?;
-                Ok(columns.insert(
-                    table_schema
+                let cached = columns.insert(CachedColumns {
+                    schema: table_schema.clone(),
+                    columns: table_schema
                         .destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING)
                         .collect(),
-                ))
+                });
+                Ok(&cached.columns)
             }
         }
     }
@@ -648,54 +669,6 @@ where
 
         info!(table_id = ?table_id, "schema change applied");
         Ok(true)
-    }
-}
-
-/// Delete row payloads Snowflake can encode.
-#[derive(Debug)]
-enum SnowflakeDeleteRow {
-    /// A full old row image.
-    Full(TableRow),
-    /// A key-only old row image.
-    Key(TableRow),
-}
-
-/// Returns the full new row required for a Snowflake update row.
-fn snowflake_update_row(
-    replicated_table_schema: &ReplicatedTableSchema,
-    updated_table_row: UpdatedTableRow,
-) -> EtlResult<TableRow> {
-    match updated_table_row {
-        UpdatedTableRow::Full(row) => Ok(row),
-        UpdatedTableRow::Partial(_) => Err(etl_error!(
-            ErrorKind::SourceReplicaIdentityError,
-            "Snowflake update requires a full new row image",
-            format!(
-                "Table '{}' emitted a partial update row. Snowflake update rows must include all \
-                 replicated column values.",
-                replicated_table_schema.name()
-            )
-        )),
-    }
-}
-
-/// Returns the old row image required for a Snowflake delete row.
-fn snowflake_delete_row(
-    replicated_table_schema: &ReplicatedTableSchema,
-    old_table_row: Option<OldTableRow>,
-) -> EtlResult<SnowflakeDeleteRow> {
-    match old_table_row {
-        Some(OldTableRow::Full(row)) => Ok(SnowflakeDeleteRow::Full(row)),
-        Some(OldTableRow::Key(row)) => Ok(SnowflakeDeleteRow::Key(row)),
-        None => Err(etl_error!(
-            ErrorKind::SourceReplicaIdentityError,
-            "Snowflake delete requires an old row image",
-            format!(
-                "Table '{}' emitted a delete without an old row image. Snowflake deletes need \
-                 either a full old row or a key image.",
-                replicated_table_schema.name()
-            )
-        )),
     }
 }
 
@@ -878,7 +851,6 @@ mod tests {
     };
 
     use etl::{
-        data::{Cell, PartialTableRow},
         event::{RelationEvent, TruncateEvent},
         pipeline::PipelineId,
         schema::{IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema, Type},
@@ -1137,59 +1109,30 @@ mod tests {
         assert_eq!(store.get_destination_table_metadata(table_id).await.unwrap(), Some(metadata));
     }
 
-    #[test]
-    fn snowflake_update_row_accepts_full_new_row() {
+    /// Cache reuse requires the same source schema and the same set of
+    /// replicated columns.
+    #[tokio::test]
+    async fn column_cache_rejects_changed_snapshot_or_projection() {
+        let (destination, _) = test_destination();
         let schema = replicated_schema();
-        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
-
-        let result = snowflake_update_row(&schema, UpdatedTableRow::Full(row.clone())).unwrap();
-
-        assert_eq!(result, row);
-    }
-
-    #[test]
-    fn snowflake_update_row_rejects_partial_new_row() {
-        let schema = replicated_schema();
-        let partial_row = PartialTableRow::new(2, TableRow::new(vec![Cell::I32(1)]), vec![1]);
-
-        let error =
-            snowflake_update_row(&schema, UpdatedTableRow::Partial(partial_row)).unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
-    }
-
-    #[test]
-    fn snowflake_delete_row_accepts_full_old_row() {
-        let schema = replicated_schema();
-        let row = TableRow::new(vec![Cell::I32(1), Cell::String("alice".to_owned())]);
-
-        let result = snowflake_delete_row(&schema, Some(OldTableRow::Full(row.clone()))).unwrap();
-
-        match result {
-            SnowflakeDeleteRow::Full(result) => assert_eq!(result, row),
-            SnowflakeDeleteRow::Key(_) => panic!("expected full old row"),
+        let mut cache = Some(CachedColumns {
+            schema: schema.clone(),
+            columns: schema.column_schemas().cloned().collect(),
+        });
+        destination.writer.prepare_columns(&mut cache, &schema).await.unwrap();
+        let mut changed = schema.inner().clone();
+        changed.snapshot_id = test_snapshot_id(10, 1);
+        for changed in [
+            ReplicatedTableSchema::all(Arc::new(changed)),
+            ReplicatedTableSchema::from_mask(
+                Arc::new(schema.inner().clone()),
+                ReplicationMask::from_bytes(vec![1, 0]),
+            ),
+        ] {
+            assert_eq!(
+                destination.writer.prepare_columns(&mut cache, &changed).await.unwrap_err().kind(),
+                ErrorKind::DestinationLayoutUnsupported
+            );
         }
-    }
-
-    #[test]
-    fn snowflake_delete_row_accepts_key_only_old_row() {
-        let schema = replicated_schema();
-        let row = TableRow::new(vec![Cell::I32(1)]);
-
-        let result = snowflake_delete_row(&schema, Some(OldTableRow::Key(row.clone()))).unwrap();
-
-        match result {
-            SnowflakeDeleteRow::Key(result) => assert_eq!(result, row),
-            SnowflakeDeleteRow::Full(_) => panic!("expected key old row"),
-        }
-    }
-
-    #[test]
-    fn snowflake_delete_row_rejects_missing_old_row() {
-        let schema = replicated_schema();
-
-        let error = snowflake_delete_row(&schema, None).unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
 }

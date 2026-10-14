@@ -929,6 +929,7 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
                 serde_json::json!("after"),
                 serde_json::json!("insert"),
                 serde_json::json!(post_truncate_offset.to_string()),
+                serde_json::json!("[]"),
             ]]
         );
     })
@@ -977,10 +978,16 @@ async fn write_events_delete_key_only() {
         .await;
         assert_eq!(rows.len(), 1, "expected 1 delete row");
 
-        // Column order: id, name, _cdc_operation, _cdc_sequence_number
+        // Source columns precede the operation, sequence, and missing-column
+        // list.
         assert_eq!(&rows[0][0], &serde_json::Value::String("42".into()),);
         assert_eq!(&rows[0][1], &serde_json::Value::Null);
         assert_eq!(&rows[0][2], &serde_json::Value::String("delete".into()),);
+        assert_eq!(rows[0][3].as_str().unwrap(), expected_offset.as_ref());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(rows[0][4].as_str().unwrap()).unwrap(),
+            serde_json::json!(["name"])
+        );
     })
     .await;
 }

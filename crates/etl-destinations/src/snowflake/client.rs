@@ -450,7 +450,20 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             let column_defs = schema::build_column_defs(columns);
             self.sql_client.create_table_if_not_exists(table_name, &column_defs).await?;
         }
-        self.validate_table(table_name, columns).await?;
+        // TODO: Remove this fallback and SqlClient::upgrade_legacy_table
+        // once all legacy destination tables (including inactive pipelines) are
+        // migrated and supported self-hosted upgrades no longer need it. New
+        // tables already include the mask; retain strict validation after
+        // removal.
+        match self.validate_table(table_name, columns).await {
+            Err(Error::MissingTableColumn { column_name, .. })
+                if column_name == schema::CDC_MISSING_COLUMNS_COLUMN =>
+            {
+                self.sql_client.upgrade_legacy_table(table_name, columns).await?;
+                self.validate_table(table_name, columns).await?;
+            }
+            result => result?,
+        }
 
         // Obtain table channel.
         let mut handle = ChannelHandle::new(
@@ -476,7 +489,11 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         let expected_column_names = columns
             .iter()
             .map(|column| column.name.as_str())
-            .chain([schema::CDC_OPERATION_COLUMN, schema::CDC_SEQUENCE_COLUMN])
+            .chain([
+                schema::CDC_OPERATION_COLUMN,
+                schema::CDC_SEQUENCE_COLUMN,
+                schema::CDC_MISSING_COLUMNS_COLUMN,
+            ])
             .collect::<Vec<_>>();
         let json_column_names = columns
             .iter()
@@ -1183,9 +1200,13 @@ mod tests {
                     let mut row = json!({
                         "id": 1, "_cdc_operation": operation,
                         "_cdc_sequence_number": OffsetToken::new(10.into(), ordinal).to_string(),
+                        "_cdc_missing_columns": [],
                     });
                     if phase != 2 {
                         row["name"] = json!(if phase == 0 { "initial" } else { "updated" });
+                    } else {
+                        row["name"] = json!(null);
+                        row["_cdc_missing_columns"] = json!(["name"]);
                     }
                     row
                 })

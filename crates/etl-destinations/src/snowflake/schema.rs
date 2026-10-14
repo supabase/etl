@@ -1,6 +1,6 @@
 use etl::schema::{
-    ColumnSchema, DefaultExpression, Type, is_array_type, parse_default_expression,
-    unquote_postgres_string_literal,
+    ColumnSchema, DefaultExpression, IdentityType, ReplicatedTableSchema, Type, is_array_type,
+    parse_default_expression, unquote_postgres_string_literal,
 };
 use tracing::warn;
 
@@ -9,8 +9,12 @@ use crate::snowflake::{
     sql::{quote_identifier, quote_string_literal},
 };
 
+/// Name of the column storing the CDC operation.
 pub(crate) const CDC_OPERATION_COLUMN: &str = "_cdc_operation";
+/// Name of the column storing the CDC sequence number.
 pub(crate) const CDC_SEQUENCE_COLUMN: &str = "_cdc_sequence_number";
+/// Name of the column listing values omitted from the CDC event.
+pub(super) const CDC_MISSING_COLUMNS_COLUMN: &str = "_cdc_missing_columns";
 
 /// Returns the Snowflake DDL type string for a given Postgres type.
 ///
@@ -41,10 +45,56 @@ pub(crate) fn type_name(typ: &Type) -> &'static str {
 /// Checks that no source column collides with the reserved CDC column names.
 pub(crate) fn validate_no_cdc_collisions(columns: &[ColumnSchema]) -> Result<()> {
     for col in columns {
-        if col.name == CDC_OPERATION_COLUMN || col.name == CDC_SEQUENCE_COLUMN {
+        if col.name == CDC_OPERATION_COLUMN
+            || col.name == CDC_SEQUENCE_COLUMN
+            || col.name == CDC_MISSING_COLUMNS_COLUMN
+        {
             return Err(Error::Config(format!(
-                "source column '{}' collides with reserved CDC column name",
+                "Source column '{}' collides with reserved CDC column name",
                 col.name,
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Checks replica identity and primary-key requirements shared by
+/// partial-update writes and materialization queries.
+pub(super) fn validate_primary_key_identity(schema: &ReplicatedTableSchema) -> Result<()> {
+    if !matches!(schema.identity_type(), IdentityType::PrimaryKey | IdentityType::Full)
+        || !schema.column_schemas().any(ColumnSchema::primary_key)
+        || !schema.all_primary_key_columns_replicated()
+        || schema.inner().primary_key_deferrable
+    {
+        return Err(Error::UnsupportedIdentity(
+            "A complete nondeferrable primary-key identity is required".to_owned(),
+        ));
+    }
+    for column in schema.column_schemas() {
+        if column.primary_key()
+            && !matches!(
+                &column.typ,
+                &Type::INT2
+                    | &Type::INT4
+                    | &Type::INT8
+                    | &Type::OID
+                    | &Type::BOOL
+                    | &Type::TEXT
+                    | &Type::VARCHAR
+                    | &Type::CHAR
+                    | &Type::BPCHAR
+                    | &Type::NAME
+                    | &Type::UUID
+                    | &Type::BYTEA
+                    | &Type::NUMERIC
+                    | &Type::DATE
+                    | &Type::TIMESTAMP
+                    | &Type::TIMESTAMPTZ
+            )
+        {
+            return Err(Error::UnsupportedIdentity(format!(
+                "Primary-key column '{}' has an unsupported type",
+                column.name
             )));
         }
     }
@@ -53,8 +103,8 @@ pub(crate) fn validate_no_cdc_collisions(columns: &[ColumnSchema]) -> Result<()>
 
 /// Builds the column definitions string.
 ///
-/// Each source column is rendered as `"name" TYPE` + two CDC columns are
-/// appended at the end.
+/// Source columns are followed by the operation and sequence columns, and
+/// the nullable missing-column mask, matching upgraded legacy tables.
 pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
     let mut parts: Vec<String> = columns
         .iter()
@@ -74,6 +124,7 @@ pub(crate) fn build_column_defs(columns: &[ColumnSchema]) -> String {
     parts.push(format!("{} VARCHAR NOT NULL", quote_identifier(CDC_OPERATION_COLUMN)));
     parts.push(format!("{} VARCHAR NOT NULL", quote_identifier(CDC_SEQUENCE_COLUMN)));
 
+    parts.push(format!("{} ARRAY", quote_identifier(CDC_MISSING_COLUMNS_COLUMN)));
     parts.join(", ")
 }
 
@@ -238,6 +289,10 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use etl::schema::{IdentityMask, ReplicationMask, TableId, TableName, TableSchema};
+
     use super::*;
 
     fn col(name: &str) -> ColumnSchema {
@@ -378,6 +433,7 @@ mod tests {
         expected.extend([
             r#""_cdc_operation" VARCHAR NOT NULL"#,
             r#""_cdc_sequence_number" VARCHAR NOT NULL"#,
+            r#""_cdc_missing_columns" ARRAY"#,
         ]);
 
         let defs = build_column_defs(&columns);
@@ -482,6 +538,45 @@ mod tests {
             if add_clause.is_some() {
                 assert_eq!(add_clause, default_clause(&column));
             }
+        }
+    }
+
+    /// Requires complete nondeferrable keys with supported types for partial
+    /// updates.
+    #[test]
+    fn supported_primary_key_identities() {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".into(), "events".into()),
+            vec![
+                ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("payload".into(), Type::TEXT, -1, 2, true),
+            ],
+        )));
+        validate_primary_key_identity(&schema).unwrap();
+        let mut table = schema.inner().clone();
+        table.primary_key_deferrable = true;
+        assert!(
+            validate_primary_key_identity(&ReplicatedTableSchema::all(Arc::new(table))).is_err()
+        );
+        let full = ReplicatedTableSchema::from_masks(
+            Arc::new(schema.inner().clone()),
+            schema.replication_mask().clone(),
+            IdentityMask::from_bytes(vec![1, 1]),
+        );
+        validate_primary_key_identity(&full).unwrap();
+        let omitted_key = ReplicatedTableSchema::from_mask(
+            Arc::new(schema.inner().clone()),
+            ReplicationMask::from_bytes(vec![0, 1]),
+        );
+        assert!(validate_primary_key_identity(&omitted_key).is_err());
+        for typ in [Type::INT4_ARRAY, Type::JSONB, Type::FLOAT8, Type::TIME, Type::INTERVAL] {
+            let mut table = schema.inner().clone();
+            table.column_schemas[0].typ = typ;
+            assert!(
+                validate_primary_key_identity(&ReplicatedTableSchema::all(Arc::new(table)))
+                    .is_err()
+            );
         }
     }
 }

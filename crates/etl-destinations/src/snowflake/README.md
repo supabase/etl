@@ -7,6 +7,58 @@ open-source destination is unrestricted. See the
 and the [`etl-examples` Snowflake section](../../../etl-examples/README.md#snowflake)
 for the runnable example.
 
+## Partial updates and materialization
+
+ETL stores inserts, updates, and deletes as CDC records. Complete rows and
+partial updates use the same destination and table format. With a supported
+primary key and `REPLICA IDENTITY DEFAULT`, Postgres can omit unchanged large
+TOAST values from updates. `REPLICA IDENTITY FULL` supplies complete update rows.
+
+Each record includes `_cdc_operation`, `_cdc_sequence_number`, and
+`_cdc_missing_columns ARRAY`. An omitted value is stored as a NULL placeholder
+with its column name in the array. An explicitly supplied SQL NULL has no entry
+and replaces the previous value. Complete records have an empty array. Deletes
+end a row's lifetime; their values are not carried forward into a later insert.
+
+### Querying current state
+
+`etl_destinations::snowflake::materialization_query` generates a `SELECT` query
+as a Rust `String`. Pass unquoted database, namespace, and physical table names
+and the matching ETL schema. The caller executes the SQL in Snowflake; ETL does
+not create, refresh, or manage downstream views or tables.
+
+The query handles complete, partial, and mixed histories. It scans retained
+history for insert/delete boundaries, then resolves values from each key's
+latest complete record and later partial updates. It preserves explicit NULLs
+and flags unanchored rows or unresolved columns. These diagnostics cannot detect
+arbitrary publication gaps or removed events.
+
+For guaranteed complete insert/update histories, a latest-event-per-key query
+avoids per-column value resolution. DEFAULT can reduce repeated large payloads;
+FULL supplies complete rows suitable for latest-event selection. Changing to
+FULL does not fill in earlier partial records. Evaluate ingestion and query
+costs together for the workload.
+
+Partial updates require a supported nondeferrable primary key with every
+component replicated. Materialization also requires stable keys, a fixed
+replicated schema, uninterrupted publication coverage, and all accepted history
+from a coherent initial snapshot. History pruning is unsupported. Incompatible
+key, schema, or publication changes and lost history require a full resync.
+See [Partial updates and materialization](https://supabase.github.io/etl/reference/destinations/#partial-updates-and-materialization)
+for supported key types, query diagnostics, and resync requirements.
+
+### Existing destination tables
+
+For ETL-owned tables using the supported previous CDC format, ETL adds the
+nullable `_cdc_missing_columns` column before opening the write channel.
+Existing insert/update records have NULL metadata, interpreted as complete
+records within their replicated schema at event time. The upgrade preserves
+stored history and replication offsets and requires no backfill.
+
+The configured Snowflake role must allow the ALTER. Unrelated schema mismatches
+remain errors. ETL updates the table format; customer-owned queries must support
+partial records before consuming them.
+
 ## Request Packing and Large Rows
 
 Snowpipe Streaming rejects any request body over 4 MiB (4,194,304 bytes,

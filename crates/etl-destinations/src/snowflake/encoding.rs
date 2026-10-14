@@ -2,9 +2,10 @@ use std::{fmt, io::Write};
 
 use etl::{
     data::{
-        ArrayCell, Cell, PgNumeric, TableRow, format_date, format_timestamp, format_timestamptz,
+        ArrayCell, Cell, OldTableRow, PgNumeric, TableRow, UpdatedTableRow, format_date,
+        format_timestamp, format_timestamptz,
     },
-    schema::ColumnSchema,
+    schema::{ColumnSchema, ReplicatedTableSchema},
 };
 use serde::{
     Serialize,
@@ -13,7 +14,7 @@ use serde::{
 
 use crate::snowflake::{
     Error, Result,
-    schema::{CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN, is_json_type},
+    schema::{CDC_MISSING_COLUMNS_COLUMN, CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN, is_json_type},
 };
 
 /// CDC operation type appended to every row sent via Snowpipe Streaming.
@@ -82,12 +83,21 @@ pub struct CdcMeta<'a> {
     pub(crate) operation: CdcOperation,
     /// WAL sequence identifier obtained from `OffsetToken`.
     pub(crate) sequence: &'a str,
+    /// Missing replicated-column positions, empty for complete records.
+    missing_columns: &'a [usize],
 }
 
 impl<'a> CdcMeta<'a> {
     /// Create new CDC meta.
     pub fn new(operation: CdcOperation, sequence: &'a str) -> Self {
-        Self { operation, sequence }
+        Self { operation, sequence, missing_columns: &[] }
+    }
+
+    /// Attach a missing-column mask whose positions have been validated against
+    /// the row schema.
+    pub(super) fn with_missing_columns(mut self, missing_columns: &'a [usize]) -> Self {
+        self.missing_columns = missing_columns;
+        self
     }
 }
 
@@ -120,12 +130,38 @@ pub(crate) fn serialize_row(
         }
     }
 
-    let serializable =
-        RowSerializer { cols, cells, operation: cdc.operation.as_str(), sequence: cdc.sequence };
+    let serializable = RowSerializer {
+        cols,
+        cells,
+        operation: cdc.operation.as_str(),
+        sequence: cdc.sequence,
+        missing_columns: cdc.missing_columns,
+    };
     serde_json::to_writer(&mut *writer, &serializable)
         .map_err(|e| Error::Encoding(e.to_string()))?;
     writer.write_all(b"\n").map_err(|e| Error::Encoding(e.to_string()))?;
     Ok(())
+}
+
+/// Serializes column names without allocating a second mask.
+struct MissingColumns<'a> {
+    /// Columns in replicated order.
+    cols: &'a [ColumnSchema],
+    /// Missing positions in that order.
+    indexes: &'a [usize],
+}
+
+impl Serialize for MissingColumns<'_> {
+    fn serialize<S: Serializer>(&self, ser: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut seq = ser.serialize_seq(Some(self.indexes.len()))?;
+        for &index in self.indexes {
+            let column = self.cols.get(index).ok_or_else(|| {
+                serde::ser::Error::custom("Missing column position exceeds row width")
+            })?;
+            seq.serialize_element(&column.name)?;
+        }
+        seq.end()
+    }
 }
 
 struct RowSerializer<'a> {
@@ -133,6 +169,7 @@ struct RowSerializer<'a> {
     cells: &'a [Cell],
     operation: &'a str,
     sequence: &'a str,
+    missing_columns: &'a [usize],
 }
 
 impl Serialize for RowSerializer<'_> {
@@ -149,6 +186,10 @@ impl Serialize for RowSerializer<'_> {
         }
         map.serialize_entry(CDC_OPERATION_COLUMN, self.operation)?;
         map.serialize_entry(CDC_SEQUENCE_COLUMN, self.sequence)?;
+        map.serialize_entry(
+            CDC_MISSING_COLUMNS_COLUMN,
+            &MissingColumns { cols: self.cols, indexes: self.missing_columns },
+        )?;
         map.end()
     }
 }
@@ -336,17 +377,167 @@ where
     seq.end()
 }
 
+/// Checks full row width and key presence before admitting a partial update.
+pub(super) fn validate_partial_update_row(
+    schema: &ReplicatedTableSchema,
+    row: &TableRow,
+) -> Result<()> {
+    if row.values().len() != schema.column_schemas().len() {
+        return Err(Error::UnsupportedLayout(
+            "Row width does not match the replicated layout".to_owned(),
+        ));
+    }
+    if schema
+        .column_schemas()
+        .zip(row.values())
+        .any(|(column, value)| column.primary_key() && matches!(value, Cell::Null))
+    {
+        return Err(Error::UnsupportedLayout(
+            "Every primary-key value must be present and nonnull".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Expands a dense partial tuple without cloning its present payloads.
+fn expand_partial_row(
+    schema: &ReplicatedTableSchema,
+    row: TableRow,
+    missing: &[usize],
+) -> Result<TableRow> {
+    let width = schema.column_schemas().len();
+    if row.values().len().checked_add(missing.len()) != Some(width)
+        || missing.last().is_some_and(|&index| index >= width)
+        || missing.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(Error::UnsupportedLayout(
+            "Partial row positions do not match the replicated layout".to_owned(),
+        ));
+    }
+    let mut present = row.into_values().into_iter();
+    let mut absent = missing.iter().copied().peekable();
+    let mut values = Vec::with_capacity(width);
+    for index in 0..width {
+        if absent.peek() == Some(&index) {
+            absent.next();
+            values.push(Cell::Null);
+        } else {
+            // The validated width and ordered mask guarantee one present value.
+            values.push(
+                present
+                    .next()
+                    .expect("validated partial row has a value at every present position"),
+            );
+        }
+    }
+    let row = TableRow::new(values);
+    Ok(row)
+}
+
+/// Expands key-only deletes using the actual replica identity, including an
+/// alternative unique index. Materialization queries never carry forward values
+/// from deletes.
+pub(super) fn normalize_delete_row(
+    schema: &ReplicatedTableSchema,
+    row: Option<OldTableRow>,
+) -> Result<(TableRow, Vec<usize>)> {
+    let row =
+        row.ok_or_else(|| Error::UnsupportedIdentity("Delete has no old tuple".to_owned()))?;
+    match row {
+        OldTableRow::Full(row) => {
+            if row.values().len() != schema.column_schemas().len() {
+                return Err(Error::UnsupportedLayout(
+                    "Old row width does not match the replicated layout".to_owned(),
+                ));
+            }
+            Ok((row, Vec::new()))
+        }
+        OldTableRow::Key(row) => {
+            let mut identity = schema.identity_column_schemas().peekable();
+            let missing = schema
+                .column_schemas()
+                .enumerate()
+                .filter_map(|(index, column)| {
+                    if identity
+                        .peek()
+                        .is_some_and(|key| key.ordinal_position == column.ordinal_position)
+                    {
+                        identity.next();
+                        None
+                    } else {
+                        Some(index)
+                    }
+                })
+                .collect::<Vec<_>>();
+            Ok((expand_partial_row(schema, row, &missing)?, missing))
+        }
+    }
+}
+
+/// Normalizes updates while preserving existing complete-row admission.
+///
+/// Partial rows require a supported, nondeferrable primary key with every key
+/// column replicated. An old tuple is allowed when its key has the same wire
+/// representation; no extra tombstone or event offset is introduced for a
+/// changed key.
+pub(super) fn normalize_update_row(
+    schema: &ReplicatedTableSchema,
+    row: UpdatedTableRow,
+    old: Option<OldTableRow>,
+) -> Result<(TableRow, Vec<usize>)> {
+    match row {
+        UpdatedTableRow::Full(row) => Ok((row, Vec::new())),
+        UpdatedTableRow::Partial(row) => {
+            crate::snowflake::schema::validate_primary_key_identity(schema)?;
+            if row.total_columns() != schema.column_schemas().len() {
+                return Err(Error::UnsupportedLayout(
+                    "Partial row width does not match the replicated layout".to_owned(),
+                ));
+            }
+            let (present, missing) = row.into_parts();
+            let row = expand_partial_row(schema, present, &missing)?;
+            validate_partial_update_row(schema, &row)?;
+            if let Some(old) = old {
+                let (old, _) = normalize_delete_row(schema, Some(old))?;
+                for ((column, before), after) in
+                    schema.column_schemas().zip(old.values()).zip(row.values())
+                {
+                    if column.primary_key() {
+                        let before = serde_json::to_vec(&CellSerializer(before))
+                            .map_err(|error| Error::Encoding(error.to_string()))?;
+                        let after = serde_json::to_vec(&CellSerializer(after))
+                            .map_err(|error| Error::Encoding(error.to_string()))?;
+                        if before != after {
+                            return Err(Error::UnsupportedIdentity(
+                                "Partial updates cannot change a primary-key value".to_owned(),
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok((row, missing))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
     use etl::{
-        data::{Date, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM, Timestamp},
-        schema::Type,
+        data::{
+            Date, PartialTableRow, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT, TIMESTAMPTZ_FORMAT_HH_MM,
+            Timestamp,
+        },
+        error::{ErrorKind, EtlError},
+        schema::{IdentityMask, TableId, TableName, TableSchema, Type},
     };
     use serde_json::{Value, json};
     use uuid::Uuid;
 
     use super::*;
+    use crate::snowflake::{OffsetToken, RowBatchBuilder, materialization_query};
 
     fn col(name: &str) -> ColumnSchema {
         ColumnSchema::new(name.to_owned(), Type::TEXT, -1, 1, true)
@@ -378,6 +569,7 @@ mod tests {
         let document: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(document.get(CDC_OPERATION_COLUMN), Some(&json!(operation.as_str())));
         assert_eq!(document.get(CDC_SEQUENCE_COLUMN), Some(&json!("0")));
+        assert_eq!(document.get(CDC_MISSING_COLUMNS_COLUMN), Some(&json!([])));
         document
     }
 
@@ -388,7 +580,7 @@ mod tests {
             for operation in [CdcOperation::Insert, CdcOperation::Update, CdcOperation::Delete] {
                 let sql_null = serialize_json_cell(typ.clone(), Cell::Null, operation);
                 assert_eq!(sql_null.get("v"), None);
-                assert_eq!(sql_null.as_object().unwrap().len(), 2);
+                assert_eq!(sql_null.as_object().unwrap().len(), 3);
                 for expected in [
                     Value::Null,
                     json!("null"),
@@ -403,6 +595,22 @@ mod tests {
                     assert_eq!(actual.get("v"), Some(&expected));
                 }
             }
+            // Omitted JSON values also omit the wire field, but retain their
+            // presence metadata so they cannot be mistaken for explicit SQL
+            // NULL.
+            let cols = [ColumnSchema::new("v".into(), typ, -1, 1, true)];
+            let row = TableRow::new(vec![Cell::Null]);
+            let mut bytes = Vec::new();
+            serialize_row(
+                &mut bytes,
+                &cols,
+                &row,
+                CdcMeta::new(CdcOperation::Update, "0").with_missing_columns(&[0]),
+            )
+            .unwrap();
+            let omitted: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(omitted.get("v"), None);
+            assert_eq!(omitted[CDC_MISSING_COLUMNS_COLUMN], json!(["v"]));
         }
     }
 
@@ -641,5 +849,212 @@ mod tests {
         assert_eq!(map.get("name").unwrap(), &json!("Alice"));
         assert_eq!(map.get("_cdc_operation").unwrap(), &json!("insert"));
         assert_eq!(map.get("_cdc_sequence_number").unwrap(), &json!("0000/0000"));
+    }
+
+    /// Builds a schema with a non-leading key and two independently missing
+    /// values.
+    fn partial_update_schema() -> ReplicatedTableSchema {
+        ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".into(), "events".into()),
+            vec![
+                ColumnSchema::new("payload".into(), Type::TEXT, -1, 1, true),
+                ColumnSchema::new("id".into(), Type::INT4, -1, 2, false).with_primary_key(1),
+                ColumnSchema::new("counter".into(), Type::INT4, -1, 3, true),
+            ],
+        )))
+    }
+
+    /// Rejects malformed rows before they can become Snowflake requests.
+    #[test]
+    fn malformed_partial_rows_and_missing_keys_fail_locally() {
+        let schema = partial_update_schema();
+        for (width, values, missing) in [
+            (4, vec![Cell::I32(1)], vec![0, 2]),
+            (3, vec![Cell::I32(1)], vec![0, 3]),
+            (3, vec![Cell::I32(1)], vec![2, 0]),
+            (3, vec![Cell::I32(1)], vec![0, 0]),
+            (3, vec![Cell::I32(1)], vec![0]),
+            (3, vec![Cell::Null, Cell::Null], vec![1]),
+            (3, vec![Cell::Null, Cell::Null, Cell::Null], vec![]),
+        ] {
+            let error = normalize_update_row(
+                &schema,
+                UpdatedTableRow::Partial(PartialTableRow::new(
+                    width,
+                    TableRow::new(values),
+                    missing,
+                )),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(EtlError::from(error).kind(), ErrorKind::DestinationLayoutUnsupported);
+        }
+        assert_eq!(
+            EtlError::from(normalize_delete_row(&schema, None).unwrap_err()).kind(),
+            ErrorKind::SourceReplicaIdentityError
+        );
+    }
+
+    /// Preserves omitted-column metadata through the large-row encoder.
+    #[test]
+    fn partial_update_large_row_frame_includes_missing_mask() {
+        let schema = partial_update_schema();
+        let columns = schema.column_schemas().cloned().collect::<Vec<_>>();
+        let partial = PartialTableRow::new(
+            3,
+            TableRow::new(vec![Cell::String("x".repeat(512 * 1024)), Cell::I32(1)]),
+            vec![2],
+        );
+        let (row, missing) =
+            normalize_update_row(&schema, UpdatedTableRow::Partial(partial), None).unwrap();
+        let offset = OffsetToken::new(10_u64.into(), 1);
+        let mut builder = RowBatchBuilder::new(schema.id());
+        let mut batches = builder
+            .push_row(
+                &columns,
+                &row,
+                CdcMeta::new(CdcOperation::Update, offset.as_ref()).with_missing_columns(&missing),
+                &offset,
+            )
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(builder.footprint().row_frames, 1);
+        batches.extend(builder.finish().unwrap());
+        assert_eq!(batches.len(), 1);
+        let data = zstd::decode_all(batches[0].bytes().as_ref()).unwrap();
+        let encoded: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(encoded["_cdc_missing_columns"], json!(["counter"]));
+        assert_eq!(encoded["payload"].as_str().unwrap().len(), 512 * 1024);
+    }
+
+    /// Complete keyless FULL rows remain writable despite partial-update
+    /// restrictions.
+    #[test]
+    fn keyless_full_identity_accepts_complete_updates_only() {
+        let schema = partial_update_schema();
+        let mut table = schema.inner().clone();
+        table.column_schemas[1].primary_key_ordinal_position = None;
+        let full = ReplicatedTableSchema::from_masks(
+            Arc::new(table),
+            schema.replication_mask().clone(),
+            IdentityMask::from_bytes(vec![1, 1, 1]),
+        );
+        let row = TableRow::new(vec![Cell::Null, Cell::I32(1), Cell::Null]);
+        let (actual, missing) = normalize_update_row(
+            &full,
+            UpdatedTableRow::Full(row.clone()),
+            Some(OldTableRow::Full(row.clone())),
+        )
+        .unwrap();
+        assert_eq!(actual, row);
+        assert!(missing.is_empty());
+        let partial =
+            PartialTableRow::new(3, TableRow::new(vec![Cell::I32(1), Cell::Null]), vec![0]);
+        assert_eq!(
+            EtlError::from(
+                normalize_update_row(&full, UpdatedTableRow::Partial(partial), None).unwrap_err()
+            )
+            .kind(),
+            ErrorKind::SourceReplicaIdentityError
+        );
+        assert!(materialization_query("db", "schema", "table", &full).is_err());
+    }
+
+    /// Accepts matching old keys and rejects changed keys or malformed old
+    /// rows.
+    #[test]
+    fn partial_updates_validate_old_keys() {
+        let schema = partial_update_schema();
+        let row = || {
+            UpdatedTableRow::Partial(PartialTableRow::new(
+                3,
+                TableRow::new(vec![Cell::I32(7), Cell::Null]),
+                vec![0],
+            ))
+        };
+        for old in [
+            OldTableRow::Key(TableRow::new(vec![Cell::I32(7)])),
+            OldTableRow::Full(TableRow::new(vec![
+                Cell::String("old".into()),
+                Cell::I32(7),
+                Cell::Null,
+            ])),
+        ] {
+            assert!(normalize_update_row(&schema, row(), Some(old)).is_ok());
+        }
+        assert_eq!(
+            EtlError::from(
+                normalize_update_row(
+                    &schema,
+                    row(),
+                    Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(8)]))),
+                )
+                .unwrap_err()
+            )
+            .kind(),
+            ErrorKind::SourceReplicaIdentityError
+        );
+        assert_eq!(
+            EtlError::from(
+                normalize_update_row(
+                    &schema,
+                    row(),
+                    Some(OldTableRow::Full(TableRow::new(vec![]))),
+                )
+                .unwrap_err()
+            )
+            .kind(),
+            ErrorKind::DestinationLayoutUnsupported
+        );
+    }
+
+    /// Alternative replica identities remain valid for deletes, but not partial
+    /// updates.
+    #[test]
+    fn alternative_identity_allows_deletes_but_rejects_partial_updates() {
+        let schema = partial_update_schema();
+        let alternative = ReplicatedTableSchema::from_masks(
+            Arc::new(schema.inner().clone()),
+            schema.replication_mask().clone(),
+            IdentityMask::from_bytes(vec![1, 0, 0]),
+        );
+        let (row, missing) = normalize_delete_row(
+            &alternative,
+            Some(OldTableRow::Key(TableRow::new(vec![Cell::String("identity".into())]))),
+        )
+        .unwrap();
+        assert_eq!(row.values(), &[Cell::String("identity".into()), Cell::Null, Cell::Null]);
+        assert_eq!(missing, vec![1, 2]);
+        let partial =
+            PartialTableRow::new(3, TableRow::new(vec![Cell::I32(1), Cell::Null]), vec![0]);
+        assert_eq!(
+            EtlError::from(
+                normalize_update_row(&alternative, UpdatedTableRow::Partial(partial), None)
+                    .unwrap_err()
+            )
+            .kind(),
+            ErrorKind::SourceReplicaIdentityError
+        );
+    }
+
+    /// Query-only reserved names must not restrict which rows the writer
+    /// accepts.
+    #[test]
+    fn partial_writer_accepts_names_reserved_only_by_materialization_query() {
+        let schema = partial_update_schema();
+        let mut table = schema.inner().clone();
+        table.column_schemas[2].name = "_cdc_version".into();
+        let schema = ReplicatedTableSchema::all(Arc::new(table));
+        let row = UpdatedTableRow::Partial(PartialTableRow::new(
+            3,
+            TableRow::new(vec![Cell::I32(7), Cell::I32(1)]),
+            vec![0],
+        ));
+        let (row, missing) = normalize_update_row(&schema, row, None).unwrap();
+        assert_eq!(missing, vec![0]);
+        assert_eq!(row.values()[2], Cell::I32(1));
+        assert!(materialization_query("db", "schema", "table", &schema).is_err());
     }
 }

@@ -65,6 +65,15 @@ pub enum Error {
         element_index: usize,
     },
 
+    /// The source or physical table cannot satisfy the CDC layout requirements.
+    #[error("Snowflake CDC layout is unsupported: {0}")]
+    UnsupportedLayout(String),
+
+    /// The source identity cannot support the received partial update or
+    /// delete.
+    #[error("Snowflake source identity is unsupported: {0}")]
+    UnsupportedIdentity(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -163,7 +172,9 @@ impl Error {
             Self::Snowpipe(SnowpipeError::HttpStatus { .. }) => AppendFailureType::Provider,
             Self::Encoding(_) | Self::NullJsonArrayElement { .. } => AppendFailureType::Encoding,
             Self::RowTooLarge { .. } => AppendFailureType::RowTooLarge,
-            Self::Config(_)
+            Self::UnsupportedIdentity(_)
+            | Self::UnsupportedLayout(_)
+            | Self::Config(_)
             | Self::MissingTableColumn { .. }
             | Self::UnexpectedTableColumn { .. }
             | Self::DatabaseNotFound(_)
@@ -199,6 +210,8 @@ impl ClassifiedError for Error {
             | Self::Channel(_)
             | Self::Encoding(_)
             | Self::NullJsonArrayElement { .. }
+            | Self::UnsupportedIdentity(_)
+            | Self::UnsupportedLayout(_)
             | Self::Config(_)
             | Self::MissingTableColumn { .. }
             | Self::UnexpectedTableColumn { .. }
@@ -215,6 +228,20 @@ impl From<Error> for EtlError {
             return classified_error(
                 ErrorKind::CorruptedTableSchema,
                 "Snowflake table schema is incompatible",
+                err,
+            );
+        }
+        if matches!(&err, Error::UnsupportedIdentity(_)) {
+            return classified_error(
+                ErrorKind::SourceReplicaIdentityError,
+                "Snowflake source identity is unsupported",
+                err,
+            );
+        }
+        if matches!(&err, Error::UnsupportedLayout(_)) {
+            return classified_error(
+                ErrorKind::DestinationLayoutUnsupported,
+                "Snowflake CDC layout is unsupported",
                 err,
             );
         }
@@ -250,6 +277,8 @@ impl From<Error> for EtlError {
             Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
             Error::MissingTableColumn { .. }
             | Error::UnexpectedTableColumn { .. }
+            | Error::UnsupportedIdentity(_)
+            | Error::UnsupportedLayout(_)
             | Error::RowTooLarge { .. }
             | Error::NullJsonArrayElement { .. } => {
                 unreachable!("schema and unsupported value errors return above")
@@ -570,5 +599,21 @@ mod tests {
         assert_eq!(unavailable.retryability(), Retryability::Retryable);
         assert!(unavailable.source().is_some());
         assert_eq!(unauthorized.retryability(), Retryability::Permanent);
+        for (source, kind) in [
+            (
+                Error::UnsupportedIdentity("invalid key".into()),
+                ErrorKind::SourceReplicaIdentityError,
+            ),
+            (
+                Error::UnsupportedLayout("invalid layout".into()),
+                ErrorKind::DestinationLayoutUnsupported,
+            ),
+        ] {
+            assert_eq!(source.retryability(), Retryability::Permanent);
+            let error = EtlError::from(source);
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.retryability(), Retryability::Permanent);
+            assert!(error.source().is_some());
+        }
     }
 }
