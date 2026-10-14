@@ -19,7 +19,7 @@ pub(crate) const CDC_LSN_COLUMN_NAME: &str = "cdc_lsn";
 /// transaction.
 pub(crate) const CDC_TX_ORDINAL_COLUMN_NAME: &str = "cdc_tx_ordinal";
 /// (For ReplacingMergeTree engine) version column. Holds the packed
-/// `EventSequenceKey` (commit_lsn in the high 64 bits, tx_ordinal in the low 64
+/// `EventPosition` (commit_lsn in the high 64 bits, tx_ordinal in the low 64
 /// bits) as a UInt128, giving ReplacingMergeTree a total order across all
 /// events for tie-breaking under `FINAL`.
 pub(crate) const ETL_VERSION_COLUMN_NAME: &str = "_etl_version";
@@ -297,7 +297,7 @@ where
 /// primary key in `primary_key_ordinal_position` order. ClickHouse uses that
 /// `ORDER BY` as the sort + dedup key, so it must match the source PK exactly.
 /// Two trailing columns are appended after the user columns: `_etl_version
-/// UInt128` (packed `EventSequenceKey`) and `_etl_deleted UInt8` (tombstone).
+/// UInt128` (packed `EventPosition`) and `_etl_deleted UInt8` (tombstone).
 ///
 /// Errors when the source schema has no PK columns.
 pub(super) fn create_replacing_merge_tree_sql<'a, I>(

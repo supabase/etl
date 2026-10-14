@@ -273,6 +273,9 @@ struct RetryableAppendRequest {
 }
 
 /// A BigQuery append request with local retry context.
+///
+/// Retries retain the same physical target and encoded rows, including their
+/// CDC sequence numbers, even when the SDK splits a request into wire messages.
 #[derive(Debug, Clone)]
 pub(super) struct BigQueryAppendRequest {
     /// Request sent to the Storage Write API client.
@@ -307,6 +310,9 @@ fn format_retryable_storage_write_requests(requests: &[RetryableAppendRequest]) 
 }
 
 /// Creates a per-request BigQuery trace identifier for Storage Write requests.
+///
+/// This is diagnostic context, not an idempotency key. Default-stream retries
+/// may append again; primary keys and row sequence numbers govern CDC replay.
 fn create_append_trace_id(pipeline_id: PipelineId, table_id: &str, request_index: usize) -> String {
     format!("supabase_etl_{pipeline_id}_{table_id}_{request_index}_{}", random::<u32>())
 }
@@ -755,6 +761,12 @@ pub struct BigQueryClient {
 }
 
 impl BigQueryClient {
+    /// Wraps an SDK client with controlled authentication for local unit tests.
+    #[cfg(test)]
+    pub(super) fn from_test_client(client: Client) -> Self {
+        Self { project_id: "test-project".to_owned(), client }
+    }
+
     /// Creates a new [`BigQueryClient`] from a service account key file.
     ///
     /// Authenticates with BigQuery using the service account key at the

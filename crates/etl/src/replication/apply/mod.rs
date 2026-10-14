@@ -77,7 +77,7 @@ use crate::{
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
-        TableSyncWorkerState,
+        TableSyncWorkerState, build_error_handling_policy,
         concurrency::{
             MemoryBackpressureStream, ShutdownResult, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id, with_shutdown,
@@ -120,6 +120,7 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// accumulates the next batch. Register both positions so each receives a share
 /// of the configured decoded-batch capacity.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
+
 /// Result type for the apply loop execution.
 ///
 /// Indicates the reason why the apply loop terminated, enabling appropriate
@@ -958,7 +959,17 @@ where
             state,
         };
 
-        let result = apply_loop.run(replication_client, replication_message_stream).await?;
+        let result = match apply_loop.run(replication_client, replication_message_stream).await {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(Self::settle_pending_flush_on_error(
+                    error,
+                    apply_loop.state.pending_flush_result.take(),
+                    &apply_loop.shutdown_token,
+                )
+                .await);
+            }
+        };
 
         // We tear down all the tasks of the apply loop.
         apply_loop.tasks.teardown().await?;
@@ -1012,6 +1023,48 @@ where
             if let Some(result) = iteration_result {
                 return Ok(result);
             }
+        }
+    }
+
+    /// Observes dispatched work before a failed attempt can replay or restart
+    /// copy.
+    ///
+    /// Source failures exit [`ApplyLoop::run`] without entering shutdown drain.
+    /// Only retryable failures need this boundary. Unlike normal flush
+    /// handling, this does not checkpoint, hand tables off, or dispatch the
+    /// buffered batch. Shutdown can interrupt the wait because it also
+    /// prevents automatic retry.
+    async fn settle_pending_flush_on_error(
+        error: EtlError,
+        pending_flush_result: Option<PendingWriteEventsResult>,
+        shutdown_token: &CancellationToken,
+    ) -> EtlError {
+        if !build_error_handling_policy(&error).should_retry() {
+            return error;
+        }
+        let Some(pending_flush_result) = pending_flush_result else {
+            return error;
+        };
+
+        warn!(
+            error = %error,
+            "waiting for pending destination work before retrying failed apply loop"
+        );
+
+        let ShutdownResult::Ok(completed) = with_shutdown!(pending_flush_result, shutdown_token)
+        else {
+            return error;
+        };
+
+        // This attempt cannot publish progress, so either successful status is
+        // sufficient. Replay will establish durability before checkpointing.
+        let (_, _, result) = completed.into_parts_with_completion();
+
+        match result {
+            // The destination error controls retry policy; keep the source failure
+            // as context without hiding a terminal write failure behind it.
+            Err(destination_error) => EtlError::from(vec![destination_error, error]),
+            Ok(_) => error,
         }
     }
 
@@ -4298,31 +4351,147 @@ mod table_sync_worker {
 mod tests {
     use std::{collections::HashSet, sync::Arc, time::Instant};
 
+    use futures::FutureExt;
     use tokio_postgres::types::{PgLsn, Type};
+    use tokio_util::sync::CancellationToken;
 
     use crate::{
         activity::{ActivityKind, ActivityRegistration},
         data::SizeHint,
-        destination::{ApplyLoopAsyncResultMetadata, WriteEventsDurability, WriteEventsResult},
+        destination::{
+            ApplyLoopAsyncResultMetadata, DestinationWriteStatus, WriteEventsDurability,
+            WriteEventsResult,
+        },
+        error::ErrorKind,
+        etl_error,
         event::Event,
         replication::{
             TableDecodingState,
             apply::{
-                ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
+                ApplyLoop, ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
                 schema_cleanup_retention_snapshot_id, tasks::ReplicationLagMetrics,
             },
             state::{StoredTableDecodingState, TableState},
         },
+        runtime::build_error_handling_policy,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId,
             TableId, TableName, TableSchema,
         },
         source_payload_metadata::StreamingPayloadMetadata,
+        store::MemoryStore,
+        test_utils::memory_destination::MemoryDestination,
     };
+
+    /// Apply loop type used to test retry handling independently of a pipeline.
+    type TestApplyLoop = ApplyLoop<MemoryStore, MemoryDestination<MemoryStore>>;
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
         SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
+    /// Creates completion metadata for a pending batch in retry tests.
+    fn flush_metadata(durability: WriteEventsDurability) -> ApplyLoopAsyncResultMetadata {
+        ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: Some(100.into()),
+            durability,
+            event_count: 1,
+            relation_table_ids: HashSet::new(),
+            streaming_payload_metadata: StreamingPayloadMetadata::default(),
+            dispatched_at: Instant::now(),
+        }
+    }
+
+    /// A failed attempt waits for completion in either durability mode.
+    /// Accepted results need no extra barrier because the attempt cannot
+    /// checkpoint them.
+    #[test]
+    fn retry_waits_for_dispatched_completion() {
+        for durability in [WriteEventsDurability::MayDefer, WriteEventsDurability::RequireDurable] {
+            for status in [DestinationWriteStatus::Durable, DestinationWriteStatus::Accepted] {
+                let token = CancellationToken::new();
+                let (result, pending) = WriteEventsResult::new(flush_metadata(durability));
+
+                let settled = TestApplyLoop::settle_pending_flush_on_error(
+                    etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
+                    Some(pending),
+                    &token,
+                );
+                tokio::pin!(settled);
+                assert!(settled.as_mut().now_or_never().is_none());
+
+                result.send(Ok(status));
+
+                assert_eq!(
+                    settled.now_or_never().unwrap().kind(),
+                    ErrorKind::SourceConnectionFailed
+                );
+            }
+        }
+    }
+
+    /// A late terminal write error must override the source's retry policy.
+    #[test]
+    fn retry_preserves_destination_error_policy() {
+        let token = CancellationToken::new();
+        let (result, pending) =
+            WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
+
+        result.send(Err(etl_error!(
+            ErrorKind::DestinationAuthenticationError,
+            "Destination authentication failed"
+        )));
+
+        let error = TestApplyLoop::settle_pending_flush_on_error(
+            etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
+            Some(pending),
+            &token,
+        )
+        .now_or_never()
+        .unwrap();
+
+        assert_eq!(
+            error.kinds(),
+            vec![ErrorKind::DestinationAuthenticationError, ErrorKind::SourceConnectionFailed]
+        );
+        assert!(!build_error_handling_policy(&error).should_retry());
+    }
+
+    /// Shutdown stops retrying, so it can interrupt a failed attempt's wait.
+    #[test]
+    fn shutdown_interrupts_retry_completion_wait() {
+        let token = CancellationToken::new();
+        let (_result, pending) =
+            WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
+
+        let settled = TestApplyLoop::settle_pending_flush_on_error(
+            etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
+            Some(pending),
+            &token,
+        );
+        tokio::pin!(settled);
+        assert!(settled.as_mut().now_or_never().is_none());
+
+        token.cancel();
+
+        assert_eq!(settled.now_or_never().unwrap().kind(), ErrorKind::SourceConnectionFailed);
+    }
+
+    /// Terminal failures still return immediately rather than draining work.
+    #[test]
+    fn terminal_error_does_not_wait_for_dispatched_completion() {
+        let token = CancellationToken::new();
+        let (_result, pending) =
+            WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
+
+        let error = TestApplyLoop::settle_pending_flush_on_error(
+            etl_error!(ErrorKind::SourceSchemaError, "Invalid source schema"),
+            Some(pending),
+            &token,
+        );
+
+        assert_eq!(error.now_or_never().unwrap().kind(), ErrorKind::SourceSchemaError);
     }
 
     fn replicated_schema(snapshot_id: SnapshotId) -> ReplicatedTableSchema {

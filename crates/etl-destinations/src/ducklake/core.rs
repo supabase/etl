@@ -16,7 +16,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    event::{Event, EventSequenceKey},
+    event::{Event, EventPosition},
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
         SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
@@ -54,8 +54,8 @@ use crate::{
             apply_table_batches_with_retry, ensure_applied_batches_table_exists,
             ensure_streaming_progress_table_exists, prepare_copy_complete_table_batch,
             prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
-            read_table_streaming_progress_sequence_key, retain_mutations_after_sequence_key,
-            retain_truncates_after_sequence_key,
+            read_table_streaming_progress_event_position, retain_mutations_after_event_position,
+            retain_truncates_after_event_position,
         },
         client::{
             DuckLakeBlockingGuard, DuckLakeConnectionManager, DuckLakeDedicatedConnection,
@@ -451,7 +451,7 @@ impl DuckLakeWriteGuard {
 struct DuckLakeTableReplayCursor {
     table_name: DuckLakeTableName,
     replay_epoch: String,
-    last_sequence_key: Option<EventSequenceKey>,
+    last_event_position: Option<EventPosition>,
     table_write_permit: Arc<OwnedSemaphorePermit>,
 }
 
@@ -2702,7 +2702,7 @@ where
             return Ok(());
         }
 
-        // A relation carries no durable DML sequence key. Reject an
+        // A relation carries no durable DML event position. Reject an
         // equal-snapshot mask conflict before it can drive DuckLake DDL.
         // Older relations are harmless replay markers. Row and truncate
         // handling validates retained events after the durable streaming
@@ -3147,7 +3147,7 @@ where
                     Event::Insert(insert) => {
                         let table_id = insert.replicated_table_schema.id();
                         let mutation = TrackedTableMutation::new(
-                            insert.event_sequence_key(),
+                            insert.event_position(),
                             TableMutation::Insert(insert.table_row),
                         );
                         push_table_mutation_segment(
@@ -3161,7 +3161,7 @@ where
                             &update.replicated_table_schema,
                             "update",
                         )?;
-                        let sequence_key = update.event_sequence_key();
+                        let event_position = update.event_position();
                         let table_id = update.replicated_table_schema.id();
                         let replicated_table_schema = update.replicated_table_schema;
                         let table_row = update.updated_table_row;
@@ -3169,7 +3169,7 @@ where
                         let segments = table_id_to_mutations.entry(table_id).or_default();
                         if let Some(old_row) = old_table_row {
                             let mutation = TrackedTableMutation::new(
-                                sequence_key,
+                                event_position,
                                 TableMutation::Update { delete_row: old_row, new_row: table_row },
                             );
                             push_table_mutation_segment(
@@ -3185,7 +3185,7 @@ where
                                          identity from new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        sequence_key,
+                                        event_position,
                                         TableMutation::Replace(table_row),
                                     );
                                     push_table_mutation_segment(
@@ -3204,7 +3204,7 @@ where
                                          partial new row"
                                     );
                                     let mutation = TrackedTableMutation::new(
-                                        sequence_key,
+                                        event_position,
                                         TableMutation::Update {
                                             delete_row: OldTableRow::Key(key_row),
                                             new_row: UpdatedTableRow::Partial(partial_row),
@@ -3224,7 +3224,7 @@ where
                             &delete.replicated_table_schema,
                             "delete",
                         )?;
-                        let sequence_key = delete.event_sequence_key();
+                        let event_position = delete.event_position();
                         let Some(old_row) = delete.old_table_row else {
                             return Err(etl_error!(
                                 ErrorKind::SourceReplicaIdentityError,
@@ -3237,8 +3237,10 @@ where
                             ));
                         };
                         let table_id = delete.replicated_table_schema.id();
-                        let mutation =
-                            TrackedTableMutation::new(sequence_key, TableMutation::Delete(old_row));
+                        let mutation = TrackedTableMutation::new(
+                            event_position,
+                            TableMutation::Delete(old_row),
+                        );
                         push_table_mutation_segment(
                             table_id_to_mutations.entry(table_id).or_default(),
                             delete.replicated_table_schema,
@@ -3264,14 +3266,14 @@ where
                             let DuckLakeTableReplayCursor {
                                 table_name: destination_table_name,
                                 replay_epoch,
-                                last_sequence_key,
+                                last_event_position,
                                 table_write_permit: replay_table_write_permit,
                             } = destination
                                 .read_table_replay_cursor(&segment.replicated_table_schema)
                                 .await?;
-                            let pending_mutations = retain_mutations_after_sequence_key(
+                            let pending_mutations = retain_mutations_after_event_position(
                                 segment.mutations,
-                                last_sequence_key,
+                                last_event_position,
                             );
                             if pending_mutations.is_empty() {
                                 debug!(
@@ -3302,7 +3304,7 @@ where
                                     "ducklake waited for checkpoint gate before streaming write"
                                 );
                             }
-                            let is_first_streaming_batch = last_sequence_key.is_none();
+                            let is_first_streaming_batch = last_event_position.is_none();
                             info!(
                                 table = %destination_table_name,
                                 pending_mutation_count = pending_mutations.len(),
@@ -3353,7 +3355,7 @@ where
             > = HashMap::new();
             while let Some(Event::Truncate(_)) = event_iter.peek() {
                 if let Some(Event::Truncate(truncate)) = event_iter.next() {
-                    let sequence_key = truncate.event_sequence_key();
+                    let event_position = truncate.event_position();
                     for replicated_table_schema in truncate.truncated_tables {
                         let table_id = replicated_table_schema.id();
                         match truncate_table_ids.entry(table_id) {
@@ -3361,14 +3363,17 @@ where
                                 let (schema, truncates) = entry.get_mut();
                                 *schema = replicated_table_schema;
                                 truncates.push(TrackedTruncateEvent::new(
-                                    sequence_key,
+                                    event_position,
                                     truncate.options,
                                 ));
                             }
                             std::collections::hash_map::Entry::Vacant(entry) => {
                                 entry.insert((
                                     replicated_table_schema,
-                                    vec![TrackedTruncateEvent::new(sequence_key, truncate.options)],
+                                    vec![TrackedTruncateEvent::new(
+                                        event_position,
+                                        truncate.options,
+                                    )],
                                 ));
                             }
                         }
@@ -3387,11 +3392,11 @@ where
                         let DuckLakeTableReplayCursor {
                             table_name,
                             replay_epoch,
-                            last_sequence_key,
+                            last_event_position,
                             table_write_permit: replay_table_write_permit,
                         } = destination.read_table_replay_cursor(&replicated_table_schema).await?;
                         let pending_truncates =
-                            retain_truncates_after_sequence_key(truncates, last_sequence_key);
+                            retain_truncates_after_event_position(truncates, last_event_position);
                         if pending_truncates.is_empty() {
                             debug!(
                                 table = %table_name,
@@ -3924,7 +3929,7 @@ where
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         let replay_epoch = self.read_table_replay_epoch(&table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
-        let last_sequence_key = read_table_streaming_progress_sequence_key_blocking(
+        let last_event_position = read_table_streaming_progress_event_position_blocking(
             self.streaming_pool()?,
             Arc::clone(&self.blocking_slots),
             table_name.clone(),
@@ -3938,7 +3943,7 @@ where
         Ok(DuckLakeTableReplayCursor {
             table_name,
             replay_epoch,
-            last_sequence_key,
+            last_event_position,
             table_write_permit,
         })
     }
@@ -4144,16 +4149,16 @@ where
 
 /// Reads the persisted streaming replay watermark for one table on DuckDB's
 /// blocking pool.
-async fn read_table_streaming_progress_sequence_key_blocking(
+async fn read_table_streaming_progress_event_position_blocking(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     table_name: DuckLakeTableName,
     replay_epoch: String,
     write_guard: DuckLakeWriteGuard,
-) -> EtlResult<Option<EventSequenceKey>> {
+) -> EtlResult<Option<EventPosition>> {
     run_duckdb_blocking(pool, blocking_slots, move |conn| {
         let _write_guard = write_guard;
-        read_table_streaming_progress_sequence_key(conn, &table_name, &replay_epoch)
+        read_table_streaming_progress_event_position(conn, &table_name, &replay_epoch)
     })
     .await
 }

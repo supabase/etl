@@ -36,9 +36,9 @@ pub struct BeginEvent {
 }
 
 impl BeginEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    /// Returns the event position for this event.
+    pub fn event_position(&self) -> EventPosition {
+        EventPosition::new(self.commit_lsn, self.tx_ordinal)
     }
 }
 
@@ -63,9 +63,9 @@ pub struct CommitEvent {
 }
 
 impl CommitEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    /// Returns the event position for this event.
+    pub fn event_position(&self) -> EventPosition {
+        EventPosition::new(self.commit_lsn, self.tx_ordinal)
     }
 }
 
@@ -87,9 +87,9 @@ pub struct InsertEvent {
 }
 
 impl InsertEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    /// Returns the event position for this event.
+    pub fn event_position(&self) -> EventPosition {
+        EventPosition::new(self.commit_lsn, self.tx_ordinal)
     }
 }
 
@@ -135,9 +135,9 @@ pub struct UpdateEvent {
 }
 
 impl UpdateEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    /// Returns the event position for this event.
+    pub fn event_position(&self) -> EventPosition {
+        EventPosition::new(self.commit_lsn, self.tx_ordinal)
     }
 }
 
@@ -167,9 +167,9 @@ pub struct DeleteEvent {
 }
 
 impl DeleteEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    /// Returns the event position for this event.
+    pub fn event_position(&self) -> EventPosition {
+        EventPosition::new(self.commit_lsn, self.tx_ordinal)
     }
 }
 
@@ -192,9 +192,9 @@ pub struct TruncateEvent {
 }
 
 impl TruncateEvent {
-    /// Returns the sequence key for this event.
-    pub fn event_sequence_key(&self) -> EventSequenceKey {
-        EventSequenceKey::new(self.commit_lsn, self.tx_ordinal)
+    /// Returns the event position for this event.
+    pub fn event_position(&self) -> EventPosition {
+        EventPosition::new(self.commit_lsn, self.tx_ordinal)
     }
 }
 
@@ -243,7 +243,7 @@ impl TruncateEvent {
 /// replicated-column position.
 ///
 /// Relation messages have no durable replay identity, so this event has no
-/// LSN or sequence key and does not consume a transaction ordinal.
+/// LSN or event position and does not consume a transaction ordinal.
 #[derive(Debug)]
 #[cfg_attr(any(test, feature = "test-utils"), derive(Clone))]
 pub struct RelationEvent {
@@ -326,21 +326,28 @@ impl SizeHint for Event {
     }
 }
 
-/// Pair used to build a CDC sequence key for destinations.
+/// Position of a source event in the logical replication stream.
+///
+/// Identifies a source event by transaction commit position and event ordinal,
+/// independent of delivery batch boundaries. Replaying the event retains this
+/// position even when size limits or timing put it in a different batch.
+/// Initial copy batches instead carry [`crate::destination::TableCopyBatchId`],
+/// which identifies work within one snapshot attempt and does not order row
+/// versions.
 ///
 /// Destinations choose their own storage and wire representation instead of
 /// relying on a generic string encoding for this domain value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EventSequenceKey {
+pub struct EventPosition {
     /// Commit LSN identifying transaction order across transactions.
     pub commit_lsn: PgLsn,
-    /// Zero-based ordinal identifying sequence-key-bearing event order within
+    /// Zero-based ordinal identifying position-bearing event order within
     /// the same transaction.
     pub tx_ordinal: u64,
 }
 
-impl EventSequenceKey {
-    /// Creates a new sequence key from commit LSN and transaction-local
+impl EventPosition {
+    /// Creates a new event position from commit LSN and transaction-local
     /// ordinal.
     pub fn new(commit_lsn: PgLsn, tx_ordinal: u64) -> Self {
         Self { commit_lsn, tx_ordinal }
