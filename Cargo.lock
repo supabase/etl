@@ -2032,6 +2032,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "parquet",
+ "percent-encoding",
  "pg_escape",
  "pkcs8",
  "proptest",
