@@ -88,6 +88,13 @@ pub trait Destination {
     /// meaningful ordering requirement on these row batches; it just provides
     /// the data that should be written for the initial snapshot.
     ///
+    /// A retry of the same logical batch keeps its ID and payload, including
+    /// row order. ETL assigns the ID before dispatch rather than letting each
+    /// destination count calls. An error that abandons the copy starts a new
+    /// attempt with fresh IDs; it does not resume an old batch counter.
+    /// Destinations may instead deduplicate by stable row identity when their
+    /// native write semantics make snapshot upserts idempotent.
+    ///
     /// Implementations report asynchronous write status through `async_result`.
     /// The method return value is reserved for immediate dispatch/setup
     /// failures before the work has been accepted.
@@ -143,6 +150,10 @@ pub trait Destination {
     /// deletes, truncates, and transaction boundaries. ETL may call this method
     /// multiple times with different streaming batches.
     ///
+    /// Delivery batch boundaries may change on replay. Use source events'
+    /// [`crate::event::EventPosition`] values for row ordering and replay
+    /// identity, rather than assigning a copy-style batch ID or call counter.
+    ///
     /// Streaming batches are built from size and time limits, not schema change
     /// boundaries. A single call may contain zero, one, or many
     /// [`Event::Relation`] events, including multiple schema changes for the
@@ -154,6 +165,11 @@ pub trait Destination {
     ///
     /// The main ordering guarantee is per table: ETL preserves the required
     /// order for streaming operations on the same table.
+    /// Before automatically retrying a failed apply attempt, ETL observes its
+    /// pending write result without checkpointing it or dispatching buffered
+    /// events. This also precedes a table-sync retry that restarts the copy.
+    /// An allowed `Accepted` result preserves the usual dispatch boundary;
+    /// it does not force deferred work to become durable before replay.
     ///
     /// The apply loop awaits this method directly, so implementations should
     /// dispatch long-running writes to owned tasks or queues and return

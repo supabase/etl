@@ -252,28 +252,34 @@ where
             warn!("pipeline was not started, skipping wait");
             return Ok(());
         };
+
         let Some(PipelineTasks { apply_worker, pool, memory_monitor_task }) =
             tasks.lock().await.take()
         else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
         };
+
         // Cancellation must reach workers even when an error or a dropped
         // waiter skips the successful teardown sequence.
         let _shutdown_guard = self.shutdown_token.clone().drop_guard();
 
-        // The apply worker may spawn table sync workers until it exits.
         debug!("waiting for apply worker to complete");
+
+        // The apply worker may spawn table sync workers until it exits.
         apply_worker.wait().await?;
         self.shutdown();
 
         debug!("waiting for table sync workers to complete");
+
         pool.wait_all().await?;
 
         debug!("waiting for destination shutdown to complete");
+
         self.destination.shutdown().await?;
 
-        // Consumers need fresh readings until workers and destination drain.
         debug!("waiting for memory monitor to complete");
+
+        // Consumers need fresh readings until workers and destination drain.
         abort_and_join(memory_monitor_task).await?;
 
         Ok(())
@@ -307,9 +313,13 @@ where
     /// workers were spawned, still shuts down the constructed destination.
     pub async fn shutdown_and_wait(self) -> EtlResult<()> {
         self.shutdown();
+
+        // If the pipeline was not started, we invoke the destination shutdown
+        // directly here, otherwise it's done inside the `wait` method.
         if matches!(self.state, PipelineState::NotStarted) {
             return self.destination.shutdown().await;
         }
+
         self.wait().await
     }
 

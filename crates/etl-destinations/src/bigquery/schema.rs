@@ -255,12 +255,15 @@ pub(super) fn postgres_to_bigquery_type(typ: &Type) -> String {
 /// Converts Postgres column schemas to a BigQuery [`TableDescriptor`].
 ///
 /// Maps data types and nullability to BigQuery column specifications, setting
-/// appropriate column modes and automatically adding CDC special columns.
+/// appropriate column modes and always adding CDC operation and sequence
+/// columns. Streaming rows allow missing scalar columns for sparse mutations;
+/// copy rows preserve the source nullability.
 pub(crate) fn column_schemas_to_table_descriptor(
     replicated_table_schema: &ReplicatedTableSchema,
-    use_cdc_sequence_column: bool,
+    allow_missing_columns: bool,
 ) -> TableDescriptor {
-    let mut field_descriptors = vec![];
+    let field_count = replicated_table_schema.column_schemas().len() + 2;
+    let mut field_descriptors = Vec::with_capacity(field_count);
     let mut number = 1;
 
     for column_schema in replicated_table_schema.column_schemas() {
@@ -290,7 +293,7 @@ pub(crate) fn column_schemas_to_table_descriptor(
 
         let mode = if is_array_type(&column_schema.typ) {
             ColumnMode::Repeated
-        } else if use_cdc_sequence_column {
+        } else if allow_missing_columns {
             // CDC delete rows can omit non-key columns, so the writer schema
             // must accept missing scalar fields even when the destination table
             // column is defined as NOT NULL.
@@ -318,14 +321,12 @@ pub(crate) fn column_schemas_to_table_descriptor(
     });
     number += 1;
 
-    if use_cdc_sequence_column {
-        field_descriptors.push(FieldDescriptor {
-            number,
-            name: BIGQUERY_CDC_SEQUENCE_COLUMN.to_owned(),
-            typ: ColumnType::String,
-            mode: ColumnMode::Required,
-        });
-    }
+    field_descriptors.push(FieldDescriptor {
+        number,
+        name: BIGQUERY_CDC_SEQUENCE_COLUMN.to_owned(),
+        typ: ColumnType::String,
+        mode: ColumnMode::Required,
+    });
 
     TableDescriptor { field_descriptors }
 }
@@ -703,7 +704,9 @@ mod tests {
 
         assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
         assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
-        assert_eq!(descriptor.field_descriptors.len(), 3);
+        assert_eq!(descriptor.field_descriptors.len(), 4);
+        assert_eq!(descriptor.field_descriptors[3].name, BIGQUERY_CDC_SEQUENCE_COLUMN);
+        assert!(matches!(descriptor.field_descriptors[3].mode, ColumnMode::Required));
     }
 
     #[test]

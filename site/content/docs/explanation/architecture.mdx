@@ -149,14 +149,14 @@ ETL also limits replay through:
 
 Destinations should make writes **idempotent** using the source table's replica
 identity or primary key plus ETL's event ordering metadata. For append-style CDC
-tables, persist a sequence key derived from `commit_lsn` and `tx_ordinal`. For
+tables, persist an event position derived from `commit_lsn` and `tx_ordinal`. For
 current-state tables, upsert by the destination's chosen row key so replayed
 events converge to the same state.
 
 The `commit_lsn` and `tx_ordinal` fields on sequenced events provide stable
 **ordering and replay detection**. Destinations such as ClickHouse and BigQuery
 use the pair to keep replayed events ordered. See [Event
-Types](/explanation/events/#understanding-event-sequence-keys) for details.
+Types](/explanation/events/#understanding-event-positions) for details.
 
 ## Table States
 
