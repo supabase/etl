@@ -586,8 +586,9 @@ where
                 "BigQuery destination view already exists",
                 format!(
                     "Cannot create view '{bigquery_table_id}' for source table '{}': it already \
-                     exists and belongs to another source table. If that table was renamed, \
-                     resynchronize it first, then retry this one.",
+                     exists and is not registered to this source table. If it belongs to a \
+                     renamed source table, resynchronize that table first, then retry this one. \
+                     Otherwise, drop the conflicting object or use another dataset.",
                     replicated_table_schema.name()
                 )
             );

@@ -221,6 +221,14 @@ treated as one destination column, while `Ä` and `ä` remain distinct. If
 BigQuery's own case-insensitivity considers such a non-ASCII pair equivalent,
 the table DDL is rejected instead of ETL silently merging the two columns.
 
+When ETL has no destination metadata for a source table, it creates the
+BigQuery view named after that table. If the name already exists, ETL fails the
+table instead of taking over an object it cannot prove it owns. This happens
+when a table is renamed and a new table takes its old name, when a table is
+re-added to the publication, when ETL state is reset against the same dataset,
+or when two pipelines share a dataset. Resynchronize the renamed table first,
+drop the conflicting object, or use another dataset.
+
 ### Limitations
 
 - Every replicated source table needs a primary key, and all primary-key

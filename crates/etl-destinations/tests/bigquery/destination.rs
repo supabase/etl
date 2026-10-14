@@ -1066,6 +1066,7 @@ async fn new_table_rejects_view_of_renamed_table() {
 
     // THEN: the copy fails and the view still shows the renamed table's row.
     assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+    assert!(orders.store.get_destination_table_metadata(new_orders.id()).await.unwrap().is_none());
     let rows = orders.bigquery_database.query_table(orders.original_name.clone()).await.unwrap();
     assert_eq!(
         parse_bigquery_table_rows::<BigQueryUser>(rows),
