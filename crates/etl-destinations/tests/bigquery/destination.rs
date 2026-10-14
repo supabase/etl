@@ -911,3 +911,87 @@ async fn applied_metadata_does_not_recreate_a_missing_table_after_restart() {
         Some(applied_metadata)
     );
 }
+
+/// After a source table is renamed, ETL keeps using the BigQuery table it
+/// created under the old name for writes, truncates and resyncs.
+#[tokio::test(flavor = "multi_thread")]
+async fn renamed_source_table_keeps_using_recorded_table() {
+    install_crypto_provider();
+    init_test_tracing();
+
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    // GIVEN: `orders` was copied with one row, then renamed to `ordersold`.
+    let bigquery_database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let original_schema = make_users_schema(&format!("orders{suffix}"));
+    let original = ReplicatedTableSchema::all(Arc::new(original_schema.clone()));
+    let renamed_schema = TableSchema::with_snapshot_id(
+        original_schema.id,
+        TableName::new("public".to_owned(), format!("ordersold{suffix}")),
+        original_schema.column_schemas.clone(),
+        test_snapshot_id(200),
+    );
+    let renamed = ReplicatedTableSchema::all(Arc::new(renamed_schema.clone()));
+    store.store_table_schema(original_schema.clone()).await.unwrap();
+    store.store_table_schema(renamed_schema).await.unwrap();
+
+    let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
+    destination
+        .write_table_rows_for_tests(
+            &original,
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("copied".to_owned()),
+                Cell::I32(10),
+            ])],
+        )
+        .await
+        .unwrap();
+
+    // WHEN: the rename arrives, then a truncate and an insert.
+    write_events(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![
+            Event::Relation(RelationEvent { replicated_table_schema: renamed.clone() }),
+            Event::Truncate(TruncateEvent {
+                commit_lsn: PgLsn::from(300_u64),
+                tx_ordinal: 0,
+                options: 0,
+                truncated_tables: vec![renamed.clone()],
+            }),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(300_u64),
+                tx_ordinal: 1,
+                replicated_table_schema: renamed.clone(),
+                table_row: TableRow::new(vec![
+                    Cell::I32(2),
+                    Cell::String("streamed".to_owned()),
+                    Cell::I32(20),
+                ]),
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+
+    // THEN: the view under the old name shows only the streamed row.
+    let rows = bigquery_database.query_table(original_schema.name.clone()).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(rows),
+        vec![BigQueryUser::new(2, "streamed", 20)]
+    );
+
+    // WHEN: the table is reset for a fresh copy.
+    let recorded = store.get_destination_table_metadata(original.id()).await.unwrap().unwrap();
+    destination.drop_table_for_copy_for_tests(&renamed).await.unwrap();
+
+    // THEN: the old-name view and the recorded table are gone.
+    let original_view = format!("public_orders{suffix}");
+    assert!(bigquery_database.get_table_metadata_by_id(&original_view).await.is_none());
+    assert!(bigquery_database.get_table_metadata_by_id(recorded.table_id()).await.is_none());
+}
