@@ -5,7 +5,7 @@ destination using [Supabase ETL](https://supabase.github.io/etl/). ClickHouse is
 the fastest local path: `cargo x init` starts it, and no cloud account is
 required. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
-for maturity and limitations, and the
+for release status and limitations, and the
 [First Pipeline](https://supabase.github.io/etl/guides/first-pipeline/) tutorial
 if you want to embed the `etl` crate instead.
 
@@ -13,10 +13,13 @@ if you want to embed the `etl` crate instead.
 
 | Example                     | Binary       | Feature      | Destination                            | Status        |
 | --------------------------- | ------------ | ------------ | -------------------------------------- | ------------- |
-| [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | Private alpha |
-| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Stable        |
-| [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | In progress   |
-| [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | In progress   |
+| [ClickHouse](#clickhouse)   | `clickhouse` | `clickhouse` | ClickHouse                             | Public alpha  |
+| [BigQuery](#bigquery)       | `bigquery`   | `bigquery`   | Google BigQuery                        | Public alpha  |
+| [DuckLake](#ducklake)       | `ducklake`   | `ducklake`   | DuckLake                               | Public alpha  |
+| [Snowflake](#snowflake)     | `snowflake`  | `snowflake`  | Snowflake                              | Public alpha  |
+
+Public alpha describes the managed-service release stage. Local and self-hosted
+use of the open-source destinations is unrestricted.
 
 Iceberg is deprecated and is not recommended for new deployments. It has no
 example here.
@@ -168,9 +171,9 @@ cargo run --bin bigquery -p etl-examples --features bigquery -- \
 
 ## ClickHouse
 
-**Private alpha.** The managed service admits a limited set of users; the
-open-source destination is unrestricted. Expect operational requirements to
-change.
+**Public alpha.** This status applies to the managed service; local and
+self-hosted use of the open-source destination is unrestricted. Expect
+operational requirements to change.
 
 Replicates a Postgres publication to ClickHouse over HTTP(S). After
 [local setup](#quick-database-setup):

@@ -1,6 +1,6 @@
 ---
 title: Destinations
-description: Official built-in destinations, maturity, requirements, and limitations.
+description: Official built-in destinations, release status, requirements, and limitations.
 icon: DatabaseZap
 ---
 
@@ -13,21 +13,18 @@ mature cloud destination.**
 
 | Feature      | Destination     | Status        | Guidance                                  |
 | ------------ | --------------- | ------------- | ----------------------------------------- |
-| `clickhouse` | ClickHouse      | Private alpha | Recommended local getting-started path    |
-| `bigquery`   | Google BigQuery | Stable        | Most mature cloud destination             |
-| `ducklake`   | DuckLake        | Private alpha | Evaluate for your workload                |
-| `snowflake`  | Snowflake       | Private alpha | Evaluate for your workload                |
+| `clickhouse` | ClickHouse      | Public alpha  | Recommended local getting-started path    |
+| `bigquery`   | Google BigQuery | Public alpha  | Most mature cloud destination             |
+| `ducklake`   | DuckLake        | Public alpha  | Evaluate for your workload                |
+| `snowflake`  | Snowflake       | Public alpha  | Evaluate for your workload                |
 | `iceberg`    | Apache Iceberg  | Deprecated    | Do not use for new deployments            |
 
 ## Status definitions
 
-- **Stable:** The most mature built-in destination. Review its limitations and
-  validate it against your production workload.
-- **Private alpha:** Managed-service access is limited. This does not restrict
-  local or self-hosted use of the open-source destination.
-- **In progress:** Functional, but behavior, configuration, schema support, and
-  operational requirements may still change. Test recovery and schema changes
-  before production use.
+- **Public alpha:** The managed service is in public alpha. Features and
+  behavior may change. Local and self-hosted use of the open-source destinations
+  is unrestricted. Review limitations and test recovery and schema changes
+  against your workload before production use.
 - **Deprecated:** Retained for compatibility but no longer recommended for new
   deployments. Plan to move away from it.
 
@@ -72,7 +69,9 @@ not restored automatically.
 
 ## BigQuery
 
-<DestinationStatus status="stable" />
+<DestinationStatus status="public-alpha" />
+
+This status applies to the managed service, not local or self-hosted use.
 
 BigQuery uses the BigQuery Storage Write API and BigQuery change data capture
 to maintain destination tables. Use it when you already have a Google Cloud
@@ -241,7 +240,7 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 
 ## ClickHouse
 
-<DestinationStatus status="private-alpha" />
+<DestinationStatus status="public-alpha" />
 
 This status applies to the managed service, not local or self-hosted use.
 
@@ -327,7 +326,7 @@ destination. Drop the conflicting object or use another database.
 
 ## DuckLake
 
-<DestinationStatus status="private-alpha" />
+<DestinationStatus status="public-alpha" />
 
 This status applies to the managed service, not local or self-hosted use.
 
@@ -347,7 +346,7 @@ object storage.
 
 ## Snowflake
 
-<DestinationStatus status="private-alpha" />
+<DestinationStatus status="public-alpha" />
 
 This status applies to the managed service, not local or self-hosted use.
 

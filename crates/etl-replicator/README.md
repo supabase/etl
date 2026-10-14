@@ -6,15 +6,18 @@ destination.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `clickhouse` | ClickHouse | In progress |
-| `bigquery` | Google BigQuery | Stable |
-| `ducklake` | DuckLake | In progress |
-| `snowflake` | Snowflake | In progress |
+| `clickhouse` | ClickHouse | Public alpha |
+| `bigquery` | Google BigQuery | Public alpha |
+| `ducklake` | DuckLake | Public alpha |
+| `snowflake` | Snowflake | Public alpha |
 | `iceberg` | Apache Iceberg | Deprecated |
+
+Public alpha describes the managed-service release stage. Local and self-hosted
+use of the open-source destinations is unrestricted.
 
 ClickHouse is the local default: `cargo x init` starts it, and `cargo x setup
 replicator` configures it. BigQuery is the most mature cloud destination.
-Compare maturity and limitations in the
+Compare release status and limitations in the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/).
 For production configuration and credential handling, see the
 [Standalone Replicator](https://supabase.github.io/etl/guides/standalone-replicator/)
