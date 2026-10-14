@@ -538,6 +538,7 @@ where
     ) -> EtlResult<VersionedBigQueryTableId> {
         let table_id = replicated_table_schema.id();
         let existing_metadata = self.state_store.get_destination_table_metadata(table_id).await?;
+        let is_first_creation = existing_metadata.is_none();
 
         // Applied metadata supplies the physical identity without probing
         // BigQuery.
@@ -573,6 +574,25 @@ where
         // A Creating target is abandoned without deletion here. Truncate or
         // explicit reset can collect it after redirecting or removing the view.
         let bigquery_table_id = table_name_to_bigquery_table_id(replicated_table_schema.name())?;
+
+        // A view with this name and no metadata belongs to another source
+        // table, for example one renamed away from this name. Creating ours
+        // would point that view at our table.
+        if is_first_creation
+            && self.client.table_exists(&self.dataset_id, &bigquery_table_id).await?
+        {
+            bail!(
+                ErrorKind::DestinationTableAlreadyExists,
+                "BigQuery destination view already exists",
+                format!(
+                    "Cannot create view '{bigquery_table_id}' for source table '{}': it already \
+                     exists and belongs to another source table. If that table was renamed, \
+                     resynchronize it first, then retry this one.",
+                    replicated_table_schema.name()
+                )
+            );
+        }
+
         let versioned_table_id = VersionedBigQueryTableId::new(bigquery_table_id);
         let metadata = DestinationTableMetadata::new_creating(
             versioned_table_id.to_string(),
