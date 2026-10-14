@@ -221,6 +221,8 @@ treated as one destination column, while `Ä` and `ä` remain distinct. If
 BigQuery's own case-insensitivity considers such a non-ASCII pair equivalent,
 the table DDL is rejected instead of ETL silently merging the two columns.
 
+### Existing destination objects
+
 When ETL has no destination metadata for a source table, it creates the
 BigQuery view named after that table. If the name already exists, ETL fails the
 table instead of taking over an object it cannot prove it owns. This happens
