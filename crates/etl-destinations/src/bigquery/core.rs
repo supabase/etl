@@ -906,7 +906,7 @@ where
 
         // BigQuery CDC sequence numbers order row mutations, but they do not
         // make destructive or ambiguously ordered DDL safe. A relation has no
-        // DML sequence key of its own, so reject older snapshots and
+        // DML sequence number of its own, so reject older snapshots and
         // equal-snapshot mask conflicts before computing a diff.
         ensure_relation_schema_transition(
             "BigQuery",
@@ -1211,7 +1211,7 @@ where
                 };
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_key = bigquery_sequence_key(
+                        let sequence_number = bigquery_sequence_number(
                             insert.event_sequence_key(),
                             BIGQUERY_SEQUENCE_ORDINAL_FIRST,
                         );
@@ -1219,7 +1219,7 @@ where
                             .table_row
                             .values_mut()
                             .push(BigQueryOperationType::Upsert.into_cell());
-                        insert.table_row.values_mut().push(Cell::String(sequence_key));
+                        insert.table_row.values_mut().push(Cell::String(sequence_number));
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -1246,7 +1246,7 @@ where
                         )?);
                     }
                     Event::Delete(delete) => {
-                        let sequence_key = bigquery_sequence_key(
+                        let sequence_number = bigquery_sequence_number(
                             delete.event_sequence_key(),
                             BIGQUERY_SEQUENCE_ORDINAL_FIRST,
                         );
@@ -1262,7 +1262,7 @@ where
                         entry.1.push(bigquery_delete_row(
                             &delete.replicated_table_schema,
                             old_table_row,
-                            sequence_key,
+                            sequence_number,
                         )?);
                     }
                     event => {
@@ -1691,7 +1691,7 @@ where
     }
 }
 
-/// Builds a BigQuery CDC ordering key with destination-internal ordering.
+/// Builds a BigQuery CDC sequence number with destination-internal ordering.
 ///
 /// BigQuery applies CDC records for the same primary key by comparing
 /// `_CHANGE_SEQUENCE_NUMBER` sections from left to right as unsigned
@@ -1705,7 +1705,7 @@ where
 /// the same source sequence key without this extra section. The internal
 /// ordinal makes the ordering within generated rows explicit instead of relying
 /// on append order or BigQuery ingestion-time tie-breaking.
-fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) -> String {
+fn bigquery_sequence_number(sequence_key: EventSequenceKey, internal_ordinal: u64) -> String {
     let commit_lsn = u64::from(sequence_key.commit_lsn);
     format!("{commit_lsn:016x}/{:016x}/{internal_ordinal:016x}", sequence_key.tx_ordinal)
 }
@@ -1713,10 +1713,10 @@ fn bigquery_sequence_key(sequence_key: EventSequenceKey, internal_ordinal: u64) 
 /// Builds a BigQuery CDC upsert row.
 fn bigquery_upsert_row(
     mut table_row: TableRow,
-    sequence_key: String,
+    sequence_number: String,
 ) -> EtlResult<BigQueryTableRow> {
     table_row.values_mut().push(BigQueryOperationType::Upsert.into_cell());
-    table_row.values_mut().push(Cell::String(sequence_key));
+    table_row.values_mut().push(Cell::String(sequence_number));
 
     BigQueryTableRow::try_from(table_row)
 }
@@ -1761,7 +1761,7 @@ fn bigquery_update_rows(
         rows.push(bigquery_delete_row(
             replicated_table_schema,
             old_table_row,
-            bigquery_sequence_key(sequence_key, BIGQUERY_SEQUENCE_ORDINAL_FIRST),
+            bigquery_sequence_number(sequence_key, BIGQUERY_SEQUENCE_ORDINAL_FIRST),
         )?);
     }
     let upsert_ordinal = if primary_key_changed {
@@ -1771,7 +1771,7 @@ fn bigquery_update_rows(
     };
     rows.push(bigquery_upsert_row(
         new_table_row,
-        bigquery_sequence_key(sequence_key, upsert_ordinal),
+        bigquery_sequence_number(sequence_key, upsert_ordinal),
     )?);
 
     Ok(rows)
@@ -2045,13 +2045,13 @@ fn bigquery_primary_key_tagged_cells_from_old_row(
 fn bigquery_delete_row(
     replicated_table_schema: &ReplicatedTableSchema,
     old_table_row: OldTableRow,
-    sequence_key: String,
+    sequence_number: String,
 ) -> EtlResult<BigQueryTableRow> {
     let source_column_count = replicated_table_schema.column_schemas().len();
     let mut tagged_cells =
         bigquery_primary_key_tagged_cells_from_old_row(replicated_table_schema, old_table_row)?;
     tagged_cells.push((source_column_count + 1, BigQueryOperationType::Delete.into_cell()));
-    tagged_cells.push((source_column_count + 2, Cell::String(sequence_key)));
+    tagged_cells.push((source_column_count + 2, Cell::String(sequence_number)));
 
     BigQueryTableRow::try_from_tagged_cells(tagged_cells)
 }
@@ -3200,11 +3200,11 @@ mod tests {
     }
 
     #[test]
-    fn bigquery_sequence_key_uses_three_64_bit_hex_sections() {
+    fn bigquery_sequence_number_uses_three_64_bit_hex_sections() {
         let sequence_key = EventSequenceKey::new(PgLsn::from(u64::MAX), u64::MAX);
 
         assert_eq!(
-            bigquery_sequence_key(sequence_key, u64::MAX),
+            bigquery_sequence_number(sequence_key, u64::MAX),
             "ffffffffffffffff/ffffffffffffffff/ffffffffffffffff"
         );
     }
