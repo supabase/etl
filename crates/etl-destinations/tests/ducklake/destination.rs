@@ -2795,7 +2795,8 @@ async fn table_rename_and_column_changes_commit_atomically() {
 
 /// Renames preserve the durable streaming watermark across a restart, including
 /// case-only changes that retain DuckLake's existing physical identifier.
-/// An uncertain metadata commit after a physical rename must still fail closed.
+/// An uncertain metadata commit after a physical rename fails closed until a
+/// reset drops the renamed table, after which a fresh copy succeeds.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_rename_preserves_replay_progress_after_restart() {
     use etl::event::{InsertEvent, RelationEvent};
@@ -2942,8 +2943,8 @@ async fn table_rename_preserves_replay_progress_after_restart() {
         drop(statement);
         drop(conn);
 
-        // Simulate an interrupted Applied write. Keep the previous name free
-        // while recovering the physical rename, then reset the recorded target.
+        // Simulate an interrupted Applied write. Free the previous name so the
+        // reset can find the committed rename under its new name.
         let pending = original
             .with_schema_change(new.inner().snapshot_id, new.replication_mask().clone())
             .unwrap();
@@ -2978,22 +2979,16 @@ async fn table_rename_preserves_replay_progress_after_restart() {
 
         assert_eq!(store.get_destination_table_metadata(new.id()).await.unwrap(), Some(pending));
         let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-        assert_eq!(lake_table_exists(&conn, &table), target_name == "renamed");
+        assert!(!lake_table_exists(&conn, &table));
         drop(conn);
         store.prepare_table_state_for_copy(new.id()).await.unwrap();
         store.store_table_schema(new.inner().clone()).await.unwrap();
         let destination =
             new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
-        let result = destination.write_table_rows_for_tests(&new, Vec::new()).await;
-        if target_name == "renamed" {
-            assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationTableAlreadyExists);
-            assert!(store.get_destination_table_metadata(new.id()).await.unwrap().is_none());
-        } else {
-            result.unwrap();
-            assert!(
-                store.get_destination_table_metadata(new.id()).await.unwrap().unwrap().is_applied()
-            );
-        }
+        destination.write_table_rows_for_tests(&new, Vec::new()).await.unwrap();
+        assert!(
+            store.get_destination_table_metadata(new.id()).await.unwrap().unwrap().is_applied()
+        );
         destination.shutdown().await.unwrap();
     }
 }
@@ -4027,8 +4022,7 @@ async fn startup_after_restart_rejects_applying_schema_change_with_pruned_previo
 
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store.clone()).await;
     let error = restarted_destination.startup().await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::InvalidState);
-    assert!(error.to_string().contains("DuckLake schema recovery previous schema not found"));
+    assert_eq!(error.kind(), ErrorKind::MissingTableSchema);
 
     let metadata = store.get_destination_table_metadata(old_schema.id).await.unwrap().unwrap();
     assert!(metadata.is_applying());

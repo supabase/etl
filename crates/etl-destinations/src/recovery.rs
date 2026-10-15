@@ -1,22 +1,37 @@
 //! Shared helpers for destination schema-transition safety and recovery.
 
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+use std::fmt::Display;
+
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+use etl::schema::ColumnAlteration;
 use etl::{
     destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     etl_error,
     schema::{ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
 };
+#[cfg(any(
+    feature = "bigquery",
+    feature = "clickhouse",
+    feature = "ducklake",
+    feature = "snowflake"
+))]
+use etl::{destination::DestinationTableSchema, schema::TableName, store::SchemaStore};
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+use tracing::warn;
 
 /// Warns that a destination is intentionally skipping a column type change.
 #[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
 pub(crate) fn warn_unsupported_column_type_change(
     destination_name: &str,
-    destination_table_id: impl std::fmt::Display,
-    alteration: &etl::schema::ColumnAlteration,
+    destination_table_id: impl Display,
+    alteration: &ColumnAlteration,
 ) {
     let before = alteration.before_column_schema();
     let after = alteration.after_column_schema();
-    tracing::warn!(
+
+    warn!(
         destination_name,
         destination_table_id = %destination_table_id,
         column_name = %before.name,
@@ -111,6 +126,40 @@ pub(crate) fn ensure_destination_schema_matches_metadata(
             metadata.replication_mask(),
         )
     ))
+}
+
+/// Returns the exact source names at both endpoints of a pending table rename.
+///
+/// [`DestinationTableMetadata::table_id`] keeps the before identifier during
+/// Applying, although remote DDL may already have moved the table. Resets use
+/// these names to find the object an interrupted rename left behind. Returns
+/// `None` for other states or unchanged names, in which case callers trust the
+/// recorded identifier. Schema retention keeps both recorded endpoints, so a
+/// missing endpoint fails instead of guessing.
+#[cfg(any(
+    feature = "bigquery",
+    feature = "clickhouse",
+    feature = "ducklake",
+    feature = "snowflake"
+))]
+pub(crate) async fn pending_table_rename<S: SchemaStore + Sync>(
+    store: &S,
+    table_id: TableId,
+    metadata: &DestinationTableMetadata,
+) -> EtlResult<Option<(TableName, TableName)>> {
+    let DestinationTableSchema::Applying { snapshot_id, previous_snapshot_id, .. } =
+        metadata.table_schema()
+    else {
+        return Ok(None);
+    };
+
+    let before_schema = store.get_exact_table_schema(&table_id, *previous_snapshot_id).await?;
+    let after_schema = store.get_exact_table_schema(&table_id, *snapshot_id).await?;
+    if before_schema.name == after_schema.name {
+        return Ok(None);
+    }
+
+    Ok(Some((before_schema.name.clone(), after_schema.name.clone())))
 }
 
 #[cfg(test)]

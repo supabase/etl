@@ -40,7 +40,7 @@ use crate::{
         },
         query::execute_query,
         schema::{create_columns_spec, postgres_to_bigquery_type},
-        sql::{quote_identifier, quote_table_path},
+        sql::{parse_view_query_table_id, quote_identifier, quote_table_path, view_query},
     },
     retry::{ClassifiedError, classified_error, classified_error_with_detail},
 };
@@ -941,11 +941,11 @@ impl BigQueryClient {
         table_id: &BigQueryTableId,
     ) -> EtlResult<()> {
         let view_path = self.full_table_name(dataset_id, view_id)?;
-        let table_path = self.full_table_name(dataset_id, table_id)?;
+        let view_query = view_query(&self.project_id, dataset_id, table_id)?;
 
-        info!(%view_path, %table_path, "creating or replacing bigquery view");
+        info!(%view_path, %table_id, "creating or replacing bigquery view");
 
-        let query = format!("create or replace view {view_path} as select * from {table_path}");
+        let query = format!("create or replace view {view_path} as {view_query}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -960,13 +960,29 @@ impl BigQueryClient {
         table_id: &BigQueryTableId,
     ) -> EtlResult<()> {
         let view_path = self.full_table_name(dataset_id, view_id)?;
-        let table_path = self.full_table_name(dataset_id, table_id)?;
-        self.query(QueryRequest::new(format!(
-            "create view {view_path} as select * from {table_path}"
-        )))
-        .await?;
+        let view_query = view_query(&self.project_id, dataset_id, table_id)?;
+        self.query(QueryRequest::new(format!("create view {view_path} as {view_query}"))).await?;
 
         Ok(())
+    }
+
+    /// Returns the physical table selected by an ETL-created view.
+    ///
+    /// Returns `None` when `view_id` is absent, is not a view, or has a query
+    /// ETL did not render. Physical table IDs carry a unique suffix, so a view
+    /// selecting one was created for that table.
+    pub(super) async fn view_target_table_id(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        view_id: &BigQueryTableId,
+    ) -> EtlResult<Option<BigQueryTableId>> {
+        match self.client.table().get(&self.project_id, dataset_id, view_id, None).await {
+            Ok(table) => Ok(table.view.and_then(|view| {
+                parse_view_query_table_id(&view.query, &self.project_id, dataset_id)
+            })),
+            Err(BQError::ResponseError { error }) if error.error.code == 404 => Ok(None),
+            Err(error) => Err(bq_error_to_etl_error(error)),
+        }
     }
 
     /// Drops a view from BigQuery.

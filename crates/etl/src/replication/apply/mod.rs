@@ -2539,41 +2539,26 @@ where
         table_id: TableId,
         schema_selection: RelationSchemaSelection,
     ) -> EtlResult<Arc<TableSchema>> {
-        let requested_snapshot_id = match schema_selection {
-            RelationSchemaSelection::Exact(snapshot_id)
-            | RelationSchemaSelection::AtOrBefore(snapshot_id) => snapshot_id,
-        };
-
-        let table_schema = self
-            .schema_store
-            .get_table_schema(&table_id, requested_snapshot_id)
-            .await?
-            .ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::MissingTableSchema,
-                    "Table schema not found",
-                    format!(
-                        "Table schema for table {} at snapshot {} not found",
-                        table_id, requested_snapshot_id
-                    )
-                )
-            })?;
-
-        match schema_selection {
+        let table_schema = match schema_selection {
             RelationSchemaSelection::Exact(snapshot_id) => {
-                if table_schema.snapshot_id != snapshot_id {
-                    bail!(
-                        ErrorKind::InvalidState,
-                        "Table schema snapshot mismatch",
-                        format!(
-                            "Table schema for table {} resolved to snapshot {} when snapshot {} \
-                             was required",
-                            table_id, table_schema.snapshot_id, snapshot_id
-                        )
-                    );
-                }
+                self.schema_store.get_exact_table_schema(&table_id, snapshot_id).await?
             }
             RelationSchemaSelection::AtOrBefore(snapshot_upper_bound) => {
+                let table_schema = self
+                    .schema_store
+                    .get_table_schema(&table_id, snapshot_upper_bound)
+                    .await?
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::MissingTableSchema,
+                            "Table schema not found",
+                            format!(
+                                "Table schema for table {} at or before snapshot {} not found",
+                                table_id, snapshot_upper_bound
+                            )
+                        )
+                    })?;
+
                 // Schema stores implement newest-at-or-before lookup. Keep this
                 // validation at the decoding boundary because using a future
                 // schema would corrupt the positional interpretation of row
@@ -2597,8 +2582,10 @@ where
                         "resolved relation schema below snapshot upper bound"
                     );
                 }
+
+                table_schema
             }
-        }
+        };
 
         Ok(table_schema)
     }

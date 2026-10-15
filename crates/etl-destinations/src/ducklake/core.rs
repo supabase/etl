@@ -19,7 +19,7 @@ use etl::{
     event::{Event, EventPosition},
     schema::{
         ColumnAlterationKind, ColumnOperation, ColumnPresenceChangeReason, ColumnSchema,
-        ReplicatedTableSchema, SchemaDiff, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
+        ReplicatedTableSchema, SchemaDiff, SchemaPlan, TableId, TableName,
     },
     store::{DestinationStore, TableStateType},
     task::{TaskGroup, TaskRegistry, abort_and_join},
@@ -92,7 +92,7 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        warn_unsupported_column_type_change,
+        pending_table_rename, warn_unsupported_column_type_change,
     },
     retry::{classified_error, classified_error_with_detail},
 };
@@ -2165,7 +2165,7 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
+        let table_name = self.resolve_reset_table_name(replicated_table_schema).await?;
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.copy_buffers.lock().remove(&table_name);
         #[cfg(feature = "test-utils")]
@@ -2666,41 +2666,47 @@ where
         ))
     }
 
-    /// Rejects a table name that is already occupied before claiming ownership.
-    async fn ensure_table_absent(&self, table_name: &DuckLakeTableName) -> EtlResult<()> {
+    /// Returns whether a table occupies `table_name` in the lake catalog.
+    async fn table_exists(&self, table_name: &DuckLakeTableName) -> EtlResult<bool> {
         let table_name = table_name.clone();
         run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
             // DuckDB identifiers ignore ASCII case, including quoted names.
-            let exists: bool = conn
-                .query_row(
-                    "select exists (select 1 from information_schema.tables where table_catalog = \
-                     ? and translate(table_schema, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
-                     'abcdefghijklmnopqrstuvwxyz') = ? and translate(table_name, \
-                     'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = ?)",
-                    duckdb::params![
-                        LAKE_CATALOG,
-                        table_name.schema().to_ascii_lowercase(),
-                        table_name.table().to_ascii_lowercase()
-                    ],
-                    |row| row.get(0),
+            conn.query_row(
+                "select exists (select 1 from information_schema.tables where table_catalog = ? \
+                 and translate(table_schema, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                 'abcdefghijklmnopqrstuvwxyz') = ? and translate(table_name, \
+                 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = ?)",
+                duckdb::params![
+                    LAKE_CATALOG,
+                    table_name.schema().to_ascii_lowercase(),
+                    table_name.table().to_ascii_lowercase()
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|source| {
+                classified_error(
+                    ErrorKind::DestinationQueryFailed,
+                    "DuckLake table existence query failed",
+                    source,
                 )
-                .map_err(|source| {
-                    classified_error(
-                        ErrorKind::DestinationQueryFailed,
-                        "DuckLake table existence query failed",
-                        source,
-                    )
-                })?;
-            if exists {
-                return Err(etl_error!(
-                    ErrorKind::DestinationTableAlreadyExists,
-                    "DuckLake destination table already exists",
-                    format!("Cannot claim occupied destination table '{table_name}'")
-                ));
-            }
-            Ok(())
+            })
         })
         .await
+    }
+
+    /// Rejects a table name that is already occupied before claiming ownership.
+    async fn ensure_table_absent(&self, table_name: &DuckLakeTableName) -> EtlResult<()> {
+        if self.table_exists(table_name).await? {
+            return Err(etl_error!(
+                ErrorKind::DestinationTableAlreadyExists,
+                "DuckLake destination table already exists",
+                format!(
+                    "Table '{table_name}' exists, but this pipeline has no destination metadata \
+                     proving ownership. Drop the table or use another schema before retrying."
+                )
+            ));
+        }
+        Ok(())
     }
 
     /// Handles relation metadata, applying the schema diff and advancing
@@ -2782,13 +2788,8 @@ where
             "ducklake schema change detected"
         );
 
-        let before_table_schema = self
-            .load_exact_table_schema(
-                table_id,
-                before_snapshot_id,
-                "Stored schema snapshot missing for DuckLake schema change",
-            )
-            .await?;
+        let before_table_schema =
+            self.store.get_exact_table_schema(&table_id, before_snapshot_id).await?;
         let before_schema =
             ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());
         let plan = before_schema.plan_schema_change(after_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
@@ -3634,53 +3635,6 @@ where
         .await
     }
 
-    /// Loads an exact table schema snapshot from the store.
-    async fn load_exact_table_schema(
-        &self,
-        table_id: TableId,
-        snapshot_id: SnapshotId,
-        missing_schema_description: &'static str,
-    ) -> EtlResult<Arc<TableSchema>> {
-        let table_schema =
-            self.store.get_table_schema(&table_id, snapshot_id).await?.ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    missing_schema_description,
-                    format!(
-                        "Table {} needs stored schema snapshot {}, but it was not found.",
-                        table_id, snapshot_id
-                    )
-                )
-            })?;
-
-        if table_schema.snapshot_id != snapshot_id {
-            return Err(etl_error!(
-                ErrorKind::InvalidState,
-                missing_schema_description,
-                format!(
-                    "Table {} needs exact schema snapshot {}, but only snapshot {} was found.",
-                    table_id, snapshot_id, table_schema.snapshot_id
-                )
-            ));
-        }
-
-        Ok(table_schema)
-    }
-
-    /// Loads the exact previous schema for interrupted DDL recovery.
-    async fn load_previous_recovery_table_schema(
-        &self,
-        table_id: TableId,
-        previous_snapshot_id: SnapshotId,
-    ) -> EtlResult<Arc<TableSchema>> {
-        self.load_exact_table_schema(
-            table_id,
-            previous_snapshot_id,
-            "DuckLake schema recovery previous schema not found",
-        )
-        .await
-    }
-
     /// Resolves the target replicated schema for interrupted DDL recovery.
     async fn target_schema_for_recovery(
         &self,
@@ -3693,13 +3647,8 @@ where
             return Ok(schema.clone());
         }
 
-        let target_table_schema = self
-            .load_exact_table_schema(
-                table_id,
-                metadata.snapshot_id(),
-                "DuckLake schema recovery target schema not found",
-            )
-            .await?;
+        let target_table_schema =
+            self.store.get_exact_table_schema(&table_id, metadata.snapshot_id()).await?;
 
         Ok(ReplicatedTableSchema::from_mask(
             target_table_schema,
@@ -3733,7 +3682,7 @@ where
                 ..
             } => {
                 let before_table_schema =
-                    self.load_previous_recovery_table_schema(table_id, before_snapshot_id).await?;
+                    self.store.get_exact_table_schema(&table_id, before_snapshot_id).await?;
                 let before_schema =
                     ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask);
                 let plan = before_schema
@@ -3938,18 +3887,38 @@ where
         .await
     }
 
-    /// Returns the stored destination table name or the deterministic default.
-    async fn resolve_destination_table_name(
+    /// Resolves the table a copy reset must drop.
+    ///
+    /// Trusts the recorded target unless an interrupted rename already moved
+    /// it. The relation path proved the after name vacant before recording
+    /// Applying, and the rename commits atomically with its column changes, so
+    /// a vacant before name with an occupied after name means it committed.
+    async fn resolve_reset_table_name(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<DuckLakeTableName> {
         let table_id = replicated_table_schema.id();
-
-        if let Some(existing) = self.store.get_destination_table_metadata(table_id).await? {
-            return DuckLakeTableName::from_metadata_id(existing.table_id());
+        let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
+            return table_name_to_ducklake_table_name(replicated_table_schema.name());
+        };
+        let before_table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
+        let Some((before_name, after_name)) =
+            pending_table_rename(&self.store, table_id, &metadata).await?
+        else {
+            return Ok(before_table_name);
+        };
+        if same_ducklake_table_name(&before_name, &after_name) {
+            return Ok(before_table_name);
         }
 
-        table_name_to_ducklake_table_name(replicated_table_schema.name())
+        let after_table_name = DuckLakeTableName::new(before_table_name.schema(), &after_name.name);
+        if !self.table_exists(&before_table_name).await?
+            && self.table_exists(&after_table_name).await?
+        {
+            return Ok(after_table_name);
+        }
+
+        Ok(before_table_name)
     }
 
     /// Serializes table-local truncate and CDC mutation writes.

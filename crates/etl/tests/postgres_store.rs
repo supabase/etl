@@ -1015,6 +1015,20 @@ async fn schema_store_versioning() {
         store.get_table_schema(&table_schema.id, SnapshotId::max()).await.unwrap().unwrap();
     let updated_at_column = schema.column_schemas.iter().find(|c| c.name == "updated_at");
     assert!(updated_at_column.is_some());
+
+    // Exact lookup returns only the stored version and never an older one.
+    let schema = store
+        .get_exact_table_schema(&table_schema.id, test_snapshot_id(100u64, 100u64))
+        .await
+        .unwrap();
+    assert_eq!(schema.snapshot_id, test_snapshot_id(100u64, 100u64));
+    for (table_id, snapshot_id) in [
+        (table_schema.id, test_snapshot_id(50u64, 50u64)),
+        (TableId::new(table_schema.id.into_inner() + 1), SnapshotId::max()),
+    ] {
+        let error = store.get_exact_table_schema(&table_id, snapshot_id).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingTableSchema);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

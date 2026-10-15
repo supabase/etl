@@ -44,7 +44,10 @@ use crate::{
         },
         sql::quote_identifier,
     },
-    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        pending_table_rename,
+    },
     table_name::try_stringify_table_name,
 };
 
@@ -1304,19 +1307,7 @@ where
                 // Recovery replays the interrupted diff from the previous
                 // snapshot to the target snapshot recorded in the metadata.
                 let before_table_schema =
-                    self.store.get_table_schema(&table_id, before_snapshot_id).await?.ok_or_else(
-                        || {
-                            etl_error!(
-                                ErrorKind::InvalidState,
-                                "Stored schema snapshot missing for ClickHouse schema recovery",
-                                format!(
-                                    "Table {} needs stored schema snapshot {} to recover the \
-                                     destination table, but it was not found.",
-                                    table_id, before_snapshot_id
-                                )
-                            )
-                        },
-                    )?;
+                    self.store.get_exact_table_schema(&table_id, before_snapshot_id).await?;
                 let before_schema = ReplicatedTableSchema::from_mask(
                     Arc::clone(&before_table_schema),
                     before_replication_mask,
@@ -1450,18 +1441,37 @@ where
             ));
         }
 
-        // Reset trusts the recorded target. An interrupted rename may leave
-        // the new name occupied, which fresh creation will report as a
-        // conflict.
+        // Reset trusts the recorded target, except after an interrupted rename
+        // has already moved it.
         let metadata = self.store.get_destination_table_metadata(schema.id()).await?;
-        let clickhouse_table_name = metadata.as_ref().map_or_else(
+        let mut clickhouse_table_name = metadata.as_ref().map_or_else(
             || try_stringify_table_name(schema.name()),
             |metadata| Ok(metadata.table_id().to_owned()),
         )?;
+        let mut vacated_table_name = None;
+        if let Some(metadata) = &metadata
+            && let Some((_, after_name)) =
+                pending_table_rename(&*self.store, schema.id(), metadata).await?
+        {
+            // The relation path proved the after name vacant before recording
+            // Applying, and ClickHouse renames atomically. A vacant before name
+            // with an occupied after name therefore means the rename executed.
+            let after_table_name = try_stringify_table_name(&after_name)?;
+            if after_table_name != clickhouse_table_name
+                && self.client.table_engine(&clickhouse_table_name).await?.is_none()
+                && self.client.table_engine(&after_table_name).await?.is_some()
+            {
+                vacated_table_name =
+                    Some(std::mem::replace(&mut clickhouse_table_name, after_table_name));
+            }
+        }
 
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
-            let drop_view = drop_current_view_sql(&clickhouse_table_name);
-            self.client.execute_ddl(DdlKind::DropView, &drop_view).await?;
+            // An interrupted rename can leave the before-name view behind.
+            for table_name in std::iter::once(&clickhouse_table_name).chain(&vacated_table_name) {
+                let drop_view = drop_current_view_sql(table_name);
+                self.client.execute_ddl(DdlKind::DropView, &drop_view).await?;
+            }
         }
 
         self.client.drop_table(&clickhouse_table_name).await?;
@@ -1588,17 +1598,7 @@ where
 
         // Retrieve the old schema to compute the diff.
         let before_table_schema =
-            self.store.get_table_schema(&table_id, before_snapshot_id).await?.ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "Stored schema snapshot missing for ClickHouse schema change",
-                    format!(
-                        "Table {} needs stored schema snapshot {} to compare with incoming \
-                         snapshot {}, but it was not found.",
-                        table_id, before_snapshot_id, after_snapshot_id
-                    )
-                )
-            })?;
+            self.store.get_exact_table_schema(&table_id, before_snapshot_id).await?;
 
         let before_schema =
             ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());

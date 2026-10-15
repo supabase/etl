@@ -14,7 +14,7 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName},
     store::DestinationStore,
     task::TaskRegistry,
 };
@@ -22,7 +22,10 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::{
-    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        pending_table_rename,
+    },
     snowflake::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
@@ -33,6 +36,14 @@ use crate::{
     },
     table_name::try_stringify_table_name,
 };
+
+/// Returns the Snowflake table name for a source table.
+///
+/// Creation, renames, and resets must derive names identically so each path
+/// addresses the same physical table.
+fn snowflake_table_name(table_name: &TableName) -> EtlResult<String> {
+    Ok(try_stringify_table_name(table_name)?.to_uppercase())
+}
 
 /// Ensures Snowflake metadata is ready for streaming operations.
 fn ensure_snowflake_metadata_applied(
@@ -125,7 +136,7 @@ where
 {
     table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
     let table_id = table_schema.id();
-    let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
+    let table_name = snowflake_table_name(table_schema.name())?;
     let columns: Vec<_> =
         table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
 
@@ -153,7 +164,7 @@ where
     schema::validate_no_cdc_collisions(&columns).map_err(EtlError::from)?;
     let creating_metadata = match store.get_destination_table_metadata(table_id).await? {
         None => {
-            if client.table_exists(&table_name).await.map_err(EtlError::from)? {
+            if client.object_exists(&table_name).await.map_err(EtlError::from)? {
                 bail!(
                     ErrorKind::DestinationTableAlreadyExists,
                     "Snowflake destination table already exists",
@@ -593,16 +604,7 @@ where
         schema::validate_no_cdc_collisions(&after_columns).map_err(EtlError::from)?;
 
         let before_table_schema =
-            self.store.get_table_schema(&table_id, before_snapshot_id).await?.ok_or_else(|| {
-                etl_error!(
-                    ErrorKind::InvalidState,
-                    "Stored schema snapshot missing for Snowflake schema change",
-                    format!(
-                        "Table {table_id} needs stored schema snapshot {before_snapshot_id} to \
-                         compare with incoming snapshot {after_snapshot_id}, but it was not found."
-                    )
-                )
-            })?;
+            self.store.get_exact_table_schema(&table_id, before_snapshot_id).await?;
 
         let before_schema =
             ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());
@@ -611,19 +613,20 @@ where
         let before_table_name = metadata.table_id().to_owned();
         let plan = before_schema.plan_schema_change(after_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         let after_table_name = if let Some(change) = plan.diff().table_name_change() {
-            try_stringify_table_name(change.after_name())?.to_uppercase()
+            snowflake_table_name(change.after_name())?
         } else {
             before_table_name.clone()
         };
         if after_table_name != before_table_name
-            && self.client.table_exists(&after_table_name).await.map_err(EtlError::from)?
+            && self.client.object_exists(&after_table_name).await.map_err(EtlError::from)?
         {
             bail!(
                 ErrorKind::DestinationTableAlreadyExists,
                 "Snowflake rename target already exists",
                 format!(
-                    "Cannot rename table '{before_table_name}' to occupied destination \
-                     '{after_table_name}'"
+                    "Cannot rename table '{before_table_name}' to '{after_table_name}': the \
+                     target exists, but this pipeline has no destination metadata proving \
+                     ownership. Drop the target before retrying."
                 )
             );
         }
@@ -753,21 +756,31 @@ where
             // them.
             let task_guard = self.tasks.drain().await?;
 
-            // Reset trusts the recorded target. An interrupted rename may
-            // leave the new name occupied; fresh creation reports that
-            // conflict.
-            let metadata = self
-                .writer
-                .store
-                .get_destination_table_metadata(replicated_table_schema.id())
-                .await?;
-            let table_name = metadata.as_ref().map_or_else(
-                || {
-                    try_stringify_table_name(replicated_table_schema.name())
-                        .map(|name| name.to_uppercase())
-                },
+            // Reset trusts the recorded target, except after an interrupted
+            // rename has already moved it.
+            let table_id = replicated_table_schema.id();
+            let metadata = self.writer.store.get_destination_table_metadata(table_id).await?;
+            let mut table_name = metadata.as_ref().map_or_else(
+                || snowflake_table_name(replicated_table_schema.name()),
                 |metadata| Ok(metadata.table_id().to_owned()),
             )?;
+            if let Some(metadata) = &metadata
+                && let Some((_, after_name)) =
+                    pending_table_rename(&self.writer.store, table_id, metadata).await?
+            {
+                // The relation path proved the after name vacant before
+                // recording Applying, and Snowflake renames atomically. A
+                // vacant before name with an occupied after name therefore
+                // means the rename executed.
+                let after_table_name = snowflake_table_name(&after_name)?;
+                let client = &self.writer.client;
+                if after_table_name != table_name
+                    && !client.object_exists(&table_name).await.map_err(EtlError::from)?
+                    && client.object_exists(&after_table_name).await.map_err(EtlError::from)?
+                {
+                    table_name = after_table_name;
+                }
+            }
             let detached = self
                 .writer
                 .client
@@ -1016,7 +1029,7 @@ mod tests {
         ));
         let schema = ReplicatedTableSchema::all(table_schema);
         let metadata = DestinationTableMetadata::new_creating(
-            try_stringify_table_name(schema.name()).unwrap().to_uppercase(),
+            snowflake_table_name(schema.name()).unwrap(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );
@@ -1033,10 +1046,7 @@ mod tests {
         assert!(metadata.is_creating());
         assert_eq!(metadata.snapshot_id(), schema.inner().snapshot_id);
         assert_eq!(metadata.replication_mask(), schema.replication_mask());
-        assert_eq!(
-            metadata.table_id(),
-            try_stringify_table_name(schema.name()).unwrap().to_uppercase()
-        );
+        assert_eq!(metadata.table_id(), snowflake_table_name(schema.name()).unwrap());
     }
 
     #[test]
@@ -1066,7 +1076,7 @@ mod tests {
         // Another copy partition completes while this caller waits for the
         // gate.
         let metadata = DestinationTableMetadata::new_applied(
-            try_stringify_table_name(schema.name()).unwrap().to_uppercase(),
+            snowflake_table_name(schema.name()).unwrap(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );

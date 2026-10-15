@@ -358,21 +358,29 @@ impl BigQueryDatabase {
         }
     }
 
-    /// Queries the schema (column metadata) for a table.
+    /// Queries the schema (column metadata) of the physical table behind a
+    /// logical view.
     ///
     /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    /// Matches physical tables with either legacy numeric or random suffixes.
+    /// Resolves the physical table from the view definition because renamed
+    /// tables keep the prefix of their original view ID. Returns `None` when
+    /// the view does not exist.
     pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
         let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
+        let view_query = self.get_table_metadata_by_id(&view_id).await?.view.unwrap().query;
+        // Views select from a backtick-quoted `project.dataset.table` path.
+        let physical_table_id = view_query
+            .trim_end()
+            .strip_suffix('`')
+            .and_then(|path| path.rsplit('.').next())
+            .unwrap_or_else(|| panic!("Unexpected BigQuery view definition: {view_query}"));
 
-        // Include numeric suffixes retained by upgraded destinations.
         let query = format!(
             "select column_name, data_type, ordinal_position from \
-             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where \
-             regexp_contains(table_name, r'^{view_id}_([0-9]{{1,20}}|[0-9a-z]{{25}})$') order by \
-             ordinal_position"
+             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where table_name = \
+             '{physical_table_id}' order by ordinal_position"
         );
 
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;

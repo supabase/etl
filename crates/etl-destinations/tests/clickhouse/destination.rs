@@ -3192,12 +3192,12 @@ async fn replicate_and_swap_orders_by_rename() -> RenameSwap {
     }
 }
 
-/// Reset can discard a pending rename. A leftover at the new name causes a
-/// normal creation conflict until the operator removes it and retries copy.
+/// Reset after an interrupted rename that already moved the table drops it
+/// under its new name, so a fresh copy succeeds without manual cleanup.
 #[tokio::test(flavor = "multi_thread")]
-async fn interrupted_table_rename_can_reset_and_reports_leftover_target() {
+async fn interrupted_table_rename_reset_drops_renamed_target() {
     let swap = replicate_and_swap_orders_by_rename().await;
-    // Keep the previous name free during recovery of the interrupted rename.
+    // Free the previous name, as if no other source had claimed it yet.
     drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
     let pending = DestinationTableMetadata::new_applied(
         "public_orders".to_owned(),
@@ -3227,30 +3227,15 @@ async fn interrupted_table_rename_can_reset_and_reports_leftover_target() {
         swap.store.get_destination_table_metadata(swap.archived.id()).await.unwrap(),
         Some(pending)
     );
-    swap.store.prepare_table_state_for_copy(swap.archived.id()).await.unwrap();
-    swap.store.store_table_schema(swap.archived_renamed.inner().clone()).await.unwrap();
-    let destination = swap
-        .clickhouse_db
-        .build_destination_with_engine(swap.store.clone(), ClickHouseEngine::ReplacingMergeTree)
-        .await;
-
-    let error = destination.write_table_rows(&swap.archived_renamed, vec![]).await.unwrap_err();
-    destination.shutdown().await.unwrap();
-
-    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
-    assert!(swap.store.get_destination_table_metadata(swap.archived.id()).await.unwrap().is_none());
-    assert_eq!(
+    assert!(
         swap.clickhouse_db
-            .query::<(i64, Option<String>)>("select id, status from public_ordersold")
-            .await,
-        [(1, Some("kept".to_owned()))]
+            .query::<String>("select name from system.tables where database = currentDatabase()")
+            .await
+            .is_empty()
     );
 
-    // The operator removes the known leftover table and derived view before
-    // requesting another copy; ETL does not infer ownership from either name.
-    for sql in ["drop view public_ordersold__current", "drop table public_ordersold"] {
-        swap.clickhouse_db.db_client().query(sql).execute().await.unwrap();
-    }
+    swap.store.prepare_table_state_for_copy(swap.archived.id()).await.unwrap();
+    swap.store.store_table_schema(swap.archived_renamed.inner().clone()).await.unwrap();
     let destination = swap
         .clickhouse_db
         .build_destination_with_engine(swap.store.clone(), ClickHouseEngine::ReplacingMergeTree)
@@ -3271,19 +3256,64 @@ async fn interrupted_table_rename_can_reset_and_reports_leftover_target() {
     );
 }
 
-/// A reset after source tables swap names by rename drops the destination
-/// table recorded in metadata, not the table matching the new source name.
+/// Reset after a rename that never executed drops only the recorded table. An
+/// unrelated table holding the after name survives, and fresh creation reports
+/// it so the operator can drop it.
 #[tokio::test(flavor = "multi_thread")]
-async fn drop_table_for_copy_after_rename_drops_recorded_table() {
-    // GIVEN: `orders` and `ordersnew` were replicated, then swapped names.
+async fn unexecuted_table_rename_reset_keeps_occupied_target() {
+    let swap = replicate_and_swap_orders_by_rename().await;
+    // `public_orders` belongs to the replacement table.
+    let reclaimed = store_status_default_schema(
+        &swap.store,
+        swap.archived.id(),
+        &TableName::new("public".to_owned(), "orders".to_owned()),
+        test_snapshot_id(300, 300),
+        None,
+    )
+    .await;
+    let pending = DestinationTableMetadata::new_applied(
+        "public_ordersold".to_owned(),
+        swap.archived_renamed.inner().snapshot_id,
+        swap.archived_renamed.replication_mask().clone(),
+    )
+    .with_schema_change(reclaimed.inner().snapshot_id, reclaimed.replication_mask().clone())
+    .unwrap();
+    swap.store.store_destination_table_metadata(swap.archived.id(), pending).await.unwrap();
+
+    drop_table_for_copy_via_trait(&swap.destination, &reclaimed).await.unwrap();
+    swap.destination.shutdown().await.unwrap();
+
+    assert_eq!(
+        swap.clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() order by name",
+            )
+            .await,
+        vec!["public_orders".to_owned(), "public_orders__current".to_owned()]
+    );
+
+    swap.store.prepare_table_state_for_copy(swap.archived.id()).await.unwrap();
+    swap.store.store_table_schema(reclaimed.inner().clone()).await.unwrap();
+    let destination = swap
+        .clickhouse_db
+        .build_destination_with_engine(swap.store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    let error = destination.write_table_rows(&reclaimed, vec![]).await.unwrap_err();
+    destination.shutdown().await.unwrap();
+
+    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+    assert!(swap.store.get_destination_table_metadata(swap.archived.id()).await.unwrap().is_none());
+}
+
+/// After source tables swap names by rename, resetting one drops only its own
+/// table and view, and its fresh copy claims its current name without touching
+/// the table that previously held that name.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_swap_reset_recopies_only_its_own_table() {
     let swap = replicate_and_swap_orders_by_rename().await;
 
-    // WHEN: the replacement table, now named `orders`, is reset for a fresh
-    // copy.
     drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
 
-    // THEN: only the replacement's own table and view are gone; the archived
-    // table under `public_ordersold` keeps its rows.
     assert_eq!(
         swap.clickhouse_db
             .query::<String>(
@@ -3292,22 +3322,8 @@ async fn drop_table_for_copy_after_rename_drops_recorded_table() {
             .await,
         vec!["public_ordersold".to_owned(), "public_ordersold__current".to_owned()]
     );
-    assert_eq!(
-        swap.clickhouse_db
-            .query::<(i64, Option<String>)>("select id, status from public_ordersold")
-            .await,
-        vec![(1, Some("kept".to_owned()))]
-    );
-}
 
-/// Resetting a renamed table permits a fresh copy under its current name
-/// without touching the table that previously owned that name.
-#[tokio::test(flavor = "multi_thread")]
-async fn copy_after_rename_reset_recreates_freed_destination() {
-    // GIVEN: after the swap, the replacement was reset the way table sync
-    // does it: drop its table, clear its ETL state, store the copy schema.
-    let swap = replicate_and_swap_orders_by_rename().await;
-    drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
+    // Table sync clears copy state and stores the copy schema after a reset.
     swap.store.prepare_table_state_for_copy(swap.replacement_id).await.unwrap();
     let replacement_copy = store_status_default_schema(
         &swap.store,
@@ -3317,8 +3333,6 @@ async fn copy_after_rename_reset_recreates_freed_destination() {
         None,
     )
     .await;
-
-    // WHEN: the fresh copy writes under the current name `orders`.
     swap.destination
         .write_table_rows(
             &replacement_copy,
@@ -3326,8 +3340,8 @@ async fn copy_after_rename_reset_recreates_freed_destination() {
         )
         .await
         .unwrap();
+    swap.destination.shutdown().await.unwrap();
 
-    // THEN: the copy owns its current name and the archived rows are untouched.
     assert_eq!(
         swap.store
             .get_destination_table_metadata(swap.replacement_id)
@@ -3337,12 +3351,14 @@ async fn copy_after_rename_reset_recreates_freed_destination() {
             .table_id(),
         "public_orders"
     );
-    assert_eq!(
-        swap.clickhouse_db
-            .query::<(i64, Option<String>)>("select id, status from public_ordersold")
-            .await,
-        vec![(1, Some("kept".to_owned()))]
-    );
+    for (table, status) in [("public_orders", "recopied"), ("public_ordersold", "kept")] {
+        assert_eq!(
+            swap.clickhouse_db
+                .query::<(i64, Option<String>)>(&format!("select id, status from {table}"))
+                .await,
+            vec![(1, Some(status.to_owned()))]
+        );
+    }
 }
 
 /// Shutdown aborts an admitted write and the pending result reports the

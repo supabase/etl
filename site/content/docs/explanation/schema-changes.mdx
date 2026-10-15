@@ -371,11 +371,18 @@ snapshot. Both names refer to the same stable source table OID.
 
 These transitions are not atomic with ETL's metadata store. An interrupted
 rename stays `Applying` and blocks ordinary writes. Restart the affected table
-for a fresh copy. Reset drops the destination target recorded in metadata; a
-partially renamed table or view can remain under another name. Fresh creation
-rejects an occupied target, so remove known leftover objects before retrying.
-Do not reassign affected destination names to another table until recovery
-finishes: reset trusts the recorded names.
+for a fresh copy. Reset drops the destination target recorded in metadata, or
+the renamed target when the interrupted rename already moved it. ClickHouse,
+DuckLake, and Snowflake treat a vacant before name with an occupied after name
+as a completed rename. When both names are occupied, they drop the before name
+recorded in metadata. Destination names do not prove ownership, so if another
+source table already reused the before name after the rename completed, reset
+drops that table instead and leaves the renamed table in place. Avoid swapping
+names between replicated tables while a rename is pending. BigQuery drops views
+under either name that still select the recorded physical table. Fresh creation
+rejects any other occupied target; drop that object and retry. Do not reassign
+affected destination names to another table until recovery finishes: reset
+trusts the recorded names.
 
 DuckLake commits its planned DDL and replay-marker relocation together, but its
 replay-epoch metadata and ETL metadata still commit separately. DuckLake captures
@@ -502,8 +509,9 @@ Recovery then follows each destination's DDL guarantees:
   complete old or target endpoint. Restart the table for a fresh copy after
   an interrupted table rename or an ambiguous partially applied DDL sequence.
 - BigQuery and Snowflake leave interrupted nontransactional DDL in `Applying`
-  until the table is restarted for a fresh copy. Reset uses the recorded
-  target; an occupied name during fresh creation requires leftover-object cleanup.
+  until the table is restarted for a fresh copy. Reset removes the recorded or
+  already renamed target; an occupied name during fresh creation must be
+  dropped before retrying.
 - Iceberg rejects newer logical schemas before changing the destination.
 
 Resynchronize the affected table when recovery cannot prove a safe endpoint.

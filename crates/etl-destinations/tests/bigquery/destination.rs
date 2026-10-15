@@ -1318,8 +1318,9 @@ async fn pending_metadata_requires_explicit_reset_after_restart() {
             );
             assert!(database.get_table_metadata_by_id(pending.table_id()).await.is_none());
             if pending.table_id() != applied.table_id() {
-                // Reset does not discover the table replaced by truncate.
-                assert!(database.get_table_metadata_by_id(applied.table_id()).await.is_some());
+                // The recorded view still selected the table replaced by
+                // truncate, so reset deletes it instead of orphaning its rows.
+                assert!(database.get_table_metadata_by_id(applied.table_id()).await.is_none());
             }
         }
         store.prepare_table_state_for_copy(schema.id()).await.unwrap();

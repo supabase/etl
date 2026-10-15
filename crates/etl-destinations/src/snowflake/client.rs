@@ -401,9 +401,10 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.channels.read().await.contains_key(&table_id)
     }
 
-    /// Checks whether a table exists in the configured Snowflake namespace.
-    pub(super) async fn table_exists(&self, table_name: &str) -> Result<bool> {
-        self.sql_client.table_exists(table_name).await
+    /// Checks whether a table or view occupies `name` in the configured
+    /// Snowflake namespace.
+    pub(super) async fn object_exists(&self, name: &str) -> Result<bool> {
+        self.sql_client.object_exists(name).await
     }
 
     /// Locks one table's setup/reset lifecycle without retaining the registry.

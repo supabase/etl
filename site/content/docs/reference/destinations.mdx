@@ -116,7 +116,9 @@ must remain available; older physical tables are no longer needed.
 Cleanup is optimistic: after truncate switches the view and persists the new
 target, ETL attempts background deletion of the previously recorded physical
 table. Explicit drop/reset also attempts deletion of its recorded physical
-target after removing the view. Physical deletion failures are logged and can
+target after removing the view. When the recorded view still selects a
+different ETL physical table, for example after an interrupted truncate, reset
+deletes that table too. Physical deletion failures are logged and can
 leave unused tables behind without blocking replication. There is no cleanup
 queue or periodic collector.
 Unrecorded orphans and failed deletions require manual cleanup after checking
@@ -186,7 +188,8 @@ separate from these query retries.
 
 Recovery currently rebuilds the affected table through the existing table-copy
 lifecycle. Restarting alone does not complete `Creating` or `Applying`, and ETL
-does not inspect view SQL or infer which DDL statements completed.
+does not infer which DDL statements completed. Reset reads ETL-created view
+definitions only to find the objects it owns.
 
 1. Stop the pipeline. If a BigQuery request timed out, use its reported job ID
    and location to wait for completion or confirm cancellation before reset.
@@ -195,9 +198,10 @@ does not inspect view SQL or infer which DDL statements completed.
    the physical table and logical view that reset must remove. Ensure that the
    recorded logical name has not been reassigned to another source; explicit
    reset trusts the recorded names. Do not reuse affected names while an
-   interrupted rename is being recovered. Partial renames can leave views
-   under another name; remove known leftover views if fresh creation reports
-   that its target already exists.
+   interrupted rename is being recovered. After a partial rename, reset drops
+   views under either name that still select the recorded physical table. If
+   fresh creation still reports that its target already exists, drop that
+   object and retry.
 3. Through the application's state-store integration, reset the affected table
    to `TableState::Init` using `StateStore::update_table_state`. Leave its
    destination metadata and schema snapshots intact. Enable initial copying
@@ -439,7 +443,8 @@ same PostgreSQL schema. It drains pending writes, retires the old streaming
 channel before freeing its table name, renames the table, applies
 column changes, and reopens ingestion at the previous committed offset. The
 new snapshot is marked applied only after these steps succeed. Renames fail
-when the mapped target name is occupied. Moving the source table to another
+before any change when a table or view occupies the mapped target name. Moving
+the source table to another
 schema is unsupported.
 
 The destination role needs `OWNERSHIP` on the table and `CREATE TABLE` on its

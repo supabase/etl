@@ -92,6 +92,45 @@ pub(super) fn quote_table_path(
     Ok(format!("`{project_id}.{dataset_id}.{table_id}`"))
 }
 
+/// Renders the query of an ETL logical view over one physical table.
+pub(super) fn view_query(
+    project_id: &BigQueryProjectId,
+    dataset_id: &BigQueryDatasetId,
+    table_id: &BigQueryTableId,
+) -> EtlResult<String> {
+    Ok(format!("select * from {}", quote_table_path(project_id, dataset_id, table_id)?))
+}
+
+/// Parses the physical table ID from a query rendered by [`view_query`].
+///
+/// Returns `None` for any other query, including one selecting from another
+/// project or dataset.
+pub(super) fn parse_view_query_table_id(
+    query: &str,
+    project_id: &BigQueryProjectId,
+    dataset_id: &BigQueryDatasetId,
+) -> Option<BigQueryTableId> {
+    let project_id = escape_identifier(project_id, "BigQuery project id").ok()?;
+    let dataset_id = escape_identifier(dataset_id, "BigQuery dataset id").ok()?;
+    let escaped_table_id = query
+        .trim()
+        .strip_prefix(&format!("select * from `{project_id}.{dataset_id}."))?
+        .strip_suffix('`')?;
+
+    let mut table_id = String::with_capacity(escaped_table_id.len());
+    let mut chars = escaped_table_id.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => table_id.push(chars.next()?),
+            // An unescaped backtick ends the quoted path early.
+            '`' => return None,
+            _ => table_id.push(ch),
+        }
+    }
+
+    (!table_id.is_empty()).then_some(table_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +170,35 @@ mod tests {
             .expect("quoted path"),
             r#"`project.data\`set.table\\name`"#
         );
+    }
+
+    #[test]
+    fn parse_view_query_table_id_round_trips_rendered_queries() {
+        let project_id = "project".to_owned();
+        let dataset_id = "data`set".to_owned();
+        for table_id in ["public_orders_1", "pwn`name\\suffix"] {
+            let query = view_query(&project_id, &dataset_id, &table_id.to_owned()).unwrap();
+            assert_eq!(
+                parse_view_query_table_id(&query, &project_id, &dataset_id).as_deref(),
+                Some(table_id)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_view_query_table_id_rejects_foreign_queries() {
+        let project_id = "project".to_owned();
+        let dataset_id = "dataset".to_owned();
+        for query in [
+            "",
+            "select * from `project.dataset.`",
+            "select * from `project.other.table`",
+            "select id from `project.dataset.table`",
+            "select * from `project.dataset.ta`ble`",
+            "select * from `project.dataset.table\\",
+            "select * from `project.dataset.table` where true",
+        ] {
+            assert_eq!(parse_view_query_table_id(query, &project_id, &dataset_id), None);
+        }
     }
 }
