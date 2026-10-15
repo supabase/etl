@@ -606,10 +606,10 @@ async fn materialization_query_composite_keys_and_native_values() {
     with_table_cleanup(&sql, &[&table], || async {
         sql.create_table_if_not_exists(
             &table,
-            "\"id\" varchar collate 'en-ci', \"shard\" integer, \"c0\"\"'\" varchar, \"array\" \
-             array, \"json\" variant, \"date\" date, \"time\" timestamp_tz, \"_cdc_operation\" \
-             varchar not null, \"_cdc_sequence_number\" varchar collate 'en-ci' not null, \
-             \"_cdc_missing_columns\" array",
+            "\"id\" varchar collate 'en-ci', \"shard\" integer, \"c0\"\"'\" varchar collate \
+             'en-ci', \"array\" array, \"json\" variant, \"date\" date, \"time\" timestamp_tz, \
+             \"_cdc_operation\" varchar not null, \"_cdc_sequence_number\" varchar collate \
+             'en-ci' not null, \"_cdc_missing_columns\" array",
         )
         .await
         .unwrap();
@@ -627,8 +627,8 @@ async fn materialization_query_composite_keys_and_native_values() {
              'insert', '01', array_construct() union all select 'A', 2, '3', array_construct(), \
              null, null, null, 'insert', '01', array_construct() union all select 'A', 1, \
              '12345678901234567890.123456789', array_construct(1, null, 3), \
-             parse_json('{{\"x\":1}}'), '2026-01-01'::date, '2026-01-01 00:00:00 \
-             +00:00'::timestamp_tz, 'update', '02', null union all select 'A', 1, null, null, \
+             parse_json('{{\"x\":1}}'), '2026-01-01'::date, '2026-01-01 00:00:00.123456789 \
+             +05:30'::timestamp_tz, 'update', '02', null union all select 'A', 1, null, null, \
              null, null, null, 'update', '03', array_construct(3, 4, 5, 6, 7) union all select \
              'A', 2, null, null, null, null, null, 'delete', '02', array_construct() union all \
              select 'A', 2, null, null, null, null, null, 'update', '03', array_construct(3, 4, \
@@ -642,9 +642,10 @@ async fn materialization_query_composite_keys_and_native_values() {
             &sql,
             &format!(
                 "select \"id\", \"shard\", \"c0\"\"'\", typeof(\"array\"), typeof(\"json\"), \
-                 \"date\"::varchar, \"time\"::varchar, \"_cdc_anchored\", \
-                 array_size(\"_cdc_unresolved_columns\") from ({query}) order by collate(\"id\", \
-                 'utf8'), \"shard\""
+                 \"date\"::varchar, to_varchar(\"time\", 'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM'), \
+                 \"_cdc_anchored\", \"_cdc_unresolved_columns\", \"_cdc_last_sequence\", \
+                 collation(\"id\"), collation(\"c0\"\"'\"), collation(\"_cdc_last_sequence\") \
+                 from ({query}) order by collate(\"id\", 'utf8'), \"shard\""
             ),
         )
         .await
@@ -665,12 +666,50 @@ async fn materialization_query_composite_keys_and_native_values() {
         assert_eq!(rows[2][0], "a");
         assert_eq!(rows[2][4], "NULL_VALUE");
         assert!(rows[1][2..7].iter().all(Value::is_null));
-        for (row, (anchored, unresolved)) in
-            rows.iter().zip([("true", "0"), ("false", "5"), ("true", "0")])
-        {
+        assert_eq!(rows[0][6], "2026-01-01 00:00:00.123456789 +05:30");
+        for (row, (anchored, unresolved)) in rows.iter().zip([
+            ("true", json!([])),
+            ("false", json!(["c0\"'", "array", "json", "date", "time"])),
+            ("true", json!([])),
+        ]) {
             assert_eq!(row[7], anchored);
-            assert_eq!(row[8], unresolved);
+            assert_eq!(parse_json_cell(&row[8]), unresolved);
+            assert_eq!(&row[10..], &[json!("en-ci"), json!("en-ci"), json!("utf8")]);
         }
+        assert_eq!(
+            rows.iter().map(|row| row[9].as_str().unwrap()).collect::<Vec<_>>(),
+            ["03", "03", "01"]
+        );
+
+        // A supplied SQL NULL must replace older values, while a newer omitted
+        // value must not replace it. JSON null remains distinct from SQL NULL.
+        sql.execute_ddl(&format!(
+            "insert into {fqn} select 'A', 1, null, null, parse_json('null'), null, null, \
+             'update', '04', array_construct(6, 7) union all select 'A', 1, null, null, null, \
+             null, null, 'update', '05', array_construct(3, 4, 5, 6, 7)"
+        ))
+        .await
+        .unwrap();
+        let current = query_rows(
+            &sql,
+            &format!(
+                "select \"c0\"\"'\", \"array\", is_null_value(\"json\"), \"_cdc_anchored\", \
+                 \"_cdc_unresolved_columns\", \"_cdc_last_sequence\" from ({query}) where \
+                 collate(\"id\", 'utf8') = 'A' and \"shard\" = 1"
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(&current[0][..4], &[Value::Null, Value::Null, json!("true"), json!("true")]);
+        assert_eq!(parse_json_cell(&current[0][4]), json!([]));
+        assert_eq!(current[0][5], "05");
+
+        // Identical replayed events may tie on sequence without changing state.
+        let ordered = format!("{query} order by collate(\"id\", 'utf8'), \"shard\"");
+        let expected = query_rows(&sql, &ordered).await.unwrap();
+        sql.execute_ddl(&format!("insert into {fqn} select * from {fqn}")).await.unwrap();
+        assert_eq!(query_rows(&sql, &ordered).await.unwrap(), expected);
         // The empty unresolved expression is valid for a key-only projection
         // too.
         let mut key_only = schema.inner().clone();

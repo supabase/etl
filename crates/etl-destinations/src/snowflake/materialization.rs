@@ -73,7 +73,8 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
         .collect::<Vec<_>>()
         .join(", ");
     let mut projection = Vec::with_capacity(columns.len() + 3);
-    let mut resolved = Vec::with_capacity(columns.len() * 2);
+    let mut group_keys = vec![keys.clone()];
+    let mut resolved = vec![keys.clone()];
     let mut output = Vec::with_capacity(columns.len() + 3);
     let mut unresolved = Vec::new();
     for (i, column) in columns.iter().enumerate() {
@@ -85,18 +86,19 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
         };
         projection.push(format!("{value} as c{i}"));
         if column.primary_key() {
-            // Partitioning must use UTF-8 equality without changing the output
-            // collation.
+            // Keep UTF-8 key equality without changing the output collation.
             projection.push(format!("{name} as o{i}"));
+            group_keys.push(format!("o{i}"));
+            resolved.push(format!("o{i}"));
             output.push(format!("o{i} as {name}"));
         } else {
             let supplied =
                 format!("iff(array_contains({}::variant, missing), 0, 1)", column.ordinal_position);
-            resolved.push(format!(
-                "first_value(c{i}) respect nulls over (partition by {keys} order by {supplied} \
-                 desc, seq desc rows between unbounded preceding and unbounded following) as r{i}"
-            ));
-            resolved.push(format!("max({supplied}) over (partition by {keys}) as k{i}"));
+            // NULL ordering keys exclude omitted values, while a supplied SQL
+            // NULL can still win. Aggregation avoids a distinct window ordering
+            // per column, which makes wide queries expensive to compile.
+            resolved.push(format!("max_by(c{i}, iff({supplied} = 1, seq, null)) as r{i}"));
+            resolved.push(format!("max({supplied}) as k{i}"));
             output.push(format!("r{i} as {name}"));
             unresolved.push(format!("iff(k{i} = 0, {}, null)", quote_string_literal(&column.name)));
         }
@@ -107,9 +109,12 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
         "ifnull({}, array_construct()) as missing",
         quote_identifier(CDC_MISSING_COLUMNS_COLUMN)
     ));
+    // Groups are nonempty and the physical sequence is NOT NULL. The fallback
+    // is unreachable; it preserves the result's non-nullability metadata.
+    resolved.push("coalesce(max(seq), collate('', 'utf8')) as seq".to_owned());
     resolved.push(
-        "latest_insert is not null and (latest_delete is null or latest_insert > latest_delete) \
-         as anchored"
+        "max(latest_insert) is not null and (max(latest_delete) is null or max(latest_insert) > \
+         max(latest_delete)) as anchored"
             .to_owned(),
     );
     output.push("anchored as \"_cdc_anchored\"".to_owned());
@@ -141,13 +146,101 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
     and (latest_insert is null or seq >= latest_insert)
     and (latest_complete is null or seq >= latest_complete)
 ), resolved as (
-  select *, {resolved}
+  select {resolved}
   from eligible
-  qualify row_number() over (partition by {keys} order by seq desc) = 1
+  group by {group_keys}
 )
 select {output} from resolved"#,
         projection = projection.join(", "),
         resolved = resolved.join(",\n    "),
+        group_keys = group_keys.join(", "),
         output = output.join(", ")
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use etl::schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type};
+
+    use crate::snowflake::{
+        AuthManager, Config, SqlClient,
+        materialization::{query, view_query},
+    };
+
+    /// Builds a schema for generated-query regression tests.
+    fn schema(columns: Vec<ColumnSchema>) -> ReplicatedTableSchema {
+        ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".into(), "test".into()),
+            columns,
+        )))
+    }
+
+    /// Wide schemas must not reintroduce per-column window planning costs.
+    #[test]
+    fn window_count_does_not_grow_with_column_count() {
+        let counts = [0, 1, 128].map(|width| {
+            let mut columns =
+                vec![ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1)];
+            columns.extend(
+                (0..width)
+                    .map(|i| ColumnSchema::new(format!("value{i}"), Type::TEXT, -1, i + 2, true)),
+            );
+            let query = view_query("test", &schema(columns)).unwrap();
+
+            query.matches("over (").count()
+        });
+
+        assert_eq!(counts, [counts[0]; 3]);
+    }
+
+    /// Aggregation must preserve source collations and non-null sequence
+    /// metadata.
+    #[tokio::test]
+    #[ignore = "requires Snowflake test credentials"]
+    async fn materialization_preserves_result_metadata() {
+        let auth = Arc::new(AuthManager::new(Config::require_tests_env().unwrap()).unwrap());
+        let sql =
+            SqlClient::new(auth.config().clone_without_credentials(), auth, reqwest::Client::new());
+        let schema = schema(vec![
+            ColumnSchema::new("id".into(), Type::TEXT, -1, 1, false).with_primary_key(1),
+            ColumnSchema::new("payload".into(), Type::TEXT, -1, 2, true),
+        ]);
+        let input = "(select 'A'::varchar collate 'en-ci' as \"id\", null::varchar collate \
+                     'en-ci' as \"payload\", 'insert' as \"_cdc_operation\", '01'::varchar as \
+                     \"_cdc_sequence_number\", array_construct() as \"_cdc_missing_columns\")";
+        let reference = format!(
+            "select \"id\", \"payload\", collate(\"_cdc_sequence_number\", 'utf8') as \
+             \"_cdc_last_sequence\" from {input}"
+        );
+        let mut metadata = Vec::new();
+        for statement in [reference, query(input, &schema).unwrap()] {
+            let response = sql.execute_statement(&statement).await.unwrap();
+            assert_eq!(
+                response
+                    .column_nullability()
+                    .into_iter()
+                    .filter(|(name, _)| matches!(*name, "id" | "payload" | "_cdc_last_sequence"))
+                    .collect::<Vec<_>>(),
+                [("id", Some(false)), ("payload", Some(true)), ("_cdc_last_sequence", Some(false))]
+            );
+            let handle = response.statement_handle.unwrap();
+            let response =
+                sql.execute_statement(&format!("describe result '{handle}'")).await.unwrap();
+            let columns = response
+                .data
+                .unwrap()
+                .into_iter()
+                .filter(|row| {
+                    matches!(row[0].as_str(), Some("id" | "payload" | "_cdc_last_sequence"))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(columns.len(), 3);
+            metadata.push(columns);
+        }
+
+        assert_eq!(metadata[0], metadata[1]);
+    }
 }

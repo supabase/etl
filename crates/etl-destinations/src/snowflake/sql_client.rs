@@ -69,6 +69,20 @@ pub(crate) struct StatementResponse {
     result_set_meta_data: Option<ResultSetMetadata>,
 }
 
+#[cfg(test)]
+impl StatementResponse {
+    /// Returns column nullability for live query contract tests.
+    pub(crate) fn column_nullability(&self) -> Vec<(&str, Option<bool>)> {
+        self.result_set_meta_data
+            .as_ref()
+            .unwrap()
+            .row_type
+            .iter()
+            .map(|column| (column.name.as_str(), column.nullable))
+            .collect()
+    }
+}
+
 /// Column metadata returned with a Snowflake SQL result set.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,6 +100,10 @@ struct ResultSetMetadata {
 struct ResultColumnMetadata {
     /// Column name supplied by Snowflake.
     name: String,
+    /// Query result nullability, retained only for provider contract tests.
+    #[cfg(test)]
+    #[serde(default)]
+    nullable: Option<bool>,
 }
 
 impl<T: TokenProvider> SqlClient<T> {
@@ -732,7 +750,7 @@ mod tests {
                 num_rows: Some(row_count),
                 row_type: column_names
                     .iter()
-                    .map(|name| ResultColumnMetadata { name: (*name).to_owned() })
+                    .map(|name| ResultColumnMetadata { name: (*name).to_owned(), nullable: None })
                     .collect(),
             }),
         }
