@@ -169,11 +169,11 @@ pub fn random_dataset_id() -> String {
     format!("etl_tests_{uuid}")
 }
 
-/// Returns the destination identifier used by BigQuery for a source table.
+/// Returns the logical BigQuery view ID for a source table.
 ///
 /// Uses the shared destination naming logic so live assertions address the
 /// same logical views as production writes.
-pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> EtlResult<BigQueryTableId> {
+pub fn table_name_to_bigquery_view_id(table_name: &TableName) -> EtlResult<BigQueryTableId> {
     try_stringify_table_name(table_name)
 }
 
@@ -269,10 +269,10 @@ impl BigQueryDatabase {
     /// to assert that a table is empty; this method treats absence as
     /// not-yet-visible.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
-        let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
+        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
+        let view_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, view_id);
 
-        let query = format!("select * from {full_table_path}");
+        let query = format!("select * from {view_path}");
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
@@ -295,7 +295,7 @@ impl BigQueryDatabase {
             if attempts_remaining.is_multiple_of(10) {
                 let reason = if not_found { "table not found" } else { "no rows" };
                 eprintln!(
-                    "bigquery table query for {full_table_path}: {reason}, retrying \
+                    "bigquery table query for {view_path}: {reason}, retrying \
                      ({attempts_remaining} attempts left)"
                 );
             }
@@ -314,10 +314,10 @@ impl BigQueryDatabase {
     /// applied. Use this to assert that deletes emptied a table;
     /// [`BigQueryDatabase::query_table`] waits for data instead.
     pub async fn wait_for_no_rows(&self, table_name: TableName) -> bool {
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
-        let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
+        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
+        let view_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, view_id);
 
-        let query = format!("select * from {full_table_path}");
+        let query = format!("select * from {view_path}");
         let mut attempts_remaining = BIGQUERY_NO_ROWS_MAX_ATTEMPTS;
 
         loop {
@@ -352,17 +352,17 @@ impl BigQueryDatabase {
     /// Queries the schema (column metadata) for a table.
     ///
     /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    /// Matches both legacy numeric versions and random physical versions.
+    /// Matches physical tables with either legacy numeric or random suffixes.
     pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
 
-        // Include numeric versions retained by upgraded destinations.
+        // Include numeric suffixes retained by upgraded destinations.
         let query = format!(
             "select column_name, data_type, ordinal_position from \
              `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where \
-             regexp_contains(table_name, r'^{table_id}_([0-9]{{1,20}}|[0-9a-z]{{25}})$') order by \
+             regexp_contains(table_name, r'^{view_id}_([0-9]{{1,20}}|[0-9a-z]{{25}})$') order by \
              ordinal_position"
         );
 
@@ -392,9 +392,9 @@ impl BigQueryDatabase {
 
     /// Gets the logical view schema from the BigQuery table metadata API.
     pub async fn get_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
 
-        self.get_table_schema_by_id(&table_id).await
+        self.get_table_schema_by_id(&view_id).await
     }
 
     /// Gets a table or view schema from the BigQuery table metadata API.

@@ -362,7 +362,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     )
     .await
     .unwrap();
-    // Join version cleanup before checking or resetting the physical tables.
+    // Join table cleanup before checking or resetting the physical tables.
     restarted.shutdown().await.unwrap();
     let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
     assert_ne!(metadata.table_id(), original_metadata[0].table_id());
@@ -666,7 +666,7 @@ async fn table_options_are_applied_only_when_the_physical_table_is_created() {
     .await
     .unwrap();
 
-    let physical_table_id = store
+    let table_id = store
         .get_destination_table_metadata(table_schema.id)
         .await
         .unwrap()
@@ -674,7 +674,7 @@ async fn table_options_are_applied_only_when_the_physical_table_is_created() {
         .table_id()
         .to_owned();
     let metadata = bigquery_database
-        .get_table_metadata_by_id(&physical_table_id)
+        .get_table_metadata_by_id(&table_id)
         .await
         .expect("physical BigQuery table should exist");
     let range_partitioning = metadata.range_partitioning.expect("range partitioning should exist");
@@ -715,7 +715,7 @@ async fn table_options_are_applied_only_when_the_physical_table_is_created() {
     .unwrap();
 
     let metadata = bigquery_database
-        .get_table_metadata_by_id(&physical_table_id)
+        .get_table_metadata_by_id(&table_id)
         .await
         .expect("physical BigQuery table should still exist");
     let range_partitioning = metadata.range_partitioning.expect("range partitioning should remain");
@@ -792,7 +792,7 @@ async fn table_options_support_all_partitioning_and_clustering_combinations() {
     }
 
     for (index, table_schema) in schemas.iter().enumerate() {
-        let physical_table_id = store
+        let table_id = store
             .get_destination_table_metadata(table_schema.id)
             .await
             .unwrap()
@@ -800,7 +800,7 @@ async fn table_options_support_all_partitioning_and_clustering_combinations() {
             .table_id()
             .to_owned();
         let metadata = bigquery_database
-            .get_table_metadata_by_id(&physical_table_id)
+            .get_table_metadata_by_id(&table_id)
             .await
             .expect("physical BigQuery table should exist");
 
@@ -974,7 +974,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
 
     let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
 
-    let mut physical_ids = HashSet::new();
+    let mut table_ids = HashSet::new();
     for iteration in 1..=3 {
         let users_rows = vec![
             TableRow::new(vec![
@@ -992,7 +992,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
         write_table_rows(&destination, &replicated_table_schema, users_rows).await.unwrap();
         let metadata =
             store.get_destination_table_metadata(table_schema.id).await.unwrap().unwrap();
-        assert!(physical_ids.insert(metadata.table_id().to_owned()));
+        assert!(table_ids.insert(metadata.table_id().to_owned()));
 
         let mut rows = parse_bigquery_table_rows::<BigQueryUser>(
             bigquery_database.query_table(table_schema.name.clone()).await.unwrap(),
@@ -1052,27 +1052,27 @@ async fn pending_metadata_requires_explicit_reset_after_restart() {
                 .with_schema_change(schema.inner().snapshot_id, schema.replication_mask().clone())
                 .unwrap()
         } else {
-            let physical_id = if delete_before_restart {
+            let table_id = if delete_before_restart {
                 applied.table_id().to_owned()
             } else {
                 // Model truncate interrupted after creation, before view
                 // replacement. The view still points to the
                 // previous physical table.
-                let physical_id = format!(
+                let table_id = format!(
                     "{}_42",
-                    etl_destinations::bigquery::table_name_to_bigquery_table_id(schema.name())
+                    etl_destinations::bigquery::table_name_to_bigquery_view_id(schema.name())
                         .unwrap()
                 );
                 database
                     .create_table(
-                        &physical_id,
+                        &table_id,
                         &[("id", "int64"), ("name", "string"), ("age", "int64")],
                     )
                     .await;
-                physical_id
+                table_id
             };
             etl::destination::DestinationTableMetadata::new_creating(
-                physical_id,
+                table_id,
                 applied.snapshot_id(),
                 applied.replication_mask().clone(),
             )
@@ -1118,7 +1118,7 @@ async fn pending_metadata_requires_explicit_reset_after_restart() {
             );
             assert!(database.get_table_metadata_by_id(pending.table_id()).await.is_none());
             if pending.table_id() != applied.table_id() {
-                // Reset does not discover the obsolete truncate version.
+                // Reset does not discover the table replaced by truncate.
                 assert!(database.get_table_metadata_by_id(applied.table_id()).await.is_some());
             }
         }

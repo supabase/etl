@@ -29,4 +29,4 @@ pub use core::BigQueryDestination;
 
 pub use client::{BigQueryClient, BigQueryDatasetId, BigQueryProjectId, BigQueryTableId};
 #[cfg(feature = "test-utils")]
-pub use test_utils::table_name_to_bigquery_table_id;
+pub use test_utils::table_name_to_bigquery_view_id;

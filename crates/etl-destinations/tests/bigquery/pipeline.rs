@@ -140,7 +140,7 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
     sync_complete.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let physical_table_id = store
+    let table_id = store
         .get_destination_table_metadata(users_schema.id)
         .await
         .unwrap()
@@ -148,7 +148,7 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
         .table_id()
         .to_owned();
     let metadata = bigquery_database
-        .get_table_metadata_by_id(&physical_table_id)
+        .get_table_metadata_by_id(&table_id)
         .await
         .expect("physical BigQuery table should exist");
     assert_eq!(
@@ -191,7 +191,7 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
     pipeline.shutdown_and_wait().await.unwrap();
 
     let metadata = bigquery_database
-        .get_table_metadata_by_id(&physical_table_id)
+        .get_table_metadata_by_id(&table_id)
         .await
         .expect("physical BigQuery table should still exist");
     assert_eq!(

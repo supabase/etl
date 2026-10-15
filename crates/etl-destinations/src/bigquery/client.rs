@@ -92,7 +92,7 @@ pub type BigQueryProjectId = String;
 /// BigQuery dataset identifier.
 pub type BigQueryDatasetId = String;
 
-/// BigQuery table identifier.
+/// BigQuery table or view identifier used by the client APIs.
 pub type BigQueryTableId = String;
 
 /// Renders creation-only partitioning and clustering clauses for a table.
@@ -928,24 +928,22 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Creates or replaces a view that points to the specified versioned table.
+    /// Creates or replaces a view that points to the specified physical table.
     ///
-    /// This is used during truncation operations to redirect the view to a new
-    /// table version.
+    /// Refreshes the view schema after column changes and redirects the view
+    /// to a new physical table after truncation.
     pub async fn create_or_replace_view(
         &self,
         dataset_id: &BigQueryDatasetId,
-        view_name: &BigQueryTableId,
-        target_table_id: &BigQueryTableId,
+        view_id: &BigQueryTableId,
+        table_id: &BigQueryTableId,
     ) -> EtlResult<()> {
-        let full_view_name = self.full_table_name(dataset_id, view_name)?;
-        let full_target_table_name = self.full_table_name(dataset_id, target_table_id)?;
+        let view_path = self.full_table_name(dataset_id, view_id)?;
+        let table_path = self.full_table_name(dataset_id, table_id)?;
 
-        info!(%full_view_name, %full_target_table_name, "creating or replacing bigquery view");
+        info!(%view_path, %table_path, "creating or replacing bigquery view");
 
-        let query = format!(
-            "create or replace view {full_view_name} as select * from {full_target_table_name}"
-        );
+        let query = format!("create or replace view {view_path} as select * from {table_path}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 
@@ -956,13 +954,16 @@ impl BigQueryClient {
     pub(super) async fn create_view(
         &self,
         dataset_id: &BigQueryDatasetId,
-        view_name: &BigQueryTableId,
-        target_table_id: &BigQueryTableId,
+        view_id: &BigQueryTableId,
+        table_id: &BigQueryTableId,
     ) -> EtlResult<()> {
-        let view = self.full_table_name(dataset_id, view_name)?;
-        let target = self.full_table_name(dataset_id, target_table_id)?;
-        self.query(QueryRequest::new(format!("create view {view} as select * from {target}")))
-            .await?;
+        let view_path = self.full_table_name(dataset_id, view_id)?;
+        let table_path = self.full_table_name(dataset_id, table_id)?;
+        self.query(QueryRequest::new(format!(
+            "create view {view_path} as select * from {table_path}"
+        )))
+        .await?;
+
         Ok(())
     }
 
@@ -972,13 +973,13 @@ impl BigQueryClient {
     pub async fn drop_view_if_exists(
         &self,
         dataset_id: &BigQueryDatasetId,
-        view_name: &BigQueryTableId,
+        view_id: &BigQueryTableId,
     ) -> EtlResult<()> {
-        let full_view_name = self.full_table_name(dataset_id, view_name)?;
+        let view_path = self.full_table_name(dataset_id, view_id)?;
 
-        info!(%full_view_name, "dropping view from bigquery");
+        info!(%view_path, "dropping view from bigquery");
 
-        let query = format!("drop view if exists {full_view_name}");
+        let query = format!("drop view if exists {view_path}");
 
         let _ = self.query(QueryRequest::new(query)).await?;
 

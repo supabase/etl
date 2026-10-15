@@ -20,7 +20,7 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 
 /// Selects the Storage Write descriptor semantics for a replication phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum WriteMode {
     /// Initial-copy rows preserve source scalar-column nullability.
     Copy,
