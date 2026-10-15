@@ -2206,6 +2206,12 @@ where
         // transaction.
         let snapshot_id = schema_snapshot_id_from_message(remote_final_lsn, message);
         let table_schema = schema_change_message.into_table_schema(snapshot_id);
+        // TODO: Deliver intermediate DDL snapshots to destinations when their
+        //  historical effects matter. Replacing PendingRelation coalesces all
+        //  changes before the next row: ADD COLUMN DEFAULT 1 followed by SET
+        //  DEFAULT 2 exposes only the final default, although PostgreSQL filled
+        //  existing rows using 1. Replaying just the endpoint diff cannot
+        //  reproduce that backfill.
         let previous_state = self.table_decoding_states.remove(&table_id);
         self.table_decoding_states
             .insert(table_id, TableDecodingState::pending_relation(snapshot_id, previous_state));

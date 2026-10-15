@@ -2938,6 +2938,10 @@ struct RenameSwap {
     store: NotifyingStore,
     destination: ClickHouseDestination<NotifyingStore>,
     replacement_id: TableId,
+    /// The archived table's source schema before the rename.
+    archived: ReplicatedTableSchema,
+    /// The archived table's source schema after the rename.
+    archived_renamed: ReplicatedTableSchema,
     /// The replacement's schema under its new name, `orders`.
     replacement_renamed: ReplicatedTableSchema,
 }
@@ -2945,8 +2949,8 @@ struct RenameSwap {
 /// Replicates `orders` (row `(1, "kept")`) and `ordersnew`, then renames
 /// `orders` to `ordersold` and `ordersnew` to `orders`.
 ///
-/// Afterwards the archived table still writes to `public_orders`, while the
-/// replacement writes to `public_ordersnew` but is named `orders`.
+/// The first relation frees `public_orders` before the second table adopts it;
+/// both metadata records then match their applied source names.
 async fn replicate_and_swap_orders_by_rename() -> RenameSwap {
     init_test_tracing();
     install_crypto_provider();
@@ -2998,15 +3002,93 @@ async fn replicate_and_swap_orders_by_rename() -> RenameSwap {
         None,
     )
     .await;
+    // The second table cannot claim the first table's name until the first
+    // relation barrier has freed it. Rejection preserves Applied metadata.
+    let before_collision = store.get_destination_table_metadata(replacement_id).await.unwrap();
+    let error = destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: replacement_renamed.clone(),
+        })])
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+    assert_eq!(
+        store.get_destination_table_metadata(replacement_id).await.unwrap(),
+        before_collision
+    );
+
     destination
         .write_events(vec![
-            Event::Relation(RelationEvent { replicated_table_schema: archived_renamed }),
+            Event::Relation(RelationEvent { replicated_table_schema: archived_renamed.clone() }),
             Event::Relation(RelationEvent { replicated_table_schema: replacement_renamed.clone() }),
         ])
         .await
         .unwrap();
 
-    RenameSwap { clickhouse_db, store, destination, replacement_id, replacement_renamed }
+    RenameSwap {
+        clickhouse_db,
+        store,
+        destination,
+        replacement_id,
+        archived,
+        archived_renamed,
+        replacement_renamed,
+    }
+}
+
+/// An uncertain rename commit cannot authorize recovery or reset to modify
+/// another table that has since adopted the previous name.
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_table_rename_preserves_reused_previous_name() {
+    let swap = replicate_and_swap_orders_by_rename().await;
+    let pending = DestinationTableMetadata::new_applied(
+        "public_orders".to_owned(),
+        swap.archived.inner().snapshot_id,
+        swap.archived.replication_mask().clone(),
+    )
+    .with_schema_change(
+        swap.archived_renamed.inner().snapshot_id,
+        swap.archived_renamed.replication_mask().clone(),
+    )
+    .unwrap();
+    swap.store.store_destination_table_metadata(swap.archived.id(), pending.clone()).await.unwrap();
+
+    let error = swap
+        .destination
+        .write_events(vec![Event::Relation(RelationEvent {
+            replicated_table_schema: swap.archived_renamed.clone(),
+        })])
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidState);
+    let error =
+        drop_table_for_copy_via_trait(&swap.destination, &swap.archived_renamed).await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::InvalidState);
+    swap.destination.shutdown().await.unwrap();
+
+    assert_eq!(
+        swap.store.get_destination_table_metadata(swap.archived.id()).await.unwrap(),
+        Some(pending)
+    );
+    assert_eq!(
+        swap.clickhouse_db
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() order by name"
+            )
+            .await,
+        [
+            "public_orders",
+            "public_orders__current",
+            "public_ordersold",
+            "public_ordersold__current"
+        ]
+    );
+    assert_eq!(
+        swap.clickhouse_db
+            .query::<(i64, Option<String>)>("select id, status from public_ordersold")
+            .await,
+        [(1, Some("kept".to_owned()))]
+    );
 }
 
 /// A reset after source tables swap names by rename drops the destination
@@ -3021,27 +3103,27 @@ async fn drop_table_for_copy_after_rename_drops_recorded_table() {
     drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
 
     // THEN: only the replacement's own table and view are gone; the archived
-    // table, which still writes to `public_orders`, keeps its rows.
+    // table under `public_ordersold` keeps its rows.
     assert_eq!(
         swap.clickhouse_db
             .query::<String>(
                 "select name from system.tables where database = currentDatabase() order by name",
             )
             .await,
-        vec!["public_orders".to_owned(), "public_orders__current".to_owned()]
+        vec!["public_ordersold".to_owned(), "public_ordersold__current".to_owned()]
     );
     assert_eq!(
         swap.clickhouse_db
-            .query::<(i64, Option<String>)>("select id, status from public_orders")
+            .query::<(i64, Option<String>)>("select id, status from public_ordersold")
             .await,
         vec![(1, Some("kept".to_owned()))]
     );
 }
 
-/// The copy after a rename-swap reset refuses the table matching the new
-/// source name, because it belongs to another source table.
+/// Resetting a renamed table permits a fresh copy under its current name
+/// without touching the table that previously owned that name.
 #[tokio::test(flavor = "multi_thread")]
-async fn copy_after_rename_reset_rejects_other_tables_destination() {
+async fn copy_after_rename_reset_recreates_freed_destination() {
     // GIVEN: after the swap, the replacement was reset the way table sync
     // does it: drop its table, clear its ETL state, store the copy schema.
     let swap = replicate_and_swap_orders_by_rename().await;
@@ -3057,24 +3139,27 @@ async fn copy_after_rename_reset_rejects_other_tables_destination() {
     .await;
 
     // WHEN: the fresh copy writes under the current name `orders`.
-    let error = swap
-        .destination
+    swap.destination
         .write_table_rows(
             &replacement_copy,
             vec![TableRow::new(vec![Cell::I64(1), Cell::String("recopied".to_owned())])],
         )
         .await
-        .unwrap_err();
+        .unwrap();
 
-    // THEN: the copy fails without claiming the table, and the archived
-    // table's rows are untouched.
-    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
-    assert!(
-        swap.store.get_destination_table_metadata(swap.replacement_id).await.unwrap().is_none()
+    // THEN: the copy owns its current name and the archived rows are untouched.
+    assert_eq!(
+        swap.store
+            .get_destination_table_metadata(swap.replacement_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .table_id(),
+        "public_orders"
     );
     assert_eq!(
         swap.clickhouse_db
-            .query::<(i64, Option<String>)>("select id, status from public_orders")
+            .query::<(i64, Option<String>)>("select id, status from public_ordersold")
             .await,
         vec![(1, Some("kept".to_owned()))]
     );

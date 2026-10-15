@@ -2228,7 +2228,11 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     pipeline.start().await.unwrap();
 
-    table_sync_complete_notify.notified().await;
+    let mut completion = Box::pin(pipeline.wait());
+    tokio::select! {
+        () = table_sync_complete_notify.notified() => {}
+        result = &mut completion => panic!("pipeline stopped before table synchronization: {result:?}"),
+    }
 
     let initial_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(initial_state.is_applied());
@@ -2244,7 +2248,10 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
         .await
         .unwrap();
 
-    events_notify.notified().await;
+    tokio::select! {
+        () = events_notify.notified() => {}
+        result = &mut completion => panic!("pipeline stopped before the initial row: {result:?}"),
+    }
 
     // PostgreSQL requires each column rename to be a separate statement. With
     // no intervening DML, pgoutput emits no intermediate Relation, so the
@@ -2299,6 +2306,12 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
         .await
         .unwrap();
 
+    database
+        .run_sql(&format!("alter table {} rename to renamed", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    let table_name = etl::schema::TableName::new(table_name.schema.clone(), "renamed".to_owned());
+
     // Insert row with new schema.
     database
         .insert_values(
@@ -2309,16 +2322,24 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
         .await
         .unwrap();
 
-    events_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
+    {
+        tokio::select! {
+            () = events_notify.notified() => {}
+            result = &mut completion => panic!("pipeline stopped before the post-rename row: {result:?}"),
+        }
+        pipeline.shutdown();
+        completion.await.unwrap();
+    }
+    drop(pipeline);
 
     let final_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(final_state.is_applied());
+    assert_eq!(final_state.table_id(), initial_state.table_id());
     // Applying the relation must advance the durable destination schema.
     assert!(final_state.snapshot_id() > initial_snapshot_id);
 
-    let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    let table_schema =
+        bigquery_database.get_table_schema_by_id(final_state.table_id()).await.unwrap();
     // A successful plan must consume every planner-generated temporary column.
     assert!(
         table_schema

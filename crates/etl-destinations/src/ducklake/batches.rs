@@ -92,6 +92,59 @@ const HELPER_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
 /// Replay epoch column shared by ETL helper tables.
 const REPLAY_EPOCH_COLUMN: &str = "replay_epoch";
 
+/// ETL-managed per-table streaming replay progress for steady-state CDC
+/// retries.
+const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
+
+/// Maximum number of times a failed write attempt is retried before giving up.
+const MAX_COMMIT_RETRIES: u32 = 10;
+/// Initial backoff duration before the first retry.
+const INITIAL_RETRY_DELAY_MS: u64 = 50;
+/// Upper bound on backoff duration.
+const MAX_RETRY_DELAY_MS: u64 = 2_000;
+/// Minimum retry delay for transient delete-file visibility failures.
+const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
+
+/// Moves replay proof with a table inside the same DuckLake DDL transaction.
+///
+/// Only the active epoch follows the table. Stale markers under the vacant
+/// target name cannot establish progress for its new owner.
+pub(super) fn rename_table_replay_state(
+    conn: &duckdb::Connection,
+    before_table_name: &DuckLakeTableName,
+    after_table_name: &DuckLakeTableName,
+    replay_epoch: &str,
+) -> EtlResult<()> {
+    for table in [APPLIED_BATCHES_TABLE, STREAMING_PROGRESS_TABLE] {
+        let table = format!("{LAKE_CATALOG}.{}", quote_identifier(table));
+        let epoch_filter =
+            format!("coalesce(replay_epoch, {}) = ?", quote_literal(LEGACY_REPLAY_EPOCH));
+        conn.execute(
+            &format!("delete from {table} where table_name = ? and {epoch_filter}"),
+            duckdb::params![after_table_name.id(), replay_epoch],
+        )
+        .map_err(|source| {
+            classified_error(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake stale rename-target replay state deletion failed",
+                source,
+            )
+        })?;
+        conn.execute(
+            &format!("update {table} set table_name = ? where table_name = ? and {epoch_filter}"),
+            duckdb::params![after_table_name.id(), before_table_name.id(), replay_epoch],
+        )
+        .map_err(|source| {
+            classified_error(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake renamed table replay state update failed",
+                source,
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Formats an optional LSN without using debug output.
 fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
     lsn.map_or_else(|| "none".to_owned(), |lsn| lsn.to_string())
@@ -160,18 +213,6 @@ fn format_update_mutation_error_detail(
          assignment_count: {assignment_count}; has_predicate: {has_predicate}"
     )
 }
-
-/// ETL-managed per-table streaming replay progress for steady-state CDC
-/// retries.
-const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
-/// Maximum number of times a failed write attempt is retried before giving up.
-const MAX_COMMIT_RETRIES: u32 = 10;
-/// Initial backoff duration before the first retry.
-const INITIAL_RETRY_DELAY_MS: u64 = 50;
-/// Upper bound on backoff duration.
-const MAX_RETRY_DELAY_MS: u64 = 2_000;
-/// Minimum retry delay for transient delete-file visibility failures.
-const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
 
 /// Event-level table mutations that must be applied in order.
 pub(super) enum TableMutation {

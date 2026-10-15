@@ -172,6 +172,21 @@ description is intended to represent the post-command schema; the visibility
 limitations below explain why it is not always a faithful description of the
 live catalog state.
 
+A single comma-separated `ALTER TABLE` produces one post-statement snapshot,
+even when it changes multiple columns. Separate ALTER statements produce
+distinct snapshots, including when they share a transaction. PostgreSQL does
+not allow table or column renames in a comma-separated ALTER action list;
+those require separate statements.
+
+Without intervening DML, the next relation uses only the latest captured
+snapshot. The destination therefore plans from its previously applied snapshot
+directly to that final endpoint. Intermediate historical effects can be lost:
+`ADD COLUMN score integer DEFAULT 1` followed by `ALTER COLUMN score SET DEFAULT
+2` backfills PostgreSQL's existing rows with `1`, while the final snapshot only
+describes default `2`. ETL currently does not replay the intermediate backfill;
+resynchronize when those historical values must match. A future change could
+deliver intermediate destination relation barriers explicitly.
+
 ### Why snapshots and replication masks are separate
 
 A table schema and a pipeline's view of that schema are different things. One
@@ -203,13 +218,20 @@ membership changes are supported.
 
 ### Ordered schema plans
 
-ETL compares the previously applied logical snapshot with the new one and
-produces one destination-aware plan. Operations are ordered as follows:
+ETL compares the previously applied logical snapshot with the new one. The
+destination handles a table rename first, if needed, then executes a
+column-only schema plan against the resulting actual table name. Column
+operations are ordered as follows:
 
 1. Drop columns that are no longer present.
-2. Apply renames, using a temporary name when needed to break a rename cycle.
+2. Apply column renames, using a temporary name when needed to break a rename cycle.
 3. Add new columns.
 4. Apply type, nullability, and default alterations in order.
+
+The column plan does not carry table names or table-rename operations.
+Renaming first lets DuckLake commit table and column changes together without
+duplicating catalog columns in the pinned engine. A move to
+another PostgreSQL schema is rejected before destination DDL or metadata changes.
 
 Every alteration includes adjacent before and after column schemas. A default
 addition, removal, or replacement is represented by one `Default` alteration.
@@ -217,9 +239,9 @@ For a replacement, destinations that support existing-column defaults first
 remove the old default idempotently, then set the new default only if it is
 supported by the current destination renderer.
 
-Mapped destination-name collisions fail before DDL. BigQuery and DuckLake use
-ASCII-lowercase destination names; ClickHouse, Snowflake, and Iceberg preserve
-source spelling. Snowflake requires `QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE` so
+Mapped column-name collisions fail before DDL. BigQuery and DuckLake use
+ASCII-lowercase column names; ClickHouse, Snowflake, and Iceberg preserve
+source column spelling. Snowflake requires `QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE` so
 quoted names remain stable.
 
 ## Publication column changes
@@ -285,6 +307,79 @@ nullable column first and then uses [`SET DEFAULT`](https://cloud.google.com/big
 which affects only future inserts.
 
 ## Destination behavior
+
+### Table renames
+
+`ALTER TABLE ... RENAME TO ...` preserves the source table OID. ETL captures its
+new name through the existing DDL trigger. At the next relation barrier, the
+destination compares the previous and target snapshot names and performs the
+rename before executing the column plan. A single schema transition can
+therefore include a table rename and column changes captured by earlier
+statements before the next row arrives. A table-only rename runs even when the
+column plan is empty.
+
+| Destination | Table-rename behavior |
+| --- | --- |
+| BigQuery | Creates a view under the new mapped name and removes the old view. The versioned physical table and its metadata identity remain unchanged. BigQuery has [no API or SQL view rename](https://docs.cloud.google.com/bigquery/docs/managing-views#rename_a_view). View-specific permissions or authorized-view configuration must be recreated for the new view. |
+| ClickHouse | Uses [`RENAME TABLE`](https://clickhouse.com/docs/reference/statements/rename). `ReplacingMergeTree` also rebuilds its `__current` view under the new name. |
+| DuckLake | Uses [`ALTER TABLE ... RENAME TO`](https://ducklake.select/docs/stable/duckdb/usage/schema_evolution#renaming-tables) before column changes. All planned DDL and relocation of existing replay markers commit in one transaction, and the table retains its replay epoch. |
+| Snowflake | Uses [`ALTER TABLE ... RENAME TO`](https://docs.snowflake.com/en/sql-reference/sql/alter-table) and opens an ingestion channel for the new name at the previous channel's confirmed committed offset. |
+| Iceberg | Deprecated. Table renames and other newer logical schemas remain unsupported. |
+
+Renames never replace an occupied destination target. If destination naming maps
+both source names to the same object, no physical rename is needed. This can
+happen with case-only renames in destinations with case-insensitive identifiers.
+The active destinations also reject initial setup under an occupied name before
+recording ownership; an unrelated source cannot adopt a table while its rename
+is still waiting for the next relation barrier.
+
+The destination observes the rename with the next relation barrier, which
+PostgreSQL normally sends before the next row event. Until then, the old
+destination name remains occupied. Coordinate name reuse and table swaps with
+that barrier; ETL does not coordinate renames across different source tables.
+
+Destination metadata records `Applying` before DDL and `Applied` only after the
+rename, supported column changes, and required ingestion state updates succeed.
+The applied source snapshot defines the logical destination name; the metadata's
+table identifier addresses the actual physical object. BigQuery is an example
+where these names intentionally differ. The before endpoint is always the
+previously applied snapshot; the after endpoint is the incoming relation's
+snapshot. Both names refer to the same stable source table OID.
+
+These transitions are not atomic with ETL's metadata store. An interrupted
+rename stays `Applying` and blocks further writes until the destination and its
+metadata are reconciled. A resynchronization may first require manual cleanup
+of the renamed object, because pending metadata retains the previous physical
+name. ETL does not infer
+ownership from a matching column layout at the new name. DuckLake commits its
+planned DDL and replay-marker relocation together, but its replay-epoch metadata
+and ETL metadata still commit separately. DuckLake captures the replay epoch
+before DDL and persists that same epoch under the resulting name, so reusing
+the freed name cannot change the renamed table's replay frontier.
+BigQuery view creation/deletion and
+ClickHouse table/view changes can leave both or only some of their objects
+visible while a transition is incomplete.
+
+Moving a table to another PostgreSQL schema, including `ALTER TABLE ... SET
+SCHEMA`, is unsupported. Plan that change as maintenance with resynchronization.
+
+### DDL transaction boundaries
+
+| Destination | Transaction boundary for a schema transition |
+| --- | --- |
+| BigQuery | Permanent DDL cannot be grouped in a [multi-statement transaction](https://docs.cloud.google.com/bigquery/docs/transactions#statements_supported_in_transactions). View creation, view removal, and column DDL complete separately. Physical table renames can require an extended [streaming pause](https://docs.cloud.google.com/bigquery/docs/managing-tables#limitations_on_renaming_tables), so ETL retains the physical name. |
+| ClickHouse | Native table rename, column DDL, and current-view refresh execute separately. ETL does not enable [experimental transactions](https://clickhouse.com/docs/concepts/features/operations/insert/transactions#transactions-commit-and-rollback) or treat the whole table/view transition as atomic. |
+| DuckLake | Table rename, planned column DDL, and existing replay-marker relocation commit in [one transaction](https://ducklake.select/docs/stable/duckdb/advanced_features/transactions). |
+| Snowflake | Each DDL statement runs in its [own transaction](https://docs.snowflake.com/en/sql-reference/transactions#ddl); wrapping the plan in `BEGIN` would not make it atomic because DDL implicitly commits an active transaction. |
+
+Destination transactions do not include ETL's metadata store. DuckLake's
+replay-epoch bookkeeping is also stored separately from its native DDL
+transaction. These boundaries are why `Applying` remains necessary even when
+the destination can commit the planned DDL atomically. Existing cleanup and
+ingestion-state reconciliation run before the final `Applied` record where
+required; best-effort removal of DuckLake tombstone columns follows it.
+
+### Column changes
 
 | Destination | Schema-change policy |
 | --- | --- |
@@ -361,13 +456,18 @@ durable progress still fails validation.
 
 Recovery then follows each destination's DDL guarantees:
 
-- DuckLake applies a plan transactionally and can retry unambiguous old or
-  target states. Rename-cycle interruptions still require operator recovery.
-- ClickHouse resumes only when the physical columns match a complete old or
-  target endpoint. A partially applied DDL sequence requires operator recovery.
+- DuckLake applies table renames, column changes, and replay-marker relocation
+  in one transaction. Table rename runs first because renaming after column
+  evolution can duplicate catalog columns in the pinned DuckLake version.
+  Metadata stays `Applying` until ingestion state is ready. Column-only recovery can retry
+  unambiguous old or target states; table-renaming and column-rename-cycle
+  interruptions require operator recovery.
+- ClickHouse resumes column-only changes when the physical columns match a
+  complete old or target endpoint. An interrupted table rename or partially
+  applied DDL sequence requires operator recovery.
 - BigQuery and Snowflake leave interrupted nontransactional DDL in `Applying`
   for operator recovery rather than guessing what completed.
-- Iceberg rejects schema evolution.
+- Iceberg rejects newer logical schemas before changing the destination.
 
 Resynchronize the affected table when recovery cannot prove a safe endpoint.
 
@@ -466,8 +566,8 @@ so keep maintenance transactions short and use `READ COMMITTED` too. A restart
 alone does not rebuild destination tables or repair inconsistent schema history;
 plan any required table resynchronization before resuming replication.
 
-- Table creation, removal, and rename are pipeline lifecycle operations, not
-  live schema changes.
+- Table creation, removal, and moves between PostgreSQL schemas are pipeline
+  lifecycle operations. Table renames within the same schema are supported.
 - General constraints, identity changes, replica-identity changes, and indexes
   are not portable destination DDL operations. Destinations may reject key
   changes required by their write model.

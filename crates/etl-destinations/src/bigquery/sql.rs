@@ -92,20 +92,6 @@ pub(super) fn quote_table_path(
     Ok(format!("`{project_id}.{dataset_id}.{table_id}`"))
 }
 
-/// Quotes the BigQuery `INFORMATION_SCHEMA.TABLES` path for a dataset.
-///
-/// The fixed `INFORMATION_SCHEMA.TABLES` suffix is intentionally not escaped as
-/// user input.
-pub(super) fn quote_information_schema_tables_path(
-    project_id: &BigQueryProjectId,
-    dataset_id: &BigQueryDatasetId,
-) -> EtlResult<String> {
-    let project_id = escape_identifier(project_id, "BigQuery project id")?;
-    let dataset_id = escape_identifier(dataset_id, "BigQuery dataset id")?;
-
-    Ok(format!("`{project_id}.{dataset_id}.INFORMATION_SCHEMA.TABLES`"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

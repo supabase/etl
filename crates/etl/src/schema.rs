@@ -794,10 +794,11 @@ impl ReplicatedTableSchema {
     /// This is the preferred entrypoint whenever both replicated endpoint
     /// schemas are available. Diffing remains independent of destination
     /// identifier behavior and retains exact PostgreSQL names. Planning maps
-    /// both endpoint namespaces, validates them, and maps every emitted
-    /// operation before ordering it in the destination namespace. Consumers of
-    /// [`SchemaPlan::ordered_operations`] must therefore execute those names as
-    /// provided rather than mapping them again.
+    /// both column namespaces, validates them, and maps emitted column
+    /// operations before ordering them in the destination namespace. Consumers
+    /// of [`SchemaPlan::ordered_operations`] execute those column names as
+    /// provided. Destinations handle table renames separately, before applying
+    /// this column-only plan to the resulting destination table name.
     ///
     /// `column_name_mapping` is assumed to describe both the currently applied
     /// destination schema and the destination semantics used during execution.
@@ -1121,7 +1122,7 @@ impl ColumnAlteration {
     }
 }
 
-/// One ordered operation in a destination schema transition.
+/// One ordered column operation in a destination schema transition.
 ///
 /// Destinations preserve this order and decide whether each alteration is
 /// supported. Built-in destinations that execute schema plans currently warn
@@ -1149,7 +1150,7 @@ pub enum SchemaOperation {
     },
 }
 
-/// Represents differences between two schema versions.
+/// Represents column differences between two schema versions.
 ///
 /// This type contains only exact facts from the PostgreSQL endpoint snapshots.
 /// It does not apply destination identifier semantics or contain generated
@@ -1242,7 +1243,7 @@ impl SchemaDiff {
         )
     }
 
-    /// Returns `true` if there are no schema changes.
+    /// Returns `true` if there are no column changes.
     pub fn is_empty(&self) -> bool {
         self.added_columns.is_empty()
             && self.dropped_columns.is_empty()
@@ -1271,6 +1272,13 @@ impl fmt::Display for SchemaEndpoint {
 /// Errors produced while validating or ordering a destination schema plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaPlanError {
+    /// Moving tables between PostgreSQL schemas is unsupported.
+    TableSchemaMoveUnsupported {
+        /// The schema at the before endpoint.
+        before_schema_name: String,
+        /// The schema at the after endpoint.
+        after_schema_name: String,
+    },
     /// Two exact source names occupy the same destination namespace entry.
     DestinationColumnNameCollision {
         /// The endpoint containing the collision.
@@ -1299,6 +1307,11 @@ pub enum SchemaPlanError {
 impl fmt::Display for SchemaPlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TableSchemaMoveUnsupported { before_schema_name, after_schema_name } => write!(
+                f,
+                "Moving a table from PostgreSQL schema '{before_schema_name}' to \
+                 '{after_schema_name}' is unsupported; resynchronize the table"
+            ),
             Self::DestinationColumnNameCollision {
                 endpoint,
                 column_name_mapping,
@@ -1324,7 +1337,7 @@ impl fmt::Display for SchemaPlanError {
 
 impl std::error::Error for SchemaPlanError {}
 
-/// A destination-validated schema transition with physical operations in safe
+/// A destination-validated column schema transition with operations in safe
 /// order.
 ///
 /// The exact endpoint facts remain available through [`SchemaPlan::diff`]. The
@@ -1350,6 +1363,12 @@ impl SchemaPlan {
         after_schema: &ReplicatedTableSchema,
         column_name_mapping: ColumnNameMapping,
     ) -> Result<Self, SchemaPlanError> {
+        if before_schema.name().schema != after_schema.name().schema {
+            return Err(SchemaPlanError::TableSchemaMoveUnsupported {
+                before_schema_name: before_schema.name().schema.clone(),
+                after_schema_name: after_schema.name().schema.clone(),
+            });
+        }
         let before_column_names: Vec<_> =
             before_schema.column_schemas().map(|column| column.name.clone()).collect();
         let after_column_names: Vec<_> =
@@ -1386,15 +1405,19 @@ impl SchemaPlan {
         &self.diff
     }
 
-    /// Returns `true` if the plan contains no operations.
+    /// Returns `true` if the plan contains no column operations.
+    ///
+    /// A table rename is independent of this plan and may still be required.
     pub fn is_empty(&self) -> bool {
         self.ordered_operations.is_empty()
     }
 
-    /// Returns the only destination-executable schema operations.
+    /// Returns the destination-executable column operations.
     ///
     /// Every column name is already mapped for the destination. The mapping
     /// must match the one used to create the currently applied schema.
+    /// Table renames are handled separately by the destination before this
+    /// column-only sequence executes against the resulting actual table name.
     ///
     /// Drops precede renames, followed by additions and type, nullability, and
     /// default alterations. A default alteration's before and after expressions
@@ -1531,7 +1554,7 @@ impl SchemaOperationPlanner {
         }
     }
 
-    /// Maps operations while building the four required physical phases.
+    /// Maps operations while ordering column schema changes.
     fn plan(mut self, diff: &SchemaDiff) -> Result<Vec<SchemaOperation>, SchemaPlanError> {
         self.plan_drops(&diff.dropped_columns);
         self.plan_renames(&diff.altered_columns)?;
@@ -1999,6 +2022,61 @@ mod tests {
             .map(|column| (column.ordinal_position, column))
             .collect();
         assert_eq!(columns_by_ordinal, expected);
+    }
+
+    #[test]
+    fn schema_plan_contains_only_columns_when_table_is_renamed() {
+        let before = create_replicated_schema(vec![text_column("value", 1)]);
+        for name in [
+            TableName::new("public".to_owned(), "renamed".to_owned()),
+            TableName::new("public".to_owned(), "Renamed".to_owned()),
+        ] {
+            let after = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+                before.id(),
+                name.clone(),
+                vec![text_column("payload", 1), text_column("extra", 2)],
+            )));
+            let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
+            assert!(!plan.diff().is_empty());
+            assert_eq!(
+                operation_names(&plan),
+                vec!["rename:value->payload".to_owned(), "add:extra".to_owned()]
+            );
+            assert_operations_converge(&before, &after);
+        }
+    }
+
+    #[test]
+    fn table_only_rename_has_empty_column_plan() {
+        let before = create_replicated_schema(vec![text_column("VALUE", 1)]);
+        let after = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            before.id(),
+            TableName::new("public".to_owned(), "Test_Table".to_owned()),
+            before.inner().column_schemas.clone(),
+        )));
+        let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
+        assert!(plan.is_empty());
+        assert!(plan.diff().is_empty());
+        assert_ne!(before.name(), after.name());
+        assert_operations_converge(&before, &after);
+        assert!(before.diff(&before).is_empty());
+    }
+
+    #[test]
+    fn schema_plan_rejects_schema_moves_before_planning_column_changes() {
+        let before = create_replicated_schema(vec![text_column("value", 1)]);
+        let after = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            before.id(),
+            TableName::new("archive".to_owned(), "renamed".to_owned()),
+            vec![text_column("payload", 1)],
+        )));
+        assert_eq!(
+            before.plan_schema_change(&after, ColumnNameMapping::Identity).unwrap_err(),
+            SchemaPlanError::TableSchemaMoveUnsupported {
+                before_schema_name: "public".to_owned(),
+                after_schema_name: "archive".to_owned(),
+            }
+        );
     }
 
     fn permutations(values: &mut [String], start: usize, output: &mut Vec<Vec<String>>) {

@@ -5,6 +5,7 @@ use std::{
 };
 
 use etl::{
+    bail,
     data::{Cell, Date, OldTableRow, TableRow, Timestamp, UpdatedTableRow},
     destination::{
         Destination, DestinationTableMetadata, DestinationTableSchema, DestinationWriteStatus,
@@ -41,8 +42,12 @@ use crate::{
             CURRENT_VIEW_SUFFIX, clickhouse_type, create_current_view_sql, create_table_sql,
             drop_current_view_sql, supports_column_default, trailing_cdc_columns,
         },
+        sql::quote_identifier,
     },
-    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        ensure_reset_table_name_is_unambiguous,
+    },
     table_name::try_stringify_table_name,
 };
 
@@ -1281,24 +1286,28 @@ where
         &self,
         table_id: TableId,
         clickhouse_table_name: &str,
-        schema: &ReplicatedTableSchema,
+        after_schema: &ReplicatedTableSchema,
         metadata: DestinationTableMetadata,
     ) -> EtlResult<()> {
         warn!("table {} has pending metadata, recovering interrupted operation", table_id);
 
-        ensure_destination_schema_matches_metadata("ClickHouse", table_id, &metadata, schema)?;
+        ensure_destination_schema_matches_metadata(
+            "ClickHouse",
+            table_id,
+            &metadata,
+            after_schema,
+        )?;
 
         match metadata.table_schema().clone() {
             DestinationTableSchema::Applying {
-                previous_snapshot_id,
-                previous_replication_mask,
+                previous_snapshot_id: before_snapshot_id,
+                previous_replication_mask: before_replication_mask,
                 ..
             } => {
                 // Recovery replays the interrupted diff from the previous
                 // snapshot to the target snapshot recorded in the metadata.
-                let prev_snapshot_id = previous_snapshot_id;
-                let old_table_schema =
-                    self.store.get_table_schema(&table_id, prev_snapshot_id).await?.ok_or_else(
+                let before_table_schema =
+                    self.store.get_table_schema(&table_id, before_snapshot_id).await?.ok_or_else(
                         || {
                             etl_error!(
                                 ErrorKind::InvalidState,
@@ -1306,19 +1315,33 @@ where
                                 format!(
                                     "Table {} needs stored schema snapshot {} to recover the \
                                      destination table, but it was not found.",
-                                    table_id, prev_snapshot_id
+                                    table_id, before_snapshot_id
                                 )
                             )
                         },
                     )?;
+                if &before_table_schema.name != after_schema.name() {
+                    // A name alone cannot prove ownership after an interrupted
+                    // remote rename. Do not infer success from a matching
+                    // column layout at a possibly unrelated target.
+                    bail!(
+                        ErrorKind::InvalidState,
+                        "Interrupted ClickHouse table rename requires recovery",
+                        format!(
+                            "Table {table_id} has a pending name change; reconcile the \
+                             destination before resuming"
+                        )
+                    );
+                }
                 let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
-                let old_schema = ReplicatedTableSchema::from_mask(
-                    Arc::clone(&old_table_schema),
-                    previous_replication_mask,
+                let before_schema = ReplicatedTableSchema::from_mask(
+                    Arc::clone(&before_table_schema),
+                    before_replication_mask,
                 );
-                let plan = old_schema.plan_schema_change(schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
+                let plan = before_schema
+                    .plan_schema_change(after_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
                 ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
-                for endpoint_schema in [&old_schema, schema] {
+                for endpoint_schema in [&before_schema, after_schema] {
                     reject_legacy_merge_tree_layout(
                         clickhouse_table_name,
                         &expected_clickhouse_columns(endpoint_schema, self.inserter_config.engine),
@@ -1327,15 +1350,15 @@ where
                 }
                 let actual_user_column_names =
                     clickhouse_user_column_names(&actual_columns, self.inserter_config.engine)?;
-                let old_column_names: Vec<_> = old_schema
+                let before_column_names: Vec<_> = before_schema
                     .destination_column_schemas(CLICKHOUSE_COLUMN_NAME_MAPPING)
                     .map(|column| column.name)
                     .collect();
-                let target_column_names: Vec<_> = schema
+                let after_column_names: Vec<_> = after_schema
                     .destination_column_schemas(CLICKHOUSE_COLUMN_NAME_MAPPING)
                     .map(|column| column.name)
                     .collect();
-                let old_ordinal_by_name: HashMap<_, _> = old_table_schema
+                let before_ordinal_by_name: HashMap<_, _> = before_table_schema
                     .column_schemas
                     .iter()
                     .map(|column| {
@@ -1345,11 +1368,12 @@ where
                         )
                     })
                     .collect();
-                let has_reused_endpoint_name = schema.column_schemas().any(|target_column| {
-                    let target_name = CLICKHOUSE_COLUMN_NAME_MAPPING.map_name(&target_column.name);
-                    old_ordinal_by_name
-                        .get(&target_name)
-                        .is_some_and(|ordinal| *ordinal != target_column.ordinal_position)
+                let has_reused_endpoint_name = after_schema.column_schemas().any(|after_column| {
+                    let after_column_name =
+                        CLICKHOUSE_COLUMN_NAME_MAPPING.map_name(&after_column.name);
+                    before_ordinal_by_name
+                        .get(&after_column_name)
+                        .is_some_and(|ordinal| *ordinal != after_column.ordinal_position)
                 });
                 let has_structural_operations = plan.ordered_operations().iter().any(|operation| {
                     matches!(
@@ -1362,30 +1386,35 @@ where
                 let recovery_endpoint = classify_clickhouse_schema_recovery_endpoint(
                     table_id,
                     &actual_user_column_names,
-                    &old_column_names,
-                    &target_column_names,
+                    &before_column_names,
+                    &after_column_names,
                     has_reused_endpoint_name && has_structural_operations,
                 )?;
 
                 match recovery_endpoint {
                     ClickHouseSchemaRecoveryEndpoint::Previous => {
-                        self.apply_schema_plan(clickhouse_table_name, &plan, &old_schema, schema)
-                            .await?;
+                        self.apply_schema_plan(
+                            clickhouse_table_name,
+                            &plan,
+                            &before_schema,
+                            after_schema,
+                        )
+                        .await?;
                     }
                     ClickHouseSchemaRecoveryEndpoint::Target => {
-                        let metadata_plan = metadata_only_schema_plan(&plan, schema)?;
+                        let metadata_plan = metadata_only_schema_plan(&plan, after_schema)?;
                         self.apply_schema_plan(
                             clickhouse_table_name,
                             &metadata_plan,
-                            schema,
-                            schema,
+                            after_schema,
+                            after_schema,
                         )
                         .await?;
                     }
                 }
             }
             DestinationTableSchema::Creating { .. } => {
-                self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
+                self.issue_create_table_stmt(clickhouse_table_name, after_schema).await?;
             }
             DestinationTableSchema::Applied { .. } => {
                 return Err(etl_error!(
@@ -1399,7 +1428,7 @@ where
         let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
         row_binary_layout_from_clickhouse_columns(
             clickhouse_table_name,
-            &expected_clickhouse_columns(schema, self.inserter_config.engine),
+            &expected_clickhouse_columns(after_schema, self.inserter_config.engine),
             &actual_columns,
         )?;
 
@@ -1423,9 +1452,18 @@ where
             ));
         }
 
-        // Destination metadata names the table this source table writes to. The
-        // current source name differs from it after a rename.
+        // Destination metadata names the actual owned table. A pending source
+        // rename must not redirect reset toward an unowned destination.
         let metadata = self.store.get_destination_table_metadata(schema.id()).await?;
+        if let Some(metadata) = &metadata {
+            ensure_reset_table_name_is_unambiguous(
+                "ClickHouse",
+                self.store.as_ref(),
+                schema.id(),
+                metadata,
+            )
+            .await?;
+        }
         let clickhouse_table_name = metadata.as_ref().map_or_else(
             || try_stringify_table_name(schema.name()),
             |metadata| Ok(metadata.table_id().to_owned()),
@@ -1491,12 +1529,12 @@ where
 
     /// Handles relation metadata, applying the schema diff for a new snapshot
     /// or recovering an interrupted transition.
-    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<()> {
-        validate_clickhouse_schema_capabilities(new_schema, self.inserter_config.engine)?;
+    async fn handle_relation_event(&self, after_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        validate_clickhouse_schema_capabilities(after_schema, self.inserter_config.engine)?;
 
-        let table_id = new_schema.id();
-        let new_snapshot_id = new_schema.inner().snapshot_id;
-        let new_replication_mask = new_schema.replication_mask().clone();
+        let table_id = after_schema.id();
+        let after_snapshot_id = after_schema.inner().snapshot_id;
+        let after_replication_mask = after_schema.replication_mask().clone();
 
         // Serialize cache reconstruction and schema transitions. This ensures a
         // cold-cache writer cannot repopulate an old RowBinary layout after the
@@ -1512,7 +1550,7 @@ where
                     format!(
                         "Table {} received schema snapshot {}, but destination metadata from \
                          initial synchronization was not found.",
-                        table_id, new_snapshot_id
+                        table_id, after_snapshot_id
                     )
                 )
             })?;
@@ -1521,14 +1559,14 @@ where
         // snapshot ID and replication mask. It can therefore resume an
         // interrupted change without inventing a DML event position.
         if metadata.is_pending() {
-            let clickhouse_table_name = metadata.table_id().to_owned();
-            self.recover_pending_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
+            let before_table_name = metadata.table_id().to_owned();
+            self.recover_pending_metadata(table_id, &before_table_name, after_schema, metadata)
                 .await?;
             return Ok(());
         }
 
-        let current_snapshot_id = metadata.snapshot_id();
-        let current_replication_mask = metadata.replication_mask().clone();
+        let before_snapshot_id = metadata.snapshot_id();
+        let before_replication_mask = metadata.replication_mask().clone();
 
         // At-least-once delivery can replay an older relation or an
         // equal-snapshot mask from a deployment that missed its logical schema
@@ -1536,16 +1574,16 @@ where
         ensure_relation_schema_transition(
             "ClickHouse",
             table_id,
-            current_snapshot_id,
-            &current_replication_mask,
-            new_snapshot_id,
-            &new_replication_mask,
+            before_snapshot_id,
+            &before_replication_mask,
+            after_snapshot_id,
+            &after_replication_mask,
         )?;
 
-        if current_snapshot_id == new_snapshot_id {
+        if before_snapshot_id == after_snapshot_id {
             debug!(
                 table_id = %table_id,
-                snapshot_id = %new_snapshot_id,
+                snapshot_id = %after_snapshot_id,
                 "clickhouse table schema unchanged"
             );
             return Ok(());
@@ -1553,42 +1591,52 @@ where
 
         info!(
             table_id = %table_id,
-            current_snapshot_id = %current_snapshot_id,
-            new_snapshot_id = %new_snapshot_id,
+            before_snapshot_id = %before_snapshot_id,
+            after_snapshot_id = %after_snapshot_id,
             "clickhouse table schema change detected"
         );
 
         // Retrieve the old schema to compute the diff.
-        let current_table_schema =
-            self.store.get_table_schema(&table_id, current_snapshot_id).await?.ok_or_else(
-                || {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "Stored schema snapshot missing for ClickHouse schema change",
-                        format!(
-                            "Table {} needs stored schema snapshot {} to compare with incoming \
-                             snapshot {}, but it was not found.",
-                            table_id, current_snapshot_id, new_snapshot_id
-                        )
+        let before_table_schema =
+            self.store.get_table_schema(&table_id, before_snapshot_id).await?.ok_or_else(|| {
+                etl_error!(
+                    ErrorKind::InvalidState,
+                    "Stored schema snapshot missing for ClickHouse schema change",
+                    format!(
+                        "Table {} needs stored schema snapshot {} to compare with incoming \
+                         snapshot {}, but it was not found.",
+                        table_id, before_snapshot_id, after_snapshot_id
                     )
-                },
-            )?;
+                )
+            })?;
 
-        let current_schema = ReplicatedTableSchema::from_mask(
-            current_table_schema,
-            current_replication_mask.clone(),
-        );
+        let before_schema =
+            ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());
 
-        let clickhouse_table_name = metadata.table_id();
-        let plan = current_schema.plan_schema_change(new_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
-        ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
-        ensure_clickhouse_type_changes_are_supported(clickhouse_table_name, &plan)?;
+        let before_table_name = metadata.table_id();
+        let plan =
+            before_schema.plan_schema_change(after_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
+        let after_table_name = if before_schema.name() != after_schema.name() {
+            try_stringify_table_name(after_schema.name())?
+        } else {
+            before_table_name.to_owned()
+        };
+        validate_clickhouse_table_name(
+            &after_table_name,
+            after_schema.name(),
+            self.inserter_config.engine,
+        )?;
+        if after_table_name != before_table_name {
+            self.ensure_table_absent(&after_table_name).await?;
+        }
+        ensure_clickhouse_renames_are_supported(before_table_name, &plan)?;
+        ensure_clickhouse_type_changes_are_supported(before_table_name, &plan)?;
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_replacing_merge_tree(
-                clickhouse_table_name,
+                before_table_name,
                 plan.diff(),
-                &current_schema,
-                new_schema,
+                &before_schema,
+                after_schema,
             )?;
         }
         // Applied metadata proves the table is at the current layout, so the
@@ -1596,10 +1644,10 @@ where
         // Reject it before any cache, metadata, or DDL mutation so the operator
         // sees the upgrade instruction with the table and metadata untouched,
         // exactly as the DML and recovery paths behave.
-        let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
+        let actual_columns = self.client.table_columns(before_table_name).await?;
         reject_legacy_merge_tree_layout(
-            clickhouse_table_name,
-            &expected_clickhouse_columns(&current_schema, self.inserter_config.engine),
+            before_table_name,
+            &expected_clickhouse_columns(&before_schema, self.inserter_config.engine),
             &actual_columns,
         )?;
         // A cached RowBinary layout is valid only for Applied metadata. Remove
@@ -1611,15 +1659,28 @@ where
 
         // Mark as Applying before DDL changes.
         let updated_metadata = DestinationTableMetadata::new_applied(
-            clickhouse_table_name.to_owned(),
-            current_snapshot_id,
-            current_replication_mask,
+            before_table_name.to_owned(),
+            before_snapshot_id,
+            before_replication_mask,
         )
-        .with_schema_change(new_snapshot_id, new_replication_mask)?;
-        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+        .with_schema_change(after_snapshot_id, after_replication_mask)?;
+        self.store.store_destination_table_metadata(table_id, updated_metadata).await?;
+
+        if after_table_name != before_table_name {
+            let sql = format!(
+                "rename table {} to {}",
+                quote_identifier(before_table_name),
+                quote_identifier(&after_table_name),
+            );
+            self.client.execute_ddl(DdlKind::RenameTable, &sql).await?;
+            if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
+                let sql = drop_current_view_sql(before_table_name);
+                self.client.execute_ddl(DdlKind::DropView, &sql).await?;
+            }
+        }
 
         if let Err(err) =
-            self.apply_schema_plan(clickhouse_table_name, &plan, &current_schema, new_schema).await
+            self.apply_schema_plan(&after_table_name, &plan, &before_schema, after_schema).await
         {
             warn!(
                 table_id = %table_id,
@@ -1631,12 +1692,19 @@ where
 
         // Mark as Applied.
         self.store
-            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .store_destination_table_metadata(
+                table_id,
+                DestinationTableMetadata::new_applied(
+                    after_table_name,
+                    after_snapshot_id,
+                    after_schema.replication_mask().clone(),
+                ),
+            )
             .await?;
 
         info!(
             table_id = %table_id,
-            snapshot_id = %new_snapshot_id,
+            snapshot_id = %after_snapshot_id,
             "clickhouse table schema change completed"
         );
 
@@ -1655,17 +1723,17 @@ where
     /// status tracks this for diagnostic purposes.
     async fn apply_schema_plan(
         &self,
-        clickhouse_table_name: &str,
+        table_name: &str,
         plan: &SchemaPlan,
         before_schema: &ReplicatedTableSchema,
         after_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         let is_replacing_merge_tree =
             matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
-        ensure_clickhouse_type_changes_are_supported(clickhouse_table_name, plan)?;
+        ensure_clickhouse_type_changes_are_supported(table_name, plan)?;
         if plan.is_empty() {
             if is_replacing_merge_tree {
-                self.refresh_current_view(clickhouse_table_name, after_schema).await?;
+                self.refresh_current_view(table_name, after_schema).await?;
             }
             return Ok(());
         }
@@ -1676,7 +1744,7 @@ where
         // used as its sort and deduplication key.
         if is_replacing_merge_tree {
             reject_pk_alters_under_replacing_merge_tree(
-                clickhouse_table_name,
+                table_name,
                 plan.diff(),
                 before_schema,
                 after_schema,
@@ -1701,9 +1769,7 @@ where
         for operation in plan.ordered_operations() {
             match operation {
                 SchemaOperation::DropColumn { before_column_schema, reason: _ } => {
-                    self.client
-                        .drop_column(clickhouse_table_name, &before_column_schema.name)
-                        .await?;
+                    self.client.drop_column(table_name, &before_column_schema.name).await?;
                     user_column_names.retain(|name| name != &before_column_schema.name);
                 }
                 SchemaOperation::AddColumn { after_column_schema, reason } => {
@@ -1714,7 +1780,7 @@ where
                         && !is_array_type(&after_column_schema.typ)
                     {
                         warn!(
-                            table_name = %clickhouse_table_name,
+                            table_name = %table_name,
                             column_name = %after_column_schema.name,
                             "adding a source not null column as nullable in clickhouse; the \
                              destination schema will be more permissive"
@@ -1730,10 +1796,7 @@ where
                         etl_error!(
                             ErrorKind::InvalidState,
                             "ClickHouse add-column after state is missing from the after schema",
-                            format!(
-                                "Table '{clickhouse_table_name}', column '{}'",
-                                after_column_schema.name
-                            )
+                            format!("Table '{table_name}', column '{}'", after_column_schema.name)
                         )
                     })?;
                     let preceding_column_name = insertion_index
@@ -1743,7 +1806,7 @@ where
                         && after_column_schema.default_expression.is_some()
                     {
                         warn!(
-                            table_name = %clickhouse_table_name,
+                            table_name = %table_name,
                             column_name = %after_column_schema.name,
                             "not applying the source default to a publication-added clickhouse \
                              column; the destination schema will differ from the logical source \
@@ -1752,7 +1815,7 @@ where
                     }
                     self.client
                         .add_column(
-                            clickhouse_table_name,
+                            table_name,
                             &destination_column_schema,
                             preceding_column_name.as_deref(),
                             force_nullable,
@@ -1766,7 +1829,7 @@ where
                     match alteration.kind() {
                         ColumnAlterationKind::Rename => {
                             self.client
-                                .rename_column(clickhouse_table_name, &before.name, &after.name)
+                                .rename_column(table_name, &before.name, &after.name)
                                 .await?;
                             if let Some(name) =
                                 user_column_names.iter_mut().find(|name| **name == before.name)
@@ -1781,12 +1844,10 @@ where
                         }
                         ColumnAlterationKind::Nullability => {
                             if !before.nullable && after.nullable {
-                                self.client
-                                    .drop_column_not_null(clickhouse_table_name, &before.name)
-                                    .await?;
+                                self.client.drop_column_not_null(table_name, &before.name).await?;
                             } else {
                                 warn!(
-                                    table_name = %clickhouse_table_name,
+                                    table_name = %table_name,
                                     column_name = %before.name,
                                     "clickhouse does not tighten an existing nullable column to \
                                      not null; keeping the destination column nullable"
@@ -1800,7 +1861,7 @@ where
                             // those rows, while Postgres keeps their add-time
                             // value.
                             warn!(
-                                table_name = %clickhouse_table_name,
+                                table_name = %table_name,
                                 column_name = %before.name,
                                 "skipping source column default change for clickhouse because it \
                                  would change rows stored before the column was added"
@@ -1812,7 +1873,7 @@ where
         }
 
         if is_replacing_merge_tree {
-            self.refresh_current_view(clickhouse_table_name, after_schema).await?;
+            self.refresh_current_view(table_name, after_schema).await?;
         }
 
         Ok(())

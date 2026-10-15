@@ -87,15 +87,25 @@ reaching the replacement table. The active logical view and its physical target
 must remain available; older physical tables are no longer needed.
 
 Cleanup is optimistic: after truncate switches the view and persists the new
-target, ETL attempts background deletion of previously discovered versions.
-Explicit drop/reset also attempts physical cleanup after removing the view.
-Listing or physical deletion failures are logged and can leave unused tables
-behind without blocking replication. A later truncate or reset can try again;
-there is no cleanup queue or periodic collector. Operators can use the table
-IDs in warnings to remove unused tables manually, after checking that they are
-not the current view target or the target recorded in destination metadata.
-Interrupted creation leaves its abandoned table for these same cleanup paths.
+target, ETL attempts background deletion of the previously recorded physical
+table. Explicit drop/reset also attempts deletion of its recorded physical
+target after removing the view. Physical deletion failures are logged and can
+leave unused tables behind without blocking replication. There is no cleanup
+queue or periodic collector. Creation recovery attempts to delete the abandoned
+physical identity still recorded in metadata after its replacement is ready.
+Unrecorded orphans and failed deletions require manual cleanup after checking
+all active views and destination metadata.
+ETL does not discover ownership by name prefix: a renamed table can retain its
+physical name while another source table reuses its original logical name.
 Creation, view changes, and metadata persistence still propagate failures.
+
+Source table renames change only the logical view. The physical table retains
+its original name until a later truncate or resync creates a fresh version.
+BigQuery requires streaming to stop before a physical rename and can require
+hours before that rename becomes eligible, so ETL does not rename the streaming
+physical table. See BigQuery's [table-rename restrictions](https://docs.cloud.google.com/bigquery/docs/managing-tables#limitations_on_renaming_tables).
+See [Table renames](/explanation/schema-changes/#table-renames) for ordering,
+permissions, collision handling, and interrupted transitions.
 
 The suffix is an underscore followed by 25 lowercase letters and digits,
 encoding a full UUID without relying on the clock. It adds 26 ASCII bytes to
@@ -340,6 +350,9 @@ object storage.
   storage, and maintenance services they configure.
 - Primary-key sorting requires source tables to have a primary key; other
   sorting modes do not add that requirement.
+- Table-sorting entries match source schema and table names. Update the entry
+  for a renamed source table to retain its configured sorting; destination
+  spelling retained by a case-only rename does not change the lookup key.
 - DuckLake adds streaming columns as nullable. Supported literal defaults are
   stored as metadata; ETL does not emit `DEFAULT(NULL)` when no source default
   exists, although a catalog client may display an omitted default as `NULL`.
@@ -352,28 +365,17 @@ This status applies to the managed service, not local or self-hosted use.
 
 Snowflake uses direct Snowpipe Streaming and key-pair authentication.
 
-### Resynchronizing after a source table rename
+### Source table renames
 
-A source rename preserves the recorded destination table name during streaming.
-Resynchronization drops that recorded table, then creates a fresh destination
-from the current source name. If that name is already occupied, ETL fails the
-copy instead of writing into another table's destination.
+ETL renames the downstream table when a source table is renamed within the
+same PostgreSQL schema. It drains pending writes, applies column changes, then
+renames the table and reopens ingestion at the previous committed offset. The
+new snapshot is marked applied only after these steps succeed. Renames fail
+when the mapped target name is occupied. Moving the source table to another
+schema is unsupported.
 
-For example, suppose `public.orders` is renamed to `public.ordersold`, and
-`public.ordersnew` is renamed to `public.orders`. The first table still owns
-`PUBLIC_ORDERS`, so resynchronizing the second table fails when it tries to
-create `PUBLIC_ORDERS`.
-
-To recover, resynchronize `public.ordersold` first and wait for it to finish.
-Provided `PUBLIC_ORDERSOLD` is available, this rebuilds the first table there
-and frees `PUBLIC_ORDERS`. Then retry resynchronizing `public.orders`.
-Resynchronization deletes previous destination data and CDC history. Existing
-source rows are copied again only when initial copying is enabled. Update any
-queries that depend on the first table's previous destination name.
-
-If the existing destination must remain unchanged, use a new pipeline targeting
-an unused destination schema. Do not manually delete or rename a destination
-that another replicated table still uses.
+See [Table renames](/explanation/schema-changes/#table-renames) for destination
+behavior and recovery after an interrupted transition.
 
 ### Limitations
 

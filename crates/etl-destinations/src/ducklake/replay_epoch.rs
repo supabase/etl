@@ -94,6 +94,38 @@ pub(super) async fn read_table_replay_epoch(
     Ok(replay_epoch)
 }
 
+/// Persists the pre-rename replay epoch under the resulting table name.
+///
+/// The caller captures the epoch before native DDL. Reading the previous name
+/// here could pick up a new owner's epoch after that name becomes available.
+/// Its old row remains historical state until the next copy-reset transition.
+pub(super) async fn preserve_renamed_table_replay_epoch(
+    pool: &PgPool,
+    metadata_schema: &str,
+    after_table_name: &DuckLakeTableName,
+    replay_epoch: &str,
+) -> EtlResult<()> {
+    let table = replay_epochs_table_name(metadata_schema);
+    let sql = format!(
+        "insert into {table} (table_name, replay_epoch) values ($1, $2) on conflict (table_name) \
+         do update set replay_epoch = excluded.replay_epoch, pending_replay_epoch = null, \
+         updated_at = now()"
+    );
+    sqlx::query(AssertSqlSafe(sql))
+        .bind(after_table_name.id())
+        .bind(replay_epoch)
+        .execute(pool)
+        .await
+        .map_err(|source| {
+            classified_error(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake renamed table replay epoch persistence failed",
+                source,
+            )
+        })?;
+    Ok(())
+}
+
 /// Starts or resumes a replay epoch transition and returns its pending value.
 pub(super) async fn begin_table_replay_epoch_transition(
     pool: &PgPool,

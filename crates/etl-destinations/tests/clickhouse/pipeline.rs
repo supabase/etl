@@ -2733,6 +2733,14 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     database
+        .run_sql(&format!("alter table {} rename to renamed", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    let table_name = etl::schema::TableName::new(table_name.schema.clone(), "renamed".to_owned());
+
+    let clickhouse_table_name = "test_renamed";
+
+    database
         .run_sql(&format!(
             "insert into {} (status, name, age) values ('Bob', 'pending', 'thirty')",
             table_name.as_quoted_identifier(),
@@ -2749,7 +2757,7 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db.query(&query).await;
     let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
         let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db
-            .query("select id, status, name, age from \"test_schema__multi__current\" order by id")
+            .query("select id, status, name, age from \"test_renamed__current\" order by id")
             .await;
         Some(rows)
     } else {
@@ -2761,6 +2769,7 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
 
     let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(final_metadata.is_applied());
+    assert_eq!(final_metadata.table_id(), clickhouse_table_name);
     // Applying the relation must advance the durable destination schema.
     assert!(final_metadata.snapshot_id() > initial_snapshot_id);
 

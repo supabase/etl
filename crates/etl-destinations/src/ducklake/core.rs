@@ -54,8 +54,8 @@ use crate::{
             apply_table_batches_with_retry, ensure_applied_batches_table_exists,
             ensure_streaming_progress_table_exists, prepare_copy_complete_table_batch,
             prepare_copy_table_batch, prepare_mutation_table_batches, prepare_truncate_table_batch,
-            read_table_streaming_progress_event_position, retain_mutations_after_event_position,
-            retain_truncates_after_event_position,
+            read_table_streaming_progress_event_position, rename_table_replay_state,
+            retain_mutations_after_event_position, retain_truncates_after_event_position,
         },
         client::{
             DuckLakeBlockingGuard, DuckLakeConnectionManager, DuckLakeDedicatedConnection,
@@ -78,7 +78,8 @@ use crate::{
         },
         replay_epoch::{
             begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
-            ensure_replay_epoch_table_exists, read_table_replay_epoch,
+            ensure_replay_epoch_table_exists, preserve_renamed_table_replay_epoch,
+            read_table_replay_epoch,
         },
         schema::{
             build_add_column_sql_ducklake, build_create_table_sql_ducklake,
@@ -91,7 +92,7 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        warn_unsupported_column_type_change,
+        ensure_reset_table_name_is_unambiguous, warn_unsupported_column_type_change,
     },
     retry::{classified_error, classified_error_with_detail},
 };
@@ -289,13 +290,17 @@ fn index_table_sorting_config(
     Ok(table_sorting)
 }
 
-/// Resolves a configured selector against the current replicated table schema.
+/// Resolves a source-name configuration against the current replicated schema.
+///
+/// The actual destination name may retain different spelling after a case-only
+/// rename; it supplies error context rather than the configuration lookup key.
 fn resolve_table_sort_columns(
     table_sorting: &HashMap<DuckLakeTableName, DuckLakeSortBy>,
     table_name: &DuckLakeTableName,
     table_schema: &ReplicatedTableSchema,
 ) -> EtlResult<Option<Vec<DuckLakeSortColumn>>> {
-    let Some(sort_by) = table_sorting.get(table_name) else {
+    let source_table_name = DuckLakeTableName::from_source(table_schema.name());
+    let Some(sort_by) = table_sorting.get(&source_table_name) else {
         return Ok(None);
     };
 
@@ -2152,6 +2157,17 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
+        if let Some(metadata) =
+            self.store.get_destination_table_metadata(replicated_table_schema.id()).await?
+        {
+            ensure_reset_table_name_is_unambiguous(
+                "DuckLake",
+                &self.store,
+                replicated_table_schema.id(),
+                &metadata,
+            )
+            .await?;
+        }
         let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.copy_buffers.lock().remove(&table_name);
@@ -2653,16 +2669,50 @@ where
         ))
     }
 
+    /// Rejects a table name that is already occupied before claiming ownership.
+    async fn ensure_table_absent(&self, table_name: &DuckLakeTableName) -> EtlResult<()> {
+        let table_name = table_name.clone();
+        run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
+            // DuckDB identifiers ignore ASCII case, including quoted names.
+            let exists: bool = conn
+                .query_row(
+                    "select exists (select 1 from information_schema.tables where table_catalog = \
+                     ? and translate(table_schema, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', \
+                     'abcdefghijklmnopqrstuvwxyz') = ? and translate(table_name, \
+                     'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = ?)",
+                    duckdb::params![
+                        LAKE_CATALOG,
+                        table_name.schema().to_ascii_lowercase(),
+                        table_name.table().to_ascii_lowercase()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(|source| {
+                    classified_error(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake table existence query failed",
+                        source,
+                    )
+                })?;
+            if exists {
+                return Err(etl_error!(
+                    ErrorKind::DestinationTableAlreadyExists,
+                    "DuckLake destination table already exists",
+                    format!("Cannot claim occupied destination table '{table_name}'")
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Handles relation metadata, applying the schema diff and advancing
     /// destination metadata when the snapshot advances.
-    async fn handle_relation_event(
-        &self,
-        new_replicated_table_schema: &ReplicatedTableSchema,
-    ) -> EtlResult<()> {
-        validate_ducklake_schema_capabilities(new_replicated_table_schema)?;
-        let table_id = new_replicated_table_schema.id();
-        let new_snapshot_id = new_replicated_table_schema.inner().snapshot_id;
-        let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
+    async fn handle_relation_event(&self, after_schema: &ReplicatedTableSchema) -> EtlResult<()> {
+        validate_ducklake_schema_capabilities(after_schema)?;
+        let table_id = after_schema.id();
+        let after_snapshot_id = after_schema.inner().snapshot_id;
+        let after_replication_mask = after_schema.replication_mask().clone();
 
         let metadata =
             self.store.get_destination_table_metadata(table_id).await?.ok_or_else(|| {
@@ -2672,31 +2722,31 @@ where
                     format!(
                         "Table {} received schema snapshot {}, but destination metadata from \
                          initial synchronization was not found.",
-                        table_id, new_snapshot_id
+                        table_id, after_snapshot_id
                     )
                 )
             })?;
-        let table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
+        let before_table_name = DuckLakeTableName::from_metadata_id(metadata.table_id())?;
         let metadata = if metadata.is_pending() {
             self.recover_pending_metadata(
                 table_id,
-                &table_name,
+                &before_table_name,
                 metadata,
-                Some(new_replicated_table_schema),
+                Some(after_schema),
             )
             .await?
         } else {
             metadata
         };
 
-        let current_snapshot_id = metadata.snapshot_id();
-        let current_replication_mask = metadata.replication_mask().clone();
+        let before_snapshot_id = metadata.snapshot_id();
+        let before_replication_mask = metadata.replication_mask().clone();
 
-        if new_snapshot_id < current_snapshot_id {
+        if after_snapshot_id < before_snapshot_id {
             info!(
                 table_id = %table_id,
-                applied_snapshot_id = %current_snapshot_id,
-                replayed_snapshot_id = %new_snapshot_id,
+                applied_snapshot_id = %before_snapshot_id,
+                replayed_snapshot_id = %after_snapshot_id,
                 "ducklake stale schema relation replay skipped"
             );
             return Ok(());
@@ -2710,17 +2760,17 @@ where
         ensure_relation_schema_transition(
             "DuckLake",
             table_id,
-            current_snapshot_id,
-            &current_replication_mask,
-            new_snapshot_id,
-            &new_replication_mask,
+            before_snapshot_id,
+            &before_replication_mask,
+            after_snapshot_id,
+            &after_replication_mask,
         )?;
 
-        if current_snapshot_id == new_snapshot_id {
+        if before_snapshot_id == after_snapshot_id {
             info!(
                 table_id = %table_id,
-                snapshot_id = %new_snapshot_id,
-                replication_mask = %new_replication_mask,
+                snapshot_id = %after_snapshot_id,
+                replication_mask = %after_replication_mask,
                 "ducklake schema unchanged"
             );
             return Ok(());
@@ -2728,143 +2778,212 @@ where
 
         info!(
             table_id = %table_id,
-            current_snapshot_id = %current_snapshot_id,
-            new_snapshot_id = %new_snapshot_id,
-            current_replication_mask = %current_replication_mask,
-            new_replication_mask = %new_replication_mask,
+            before_snapshot_id = %before_snapshot_id,
+            after_snapshot_id = %after_snapshot_id,
+            before_replication_mask = %before_replication_mask,
+            after_replication_mask = %after_replication_mask,
             "ducklake schema change detected"
         );
 
-        let current_table_schema = self
+        let before_table_schema = self
             .load_exact_table_schema(
                 table_id,
-                current_snapshot_id,
+                before_snapshot_id,
                 "Stored schema snapshot missing for DuckLake schema change",
             )
             .await?;
-        let current_schema = ReplicatedTableSchema::from_mask(
-            current_table_schema,
-            current_replication_mask.clone(),
-        );
-        let plan = current_schema
-            .plan_schema_change(new_replicated_table_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
-        self.cleanup_tombstone_columns_after_applied(&table_name, &current_schema).await;
+        let before_schema =
+            ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());
+        let plan = before_schema.plan_schema_change(after_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
+        let after_table_name = if before_schema.name() != after_schema.name() {
+            // Table rename preserves the actual namespace recorded in metadata.
+            let target =
+                DuckLakeTableName::new(before_table_name.schema(), &after_schema.name().name);
+            if target.table().eq_ignore_ascii_case(before_table_name.table()) {
+                before_table_name.clone()
+            } else {
+                target
+            }
+        } else {
+            before_table_name.clone()
+        };
+        if after_table_name != before_table_name {
+            self.ensure_table_absent(&after_table_name).await?;
+        }
+        self.cleanup_tombstone_columns_after_applied(&before_table_name, &before_schema).await;
 
         let updated_metadata = DestinationTableMetadata::new_applied(
-            table_name.to_metadata_id()?,
-            current_snapshot_id,
-            current_replication_mask,
+            before_table_name.to_metadata_id()?,
+            before_snapshot_id,
+            before_replication_mask,
         )
-        .with_schema_change(new_snapshot_id, new_replication_mask)?;
-        self.applied_tables.lock().remove(&table_name);
-        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+        .with_schema_change(after_snapshot_id, after_replication_mask)?;
+        self.applied_tables.lock().remove(&before_table_name);
+        self.store.store_destination_table_metadata(table_id, updated_metadata).await?;
 
-        if let Err(error) = self.apply_schema_plan(&table_name, &plan).await {
+        let rename_target = (after_table_name != before_table_name).then_some(&after_table_name);
+        if let Err(error) = self.apply_schema_change(&before_table_name, rename_target, &plan).await
+        {
             warn!(
                 error = %error,
                 table_id = %table_id,
-                table = %table_name,
+                table = %before_table_name,
                 "ducklake schema change failed"
             );
             return Err(error);
         }
-        self.reconcile_missing_replicated_columns(&table_name, new_replicated_table_schema).await?;
-        self.reconcile_table_sorting(&table_name, new_replicated_table_schema).await?;
+        self.reconcile_missing_replicated_columns(&after_table_name, after_schema).await?;
+        self.reconcile_table_sorting(&after_table_name, after_schema).await?;
 
-        let applied_metadata = updated_metadata.to_applied();
+        let applied_metadata = DestinationTableMetadata::new_applied(
+            after_table_name.to_metadata_id()?,
+            after_snapshot_id,
+            after_schema.replication_mask().clone(),
+        );
         self.store.store_destination_table_metadata(table_id, applied_metadata).await?;
-        self.cleanup_tombstone_columns_after_applied(&table_name, new_replicated_table_schema)
-            .await;
-        self.applied_tables.lock().insert(table_name.clone());
-
+        self.cleanup_tombstone_columns_after_applied(&after_table_name, after_schema).await;
         info!(
             table_id = %table_id,
-            table = %table_name,
-            snapshot_id = %new_snapshot_id,
+            before_table_name = %before_table_name,
+            after_table_name = %after_table_name,
+            snapshot_id = %after_snapshot_id,
             "ducklake schema change completed"
         );
+        self.applied_tables.lock().insert(after_table_name);
 
         Ok(())
     }
 
-    /// Applies a schema plan while serializing with table-local writes and
-    /// external maintenance.
+    /// Renames a table, then applies its column plan in one transaction while
+    /// serializing with table-local writes and external maintenance.
+    ///
+    /// Replay markers move in the same transaction. The column renderer always
+    /// receives the resulting actual table name and never handles table
+    /// renames. The captured replay epoch is persisted under the new name
+    /// after the native commit while the table write permit is still held.
     ///
     /// A table that was copied with data inlining disabled must restore its
     /// streaming setting before DuckLake applies a later schema change. This
     /// lets DuckLake update its inlined-data representation with the DDL.
-    async fn apply_schema_plan(
+    async fn apply_schema_change(
         &self,
-        table_name: &DuckLakeTableName,
+        before_table_name: &DuckLakeTableName,
+        after_table_name: Option<&DuckLakeTableName>,
         plan: &SchemaPlan,
     ) -> EtlResult<()> {
-        if plan.is_empty() {
-            debug!(table = %table_name, "ducklake schema plan is empty");
+        if after_table_name.is_none() && plan.is_empty() {
+            debug!(table = %before_table_name, "ducklake schema plan is empty");
             return Ok(());
         }
 
         info!(
-            table = %table_name,
+            table = %before_table_name,
             additions = plan.diff().added_columns.len(),
             drops = plan.diff().dropped_columns.len(),
             alterations = plan.diff().altered_columns.len(),
             "ducklake applying schema plan"
         );
 
-        let table_write_permit = self.acquire_table_write_slot(table_name).await?;
+        let table_write_permit = self.acquire_table_write_slot(before_table_name).await?;
         let checkpoint_guard = self.acquire_mutation_guard().await;
         let write_guard = DuckLakeWriteGuard::new(&table_write_permit, &checkpoint_guard);
-        let table_name = table_name.clone();
+        let rename = match after_table_name {
+            Some(after_table_name) => Some((
+                after_table_name.clone(),
+                self.read_table_replay_epoch(before_table_name).await?,
+            )),
+            None => None,
+        };
+        let before_table_name = before_table_name.clone();
+        let rename_for_ddl = rename.clone();
         let plan = plan.clone();
 
-        run_duckdb_blocking(self.streaming_pool()?, Arc::clone(&self.blocking_slots), move |conn| {
-            let _write_guard = write_guard;
-            let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
-                conn.execute_batch(sql).map_err(|source| {
-                    classified_error_with_detail(
-                        ErrorKind::DestinationQueryFailed,
-                        description,
-                        format_query_error_detail(sql),
-                        source,
-                    )
-                })
-            };
+        run_duckdb_blocking(
+            self.streaming_pool()?,
+            Arc::clone(&self.blocking_slots),
+            move |conn| {
+                let _write_guard = write_guard;
+                let execute_ddl = |sql: &str, description: &'static str| -> EtlResult<()> {
+                    conn.execute_batch(sql).map_err(|source| {
+                        classified_error_with_detail(
+                            ErrorKind::DestinationQueryFailed,
+                            description,
+                            format_query_error_detail(sql),
+                            source,
+                        )
+                    })
+                };
 
-            execute_ddl("begin transaction", "DuckLake DDL transaction failed")?;
+                execute_ddl("begin transaction", "DuckLake DDL transaction failed")?;
 
-            let apply_result = (|| -> EtlResult<()> {
-                let column_names = read_ducklake_table_column_names_blocking(conn, &table_name)?;
-                let nullable_column_names =
-                    read_ducklake_nullable_column_names_blocking(conn, &table_name)?;
-                let DuckLakeSchemaDdlPlan { statements, column_names: _column_names } =
-                    plan_ducklake_schema_ddl_with_nullability(
-                        &table_name,
-                        column_names,
-                        nullable_column_names,
-                        &plan,
-                    )?;
+                let apply_result = (|| -> EtlResult<()> {
+                    // Rename first: the pinned DuckLake engine cannot safely
+                    // rename after column evolution in the same transaction.
+                    let table_name = if let Some((after_table_name, _)) = &rename_for_ddl {
+                        let sql = format!(
+                            "alter table {} rename to {}",
+                            qualified_lake_table_name(&before_table_name),
+                            quote_identifier(after_table_name.table()),
+                        );
+                        execute_ddl(&sql, "DuckLake table rename failed")?;
+                        after_table_name
+                    } else {
+                        &before_table_name
+                    };
+                    let column_names = read_ducklake_table_column_names_blocking(conn, table_name)?;
+                    let nullable_column_names =
+                        read_ducklake_nullable_column_names_blocking(conn, table_name)?;
+                    let DuckLakeSchemaDdlPlan { statements, column_names: _column_names } =
+                        plan_ducklake_schema_ddl_with_nullability(
+                            table_name,
+                            column_names,
+                            nullable_column_names,
+                            &plan,
+                        )?;
 
-                for statement in statements {
-                    execute_ddl(&statement.sql, statement.error_description)?;
+                    for statement in statements {
+                        execute_ddl(&statement.sql, statement.error_description)?;
+                    }
+                    if let Some((after_table_name, replay_epoch)) = &rename_for_ddl {
+                        rename_table_replay_state(
+                            conn,
+                            &before_table_name,
+                            after_table_name,
+                            replay_epoch,
+                        )?;
+                    }
+
+                    Ok(())
+                })();
+
+                if let Err(error) = apply_result {
+                    if let Err(rollback_error) = conn.execute_batch("rollback") {
+                        warn!(
+                            error = %rollback_error,
+                            table = %before_table_name,
+                            "ducklake schema change rollback failed"
+                        );
+                    }
+                    return Err(error);
                 }
 
-                Ok(())
-            })();
+                execute_ddl("commit", "DuckLake DDL transaction commit failed")
+            },
+        )
+        .await?;
 
-            if let Err(error) = apply_result {
-                if let Err(rollback_error) = conn.execute_batch("rollback") {
-                    warn!(
-                        error = %rollback_error,
-                        table = %table_name,
-                        "ducklake schema change rollback failed"
-                    );
-                }
-                return Err(error);
-            }
-
-            execute_ddl("commit", "DuckLake DDL transaction commit failed")
-        })
-        .await
+        if let Some((after_table_name, replay_epoch)) = rename {
+            // Keep the epoch captured before DDL: a new owner can reuse the
+            // freed name and rotate its epoch after the native rename commits.
+            preserve_renamed_table_replay_epoch(
+                &self.metadata_pg_pool,
+                self.metadata_schema.as_ref(),
+                &after_table_name,
+                &replay_epoch,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// Reconciles the configured sort order and maintenance-only insert policy.
@@ -2999,7 +3118,7 @@ where
             DUCKLAKE_COLUMN_NAME_MAPPING,
         )?;
 
-        self.apply_schema_plan(table_name, &plan).await
+        self.apply_schema_change(table_name, None, &plan).await
     }
 
     /// Drops ETL tombstone columns after schema metadata is durably `Applied`.
@@ -3447,6 +3566,10 @@ where
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
         validate_ducklake_table_shape(replicated_table_schema)?;
+        // Initial setup must not adopt a table whose old name has not yet
+        // been freed by another source's relation barrier. Creating recovery
+        // remains idempotent once ownership metadata has been recorded.
+        self.ensure_table_absent(table_name).await?;
         let metadata = DestinationTableMetadata::new_creating(
             table_name.to_metadata_id()?,
             replicated_table_schema.inner().snapshot_id,
@@ -3582,7 +3705,7 @@ where
         table_id: TableId,
         table_name: &DuckLakeTableName,
         metadata: DestinationTableMetadata,
-        target_schema: Option<&ReplicatedTableSchema>,
+        after_schema: Option<&ReplicatedTableSchema>,
     ) -> EtlResult<DestinationTableMetadata> {
         warn!(
             table_id = %table_id,
@@ -3590,30 +3713,37 @@ where
             "ducklake table has pending metadata, recovering interrupted operation"
         );
 
-        let target_schema =
-            self.target_schema_for_recovery(table_id, &metadata, target_schema).await?;
-        validate_ducklake_table_shape(&target_schema)?;
+        let after_schema =
+            self.target_schema_for_recovery(table_id, &metadata, after_schema).await?;
+        validate_ducklake_table_shape(&after_schema)?;
 
         match metadata.table_schema().clone() {
             DestinationTableSchema::Applying {
-                previous_snapshot_id,
-                previous_replication_mask,
+                previous_snapshot_id: before_snapshot_id,
+                previous_replication_mask: before_replication_mask,
                 ..
             } => {
-                let previous_table_schema = self
-                    .load_previous_recovery_table_schema(table_id, previous_snapshot_id)
-                    .await?;
-                let old_schema = ReplicatedTableSchema::from_mask(
-                    previous_table_schema,
-                    previous_replication_mask,
-                );
-                let plan =
-                    old_schema.plan_schema_change(&target_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
+                let before_table_schema =
+                    self.load_previous_recovery_table_schema(table_id, before_snapshot_id).await?;
+                let before_schema =
+                    ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask);
+                let plan = before_schema
+                    .plan_schema_change(&after_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
+                if before_schema.name() != after_schema.name() {
+                    return Err(etl_error!(
+                        ErrorKind::InvalidState,
+                        "Interrupted DuckLake table rename requires recovery",
+                        format!(
+                            "Table '{table_name}' has a pending name change; reconcile the \
+                             destination and replay state before resuming"
+                        )
+                    ));
+                }
                 ensure_ducklake_schema_plan_recoverable(table_name, &plan)?;
-                self.apply_schema_plan(table_name, &plan).await?;
+                self.apply_schema_change(table_name, None, &plan).await?;
             }
             DestinationTableSchema::Creating { .. } => {
-                self.issue_create_table_stmt(table_name, &target_schema).await?;
+                self.issue_create_table_stmt(table_name, &after_schema).await?;
             }
             DestinationTableSchema::Applied { .. } => {
                 return Err(etl_error!(
@@ -3623,12 +3753,12 @@ where
                 ));
             }
         }
-        self.reconcile_missing_replicated_columns(table_name, &target_schema).await?;
-        self.reconcile_table_sorting(table_name, &target_schema).await?;
+        self.reconcile_missing_replicated_columns(table_name, &after_schema).await?;
+        self.reconcile_table_sorting(table_name, &after_schema).await?;
 
         let metadata = metadata.to_applied();
         self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
-        self.cleanup_tombstone_columns_after_applied(table_name, &target_schema).await;
+        self.cleanup_tombstone_columns_after_applied(table_name, &after_schema).await;
         self.applied_tables.lock().insert(table_name.clone());
 
         Ok(metadata)
@@ -4455,17 +4585,24 @@ mod tests {
         })
         .unwrap();
 
-        let columns = resolve_table_sort_columns(&sorting, &table_name, &replicated_table_schema)
-            .unwrap()
-            .unwrap();
+        for table_name in [
+            table_name,
+            DuckLakeTableName::new("public", "Users"),
+            DuckLakeTableName::new("actual_schema", "physical_table"),
+        ] {
+            let columns =
+                resolve_table_sort_columns(&sorting, &table_name, &replicated_table_schema)
+                    .unwrap()
+                    .unwrap();
 
-        assert_eq!(
-            columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
-            vec!["id", "tenant_id"]
-        );
-        assert!(columns.iter().all(|column| {
-            column.direction == DuckLakeSortDirection::Asc && column.nulls.is_none()
-        }));
+            assert_eq!(
+                columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+                vec!["id", "tenant_id"]
+            );
+            assert!(columns.iter().all(|column| {
+                column.direction == DuckLakeSortDirection::Asc && column.nulls.is_none()
+            }));
+        }
     }
 
     #[test]
@@ -4768,6 +4905,36 @@ mod tests {
             );
             assert_eq!(plan.column_names, expected_column_names);
         }
+    }
+
+    /// Column DDL addresses the actual table name supplied after the rename
+    /// phase.
+    #[test]
+    fn column_plan_uses_supplied_actual_table_name() {
+        let before = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "source".to_owned()),
+            vec![ColumnSchema::new("value".to_owned(), PgType::TEXT, -1, 1, true)],
+        )));
+        let after = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            before.id(),
+            TableName::new("public".to_owned(), "renamed".to_owned()),
+            vec![ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 1, true)],
+        )));
+        let shared_plan = before.plan_schema_change(&after, DUCKLAKE_COLUMN_NAME_MAPPING).unwrap();
+        let plan = plan_ducklake_schema_ddl(
+            &DuckLakeTableName::new("actual_schema", "renamed"),
+            vec!["value".to_owned()],
+            &shared_plan,
+        )
+        .unwrap();
+        let statements: Vec<_> =
+            plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+        assert_eq!(
+            statements,
+            ["alter table \"lake\".\"actual_schema\".\"renamed\" rename column \"value\" to \
+              \"payload\"",]
+        );
     }
 
     #[test]
@@ -5442,9 +5609,10 @@ mod tests {
     mod postgres_backed {
         use super::*;
 
-        /// A pending replay epoch is stable until its table reset commits.
+        /// Reset retries retain their pending epoch, and a rename retains the
+        /// captured epoch even when the previous name gets a new owner.
         #[tokio::test(flavor = "multi_thread")]
-        async fn replay_epoch_transition_reuses_pending_epoch_until_reset_completes() {
+        async fn replay_epoch_transitions_preserve_reset_and_rename_boundaries() {
             let dir = TempDir::new().expect("failed to create temp dir");
             let data = path_to_file_url(&dir.path().join("data"));
             let (_catalog_database, catalog) = create_catalog_database().await;
@@ -5515,6 +5683,37 @@ mod tests {
                 .await
                 .expect("failed to read pending replay epoch");
             assert_eq!(pending_replay_epoch, None);
+
+            // Model old-name reuse after native DDL commits but before the
+            // renamed table's epoch is persisted. The new owner must not
+            // supply the renamed table's replay proof.
+            let renamed_replay_epoch =
+                destination.read_table_replay_epoch(&table_name).await.unwrap();
+            let reused_name_replay_epoch =
+                destination.begin_table_replay_epoch_transition(&table_name).await.unwrap();
+            destination
+                .complete_table_replay_epoch_transition(&table_name, &reused_name_replay_epoch)
+                .await
+                .unwrap();
+            let after_table_name = DuckLakeTableName::new(table_name.schema(), "renamed");
+            preserve_renamed_table_replay_epoch(
+                &destination.metadata_pg_pool,
+                destination.metadata_schema.as_ref(),
+                &after_table_name,
+                &renamed_replay_epoch,
+            )
+            .await
+            .unwrap();
+            assert_ne!(renamed_replay_epoch, reused_name_replay_epoch);
+            assert_eq!(
+                destination.read_table_replay_epoch(&table_name).await.unwrap(),
+                reused_name_replay_epoch
+            );
+            assert_eq!(
+                destination.read_table_replay_epoch(&after_table_name).await.unwrap(),
+                renamed_replay_epoch
+            );
+            destination.shutdown().await.unwrap();
         }
 
         #[tokio::test(flavor = "multi_thread")]

@@ -83,7 +83,10 @@ async fn schema_change_batched_operations() {
     );
     let snowflake_table = snowflake_table_name(&table_name);
 
-    with_table_cleanup(&sql, &[&snowflake_table], || async {
+    let renamed_source =
+        TableName::new(table_name.schema.clone(), format!("{}renamed", table_name.name));
+    let renamed_destination = snowflake_table_name(&renamed_source);
+    with_table_cleanup(&sql, &[&snowflake_table, &renamed_destination], || async {
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
         let client = Client::new(Arc::clone(&auth), pipeline_id);
@@ -142,6 +145,15 @@ async fn schema_change_batched_operations() {
             .unwrap();
         database
             .run_sql(&format!(
+                "alter table {} rename to {}",
+                table_name.as_quoted_identifier(),
+                pg_escape::quote_identifier(&renamed_source.name)
+            ))
+            .await
+            .unwrap();
+        let table_name = renamed_source.clone();
+        database
+            .run_sql(&format!(
                 "insert into {} (name, replaced) values ('Bob', 'new-replaced')",
                 table_name.as_quoted_identifier()
             ))
@@ -192,7 +204,8 @@ async fn schema_change_batched_operations() {
             ],
         ];
         let rows =
-            query_default_rows(&sql, config.database(), config.schema(), &snowflake_table).await;
+            query_default_rows(&sql, config.database(), config.schema(), &renamed_destination)
+                .await;
         assert_eq!(rows, expected);
     })
     .await;

@@ -20,11 +20,7 @@ use gcp_bigquery_client::{
         },
         rpc::Status as GoogleRpcStatus,
     },
-    model::{
-        query_parameter::QueryParameter, query_parameter_type::QueryParameterType,
-        query_parameter_value::QueryParameterValue, query_request::QueryRequest,
-        query_response::ResultSet,
-    },
+    model::{query_request::QueryRequest, query_response::ResultSet},
     storage::{AppendRequest, AppendResult, StorageApiConfig, StreamName, TableDescriptor},
     yup_oauth2::parse_service_account_key,
 };
@@ -44,7 +40,7 @@ use crate::{
         },
         query::execute_query,
         schema::{create_columns_spec, postgres_to_bigquery_type},
-        sql::{quote_identifier, quote_information_schema_tables_path, quote_table_path},
+        sql::{quote_identifier, quote_table_path},
     },
     retry::{ClassifiedError, classified_error, classified_error_with_detail},
 };
@@ -956,6 +952,20 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Creates a logical view without replacing an existing object.
+    pub(super) async fn create_view(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        view_name: &BigQueryTableId,
+        target_table_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let view = self.full_table_name(dataset_id, view_name)?;
+        let target = self.full_table_name(dataset_id, target_table_id)?;
+        self.query(QueryRequest::new(format!("create view {view} as select * from {target}")))
+            .await?;
+        Ok(())
+    }
+
     /// Drops a view from BigQuery.
     ///
     /// Executes a DROP VIEW statement to remove the logical view if it exists.
@@ -975,6 +985,32 @@ impl BigQueryClient {
         Ok(())
     }
 
+    /// Deletes a view only when its definition still targets the recorded
+    /// physical table, including after an interrupted logical rename.
+    pub(super) async fn drop_owned_view_if_exists(
+        &self,
+        dataset_id: &BigQueryDatasetId,
+        view_name: &BigQueryTableId,
+        physical_id: &BigQueryTableId,
+    ) -> EtlResult<()> {
+        let table =
+            match self.client.table().get(&self.project_id, dataset_id, view_name, None).await {
+                Ok(table) => table,
+                Err(BQError::ResponseError { error }) if error.error.code == 404 => return Ok(()),
+                Err(error) => return Err(bq_error_to_etl_error(error)),
+            };
+        let expected_query =
+            format!("select * from {}", self.full_table_name(dataset_id, physical_id)?);
+        if table.view.as_ref().is_none_or(|view| view.query.trim() != expected_query) {
+            return Err(etl_error!(
+                ErrorKind::DestinationTableAlreadyExists,
+                "BigQuery view ownership does not match destination metadata",
+                format!("View '{view_name}' does not target recorded table '{physical_id}'")
+            ));
+        }
+        self.drop_view_if_exists(dataset_id, view_name).await
+    }
+
     /// Drops a table from BigQuery.
     ///
     /// Executes a DROP TABLE statement to remove the table and all its data.
@@ -992,52 +1028,6 @@ impl BigQueryClient {
         let _ = self.query(QueryRequest::new(query)).await?;
 
         Ok(())
-    }
-
-    /// Lists physical table ID strings matching a base table prefix.
-    ///
-    /// Queries `INFORMATION_SCHEMA.TABLES` instead of using the destination's
-    /// local cache so reset cleanup can remove versions left behind by earlier
-    /// processes.
-    pub(super) async fn list_physical_table_ids(
-        &self,
-        dataset_id: &BigQueryDatasetId,
-        base_table_id: &BigQueryTableId,
-    ) -> EtlResult<Vec<BigQueryTableId>> {
-        info!(%dataset_id, %base_table_id, "listing versioned tables from bigquery");
-
-        let information_schema_tables =
-            quote_information_schema_tables_path(&self.project_id, dataset_id)?;
-        let query = format!(
-            "select table_name from {information_schema_tables} where table_type = 'BASE TABLE' \
-             and starts_with(table_name, @table_name_prefix) order by table_name"
-        );
-        let mut request = QueryRequest::new(query);
-        request.parameter_mode = Some("NAMED".to_owned());
-        request.query_parameters = Some(vec![QueryParameter {
-            name: Some("table_name_prefix".to_owned()),
-            parameter_type: Some(QueryParameterType {
-                r#type: "STRING".to_owned(),
-                ..Default::default()
-            }),
-            parameter_value: Some(QueryParameterValue {
-                value: Some(format!("{base_table_id}_")),
-                ..Default::default()
-            }),
-        }]);
-
-        let mut result_set = self.query(request).await?;
-        let mut physical_table_ids = Vec::new();
-
-        while result_set.next_row() {
-            if let Some(physical_table_id) =
-                result_set.get_string_by_name("table_name").map_err(bq_error_to_etl_error)?
-            {
-                physical_table_ids.push(physical_table_id);
-            }
-        }
-
-        Ok(physical_table_ids)
     }
 
     /// Adds a column to an existing BigQuery table.

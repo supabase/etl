@@ -488,6 +488,15 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             .await
     }
 
+    /// Renames the physical table before applying its column plan.
+    pub async fn rename_table(
+        &self,
+        before_table_name: &str,
+        after_table_name: &str,
+    ) -> Result<()> {
+        self.sql_client.rename_table(before_table_name, after_table_name).await
+    }
+
     /// Translates a validated schema plan into Snowflake DDL in the supplied
     /// order.
     pub async fn apply_schema_plan(&self, table_name: &str, plan: &SchemaPlan) -> Result<()> {
@@ -719,20 +728,55 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         result
     }
 
+    /// Reopens ingestion under the target name while preserving the confirmed
+    /// replay frontier. A failed open leaves the previous handle intact.
+    async fn refresh_channel_target(
+        &self,
+        channel: &mut ChannelHandle<C>,
+        table_name: &str,
+    ) -> Result<()> {
+        if channel.table_name() == table_name {
+            channel.open().await?;
+        } else {
+            // The new table-derived channel must retain the committed replay
+            // frontier. Opening it without the old offset could duplicate CDC
+            // records when the apply checkpoint is replayed after a restart.
+            let offset = channel.committed_offset().cloned();
+            let mut renamed = ChannelHandle::new(
+                Arc::clone(&self.stream_client),
+                self.pipeline_id,
+                self.database.clone(),
+                self.schema.clone(),
+                table_name.to_owned(),
+            );
+            if let Some(offset) = offset {
+                renamed.open_at(&offset).await?;
+            } else {
+                renamed.open().await?;
+            }
+            *channel = renamed;
+        }
+        Ok(())
+    }
+
     /// Validates and refreshes the table's ingestion state after a schema
     /// change.
     ///
     /// Channels are reopened after ALTER TABLE so Snowpipe picks up the new
     /// column list.
     ///
-    /// Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-classic-recommendation>
-    pub async fn refresh_table(&self, table_id: &TableId, columns: &[ColumnSchema]) -> Result<()> {
+    /// Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api#open-a-named-channel>
+    pub async fn refresh_table(
+        &self,
+        table_id: &TableId,
+        table_name: &str,
+        columns: &[ColumnSchema],
+    ) -> Result<()> {
         self.wait_for_pending_durability().await?;
         let channel = self.get_channel(*table_id).await?;
         let mut channel = channel.lock().await;
-        let table_name = channel.table_name().to_owned();
-        self.validate_table(&table_name, columns).await?;
-        channel.open().await.map(|_| ())
+        self.validate_table(table_name, columns).await?;
+        self.refresh_channel_target(&mut channel, table_name).await
     }
 
     /// Sends one table-copy request and retains its pending durability target.
@@ -962,6 +1006,8 @@ mod tests {
         statuses: std::sync::Mutex<HashMap<String, ChannelStatusResponse>>,
         /// Rejects every append before recording any accepted rows.
         fail_append: bool,
+        /// Rejects opening a particular rename target.
+        fail_open_for: Option<String>,
         /// Counts attempted appends, including failures.
         append_attempts: AtomicUsize,
     }
@@ -979,6 +1025,9 @@ mod tests {
             channel: &str,
             offset_token: Option<&OffsetToken>,
         ) -> Result<OpenChannelResponse> {
+            if self.fail_open_for.as_deref() == Some(table) {
+                return Err(Error::Channel("Synthetic rename channel failure.".to_owned()));
+            }
             let mut statuses = self.statuses.lock().unwrap();
             let status =
                 statuses.entry(table.to_owned()).or_insert_with(|| ChannelStatusResponse {
@@ -1269,6 +1318,52 @@ mod tests {
                 assert_eq!(requests[1].rows.len(), 1);
                 assert_eq!(requests[1].start, OffsetToken::new(10.into(), 2));
             }
+        }
+    }
+
+    /// A renamed table's new channel inherits the confirmed delivery frontier;
+    /// failure to open it must leave the old handle available for diagnosis.
+    #[tokio::test]
+    async fn rename_channel_preserves_committed_offset_and_failed_open_keeps_old_target() {
+        for fail_open in [false, true] {
+            let stream = Arc::new(RecordingStreamClient {
+                fail_open_for: fail_open.then(|| "RENAMED".to_owned()),
+                ..Default::default()
+            });
+            let config =
+                Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+            let sql = SqlClient::new(config, Arc::new(UnusedTokenProvider), reqwest::Client::new());
+            let client = Client::with_clients(
+                sql,
+                Arc::clone(&stream),
+                "db".to_owned(),
+                "schema".to_owned(),
+                1,
+            );
+            let mut channel = ChannelHandle::new(
+                Arc::clone(&stream),
+                1,
+                "db".to_owned(),
+                "schema".to_owned(),
+                "ORIGINAL".to_owned(),
+            );
+            let offset = OffsetToken::new(10_u64.into(), 3);
+            channel.open_at(&offset).await.unwrap();
+
+            let result = client.refresh_channel_target(&mut channel, "RENAMED").await;
+            if fail_open {
+                assert!(result.is_err());
+                assert_eq!(channel.table_name(), "ORIGINAL");
+                assert!(!stream.statuses.lock().unwrap().contains_key("RENAMED"));
+            } else {
+                result.unwrap();
+                assert_eq!(channel.table_name(), "RENAMED");
+                assert_eq!(
+                    stream.statuses.lock().unwrap()["RENAMED"].offset_token,
+                    Some(offset.clone())
+                );
+            }
+            assert_eq!(channel.committed_offset(), Some(&offset));
         }
     }
 

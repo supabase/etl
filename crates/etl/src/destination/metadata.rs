@@ -26,6 +26,10 @@ pub enum DestinationTableSchema {
     },
     /// The current schema has been successfully applied.
     ///
+    /// The supported schema and mapped logical table name match this snapshot.
+    /// The destination-specific physical identifier is stored separately and
+    /// may differ from the logical name, for example a BigQuery view's target.
+    ///
     /// Destinations treat this state as authoritative. Restart and cache misses
     /// may rebuild process-local or derived non-data-bearing state, but must
     /// not recreate or structurally repair the data-bearing destination table.
@@ -63,7 +67,10 @@ impl DestinationTableSchema {
 /// incomplete recovery metadata unrepresentable in memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestinationTableMetadata {
-    /// The name or identifier of the table in the destination system.
+    /// The name or identifier of the data-bearing destination table.
+    ///
+    /// During Applying, this retains the before name even if remote DDL has
+    /// already renamed the table. Applied records the resulting identifier.
     table_id: String,
     /// The schema state stored for the destination table.
     table_schema: DestinationTableSchema,
@@ -95,7 +102,10 @@ impl DestinationTableMetadata {
         }
     }
 
-    /// Returns the destination-specific table identifier.
+    /// Returns the destination-specific physical table identifier.
+    ///
+    /// During [`DestinationTableSchema::Applying`], this is the before
+    /// identifier and may no longer address the remotely renamed table.
     pub fn table_id(&self) -> &str {
         &self.table_id
     }

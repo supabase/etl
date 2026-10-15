@@ -413,6 +413,12 @@ impl<C: StreamClient> ChannelHandle<C> {
         &self.table
     }
 
+    /// Returns the last provider-confirmed committed offset without querying a
+    /// table that may already have been renamed.
+    pub(in crate::snowflake) fn committed_offset(&self) -> Option<&OffsetToken> {
+        self.progress.committed_offset.as_ref()
+    }
+
     /// Opens or reopens the channel while preserving Snowflake's stored offset.
     ///
     /// Opening fences older continuation tokens. If rows are still in flight,

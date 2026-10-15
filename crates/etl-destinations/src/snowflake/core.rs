@@ -22,7 +22,10 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::{
-    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        ensure_reset_table_name_is_unambiguous,
+    },
     snowflake::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
@@ -545,25 +548,25 @@ where
         }
     }
 
-    async fn handle_relation_event(&self, new_schema: &ReplicatedTableSchema) -> EtlResult<bool> {
-        let table_id = new_schema.id();
-        let new_snapshot_id = new_schema.inner().snapshot_id;
+    async fn handle_relation_event(&self, after_schema: &ReplicatedTableSchema) -> EtlResult<bool> {
+        let table_id = after_schema.id();
+        let after_snapshot_id = after_schema.inner().snapshot_id;
 
         let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
             bail!(
                 ErrorKind::CorruptedTableSchema,
                 "Destination metadata missing for Snowflake schema change",
                 format!(
-                    "Table {table_id} received schema snapshot {new_snapshot_id}, but destination \
-                     metadata from initial synchronization was not found."
+                    "Table {table_id} received schema snapshot {after_snapshot_id}, but \
+                     destination metadata from initial synchronization was not found."
                 )
             );
         };
         ensure_snowflake_metadata_applied(table_id, &metadata)?;
 
-        let current_snapshot_id = metadata.snapshot_id();
-        let current_replication_mask = metadata.replication_mask().clone();
-        let new_replication_mask = new_schema.replication_mask().clone();
+        let before_snapshot_id = metadata.snapshot_id();
+        let before_replication_mask = metadata.replication_mask().clone();
+        let after_replication_mask = after_schema.replication_mask().clone();
 
         // A relation carries no channel offset proving replay coverage or
         // ordering between masks. Reject older snapshots and equal-snapshot
@@ -571,67 +574,86 @@ where
         ensure_relation_schema_transition(
             "Snowflake",
             table_id,
-            current_snapshot_id,
-            &current_replication_mask,
-            new_snapshot_id,
-            &new_replication_mask,
+            before_snapshot_id,
+            &before_replication_mask,
+            after_snapshot_id,
+            &after_replication_mask,
         )?;
 
-        if current_snapshot_id == new_snapshot_id {
+        if before_snapshot_id == after_snapshot_id {
             info!(table_id = ?table_id, "schema unchanged, skipping relation event");
             return Ok(false);
         }
 
         info!(
             table_id = ?table_id,
-            "schema change detected: snapshot_id {current_snapshot_id} -> {new_snapshot_id}"
+            "schema change detected: snapshot_id {before_snapshot_id} -> {after_snapshot_id}"
         );
 
-        new_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
-        let target_columns: Vec<_> =
-            new_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
-        schema::validate_no_cdc_collisions(&target_columns).map_err(EtlError::from)?;
+        after_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        let after_columns: Vec<_> =
+            after_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
+        schema::validate_no_cdc_collisions(&after_columns).map_err(EtlError::from)?;
 
-        let current_table_schema = self
-            .store
-            .get_table_schema(&table_id, current_snapshot_id)
-            .await?
-            .ok_or_else(|| {
+        let before_table_schema =
+            self.store.get_table_schema(&table_id, before_snapshot_id).await?.ok_or_else(|| {
                 etl_error!(
                     ErrorKind::InvalidState,
                     "Stored schema snapshot missing for Snowflake schema change",
                     format!(
-                        "Table {table_id} needs stored schema snapshot {current_snapshot_id} to \
-                         compare with incoming snapshot {new_snapshot_id}, but it was not found."
+                        "Table {table_id} needs stored schema snapshot {before_snapshot_id} to \
+                         compare with incoming snapshot {after_snapshot_id}, but it was not found."
                     )
                 )
             })?;
 
-        let current_schema = ReplicatedTableSchema::from_mask(
-            current_table_schema,
-            current_replication_mask.clone(),
-        );
-        let current_columns: Vec<_> =
-            current_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
-        let table_name = metadata.table_id().to_owned();
+        let before_schema =
+            ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());
+        let before_columns: Vec<_> =
+            before_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
+        let before_table_name = metadata.table_id().to_owned();
+        let plan = before_schema.plan_schema_change(after_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        let after_table_name = if before_schema.name() != after_schema.name() {
+            try_stringify_table_name(after_schema.name())?.to_uppercase()
+        } else {
+            before_table_name.clone()
+        };
+        if after_table_name != before_table_name
+            && self.client.table_exists(&after_table_name).await.map_err(EtlError::from)?
+        {
+            bail!(
+                ErrorKind::DestinationTableAlreadyExists,
+                "Snowflake rename target already exists",
+                format!(
+                    "Cannot rename table '{before_table_name}' to occupied destination \
+                     '{after_table_name}'"
+                )
+            );
+        }
         self.client
-            .prepare_existing_table(table_id, &table_name, &current_columns)
+            .prepare_existing_table(table_id, &before_table_name, &before_columns)
             .await
             .map_err(EtlError::from)?;
 
-        let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
         let updated_metadata = DestinationTableMetadata::new_applied(
             metadata.table_id().to_owned(),
-            current_snapshot_id,
-            current_replication_mask,
+            before_snapshot_id,
+            before_replication_mask,
         )
-        .with_schema_change(new_snapshot_id, new_replication_mask)?;
-        self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+        .with_schema_change(after_snapshot_id, after_replication_mask)?;
+        self.store.store_destination_table_metadata(table_id, updated_metadata).await?;
+
+        if after_table_name != before_table_name {
+            self.client
+                .rename_table(&before_table_name, &after_table_name)
+                .await
+                .map_err(EtlError::from)?;
+        }
 
         if let Err(err) =
-            self.client.apply_schema_plan(&table_name, &plan).await.map_err(EtlError::from)
+            self.client.apply_schema_plan(&after_table_name, &plan).await.map_err(EtlError::from)
         {
             warn!(
                 table_id = ?table_id,
@@ -641,9 +663,19 @@ where
             return Err(err);
         }
 
-        self.client.refresh_table(&table_id, &target_columns).await.map_err(EtlError::from)?;
+        self.client
+            .refresh_table(&table_id, &after_table_name, &after_columns)
+            .await
+            .map_err(EtlError::from)?;
         self.store
-            .store_destination_table_metadata(table_id, updated_metadata.to_applied())
+            .store_destination_table_metadata(
+                table_id,
+                DestinationTableMetadata::new_applied(
+                    after_table_name,
+                    after_snapshot_id,
+                    after_schema.replication_mask().clone(),
+                ),
+            )
             .await?;
 
         info!(table_id = ?table_id, "schema change applied");
@@ -724,15 +756,23 @@ where
             // them.
             let task_guard = self.tasks.drain().await?;
 
-            // A source rename changes the schema name but not the destination
-            // this table owns. Use the same durable target for channel and
-            // table deletion, including when no channel is cached
-            // after a restart.
+            // Metadata identifies the actual owned target, including during
+            // an interrupted rename. Use it for both channel and table
+            // deletion rather than deriving a target from a newer snapshot.
             let metadata = self
                 .writer
                 .store
                 .get_destination_table_metadata(replicated_table_schema.id())
                 .await?;
+            if let Some(metadata) = &metadata {
+                ensure_reset_table_name_is_unambiguous(
+                    "Snowflake",
+                    &self.writer.store,
+                    replicated_table_schema.id(),
+                    metadata,
+                )
+                .await?;
+            }
             let table_name = metadata.as_ref().map_or_else(
                 || {
                     try_stringify_table_name(replicated_table_schema.name())

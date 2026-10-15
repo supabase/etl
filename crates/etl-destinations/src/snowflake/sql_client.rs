@@ -103,6 +103,18 @@ impl<T: TokenProvider> SqlClient<T> {
         Ok(())
     }
 
+    /// Renames a table without replacing an existing destination object.
+    pub(super) async fn rename_table(
+        &self,
+        before_table_name: &str,
+        after_table_name: &str,
+    ) -> Result<()> {
+        let before_table_name = self.fully_qualified_name(before_table_name);
+        let after_table_name = self.fully_qualified_name(after_table_name);
+        self.execute_ddl(&format!("alter table {before_table_name} rename to {after_table_name}"))
+            .await
+    }
+
     /// Create a table with the given columns and provider-driven evolution
     /// disabled.
     pub async fn create_table_if_not_exists(

@@ -3,6 +3,7 @@ use std::{collections::HashSet, sync::Arc};
 use etl::{
     data::{Cell, Date, OldTableRow, TableRow, UpdatedTableRow},
     destination::{Destination as _, TableCopyAttemptId, TableCopyBatchId, WriteEventsDurability},
+    error::ErrorKind,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
@@ -48,6 +49,127 @@ fn make_users_schema_with_id(table_id: u32, table_name: &str) -> TableSchema {
 fn test_snapshot_id(value: u64) -> SnapshotId {
     let lsn = PgLsn::from(value);
     SnapshotId::new(lsn, lsn)
+}
+
+/// Reusing the old source name must not let truncate or reset delete the
+/// renamed table's physical target, which still carries its original prefix.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_rename_preserves_physical_ownership_after_old_name_is_reused() {
+    install_crypto_provider();
+    init_test_tracing();
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+    let database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let old = make_users_schema("orders");
+    let renamed = TableSchema::with_snapshot_id(
+        old.id,
+        TableName::new("public".to_owned(), "renamed".to_owned()),
+        old.column_schemas.clone(),
+        test_snapshot_id(20),
+    );
+    store.store_table_schema(old.clone()).await.unwrap();
+    store.store_table_schema(renamed.clone()).await.unwrap();
+    let old = ReplicatedTableSchema::all(Arc::new(old));
+    let renamed = ReplicatedTableSchema::all(Arc::new(renamed));
+    let destination = database.build_destination(1, store.clone()).await;
+    write_table_rows(
+        &destination,
+        &old,
+        vec![TableRow::new(vec![
+            Cell::I32(1),
+            Cell::String("preserved".to_owned()),
+            Cell::I32(10),
+        ])],
+    )
+    .await
+    .unwrap();
+    let initial = store.get_destination_table_metadata(old.id()).await.unwrap().unwrap();
+    write_events(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![Event::Relation(RelationEvent { replicated_table_schema: renamed.clone() })],
+    )
+    .await
+    .unwrap();
+    destination.shutdown().await.unwrap();
+    let applied = store.get_destination_table_metadata(old.id()).await.unwrap().unwrap();
+    assert!(applied.is_applied());
+    assert_eq!(applied.snapshot_id(), renamed.inner().snapshot_id);
+    assert_eq!(applied.table_id(), initial.table_id());
+    assert!(database.get_table_metadata_by_id("public_orders").await.is_none());
+
+    let reused = make_users_schema_with_id(2, "orders");
+    store.store_table_schema(reused.clone()).await.unwrap();
+    let reused = ReplicatedTableSchema::all(Arc::new(reused));
+    let destination = database.build_destination(1, store.clone()).await;
+    write_table_rows(
+        &destination,
+        &reused,
+        vec![TableRow::new(vec![Cell::I32(2), Cell::String("reused".to_owned()), Cell::I32(20)])],
+    )
+    .await
+    .unwrap();
+    write_events(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![Event::Truncate(TruncateEvent {
+            commit_lsn: PgLsn::from(30),
+            tx_ordinal: 0,
+            options: 0,
+            truncated_tables: vec![reused.clone()],
+        })],
+    )
+    .await
+    .unwrap();
+    destination.shutdown().await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(
+            database.query_table(renamed.name().clone()).await.unwrap()
+        ),
+        vec![BigQueryUser::new(1, "preserved", 10)]
+    );
+    assert!(database.wait_for_no_rows(reused.name().clone()).await);
+
+    let occupied = TableSchema::with_snapshot_id(
+        reused.id(),
+        renamed.name().clone(),
+        reused.inner().column_schemas.clone(),
+        test_snapshot_id(40),
+    );
+    store.store_table_schema(occupied.clone()).await.unwrap();
+    let before_collision =
+        store.get_destination_table_metadata(reused.id()).await.unwrap().unwrap();
+    let destination = database.build_destination(1, store.clone()).await;
+    let error = write_events(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![Event::Relation(RelationEvent {
+            replicated_table_schema: ReplicatedTableSchema::all(Arc::new(occupied)),
+        })],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+    assert_eq!(
+        store.get_destination_table_metadata(reused.id()).await.unwrap().unwrap(),
+        before_collision
+    );
+    destination.shutdown().await.unwrap();
+
+    // An uncertain Applied commit after the first rename must not authorize
+    // reset to delete the second source table now using its previous name.
+    let pending = initial
+        .with_schema_change(renamed.inner().snapshot_id, renamed.replication_mask().clone())
+        .unwrap();
+    store.store_destination_table_metadata(renamed.id(), pending.clone()).await.unwrap();
+    let destination = database.build_destination(1, store.clone()).await;
+    drop_table_for_copy(&destination, &renamed).await.unwrap_err();
+    assert!(database.get_table_metadata_by_id("public_orders").await.is_some());
+    assert!(database.get_table_metadata_by_id(applied.table_id()).await.is_some());
+    assert_eq!(store.get_destination_table_metadata(renamed.id()).await.unwrap(), Some(pending));
+    destination.shutdown().await.unwrap();
 }
 
 /// Parallel copy and retries preserve distinct keys, and partial transaction
@@ -952,11 +1074,10 @@ async fn table_creation_recovers_after_destination_restart() {
         assert_eq!(recovered_metadata.snapshot_id(), applied_metadata.snapshot_id());
         assert_eq!(recovered_metadata.replication_mask(), applied_metadata.replication_mask());
 
-        // Recovery does not clean up the abandoned target. Explicit reset
-        // below provides the next cleanup opportunity.
-        assert_eq!(
-            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_some(),
-            !delete_before_restart
+        // Recovery can reclaim this exact recorded identity after the new
+        // physical target and view become authoritative.
+        assert!(
+            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_none()
         );
 
         let rows =
@@ -967,7 +1088,10 @@ async fn table_creation_recovers_after_destination_restart() {
         );
         drop_table_for_copy(&restarted_destination, &replicated_table_schema).await.unwrap();
         assert!(
-            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_none()
+            bigquery_database
+                .get_table_metadata_by_id(recovered_metadata.table_id())
+                .await
+                .is_none()
         );
     }
 }

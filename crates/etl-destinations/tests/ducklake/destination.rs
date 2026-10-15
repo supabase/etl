@@ -77,7 +77,7 @@ use etl_telemetry::tracing::init_test_tracing;
 use futures::FutureExt;
 use pg_escape::{quote_identifier, quote_literal};
 #[cfg(feature = "test-utils")]
-use sqlx::{postgres::PgPoolOptions, types::Json};
+use sqlx::{AssertSqlSafe, postgres::PgPoolOptions, types::Json};
 #[cfg(feature = "test-utils")]
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use url::Url;
@@ -2655,6 +2655,307 @@ async fn write_events_skips_applied_stale_prefix_and_rejects_pending_stale_row()
             (2, "Bob".to_owned(), Some("bob@example.com".to_owned())),
         ]
     );
+}
+
+/// Mixed table and column changes, including their replay markers, either
+/// commit in one DuckLake snapshot or roll back together on catalog failure.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn table_rename_and_column_changes_commit_atomically() {
+    use etl::event::{InsertEvent, RelationEvent};
+
+    for reject_commit in [false, true] {
+        let lake = create_test_lake("atomic_table_rename").await;
+        let store = MemoryStore::new();
+        let old = make_schema(1, "public", "orders");
+        let new = TableSchema::with_snapshot_id(
+            old.id,
+            TableName::new("public".to_owned(), "renamed".to_owned()),
+            vec![
+                old.column_schemas[0].clone(),
+                ColumnSchema::new("payload".to_owned(), PgType::TEXT, -1, 2, true),
+                ColumnSchema::new("extra".to_owned(), PgType::INT4, -1, 3, true),
+            ],
+            test_snapshot_id(20, 20),
+        );
+        store.store_table_schema(old.clone()).await.unwrap();
+        store.store_table_schema(new.clone()).await.unwrap();
+        let old = make_replicated_table_schema(&old);
+        let new = make_replicated_table_schema(&new);
+        let destination =
+            new_unbuffered_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+        destination.write_table_rows_for_tests(&old, Vec::new()).await.unwrap();
+        destination
+            .write_events(vec![Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(10),
+                tx_ordinal: 0,
+                replicated_table_schema: old.clone(),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_owned())]),
+            })])
+            .await
+            .unwrap();
+        let original = store.get_destination_table_metadata(old.id()).await.unwrap().unwrap();
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(lake.catalog_url.as_str())
+            .await
+            .unwrap();
+        let metadata_schema: String = sqlx::query_scalar(
+            "select table_schema from information_schema.tables where table_name = \
+             'ducklake_snapshot'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let snapshot_query = format!(
+            "select max(snapshot_id)::bigint from {}.ducklake_snapshot",
+            quote_identifier(&metadata_schema)
+        );
+        let before: i64 = sqlx::query_scalar(AssertSqlSafe(snapshot_query.as_str()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        if reject_commit {
+            // Fail the actual catalog commit after DuckLake has executed the
+            // rename and column DDL, without adding production failure hooks.
+            sqlx::query(AssertSqlSafe(format!(
+                "alter table {}.ducklake_column add constraint reject_extra check (column_name <> \
+                 'extra')",
+                quote_identifier(&metadata_schema)
+            )))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let result = destination
+            .write_events(vec![Event::Relation(RelationEvent {
+                replicated_table_schema: new.clone(),
+            })])
+            .await;
+        if reject_commit {
+            result.unwrap_err();
+        } else {
+            result.unwrap();
+        }
+        destination.shutdown().await.unwrap();
+        drop(destination);
+
+        let after: i64 = sqlx::query_scalar(AssertSqlSafe(snapshot_query.as_str()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(after, before + i64::from(!reject_commit));
+        let metadata = store.get_destination_table_metadata(new.id()).await.unwrap().unwrap();
+        let expected_metadata = if reject_commit {
+            original
+                .with_schema_change(new.inner().snapshot_id, new.replication_mask().clone())
+                .unwrap()
+        } else {
+            DestinationTableMetadata::new_applied(
+                DuckLakeTableName::new("public", "renamed").to_metadata_id().unwrap(),
+                new.inner().snapshot_id,
+                new.replication_mask().clone(),
+            )
+        };
+        assert_eq!(metadata, expected_metadata);
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        let before_name = DuckLakeTableName::new("public", "orders");
+        let after_name = DuckLakeTableName::new("public", "renamed");
+        assert_eq!(lake_table_exists(&conn, &before_name), reject_commit);
+        assert_eq!(lake_table_exists(&conn, &after_name), !reject_commit);
+        let target = if reject_commit { &before_name } else { &after_name };
+        assert_eq!(count_rows(&conn, target), 1);
+        assert_eq!(read_streaming_progress(&conn, target), Some((10, 0)));
+        let other = if reject_commit { &after_name } else { &before_name };
+        assert_eq!(read_streaming_progress(&conn, other), None);
+        let column = if reject_commit { "name" } else { "payload" };
+        let value: String = conn
+            .query_row(
+                &format!(
+                    "select {} from {}",
+                    quote_identifier(column),
+                    qualified_lake_table_name(target)
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "before");
+        assert_eq!(
+            table_column_names(&conn, target),
+            if reject_commit { vec!["id", "name"] } else { vec!["id", "payload", "extra"] }
+        );
+        pool.close().await;
+    }
+}
+
+/// Renames preserve the durable streaming watermark across a restart, including
+/// case-only changes that retain DuckLake's existing physical identifier.
+/// An uncertain metadata commit after the rename must still fail closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_rename_preserves_replay_progress_after_restart() {
+    use etl::event::{InsertEvent, RelationEvent};
+
+    for target_name in ["renamed", "Orders"] {
+        let lake = create_test_lake("table_rename_replay").await;
+        let store = MemoryStore::new();
+        let old = make_schema(1, "public", "orders");
+        let new = TableSchema::with_snapshot_id(
+            old.id,
+            TableName::new("public".to_owned(), target_name.to_owned()),
+            old.column_schemas.clone(),
+            test_snapshot_id(20, 20),
+        );
+        store.store_table_schema(old.clone()).await.unwrap();
+        store.store_table_schema(new.clone()).await.unwrap();
+        let old = make_replicated_table_schema(&old);
+        let new = make_replicated_table_schema(&new);
+        let destination = new_unbuffered_destination(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        destination.write_table_rows_for_tests(&old, Vec::new()).await.unwrap();
+        let original = store.get_destination_table_metadata(old.id()).await.unwrap().unwrap();
+        let reused_schema = make_schema(2, "public", "orders");
+        store.store_table_schema(reused_schema.clone()).await.unwrap();
+        let reused = make_replicated_table_schema(&reused_schema);
+        let error = destination.write_table_rows_for_tests(&reused, Vec::new()).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+        assert!(store.get_destination_table_metadata(reused.id()).await.unwrap().is_none());
+        let before = Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(10),
+            tx_ordinal: 0,
+            replicated_table_schema: old.clone(),
+            table_row: TableRow::new(vec![Cell::I32(1), Cell::String("before".to_owned())]),
+        });
+        let after = Event::Insert(InsertEvent {
+            commit_lsn: PgLsn::from(30),
+            tx_ordinal: 0,
+            replicated_table_schema: new.clone(),
+            table_row: TableRow::new(vec![Cell::I32(2), Cell::String("after".to_owned())]),
+        });
+        destination.write_events(vec![before.clone()]).await.unwrap();
+        destination
+            .write_events(vec![
+                Event::Relation(RelationEvent { replicated_table_schema: new.clone() }),
+                after.clone(),
+            ])
+            .await
+            .unwrap();
+        destination.shutdown().await.unwrap();
+        drop(destination);
+
+        let destination = new_unbuffered_destination(
+            lake.catalog_url.clone(),
+            lake.data_url.clone(),
+            1,
+            None,
+            None,
+            None,
+            None,
+            store.clone(),
+        )
+        .await
+        .unwrap();
+        if target_name == "renamed" {
+            destination
+                .write_table_rows_for_tests(
+                    &reused,
+                    vec![TableRow::new(vec![Cell::I32(3), Cell::String("reused".to_owned())])],
+                )
+                .await
+                .unwrap();
+        }
+        if target_name == "renamed" {
+            // A second source can use the freed name, but cannot rename over
+            // the first table's occupied destination or change its metadata.
+            let occupied = TableSchema::with_snapshot_id(
+                reused.id(),
+                new.name().clone(),
+                reused.inner().column_schemas.clone(),
+                test_snapshot_id(40, 40),
+            );
+            store.store_table_schema(occupied.clone()).await.unwrap();
+            let before_collision = store.get_destination_table_metadata(reused.id()).await.unwrap();
+            let error = destination
+                .write_events(vec![Event::Relation(RelationEvent {
+                    replicated_table_schema: make_replicated_table_schema(&occupied),
+                })])
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+            assert_eq!(
+                store.get_destination_table_metadata(reused.id()).await.unwrap(),
+                before_collision
+            );
+        }
+        destination
+            .write_events(vec![
+                Event::Relation(RelationEvent { replicated_table_schema: old }),
+                before,
+                after,
+            ])
+            .await
+            .unwrap();
+        destination.shutdown().await.unwrap();
+        drop(destination);
+        let applied = store.get_destination_table_metadata(new.id()).await.unwrap().unwrap();
+        assert!(applied.is_applied());
+        assert_eq!(applied.snapshot_id(), new.inner().snapshot_id);
+        let physical_name = if target_name == "Orders" { "orders" } else { target_name };
+        let table = DuckLakeTableName::new("public", physical_name);
+        assert_eq!(applied.table_id(), table.to_metadata_id().unwrap());
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        let mut statement = conn
+            .prepare(&format!(
+                "select id, name from {} order by id",
+                qualified_lake_table_name(&table)
+            ))
+            .unwrap();
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows, [(1, "before".to_owned()), (2, "after".to_owned())]);
+        if target_name == "renamed" {
+            let reused_name = DuckLakeTableName::new("public", "orders");
+            let value: String = conn
+                .query_row(
+                    &format!("select name from {}", qualified_lake_table_name(&reused_name)),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(value, "reused");
+        }
+        drop(statement);
+        drop(conn);
+
+        // Simulate a crash after destination commits but before Applied is
+        // persisted. Matching columns at the new name do not prove ownership.
+        let pending = original
+            .with_schema_change(new.inner().snapshot_id, new.replication_mask().clone())
+            .unwrap();
+        store.store_destination_table_metadata(new.id(), pending.clone()).await.unwrap();
+        let destination =
+            new_test_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+        let error = destination.startup().await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        let error = drop_table_for_copy_with_result(&destination, &new).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(store.get_destination_table_metadata(new.id()).await.unwrap(), Some(pending));
+        destination.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

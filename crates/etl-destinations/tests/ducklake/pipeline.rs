@@ -1390,7 +1390,6 @@ async fn schema_change_ordered_name_reuse() {
     let lake = create_test_lake("schema_change_ordered_name_reuse").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
     let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
@@ -1451,6 +1450,12 @@ async fn schema_change_ordered_name_reuse() {
         .await
         .unwrap();
     database
+        .run_sql(&format!("alter table {} rename to renamed", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    let table_name = etl::schema::TableName::new(table_name.schema.clone(), "renamed".to_owned());
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
+    database
         .run_sql(&format!(
             "insert into {} (status, name, age) values ('Bob', 'pending', 'thirty')",
             table_name.as_quoted_identifier()
@@ -1458,8 +1463,17 @@ async fn schema_change_ordered_name_reuse() {
         .await
         .unwrap();
 
-    events_notify.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
+    {
+        let completion = pipeline.wait();
+        tokio::pin!(completion);
+        tokio::select! {
+            () = events_notify.notified() => {}
+            result = &mut completion => panic!("pipeline stopped before the post-rename row: {result:?}"),
+        }
+        pipeline.shutdown();
+        completion.await.unwrap();
+    }
+    drop(pipeline);
     drop(destination);
     checkpoint_lake(&catalog_url, &data_url);
 

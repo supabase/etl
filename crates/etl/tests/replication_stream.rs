@@ -37,8 +37,8 @@ const MATRIX_UUID: &str = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11";
 #[derive(Debug, PartialEq, Eq)]
 enum StreamMarker {
     Begin(PgLsn),
-    DdlMessage(PgLsn, u32, Option<String>, Vec<String>),
-    Relation(u32, Vec<String>),
+    DdlMessage(PgLsn, u32, Option<String>, Vec<String>, JsonValue),
+    Relation(u32, Vec<String>, TableName),
     Insert(u32),
     Truncate(Vec<u32>),
     Commit(PgLsn),
@@ -60,14 +60,14 @@ impl StreamMarker {
     fn expected(&self) -> ExpectedStreamMarker {
         match self {
             Self::Begin(_) => ExpectedStreamMarker::Begin,
-            Self::DdlMessage(_, table_id, publication_name, columns) => {
+            Self::DdlMessage(_, table_id, publication_name, columns, _) => {
                 ExpectedStreamMarker::DdlMessage(
                     *table_id,
                     publication_name.clone(),
                     columns.clone(),
                 )
             }
-            Self::Relation(table_id, columns) => {
+            Self::Relation(table_id, columns, _) => {
                 ExpectedStreamMarker::Relation(*table_id, columns.clone())
             }
             Self::Insert(table_id) => ExpectedStreamMarker::Insert(*table_id),
@@ -134,6 +134,7 @@ async fn collect_stream_markers(
                         table_id,
                         publication_name,
                         column_names,
+                        json,
                     ));
                 }
                 LogicalReplicationMessage::Relation(relation) => {
@@ -146,7 +147,14 @@ async fn collect_stream_markers(
                         })
                         .collect();
 
-                    markers.push(StreamMarker::Relation(table_id, column_names));
+                    markers.push(StreamMarker::Relation(
+                        table_id,
+                        column_names,
+                        TableName::new(
+                            relation.namespace().unwrap().to_owned(),
+                            relation.name().unwrap().to_owned(),
+                        ),
+                    ));
                 }
                 LogicalReplicationMessage::Insert(insert) => {
                     markers.push(StreamMarker::Insert(insert.rel_id()));
@@ -174,7 +182,7 @@ async fn assert_stream_markers_and_replay(
     slot_name: &str,
     start_lsn: PgLsn,
     expected: &[ExpectedStreamMarker],
-) {
+) -> Vec<StreamMarker> {
     let initial_markers = collect_stream_markers(initial_stream, expected.len()).await;
     let initial_shapes = initial_markers.iter().map(StreamMarker::expected).collect::<Vec<_>>();
     assert_eq!(initial_shapes, expected);
@@ -218,6 +226,7 @@ async fn assert_stream_markers_and_replay(
         .unwrap();
     let replay_markers = collect_stream_markers(replay_stream, expected.len()).await;
     assert_eq!(replay_markers, initial_markers);
+    initial_markers
 }
 
 /// Starts a logical replication stream whose slot can be replayed from its
@@ -1346,41 +1355,55 @@ async fn logical_replication_replays_consecutive_ddl_only_transactions_without_r
     .await;
 }
 
+/// DDL retains every committed table and column rename endpoint while
+/// pgoutput emits only the final relation when the next row needs it.
 #[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_replays_consecutive_renames_as_one_final_relation() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
-    let table_name = test_table_name("consecutive_rename_cycle");
-    let quoted_table_name = table_name.as_quoted_identifier();
+    let before_table_name = test_table_name("consecutive_rename_cycle");
+    let quoted_before_table_name = before_table_name.as_quoted_identifier();
     let table_id = database
-        .create_table(table_name.clone(), true, &[("a", "text"), ("b", "text")])
+        .create_table(before_table_name.clone(), true, &[("a", "text"), ("b", "text")])
         .await
         .unwrap();
 
     let publication_name = "consecutive_rename_cycle_pub";
-    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .create_publication(publication_name, std::slice::from_ref(&before_table_name))
+        .await
+        .unwrap();
 
     let (client, initial_stream, slot_name, start_lsn) =
         start_replayable_stream(&database, publication_name, "consecutive_rename_cycle_slot").await;
 
     database
         .run_sql(&format!(
-            "alter table {quoted_table_name} rename column a to supabase_etl_source_swap"
+            "alter table {quoted_before_table_name} rename column a to supabase_etl_source_swap"
         ))
         .await
         .unwrap();
     database
-        .run_sql(&format!("alter table {quoted_table_name} rename column b to a"))
+        .run_sql(&format!("alter table {quoted_before_table_name} rename column b to a"))
         .await
         .unwrap();
+    database
+        .run_sql(&format!("alter table {quoted_before_table_name} rename to renamed"))
+        .await
+        .unwrap();
+    let after_table_name = TableName::new(before_table_name.schema.clone(), "renamed".to_owned());
     database
         .run_sql(&format!(
-            "alter table {quoted_table_name} rename column supabase_etl_source_swap to b"
+            "alter table {} rename column supabase_etl_source_swap to b",
+            after_table_name.as_quoted_identifier()
         ))
         .await
         .unwrap();
-    database.insert_values(table_name, &["a", "b"], &[&"old-b", &"old-a"]).await.unwrap();
+    database
+        .insert_values(after_table_name.clone(), &["a", "b"], &[&"old-b", &"old-a"])
+        .await
+        .unwrap();
 
     let expected = [
         ExpectedStreamMarker::Begin,
@@ -1388,6 +1411,13 @@ async fn logical_replication_replays_consecutive_renames_as_one_final_relation()
             table_id.into_inner(),
             None,
             vec!["id".to_owned(), "supabase_etl_source_swap".to_owned(), "b".to_owned()],
+        ),
+        ExpectedStreamMarker::Commit,
+        ExpectedStreamMarker::Begin,
+        ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            vec!["id".to_owned(), "supabase_etl_source_swap".to_owned(), "a".to_owned()],
         ),
         ExpectedStreamMarker::Commit,
         ExpectedStreamMarker::Begin,
@@ -1413,7 +1443,7 @@ async fn logical_replication_replays_consecutive_renames_as_one_final_relation()
         ExpectedStreamMarker::Commit,
     ];
 
-    assert_stream_markers_and_replay(
+    let markers = assert_stream_markers_and_replay(
         client,
         initial_stream,
         &database,
@@ -1423,6 +1453,115 @@ async fn logical_replication_replays_consecutive_renames_as_one_final_relation()
         &expected,
     )
     .await;
+    let ddl_table_names: Vec<_> = markers
+        .iter()
+        .filter_map(|marker| match marker {
+            StreamMarker::DdlMessage(_, _, _, _, payload) => Some(TableName::new(
+                payload["nspname"].as_str().unwrap().to_owned(),
+                payload["relname"].as_str().unwrap().to_owned(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ddl_table_names,
+        [
+            before_table_name.clone(),
+            before_table_name,
+            after_table_name.clone(),
+            after_table_name.clone()
+        ]
+    );
+    assert!(markers.iter().any(|marker| {
+        matches!(marker, StreamMarker::Relation(id, _, name)
+            if *id == table_id.into_inner() && name == &after_table_name)
+    }));
+}
+
+/// Comma-separated actions produce one snapshot; separate statements in the
+/// same transaction retain separate snapshots. Both replay before one relation.
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_replication_compound_and_separate_alters_preserve_snapshot_boundaries() {
+    init_test_tracing();
+    for compound in [true, false] {
+        let mut database = spawn_source_database().await;
+        let table_name = test_table_name("compound_alter");
+        let table_id = database
+            .create_table(table_name.clone(), true, &[("value", "text not null")])
+            .await
+            .unwrap();
+        let publication_name = "compound_alter_pub";
+        database
+            .create_publication(publication_name, std::slice::from_ref(&table_name))
+            .await
+            .unwrap();
+        let (client, stream, slot_name, start_lsn) =
+            start_replayable_stream(&database, publication_name, "compound_alter_slot").await;
+
+        let transaction = database.begin_transaction().await;
+        let quoted = table_name.as_quoted_identifier();
+        if compound {
+            transaction
+                .run_sql(&format!(
+                    "alter table {quoted} add column extra integer default 7, alter column value \
+                     drop not null"
+                ))
+                .await
+                .unwrap();
+        } else {
+            transaction
+                .run_sql(&format!("alter table {quoted} add column extra integer default 7"))
+                .await
+                .unwrap();
+            transaction
+                .run_sql(&format!("alter table {quoted} alter column value drop not null"))
+                .await
+                .unwrap();
+        }
+        transaction.insert_values(table_name.clone(), &["value"], &[&"after ddl"]).await.unwrap();
+        transaction.commit_transaction().await;
+
+        let columns = vec!["id".to_owned(), "value".to_owned(), "extra".to_owned()];
+        let mut expected = vec![ExpectedStreamMarker::Begin];
+        for _ in 0..if compound { 1 } else { 2 } {
+            expected.push(ExpectedStreamMarker::DdlMessage(
+                table_id.into_inner(),
+                None,
+                columns.clone(),
+            ));
+        }
+        expected.extend([
+            ExpectedStreamMarker::Relation(table_id.into_inner(), columns),
+            ExpectedStreamMarker::Insert(table_id.into_inner()),
+            ExpectedStreamMarker::Commit,
+        ]);
+        let markers = assert_stream_markers_and_replay(
+            client,
+            stream,
+            &database,
+            publication_name,
+            &slot_name,
+            start_lsn,
+            &expected,
+        )
+        .await;
+        let ddl: Vec<_> = markers
+            .iter()
+            .filter_map(|marker| match marker {
+                StreamMarker::DdlMessage(_, _, _, _, payload) => Some(payload),
+                _ => None,
+            })
+            .collect();
+        for (index, payload) in ddl.iter().enumerate() {
+            assert_eq!(payload["nspname"], table_name.schema);
+            assert_eq!(payload["relname"], table_name.name);
+            let columns = payload["columns"].as_array().unwrap();
+            let value = columns.iter().find(|column| column["attname"] == "value").unwrap();
+            assert_eq!(value["attnotnull"], !compound && index == 0);
+            let extra = columns.iter().find(|column| column["attname"] == "extra").unwrap();
+            assert_eq!(extra["default_expression"], "7");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
