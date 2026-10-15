@@ -2386,6 +2386,20 @@ async fn json_null_preservation_and_legacy_defaults() {
         .await
         .is_ok_and(|result| result.is_ok());
     }
+    for suffix in ["_CURRENT", "_CURRENT_PENDING"] {
+        let view = format!("{sf_table}{suffix}");
+        let quote = crate::snowflake::common::quote;
+        harness
+            .sql
+            .execute_ddl(&format!(
+                "drop view if exists {}.{}.{}",
+                quote(harness.config.database()),
+                quote(harness.config.schema()),
+                quote(&view)
+            ))
+            .await
+            .unwrap();
+    }
     let dropped = harness.sql.drop_table(&sf_table).await;
     let absent = harness.sql.table_exists(&sf_table).await.map(|exists| !exists);
     assert!(shutdown_ok);

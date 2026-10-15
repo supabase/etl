@@ -225,6 +225,42 @@ impl<T: TokenProvider> SqlClient<T> {
         Ok(table_names.contains(&table_name))
     }
 
+    /// Lists exact object kinds and comments for companion-view ownership
+    /// checks.
+    pub(super) async fn objects_starting_with(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let response = self
+            .execute_statement(&format!(
+                "show objects in schema {}.{} starts with {}",
+                quote_identifier(&self.config.database),
+                quote_identifier(&self.config.schema),
+                quote_string_literal(prefix),
+            ))
+            .await?;
+        let names = parse_named_show_column(&response, "SHOW OBJECTS", "name")?;
+        let kinds = parse_named_show_column(&response, "SHOW OBJECTS", "kind")?;
+        let comments = parse_named_show_values(&response, "SHOW OBJECTS", "comment")?;
+        names
+            .into_iter()
+            .zip(kinds)
+            .zip(comments)
+            .map(|((name, kind), comment)| {
+                let comment = match comment {
+                    serde_json::Value::Null => "",
+                    serde_json::Value::String(value) => value,
+                    _ => {
+                        return Err(Error::Config(
+                            "Snowflake object comment is not a string".to_owned(),
+                        ));
+                    }
+                };
+                Ok((name.to_owned(), kind.to_owned(), comment.to_owned()))
+            })
+            .collect()
+    }
+
     /// Add a nullable column to an existing table.
     ///
     /// When `default_clause` is present, Snowflake populates existing rows with
@@ -265,7 +301,7 @@ impl<T: TokenProvider> SqlClient<T> {
         self.execute_ddl(&format!("ALTER TABLE {fqn} RENAME COLUMN {old} TO {new}")).await
     }
 
-    fn fully_qualified_name(&self, name: &str) -> String {
+    pub(super) fn fully_qualified_name(&self, name: &str) -> String {
         format!(
             "{}.{}.{}",
             quote_identifier(&self.config.database),

@@ -83,6 +83,7 @@ clickhouse = [
     "dep:uuid",
 ]
 snowflake = [
+    "dep:futures",
     "dep:base64",
     "dep:bytes",
     "dep:jsonwebtoken",

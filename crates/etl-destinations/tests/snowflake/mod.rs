@@ -6,3 +6,4 @@ mod partial_updates;
 mod pipeline;
 mod sql_client;
 mod stream_client;
+mod views;

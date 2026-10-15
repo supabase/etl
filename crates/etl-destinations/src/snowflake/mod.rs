@@ -10,6 +10,7 @@ mod schema;
 mod sql;
 mod sql_client;
 mod streaming;
+mod view;
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils;

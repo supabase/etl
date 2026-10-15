@@ -351,8 +351,9 @@ object storage.
 This status applies to the managed service, not local or self-hosted use.
 
 Snowflake uses direct Snowpipe Streaming and key-pair authentication. ETL stores
-inserts, updates and deletes as CDC records. Query these records to materialize
-the source table's current state, or use them as an event history.
+inserts, updates and deletes as CDC records. For tables meeting the requirements
+below, ETL creates a companion view exposing current state. The raw table remains
+available as event history.
 
 ### Partial updates and materialization
 
@@ -397,29 +398,37 @@ SQL NULL has no entry; it replaces the previous value. Complete records have an
 empty array. Changed large values and initial copy rows must fit the compressed
 request limit.
 
-Use `etl_destinations::snowflake::materialization_query(database, schema,
-physical_table, &replicated_schema)` to generate a `SELECT` query as a Rust
-`String`. Pass unquoted identifiers and the matching ETL schema, then execute the
-SQL using a Snowflake warehouse. You can run it directly or use its result to
-create a snapshot table. ETL does not create, refresh or manage downstream views
-or tables.
-
-For custom SQL, obtain the column-name-to-ID mapping from ETL's applied schema,
-or query PostgreSQL after ETL has applied the matching schema to Snowflake:
+Query the automatically created `<physical_table>_CURRENT` view:
 
 ```sql
-select attname as column_name, attnum as column_id
-from pg_catalog.pg_attribute
-where attrelid = 'public.example_table'::regclass
-  and attnum > 0
-  and not attisdropped
-order by attnum;
+select * from PUBLIC_ORDERS_CURRENT;
 ```
 
-Use the entries for the replicated columns. The destination table does not
-publish this mapping, and Snowflake column positions cannot replace PostgreSQL
-attribute numbers. Once generated, the materialization SQL executes entirely in
-Snowflake without querying PostgreSQL. Refresh the SQL after DDL.
+This ordinary view runs the materialization query when read. It does not store
+results or run a background refresh, and it requires a Snowflake warehouse.
+ETL updates its definition after supported schema changes. No PostgreSQL access,
+ETL binary, or manual query generation is needed.
+
+For custom SQL, read the column-ID and primary-key mapping entirely in Snowflake:
+
+```sql
+select column_name,
+       try_parse_json(comment):column_id::integer as column_id,
+       try_parse_json(comment):primary_key_position::integer as primary_key_position
+from ETL_DB.information_schema.columns
+where table_schema = 'PUBLIC'
+  and table_name = 'PUBLIC_ORDERS_CURRENT'
+  and try_parse_json(comment):column_id is not null
+order by ordinal_position;
+```
+
+Replace the example database, schema, and view identifiers. Source-column comments
+contain JSON with `column_id` and nullable `primary_key_position`. Diagnostic
+columns have descriptive comments instead. Use `GET_DDL('VIEW',
+'ETL_DB.PUBLIC.PUBLIC_ORDERS_CURRENT')` to inspect the generated SQL. Refresh
+customer-owned SQL after DDL; Snowflake column positions cannot replace these IDs.
+The Rust `etl_destinations::snowflake::materialization_query` API is also available
+as a query-generation helper.
 
 The query carries forward omitted values, preserves explicit NULLs and respects
 delete/reinsert boundaries. It returns `_cdc_anchored`,
@@ -440,8 +449,8 @@ pruning safe.
   `varchar`, PostgreSQL `"char"`, `char(n)`, `name`, `uuid`, `bytea`, `numeric`,
   `date`, `timestamp`, and `timestamptz`. Other key types need separate validation.
 - Stable key values and representation. Column renames and drops are supported;
-  regenerate the materialization query from the schema snapshot ETL has applied
-  to Snowflake after DDL.
+  ETL refreshes the companion view after applying DDL. Regenerate customer-owned
+  materialization queries against the updated mapping.
   The materialization query reserves names beginning with `_cdc_`. The writer
   reserves its three physical CDC column names.
 - Complete, uninterrupted publication coverage with unchanged actions, column
@@ -455,9 +464,8 @@ schema changes. Successfully storing an event does not establish that its
 history meets the requirements for materializing CDC history. Publication changes are an
 operator responsibility; ETL cannot detect events Postgres never emits.
 
-The live source catalog can be ahead of Snowflake. If using its column IDs, wait
-until ETL has applied the DDL before generating/executing the query. pgoutput
-announces the changed relation with the next row event; DDL alone is not enough.
+pgoutput announces a changed relation with the next row event; DDL alone does
+not update the destination or its view.
 
 Omission metadata keeps its meaning after a rename or drop, including renaming
 a key without changing its value. `_cdc_unresolved_columns` reports current
@@ -473,6 +481,43 @@ history from a new coherent snapshot. Recreate the pipeline if per-table resync
 is unavailable. Standalone deployments without reset support should use fresh
 ETL state and a fresh destination schema. A normal restart does not request a
 resync; manual truncation is not a substitute.
+
+### Companion-view permissions and lifecycle
+
+The ETL role needs `CREATE VIEW` on the destination schema and ownership of its
+raw tables and views. For example:
+
+```sql
+grant create view on schema ETL_DB.PUBLIC to role ETL_ROLE;
+```
+
+Grant this before starting or upgrading the replicator. ETL does not change role
+grants automatically. Missing permissions or conflicting objects fail setup or
+startup reconciliation. Consumers need `SELECT` on the view and the usual
+usage privileges for its database, schema, and query warehouse.
+
+ETL owns the `_CURRENT` and `_CURRENT_PENDING` companion names and their comments.
+For physical names longer than 239 characters, the view name is
+`_ETL_<uppercase SHA-256 of the physical name>_CURRENT`; its recovery name adds
+`_PENDING`.
+The second name is an internal recovery object, not a supported query interface.
+Before a drop or rename, the public view becomes temporarily unavailable; it is
+restored after the raw schema and new definition are ready. Add-only changes
+replace the definition without taking the public name offline. Startup also
+reconciles views for idle tables. Interrupted raw DDL follows the existing
+schema recovery/resync requirements.
+
+Explicit view grants survive definition replacement and same-name resync.
+Do not attach custom policies, tags, or streams to ETL-owned views or change
+their definitions/comments. Create a separate customer-owned view for custom
+behavior. Replacing an ETL view makes streams on it stale. During initial copy
+or resync, the view may expose a snapshot that is still being copied.
+
+Complete-row ingestion for keyless tables, unsupported identities/key types, or
+source names beginning with `_cdc_` remains raw-only and emits a warning. Losing
+eligibility after a view has been created makes it unavailable and fails
+reconciliation. Fresh pipeline state requires an unused destination namespace
+or deliberate cleanup of old tables and both reserved companion names.
 
 ### Resynchronizing after a source table rename
 
@@ -491,7 +536,9 @@ Provided `PUBLIC_ORDERSOLD` is available, this rebuilds the first table there
 and frees `PUBLIC_ORDERS`. Then retry resynchronizing `public.orders`.
 Resynchronization deletes previous destination data and CDC history. Existing
 source rows are copied again only when initial copying is enabled. Update any
-queries that depend on the first table's previous destination name.
+queries that depend on the first table's previous destination name. ETL removes
+the old companion view when resync moves to another name. Set up consumer grants
+and references for the new view.
 
 If the existing destination must remain unchanged, use a new pipeline targeting
 an unused destination schema. Do not manually delete or rename a destination

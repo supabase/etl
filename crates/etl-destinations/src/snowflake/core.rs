@@ -14,10 +14,11 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     event::{DeleteEvent, Event, InsertEvent, UpdateEvent},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId},
+    schema::{ColumnAlterationKind, ColumnSchema, ReplicatedTableSchema, SchemaOperation, TableId},
     store::DestinationStore,
     task::TaskRegistry,
 };
+use futures::{TryStreamExt, stream};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
@@ -33,6 +34,9 @@ use crate::{
     },
     table_name::try_stringify_table_name,
 };
+
+/// Bounds concurrent remote table/view checks before replication starts.
+const VIEW_STARTUP_CONCURRENCY: usize = 8;
 
 /// Ensures Snowflake metadata is ready for streaming operations.
 fn ensure_snowflake_metadata_applied(
@@ -144,11 +148,9 @@ where
         && metadata.is_applied()
     {
         ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
-        client
-            .prepare_existing_table(table_id, metadata.table_id(), &columns)
-            .await
-            .map_err(EtlError::from)?;
-        return Ok(());
+        if client.is_table_ready(table_id).await {
+            return Ok(());
+        }
     }
 
     // Own the complete Creating -> remote setup -> Applied transition with the
@@ -201,6 +203,10 @@ where
                 .prepare_table(&table, metadata.table_id(), &columns, false)
                 .await
                 .map_err(EtlError::from)?;
+            client
+                .prepare_view(&table, metadata.table_id(), table_schema)
+                .await
+                .map_err(EtlError::from)?;
             return Ok(());
         }
         Some(metadata) if metadata.is_creating() => {
@@ -243,7 +249,9 @@ where
     // Remote setup is retry-safe and remains inside the per-table permit.
     client.prepare_table(&table, &table_name, &columns, true).await.map_err(EtlError::from)?;
 
-    // Publish completion only after both the table and channel exist.
+    client.prepare_view(&table, &table_name, table_schema).await.map_err(EtlError::from)?;
+
+    // Publish completion only after the table, channel, and view are ready.
     if let Some(metadata) = creating_metadata {
         store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
     }
@@ -346,17 +354,7 @@ where
         ensure_snowflake_metadata_applied(table_id, &metadata)?;
         ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
 
-        if self.client.has_channel(table_id).await {
-            return Ok(());
-        }
-
-        table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
-        let columns: Vec<_> =
-            table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
-        self.client
-            .prepare_existing_table(table_id, metadata.table_id(), &columns)
-            .await
-            .map_err(EtlError::from)?;
+        self.initialize_table(table_schema).await?;
 
         Ok(())
     }
@@ -599,6 +597,7 @@ where
         )?;
 
         if current_snapshot_id == new_snapshot_id {
+            self.initialize_table(new_schema).await?;
             info!(table_id = ?table_id, "schema unchanged, skipping relation event");
             return Ok(false);
         }
@@ -643,6 +642,18 @@ where
         let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
+        let table = self.client.lock_table(table_id).await;
+        self.client.invalidate_view(&table).await;
+        if plan.ordered_operations().iter().any(|operation| match operation {
+            SchemaOperation::DropColumn { .. } => true,
+            SchemaOperation::AlterColumn { alteration } => {
+                alteration.kind() == ColumnAlterationKind::Rename
+            }
+            _ => false,
+        }) {
+            self.client.park_view(&table, &table_name).await.map_err(EtlError::from)?;
+        }
+
         let updated_metadata = DestinationTableMetadata::new_applied(
             metadata.table_id().to_owned(),
             current_snapshot_id,
@@ -667,6 +678,10 @@ where
             .store_destination_table_metadata(table_id, updated_metadata.to_applied())
             .await?;
 
+        // Raw schema completion is durable before derived-view work. Failure
+        // here retries view reconciliation without replaying successful DDL.
+        self.client.prepare_view(&table, &table_name, new_schema).await.map_err(EtlError::from)?;
+
         info!(table_id = ?table_id, "schema change applied");
         Ok(true)
     }
@@ -680,6 +695,58 @@ where
 {
     fn name() -> &'static str {
         etl_config::shared::DestinationKind::Snowflake.as_str()
+    }
+
+    async fn startup(&self) -> EtlResult<()> {
+        let table_ids = self
+            .writer
+            .store
+            .get_table_schemas()
+            .await?
+            .iter()
+            .map(|schema| schema.id)
+            .collect::<HashSet<_>>();
+        stream::iter(table_ids.into_iter().map(Ok))
+            .try_for_each_concurrent(VIEW_STARTUP_CONCURRENCY, |table_id| async move {
+                let Some(metadata) =
+                    self.writer.store.get_destination_table_metadata(table_id).await?
+                else {
+                    return Ok(());
+                };
+                // Never publish a view over interrupted raw DDL or a pending
+                // reset.
+                if !metadata.is_applied() {
+                    return Ok(());
+                }
+                let schema = self
+                    .writer
+                    .store
+                    .get_table_schema(&table_id, metadata.snapshot_id())
+                    .await?
+                    .ok_or_else(|| {
+                        etl_error!(
+                            ErrorKind::InvalidState,
+                            "Stored schema missing for Snowflake view reconciliation"
+                        )
+                    })?;
+                let schema =
+                    ReplicatedTableSchema::from_mask(schema, metadata.replication_mask().clone());
+                schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+                let columns: Vec<_> =
+                    schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
+                let table = self.writer.client.lock_table(table_id).await;
+                self.writer
+                    .client
+                    .prepare_existing_schema(metadata.table_id(), &columns)
+                    .await
+                    .map_err(EtlError::from)?;
+                self.writer
+                    .client
+                    .prepare_view(&table, metadata.table_id(), &schema)
+                    .await
+                    .map_err(EtlError::from)
+            })
+            .await
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
@@ -716,7 +783,13 @@ where
             let detached = self
                 .writer
                 .client
-                .detach_table_for_copy(replicated_table_schema.id(), &table_name)
+                .detach_table_for_copy(
+                    replicated_table_schema.id(),
+                    &table_name,
+                    metadata.is_some(),
+                    table_name
+                        == try_stringify_table_name(replicated_table_schema.name())?.to_uppercase(),
+                )
                 .await
                 .map_err(EtlError::from)?;
             Ok::<_, EtlError>((task_guard, detached))

@@ -38,6 +38,25 @@ pub fn materialization_query(
     table: &str,
     schema: &ReplicatedTableSchema,
 ) -> Result<String> {
+    query(
+        &format!(
+            "{}.{}.{}",
+            quote_identifier(database),
+            quote_identifier(namespace),
+            quote_identifier(table)
+        ),
+        schema,
+    )
+}
+
+/// Uses the view's own schema so database clones do not read the original
+/// table.
+pub(super) fn view_query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
+    query(&quote_identifier(table), schema)
+}
+
+/// Builds the shared query over an already quoted table reference.
+fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
     validate_primary_key_identity(schema)?;
     if schema.column_schemas().any(|column| column.name.starts_with("_cdc_")) {
         return Err(Error::Config(
@@ -101,12 +120,6 @@ pub fn materialization_query(
     };
     output.push(format!("{unresolved} as \"_cdc_unresolved_columns\""));
     output.push("seq as \"_cdc_last_sequence\"".to_owned());
-    let table = format!(
-        "{}.{}.{}",
-        quote_identifier(database),
-        quote_identifier(namespace),
-        quote_identifier(table)
-    );
     // A complete record supplies every value, including explicit NULLs, so
     // earlier suppliers cannot affect the query result. Compute lifetime
     // boundaries first so filtering out an older insert does not lose the

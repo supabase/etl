@@ -74,6 +74,21 @@ pub enum Error {
     #[error("Snowflake source identity is unsupported: {0}")]
     UnsupportedIdentity(String),
 
+    /// An existing managed view cannot represent the newly applied schema.
+    #[error(
+        "Snowflake companion view '{name}' is unavailable under '{pending}'; restore a supported \
+         primary-key identity and source column names, or deliberately remove both reserved views \
+         to continue with raw CDC only"
+    )]
+    CompanionViewUnsupported {
+        /// Public view that is no longer available.
+        name: String,
+        /// Reserved view retaining ownership and grants.
+        pending: String,
+        /// Query-generation requirement the new schema violates.
+        source: Box<Error>,
+    },
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -174,6 +189,7 @@ impl Error {
             Self::RowTooLarge { .. } => AppendFailureType::RowTooLarge,
             Self::UnsupportedIdentity(_)
             | Self::UnsupportedLayout(_)
+            | Self::CompanionViewUnsupported { .. }
             | Self::Config(_)
             | Self::MissingTableColumn { .. }
             | Self::UnexpectedTableColumn { .. }
@@ -212,6 +228,7 @@ impl ClassifiedError for Error {
             | Self::NullJsonArrayElement { .. }
             | Self::UnsupportedIdentity(_)
             | Self::UnsupportedLayout(_)
+            | Self::CompanionViewUnsupported { .. }
             | Self::Config(_)
             | Self::MissingTableColumn { .. }
             | Self::UnexpectedTableColumn { .. }
@@ -275,6 +292,9 @@ impl From<Error> for EtlError {
             Error::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
             Error::Encoding(_) => (ErrorKind::InvalidData, "Snowflake encoding error"),
             Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
+            Error::CompanionViewUnsupported { .. } => {
+                (ErrorKind::ConfigError, "Snowflake companion view no longer supports the schema")
+            }
             Error::MissingTableColumn { .. }
             | Error::UnexpectedTableColumn { .. }
             | Error::UnsupportedIdentity(_)

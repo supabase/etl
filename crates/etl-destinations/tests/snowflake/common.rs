@@ -6,6 +6,7 @@ use etl_destinations::snowflake::{
     StreamClient, test_utils,
 };
 use futures::FutureExt;
+use sha2::{Digest, Sha256};
 
 pub fn build_auth() -> Arc<AuthManager<HttpExchanger>> {
     Arc::new(AuthManager::new(test_utils::load_test_config()).expect("AuthManager creation failed"))
@@ -22,6 +23,18 @@ pub async fn with_table_cleanup<F, Fut>(
     let result = std::panic::AssertUnwindSafe(test_fn()).catch_unwind().await;
 
     for table in tables {
+        let config = test_utils::load_test_config();
+        let view = companion_name(table);
+        for name in [&view, &format!("{view}_PENDING")] {
+            let _ = sql
+                .execute_ddl(&format!(
+                    "drop view if exists {}.{}.{}",
+                    quote(config.database()),
+                    quote(config.schema()),
+                    quote(name),
+                ))
+                .await;
+        }
         let _ = sql.drop_table(table).await;
     }
 
@@ -76,4 +89,30 @@ pub async fn poll_stream_offset(
         }
     }
     None
+}
+
+/// Quotes a test SQL identifier without changing its case.
+pub fn quote(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Derives the documented companion name, including the long-identifier case.
+pub fn companion_name(table: &str) -> String {
+    if table.chars().count() + "_CURRENT_PENDING".len() > 255 {
+        let hash: String =
+            Sha256::digest(table.as_bytes()).iter().map(|byte| format!("{byte:02X}")).collect();
+        format!("_ETL_{hash}_CURRENT")
+    } else {
+        format!("{table}_CURRENT")
+    }
+}
+
+/// Selects the destination-managed view using only Snowflake-side identifiers.
+pub fn companion_query(config: &Config, table: &str) -> String {
+    format!(
+        "select * from {}.{}.{}",
+        quote(config.database()),
+        quote(config.schema()),
+        quote(&companion_name(table))
+    )
 }

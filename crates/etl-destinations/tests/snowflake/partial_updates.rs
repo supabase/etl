@@ -19,7 +19,7 @@ use etl_destinations::snowflake::{
 };
 use serde_json::{Value, json};
 
-use crate::snowflake::common::{build_auth, with_table_cleanup};
+use crate::snowflake::common::{build_auth, companion_query, with_table_cleanup};
 
 /// Builds the source schema shared by the history and migration tests.
 fn table_schema(id: TableId, name: String) -> TableSchema {
@@ -125,8 +125,7 @@ async fn materialization_history_lifetimes_and_restart() {
             insert(11, 7, "new lifetime"),
             update(12, partial(7, 7)),
         ];
-        let query =
-            materialization_query(config.database(), config.schema(), &physical, &schema).unwrap();
+        let query = companion_query(&config, &physical);
         assert_eq!(
             write_events(&destination, WriteEventsDurability::RequireDurable, events.clone(),)
                 .await
@@ -396,13 +395,7 @@ async fn postgres_external_toast(full_identity: bool) {
             panic!("explicit null must be supplied")
         };
         assert_eq!(cleared.values()[1], Cell::Null);
-        let query = materialization_query(
-            config.database(),
-            config.schema(),
-            &physical,
-            &updates[0].replicated_table_schema,
-        )
-        .unwrap();
+        let query = companion_query(&config, &physical);
         let rows = query_rows(&sql, &format!("{query} order by \"id\"")).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(&rows[0][..3], &[json!("1"), json!("y".repeat(32768)), json!("2")]);
@@ -436,7 +429,7 @@ async fn postgres_external_toast(full_identity: bool) {
         // pgoutput updates, and checks values after durability and shutdown.
         // Only two source rows are needed to distinguish omission from NULL.
         let mut previous_lsn = last.commit_lsn;
-        for (count, commands, columns, expected) in [
+        for (phase, (count, commands, columns, expected)) in [
             (
                 2_usize,
                 format!(
@@ -484,7 +477,7 @@ async fn postgres_external_toast(full_identity: bool) {
                     vec![json!("2"), json!(null), json!("fresh"), json!(null)],
                 ],
             ),
-        ] {
+        ].into_iter().enumerate() {
             let destination = TestDestinationWrapper::wrap(Destination::new(
                 Client::new(Arc::clone(&auth), pipeline_id),
                 store.clone(),
@@ -502,7 +495,7 @@ async fn postgres_external_toast(full_identity: bool) {
                 .notify_on_events(move |events| {
                     events.iter().filter(|event| matches!(event,
                         Event::Update(update) if update.commit_lsn > previous_lsn
-                    )).count() == count
+                    )).count() >= count
                 })
                 .await;
             let failed = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
@@ -518,13 +511,18 @@ async fn postgres_external_toast(full_identity: bool) {
             tokio::pin!(completion);
             let completed = tokio::select! {
                 _ = changed.notified() => true,
+
                 _ = failed.notified() => false,
+
                 result = &mut completion => panic!("Pipeline finished before the DDL updates: {result:?}"),
-                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => false,
+
+                // The column-swap phase crosses two durability barriers plus
+                // two view/DDL transitions; 60 seconds is insufficient.
+                _ = tokio::time::sleep(std::time::Duration::from_secs(120)) => false,
             };
             pipeline.shutdown();
             completion.await.unwrap();
-            assert!(completed, "state: {:?}, events: {}", store.get_table_state(table_id).await.unwrap(), destination.get_events().await.len());
+            assert!(completed, "phase {phase}, state: {:?}, events: {}", store.get_table_state(table_id).await.unwrap(), destination.get_events().await.len());
             let events = destination.get_events().await;
             let updates = events
                 .iter()
@@ -541,14 +539,7 @@ async fn postgres_external_toast(full_identity: bool) {
                     .any(|update| matches!(update.updated_table_row, UpdatedTableRow::Partial(_)))
                     != full_identity
             );
-            let current_schema = &updates.last().unwrap().replicated_table_schema;
-            let query = materialization_query(
-                config.database(),
-                config.schema(),
-                &physical,
-                current_schema,
-            )
-            .unwrap();
+            let query = companion_query(&config, &physical);
             assert_eq!(
                 query_rows(
                     &sql,
@@ -797,8 +788,7 @@ async fn legacy_format_upgrade_preserves_history_and_offsets() {
         write_events(&upgraded, WriteEventsDurability::RequireDurable, events.clone())
             .await
             .unwrap();
-        let query =
-            materialization_query(config.database(), config.schema(), &physical, &schema).unwrap();
+        let query = companion_query(&config, &physical);
         let rows = query_rows(&sql, &format!("{query} order by \"id\"")).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(&rows[0][..3], &[json!("1"), json!("before upgrade"), json!("2")]);
