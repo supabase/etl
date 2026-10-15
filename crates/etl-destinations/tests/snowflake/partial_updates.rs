@@ -679,8 +679,12 @@ async fn legacy_upgrade_rejects_unrelated_schema_damage() {
         store.store_table_schema(table).await.unwrap();
         let original = Destination::new(Client::new(Arc::clone(&auth), 1175), store.clone());
         with_table_cleanup(&sql, &[&physical], || async {
-            write_table_rows(&original, &schema, vec![row(1, Cell::Null, 0)]).await.unwrap();
-            write_table_rows(&original, &schema, vec![]).await.unwrap();
+            // Rejection depends on column metadata; history preservation is
+            // tested above.
+            assert_eq!(
+                write_table_rows(&original, &schema, vec![]).await.unwrap(),
+                DestinationWriteStatus::Durable
+            );
             original.shutdown().await.unwrap();
             sql.drop_column(&physical, "_cdc_missing_columns").await.unwrap();
             match damage {

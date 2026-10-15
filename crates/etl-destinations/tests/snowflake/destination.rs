@@ -261,18 +261,28 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
 
     with_table_cleanup(&harness.sql, &cleanup_names, || async {
         let mut original_metadata = Vec::new();
+        // Independent tables can commit while the remaining copies are
+        // submitted.
         for ((schema, _), name) in cases.iter().zip(&names) {
             harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
-            write_table_copy_and_wait(
+            let status = invoke_write_table_rows(
                 &harness.destination,
                 schema,
                 vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
             )
-            .await;
+            .await
+            .unwrap();
+            assert_eq!(status, DestinationWriteStatus::Accepted);
             let metadata =
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
             assert_eq!(metadata.table_id(), name);
             original_metadata.push(metadata);
+        }
+
+        for (schema, _) in &cases {
+            let status =
+                invoke_write_table_rows(&harness.destination, schema, vec![]).await.unwrap();
+            assert_eq!(status, DestinationWriteStatus::Durable);
         }
 
         // Case-only collisions with an already-created table use the existing
@@ -301,22 +311,27 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
 
         let restarted =
             Destination::new(Client::new(build_auth(), u64::MAX), harness.store.clone());
-        for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
-            invoke_write_events(
-                &restarted,
-                WriteEventsDurability::RequireDurable,
-                vec![Event::Insert(InsertEvent {
+        // One batch submits every table before waiting for CDC durability.
+        let events = cases
+            .iter()
+            .enumerate()
+            .map(|(index, (schema, _))| {
+                Event::Insert(InsertEvent {
                     commit_lsn: PgLsn::from(10_u64),
-                    tx_ordinal: 1,
+                    tx_ordinal: u64::try_from(index).unwrap() + 1,
                     replicated_table_schema: schema.clone(),
                     table_row: TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("streamed".to_owned()),
                     ]),
-                })],
-            )
+                })
+            })
+            .collect();
+        let status = invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, events)
             .await
             .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
             assert_eq!(
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
                 Some(metadata)
