@@ -16,7 +16,8 @@ use etl::{
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
     failpoints::{
-        SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
+        APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, SEND_STATUS_UPDATE_FP,
+        START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
         STORE_REPLICATION_CHECKPOINT_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
@@ -42,12 +43,13 @@ use etl::{
         },
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{
-            TableSelection, assert_events_equal, build_expected_users_inserts, insert_orders_data,
-            insert_users_data, setup_test_database_schema,
+            TableSelection, assert_events_equal, assert_table_rows_equal_ignoring_size,
+            build_expected_users_inserts, insert_orders_data, insert_users_data,
+            setup_test_database_schema,
         },
     },
 };
-use etl_config::shared::TableSyncCopyConfig;
+use etl_config::shared::{PipelineConfig, TableSyncCopyConfig};
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     below_version,
@@ -2710,10 +2712,14 @@ impl IdleDurabilityTest {
         )
         .with_table_sync_copy_config(TableSyncCopyConfig::SkipAllTables)
         .with_settle_durable_interval_ms(settle_durable_interval_ms)
+        .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1)
         .build();
         let synced = store.notify_on_table_sync_complete(table_id).await;
+
         pipeline.start().await.unwrap();
+
         synced.notified().await;
+
         Self { database, table_name, pipeline, store, slot_name, writes_rx }
     }
 
@@ -2725,26 +2731,22 @@ impl IdleDurabilityTest {
     /// Receives the next event batch, failing if an unexpected barrier
     /// overtakes it.
     async fn next_batch(&mut self) -> (PgLsn, WriteEventsResult) {
-        let write = tokio::time::timeout(Duration::from_secs(50), self.writes_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let write = self.writes_rx.recv().await.unwrap();
         let DeferredEventsWrite::Batch { commit_end_lsn, result } = write else {
             panic!("expected an event batch");
         };
+
         (commit_end_lsn, result)
     }
 
     /// Receives an empty barrier driven by an incoming primary keepalive,
     /// including a reply requested by ETL's periodic feedback.
     async fn next_barrier(&mut self) -> WriteEventsResult {
-        let write = tokio::time::timeout(Duration::from_secs(50), self.writes_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let write = self.writes_rx.recv().await.unwrap();
         let DeferredEventsWrite::DurabilityBarrier { result } = write else {
             panic!("expected an idle durability barrier");
         };
+
         result
     }
 
@@ -2762,6 +2764,107 @@ impl IdleDurabilityTest {
         )
         .await;
     }
+}
+
+/// Only successful replay may checkpoint a batch dispatched by a failed
+/// attempt, even when the original write completed durably.
+#[tokio::test(flavor = "multi_thread")]
+async fn apply_retry_replays_dispatched_write_without_checkpointing() {
+    let _scenario = FailScenario::setup();
+    let mut test = IdleDurabilityTest::start().await;
+    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+
+    // Failure is injected after dispatch and before completion handling, so
+    // releasing the result cannot let the failed attempt checkpoint it.
+    fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(apply)").unwrap();
+
+    test.insert(1).await;
+
+    let (commit_lsn, result) = test.next_batch().await;
+    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+    assert!(test.confirmed_lsn().await < commit_lsn);
+
+    result.send(Ok(DestinationWriteStatus::Durable));
+
+    let (replay_lsn, replay_result) = test.next_batch().await;
+    assert_eq!(replay_lsn, commit_lsn);
+    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+
+    replay_result.send(Ok(DestinationWriteStatus::Durable));
+
+    test.wait_for_flush(commit_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+
+    assert_eq!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+        Some(commit_lsn)
+    );
+}
+
+/// A failed catchup attempt recopies from a fresh snapshot even when its
+/// dispatched write completed durably.
+#[tokio::test(flavor = "multi_thread")]
+async fn catchup_retry_recopies_after_dispatched_write() {
+    let _scenario = FailScenario::setup();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    init_test_tracing();
+
+    let mut database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = schema.users_schema().id;
+    let store = NotifyingStore::new();
+    let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
+    let destination = TestDestinationWrapper::wrap(destination);
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    );
+    let finished_copy =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+
+    pipeline.start().await.unwrap();
+
+    finished_copy.notified().await;
+
+    insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+
+    // Move the catchup target beyond the held transaction so its write uses
+    // MayDefer, independently of the terminal durability barrier.
+    let other_database = spawn_source_database().await;
+    let other_table = test_table_name("retry_catchup_wal");
+    other_database.create_table(other_table.clone(), true, &[("value", "int4")]).await.unwrap();
+    other_database.insert_values(other_table, &["value"], &[&1_i32]).await.unwrap();
+    let target_lsn = database.current_wal_flush_lsn().await.unwrap();
+    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    let errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let copied_again =
+        store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+    fail::cfg(APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, "1*return(table_sync)").unwrap();
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    let write = writes_rx.recv().await.unwrap();
+    let DeferredEventsWrite::Batch { result, .. } = write else {
+        panic!("Expected a catchup batch");
+    };
+    result.send(Ok(DestinationWriteStatus::Durable));
+
+    errored.notified().await;
+    copied_again.notified().await;
+    synced.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert!(writes_rx.try_recv().is_err());
+    let table_rows = destination.get_table_rows().await;
+    assert_table_rows_equal_ignoring_size(
+        table_rows.get(&table_id).unwrap(),
+        &[TableRow::new(vec![Cell::I64(1), Cell::String("user_1".to_owned()), Cell::I32(1)])],
+    );
 }
 
 /// A single accepted batch settles without another source write.

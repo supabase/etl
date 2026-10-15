@@ -1,7 +1,8 @@
 # Snowflake
 
 Snowflake destination for [Supabase ETL](https://supabase.github.io/etl/).
-Status: In progress. See the
+Managed-service status: Public alpha. Local and self-hosted use of the
+open-source destination is unrestricted. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
 and the [`etl-examples` Snowflake section](../../../etl-examples/README.md#snowflake)
 for the runnable example.

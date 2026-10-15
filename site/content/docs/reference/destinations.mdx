@@ -1,6 +1,6 @@
 ---
 title: Destinations
-description: Official built-in destinations, maturity, requirements, and limitations.
+description: Official built-in destinations, release status, requirements, and limitations.
 icon: DatabaseZap
 ---
 
@@ -13,21 +13,18 @@ mature cloud destination.**
 
 | Feature      | Destination     | Status        | Guidance                                  |
 | ------------ | --------------- | ------------- | ----------------------------------------- |
-| `clickhouse` | ClickHouse      | Private alpha | Recommended local getting-started path    |
-| `bigquery`   | Google BigQuery | Stable        | Most mature cloud destination             |
-| `ducklake`   | DuckLake        | Private alpha | Evaluate for your workload                |
-| `snowflake`  | Snowflake       | Private alpha | Evaluate for your workload                |
+| `clickhouse` | ClickHouse      | Public alpha  | Recommended local getting-started path    |
+| `bigquery`   | Google BigQuery | Public alpha  | Most mature cloud destination             |
+| `ducklake`   | DuckLake        | Public alpha  | Evaluate for your workload                |
+| `snowflake`  | Snowflake       | Public alpha  | Evaluate for your workload                |
 | `iceberg`    | Apache Iceberg  | Deprecated    | Do not use for new deployments            |
 
 ## Status definitions
 
-- **Stable:** The most mature built-in destination. Review its limitations and
-  validate it against your production workload.
-- **Private alpha:** Managed-service access is limited. This does not restrict
-  local or self-hosted use of the open-source destination.
-- **In progress:** Functional, but behavior, configuration, schema support, and
-  operational requirements may still change. Test recovery and schema changes
-  before production use.
+- **Public alpha:** The managed service is in public alpha. Features and
+  behavior may change. Local and self-hosted use of the open-source destinations
+  is unrestricted. Review limitations and test recovery and schema changes
+  against your workload before production use.
 - **Deprecated:** Retained for compatibility but no longer recommended for new
   deployments. Plan to move away from it.
 
@@ -72,11 +69,73 @@ not restored automatically.
 
 ## BigQuery
 
-<DestinationStatus status="stable" />
+<DestinationStatus status="public-alpha" />
+
+This status applies to the managed service, not local or self-hosted use.
 
 BigQuery uses the BigQuery Storage Write API and BigQuery change data capture
 to maintain destination tables. Use it when you already have a Google Cloud
 project. For a local first pipeline, prefer [ClickHouse](#clickhouse).
+
+### Physical table versions and upgrades
+
+Query the stable logical view for each replicated table. Initial copy, recopy,
+and source `TRUNCATE` operations create physical tables with fresh random
+version IDs. ETL does not deliberately reuse a deleted physical name:
+streaming writes after same-name recreation can be acknowledged without
+reaching the replacement table. The active logical view and its physical target
+must remain available; older physical tables are no longer needed.
+
+Cleanup is optimistic: after truncate switches the view and persists the new
+target, ETL attempts background deletion of previously discovered versions.
+Explicit drop/reset also attempts physical cleanup after removing the view.
+Listing or physical deletion failures are logged and can leave unused tables
+behind without blocking replication. A later truncate or reset can try again;
+there is no cleanup queue or periodic collector. Operators can use the table
+IDs in warnings to remove unused tables manually, after checking that they are
+not the current view target or the target recorded in destination metadata.
+Interrupted creation leaves its abandoned table for these same cleanup paths.
+Creation, view changes, and metadata persistence still propagate failures.
+
+The suffix is an underscore followed by 25 lowercase letters and digits,
+encoding a full UUID without relying on the clock. It adds 26 ASCII bytes to
+the encoded source name. BigQuery permits table names up to [1,024 UTF-8
+bytes](https://docs.cloud.google.com/bigquery/docs/tables#table_naming).
+
+Existing numeric versions remain readable and active after an upgrade.
+The next truncate or recopy allocates a random version while preserving the
+logical view name. No metadata database migration or immediate recopy is
+required. Once random IDs have been persisted, downgrading requires a release
+that understands this format; older releases that only parse numeric suffixes
+cannot resume those tables. Do not edit stored IDs to enable a downgrade. If
+rollback to an older deployment must remain possible, deploy support for
+reading both formats in that release before deploying random-ID allocation.
+
+### Query completion and recovery
+
+ETL waits for BigQuery DDL to finish before advancing destination metadata.
+Query submission, completion polling, result pages, and retries share a
+ten-minute deadline. A pending response keeps the original job ID and location.
+Each poll requests a ten-second server wait; another incomplete response is
+followed by a one-second pause. The server wait is a hint: HTTP latency can
+exceed it, and it does not limit the remote job's lifetime.
+
+Transient HTTP failures allow up to 20 retries of the same request. Backoff
+starts at one second, doubles to a 32-second cap, and adds up to one second of
+jitter within that cap, following [BigQuery's reliability
+guidance](https://docs.cloud.google.com/bigquery/docs/reliability-intro#retry_failed_api_requests).
+Only BigQuery's explicit retryable failed-job responses permit resubmission
+with a new request ID, with at most four replacement jobs. The shared deadline
+can stop either retry loop sooner. Permanent SQL, permission, and configuration
+errors require correction.
+
+A local timeout does not cancel the remote job. ETL reports an unconfirmed
+outcome and requires manual recovery instead of automatically replaying DDL.
+Use the reported request ID, job ID, and location to investigate the outcome
+before retrying or resetting the affected table. View changes and metadata
+writes are separate operations; after an interrupted transition, inspect both
+before deleting any physical table. Storage Write API propagation retries are
+separate from these query retries.
 
 ### Table partitioning and clustering
 
@@ -181,7 +240,7 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 
 ## ClickHouse
 
-<DestinationStatus status="private-alpha" />
+<DestinationStatus status="public-alpha" />
 
 This status applies to the managed service, not local or self-hosted use.
 
@@ -267,7 +326,7 @@ destination. Drop the conflicting object or use another database.
 
 ## DuckLake
 
-<DestinationStatus status="private-alpha" />
+<DestinationStatus status="public-alpha" />
 
 This status applies to the managed service, not local or self-hosted use.
 
@@ -287,7 +346,7 @@ object storage.
 
 ## Snowflake
 
-<DestinationStatus status="private-alpha" />
+<DestinationStatus status="public-alpha" />
 
 This status applies to the managed service, not local or self-hosted use.
 

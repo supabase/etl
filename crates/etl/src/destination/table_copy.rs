@@ -36,6 +36,17 @@ impl fmt::Display for TableCopyAttemptId {
 /// attempt-local `u64` sequence allocated across all copy workers. The ID is
 /// opaque to destinations and does not define ordering or resumable source
 /// progress.
+///
+/// Allocate the ID once before dispatch. Retrying that logical batch preserves
+/// its ID, schema, rows, and row order; assigning a new ID would describe new
+/// work to a destination that deduplicates whole batches. Allocation order
+/// depends on parallel worker scheduling, so rerunning a copy does not recreate
+/// the same batch boundaries or IDs.
+///
+/// Streaming uses [`crate::event::EventPosition`] instead: WAL event
+/// positions survive replay and changes in delivery batch boundaries. A copy
+/// batch ID identifies a delivery from one snapshot, not a version of a source
+/// row.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TableCopyBatchId {
     /// The initial-copy execution that emitted the batch.

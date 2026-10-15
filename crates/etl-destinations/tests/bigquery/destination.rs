@@ -1,15 +1,17 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use etl::{
-    data::{Cell, Date, TableRow},
-    destination::{Destination as _, WriteEventsDurability},
-    event::{Event, InsertEvent, RelationEvent, TruncateEvent},
+    data::{Cell, Date, OldTableRow, TableRow, UpdatedTableRow},
+    destination::{Destination as _, TableCopyAttemptId, TableCopyBatchId, WriteEventsDurability},
+    event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
         Type,
     },
     store::{MemoryStore, SchemaStore, StateStore, TableStateLifecycleStore},
-    test_utils::destination::write_events,
+    test_utils::destination::{
+        drop_table_for_copy, write_events, write_table_rows, write_table_rows_with_batch_id,
+    },
 };
 use etl_config::shared::{
     BigQueryPartitionBy, BigQueryTableOptions, BigQueryTableOptionsConfig,
@@ -48,7 +50,126 @@ fn test_snapshot_id(value: u64) -> SnapshotId {
     SnapshotId::new(lsn, lsn)
 }
 
-/// Checks physical generations and logical views retain distinct names across
+/// Parallel copy and retries preserve distinct keys, and partial transaction
+/// replay cannot restore stale rows or resurrect deleted keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_then_transaction_replay_preserves_current_rows() {
+    install_crypto_provider();
+    init_test_tracing();
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+
+    let database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let schema = make_users_schema("replay_ordering");
+    store.store_table_schema(schema.clone()).await.unwrap();
+    let schema = ReplicatedTableSchema::all(Arc::new(schema));
+    let destination = database.build_destination(1, store).await;
+    let first_copy_rows = vec![
+        TableRow::new(vec![Cell::I32(1), Cell::String("snapshot".to_owned()), Cell::I32(10)]),
+        TableRow::new(vec![Cell::I32(3), Cell::String("snapshot".to_owned()), Cell::I32(10)]),
+    ];
+    let second_copy_rows =
+        vec![TableRow::new(vec![Cell::I32(2), Cell::String("snapshot".to_owned()), Cell::I32(10)])];
+    let attempt_id = TableCopyAttemptId::from_u128(1);
+    let first_copy_id = TableCopyBatchId::new(attempt_id, 0);
+    let second_copy_id = TableCopyBatchId::new(attempt_id, 1);
+
+    tokio::try_join!(
+        write_table_rows_with_batch_id(
+            &destination,
+            &schema,
+            first_copy_id,
+            first_copy_rows.clone()
+        ),
+        write_table_rows_with_batch_id(&destination, &schema, second_copy_id, second_copy_rows),
+    )
+    .unwrap();
+
+    write_table_rows_with_batch_id(&destination, &schema, first_copy_id, first_copy_rows)
+        .await
+        .unwrap();
+
+    let rows = database.query_table(schema.name().clone()).await.unwrap();
+    let users: Vec<BigQueryUser> = parse_bigquery_table_rows(rows);
+    assert_eq!(
+        users,
+        vec![
+            BigQueryUser::new(1, "snapshot", 10),
+            BigQueryUser::new(2, "snapshot", 10),
+            BigQueryUser::new(3, "snapshot", 10),
+        ]
+    );
+
+    let commit_lsn = PgLsn::from(10);
+    let first_batch: Vec<_> = [1, 2]
+        .into_iter()
+        .map(|id| {
+            Event::Update(UpdateEvent {
+                commit_lsn,
+                tx_ordinal: u64::try_from(id).unwrap(),
+                replicated_table_schema: schema.clone(),
+                updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                    Cell::I32(id),
+                    Cell::String("first".to_owned()),
+                    Cell::I32(20),
+                ])),
+                old_table_row: None,
+            })
+        })
+        .collect();
+    let second_batch = vec![
+        Event::Update(UpdateEvent {
+            commit_lsn,
+            tx_ordinal: 3,
+            replicated_table_schema: schema.clone(),
+            updated_table_row: UpdatedTableRow::Full(TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("second".to_owned()),
+                Cell::I32(30),
+            ])),
+            old_table_row: None,
+        }),
+        Event::Delete(DeleteEvent {
+            commit_lsn,
+            tx_ordinal: 4,
+            replicated_table_schema: schema.clone(),
+            old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(2)]))),
+        }),
+    ];
+
+    // ETL may split one transaction across batches, but can checkpoint only
+    // its commit. If checkpointing fails after the writes land, it replays the
+    // whole transaction in source order with the same event positions.
+    for batch in [first_batch.clone(), second_batch.clone(), first_batch.clone()] {
+        write_events(&destination, WriteEventsDurability::MayDefer, batch).await.unwrap();
+    }
+
+    // Check before later events can restore the final state: replaying the
+    // earlier updates must neither rewind key 1 nor resurrect deleted key 2.
+    let rows = database.query_table(schema.name().clone()).await.unwrap();
+    let users: Vec<BigQueryUser> = parse_bigquery_table_rows(rows);
+    assert_eq!(
+        users,
+        vec![BigQueryUser::new(1, "second", 30), BigQueryUser::new(3, "snapshot", 10)]
+    );
+
+    // Reconnect can change batch boundaries without changing event positions.
+    let replay = first_batch.into_iter().chain(second_batch).collect();
+    write_events(&destination, WriteEventsDurability::MayDefer, replay).await.unwrap();
+
+    destination.shutdown().await.unwrap();
+
+    let rows = database.query_table(schema.name().clone()).await.unwrap();
+    let users: Vec<BigQueryUser> = parse_bigquery_table_rows(rows);
+    assert_eq!(
+        users,
+        vec![BigQueryUser::new(1, "second", 30), BigQueryUser::new(3, "snapshot", 10)]
+    );
+}
+
+/// Checks physical versions and logical views retain distinct names across
 /// copy, CDC, restart, truncate, and reset.
 #[tokio::test(flavor = "multi_thread")]
 async fn boundary_underscore_names_survive_destination_lifecycle() {
@@ -64,15 +185,15 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     let mut original_metadata = Vec::new();
     for (schema, name) in &cases {
         store.store_table_schema(schema.inner().clone()).await.unwrap();
-        destination
-            .write_table_rows_for_tests(
-                schema,
-                vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
-            )
-            .await
-            .unwrap();
+        write_table_rows(
+            &destination,
+            schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
+        )
+        .await
+        .unwrap();
         let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-        assert_eq!(metadata.table_id(), format!("{name}_0"));
+        assert!(metadata.table_id().starts_with(&format!("{name}_")));
         original_metadata.push(metadata);
     }
     destination.shutdown().await.unwrap();
@@ -119,11 +240,11 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     )
     .await
     .unwrap();
-    // Join generation cleanup before checking or resetting the physical tables.
+    // Join version cleanup before checking or resetting the physical tables.
     restarted.shutdown().await.unwrap();
     let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-    assert_eq!(metadata.table_id(), format!("{name}_1"));
-    assert!(database.get_table_metadata_by_id(&format!("{name}_0")).await.is_none());
+    assert_ne!(metadata.table_id(), original_metadata[0].table_id());
+    assert!(database.get_table_metadata_by_id(original_metadata[0].table_id()).await.is_none());
     let rows = database.query_table(schema.name().clone()).await.unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -132,18 +253,18 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     );
 
     let reset = database.build_destination(1, store.clone()).await;
-    reset.drop_table_for_copy_for_tests(schema).await.unwrap();
+    drop_table_for_copy(&reset, schema).await.unwrap();
     assert!(database.get_table_metadata_by_id(name).await.is_none());
     assert!(database.get_table_metadata_by_id(metadata.table_id()).await.is_none());
     store.prepare_table_state_for_copy(schema.id()).await.unwrap();
     store.store_table_schema(schema.inner().clone()).await.unwrap();
-    reset
-        .write_table_rows_for_tests(
-            schema,
-            vec![TableRow::new(vec![Cell::I32(4), Cell::String("recopied".to_owned())])],
-        )
-        .await
-        .unwrap();
+    write_table_rows(
+        &reset,
+        schema,
+        vec![TableRow::new(vec![Cell::I32(4), Cell::String("recopied".to_owned())])],
+    )
+    .await
+    .unwrap();
     reset.shutdown().await.unwrap();
     for (index, (schema, _)) in cases.iter().enumerate() {
         let rows = database.query_table(schema.name().clone()).await.unwrap();
@@ -241,10 +362,7 @@ async fn flexible_column_names_work_for_copy_cdc_and_schema_changes() {
             .map(|(index, _)| Cell::String(format!("copied_{index}"))),
     );
 
-    destination
-        .write_table_rows_for_tests(&initial_schema, vec![TableRow::new(cells)])
-        .await
-        .unwrap();
+    write_table_rows(&destination, &initial_schema, vec![TableRow::new(cells)]).await.unwrap();
 
     let mut changed_column_schemas = flexible_column_names
         .iter()
@@ -418,17 +536,13 @@ async fn table_options_are_applied_only_when_the_physical_table_is_created() {
         .build_destination_with_table_options(1_u64, store.clone(), original_options)
         .await;
 
-    destination
-        .write_table_rows_for_tests(
-            &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("created".to_owned()),
-                Cell::I32(42),
-            ])],
-        )
-        .await
-        .unwrap();
+    write_table_rows(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("created".to_owned()), Cell::I32(42)])],
+    )
+    .await
+    .unwrap();
 
     let physical_table_id = store
         .get_destination_table_metadata(table_schema.id)
@@ -466,17 +580,17 @@ async fn table_options_are_applied_only_when_the_physical_table_is_created() {
     let restarted_destination = bigquery_database
         .build_destination_with_table_options(1_u64, store.clone(), changed_options)
         .await;
-    restarted_destination
-        .write_table_rows_for_tests(
-            &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(2),
-                Cell::String("restarted".to_owned()),
-                Cell::I32(43),
-            ])],
-        )
-        .await
-        .unwrap();
+    write_table_rows(
+        &restarted_destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![
+            Cell::I32(2),
+            Cell::String("restarted".to_owned()),
+            Cell::I32(43),
+        ])],
+    )
+    .await
+    .unwrap();
 
     let metadata = bigquery_database
         .get_table_metadata_by_id(&physical_table_id)
@@ -542,17 +656,17 @@ async fn table_options_support_all_partitioning_and_clustering_combinations() {
 
     for (index, table_schema) in schemas.iter().enumerate() {
         store.store_table_schema(table_schema.clone()).await.unwrap();
-        destination
-            .write_table_rows_for_tests(
-                &ReplicatedTableSchema::all(Arc::new(table_schema.clone())),
-                vec![TableRow::new(vec![
-                    Cell::I32(i32::try_from(index).unwrap()),
-                    Cell::String(format!("user_{index}")),
-                    Cell::I32(42),
-                ])],
-            )
-            .await
-            .unwrap();
+        write_table_rows(
+            &destination,
+            &ReplicatedTableSchema::all(Arc::new(table_schema.clone())),
+            vec![TableRow::new(vec![
+                Cell::I32(i32::try_from(index).unwrap()),
+                Cell::String(format!("user_{index}")),
+                Cell::I32(42),
+            ])],
+        )
+        .await
+        .unwrap();
     }
 
     for (index, table_schema) in schemas.iter().enumerate() {
@@ -623,29 +737,25 @@ async fn table_options_support_time_column_and_ingestion_time_partitioning() {
         bigquery_database.build_destination_with_table_options(1_u64, store.clone(), options).await;
 
     store.store_table_schema(time_column_schema.clone()).await.unwrap();
-    destination
-        .write_table_rows_for_tests(
-            &ReplicatedTableSchema::all(Arc::new(time_column_schema.clone())),
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::Date(Date::Value(chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap())),
-            ])],
-        )
-        .await
-        .unwrap();
+    write_table_rows(
+        &destination,
+        &ReplicatedTableSchema::all(Arc::new(time_column_schema.clone())),
+        vec![TableRow::new(vec![
+            Cell::I32(1),
+            Cell::Date(Date::Value(chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap())),
+        ])],
+    )
+    .await
+    .unwrap();
 
     store.store_table_schema(ingestion_time_schema.clone()).await.unwrap();
-    destination
-        .write_table_rows_for_tests(
-            &ReplicatedTableSchema::all(Arc::new(ingestion_time_schema.clone())),
-            vec![TableRow::new(vec![
-                Cell::I32(2),
-                Cell::String("ingested".to_owned()),
-                Cell::I32(42),
-            ])],
-        )
-        .await
-        .unwrap();
+    write_table_rows(
+        &destination,
+        &ReplicatedTableSchema::all(Arc::new(ingestion_time_schema.clone())),
+        vec![TableRow::new(vec![Cell::I32(2), Cell::String("ingested".to_owned()), Cell::I32(42)])],
+    )
+    .await
+    .unwrap();
 
     let time_column_table_id = store
         .get_destination_table_metadata(time_column_schema.id)
@@ -709,13 +819,13 @@ async fn nullable_array_is_stored_as_empty_array() {
     let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
     let destination = bigquery_database.build_destination(1_u64, store).await;
 
-    destination
-        .write_table_rows_for_tests(
-            &replicated_table_schema,
-            vec![TableRow::new(vec![Cell::I32(1), Cell::Null])],
-        )
-        .await
-        .unwrap();
+    write_table_rows(
+        &destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::Null])],
+    )
+    .await
+    .unwrap();
 
     let table_rows = bigquery_database.query_table(table_name).await.unwrap();
     assert_eq!(table_rows.len(), 1);
@@ -742,6 +852,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
 
     let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
 
+    let mut physical_ids = HashSet::new();
     for iteration in 1..=3 {
         let users_rows = vec![
             TableRow::new(vec![
@@ -756,7 +867,10 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
             ]),
         ];
 
-        destination.write_table_rows_for_tests(&replicated_table_schema, users_rows).await.unwrap();
+        write_table_rows(&destination, &replicated_table_schema, users_rows).await.unwrap();
+        let metadata =
+            store.get_destination_table_metadata(table_schema.id).await.unwrap().unwrap();
+        assert!(physical_ids.insert(metadata.table_id().to_owned()));
 
         let mut rows = parse_bigquery_table_rows::<BigQueryUser>(
             bigquery_database.query_table(table_schema.name.clone()).await.unwrap(),
@@ -771,7 +885,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
             ]
         );
 
-        destination.drop_table_for_copy_for_tests(&replicated_table_schema).await.unwrap();
+        drop_table_for_copy(&destination, &replicated_table_schema).await.unwrap();
 
         // Match the table-sync lifecycle: ETL clears durable copy metadata only
         // after the destination drop succeeds, then stores the fresh schema.
@@ -780,6 +894,7 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
     }
 }
 
+/// Interrupted creation must abandon its old identity even if it still exists.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_creation_recovers_after_destination_restart() {
     install_crypto_provider();
@@ -790,40 +905,71 @@ async fn table_creation_recovers_after_destination_restart() {
     }
 
     let bigquery_database = setup_bigquery_database().await;
-    let store = MemoryStore::new();
-    let table_name = format!("destination_creation_recovery_{}", uuid::Uuid::new_v4().simple());
-    let table_schema = make_users_schema(&table_name);
-    let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
-    let table_id = replicated_table_schema.id();
+    for delete_before_restart in [false, true] {
+        let store = MemoryStore::new();
+        let table_name = format!("destination_creation_recovery_{}", uuid::Uuid::new_v4().simple());
+        let table_schema = make_users_schema(&table_name);
+        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
+        let table_id = replicated_table_schema.id();
+        store.store_table_schema(table_schema).await.unwrap();
 
-    store.store_table_schema(table_schema).await.unwrap();
+        let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
+        write_table_rows(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
+        destination.shutdown().await.unwrap();
+        let applied_metadata =
+            store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
 
-    let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-    destination.write_table_rows_for_tests(&replicated_table_schema, Vec::new()).await.unwrap();
+        // Both a surviving creation and a deleted incarnation must be
+        // abandoned.
+        if delete_before_restart {
+            drop_table_for_copy(&destination, &replicated_table_schema).await.unwrap();
+        }
+        let creating_metadata = etl::destination::DestinationTableMetadata::new_creating(
+            applied_metadata.table_id().to_owned(),
+            applied_metadata.snapshot_id(),
+            applied_metadata.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(table_id, creating_metadata).await.unwrap();
 
-    let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(applied_metadata.is_applied());
-
-    // Simulate a crash after `Creating` was stored and the idempotent table DDL
-    // completed, but before the final `Applied` metadata write.
-    let creating_metadata = etl::destination::DestinationTableMetadata::new_creating(
-        applied_metadata.table_id().to_owned(),
-        applied_metadata.snapshot_id(),
-        applied_metadata.replication_mask().clone(),
-    );
-    store.store_destination_table_metadata(table_id, creating_metadata).await.unwrap();
-
-    let restarted_destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-    restarted_destination
-        .write_table_rows_for_tests(&replicated_table_schema, Vec::new())
+        let restarted_destination = bigquery_database.build_destination(1_u64, store.clone()).await;
+        write_table_rows(
+            &restarted_destination,
+            &replicated_table_schema,
+            vec![TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("recovered".to_owned()),
+                Cell::I32(42),
+            ])],
+        )
         .await
         .unwrap();
+        restarted_destination.shutdown().await.unwrap();
 
-    let recovered_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-    assert!(recovered_metadata.is_applied());
-    assert_eq!(recovered_metadata.table_id(), applied_metadata.table_id());
-    assert_eq!(recovered_metadata.snapshot_id(), applied_metadata.snapshot_id());
-    assert_eq!(recovered_metadata.replication_mask(), applied_metadata.replication_mask());
+        let recovered_metadata =
+            store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
+        assert!(recovered_metadata.is_applied());
+        assert_ne!(recovered_metadata.table_id(), applied_metadata.table_id());
+        assert_eq!(recovered_metadata.snapshot_id(), applied_metadata.snapshot_id());
+        assert_eq!(recovered_metadata.replication_mask(), applied_metadata.replication_mask());
+
+        // Recovery does not clean up the abandoned target. Explicit reset
+        // below provides the next cleanup opportunity.
+        assert_eq!(
+            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_some(),
+            !delete_before_restart
+        );
+
+        let rows =
+            bigquery_database.query_table(replicated_table_schema.name().clone()).await.unwrap();
+        assert_eq!(
+            parse_bigquery_table_rows::<BigQueryUser>(rows),
+            vec![BigQueryUser::new(1, "recovered", 42)]
+        );
+        drop_table_for_copy(&restarted_destination, &replicated_table_schema).await.unwrap();
+        assert!(
+            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_none()
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -845,27 +991,23 @@ async fn applied_metadata_does_not_recreate_a_missing_table_after_restart() {
     store.store_table_schema(table_schema).await.unwrap();
 
     let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-    destination.write_table_rows_for_tests(&replicated_table_schema, Vec::new()).await.unwrap();
+    write_table_rows(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
 
     let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(applied_metadata.is_applied());
 
     // Removing the destination object without clearing its durable metadata
     // simulates out-of-band deletion after successful table preparation.
-    destination.drop_table_for_copy_for_tests(&replicated_table_schema).await.unwrap();
+    drop_table_for_copy(&destination, &replicated_table_schema).await.unwrap();
 
     let restarted_destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-    restarted_destination
-        .write_table_rows_for_tests(
-            &replicated_table_schema,
-            vec![TableRow::new(vec![
-                Cell::I32(1),
-                Cell::String("user_1".to_owned()),
-                Cell::I32(42),
-            ])],
-        )
-        .await
-        .unwrap_err();
+    write_table_rows(
+        &restarted_destination,
+        &replicated_table_schema,
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("user_1".to_owned()), Cell::I32(42)])],
+    )
+    .await
+    .unwrap_err();
 
     assert_eq!(
         store.get_destination_table_metadata(table_id).await.unwrap(),

@@ -44,6 +44,7 @@ ducklake = [
     "dep:url",
 ]
 bigquery = [
+    "dep:uuid",
     "dep:gcp-bigquery-client",
     "dep:serde_json",
     "dep:prost",
@@ -88,6 +89,7 @@ snowflake = [
     "dep:metrics",
     "dep:reqwest",
     "dep:aws-lc-rs",
+    "dep:percent-encoding",
     "dep:pkcs8",
     "dep:secrecy",
     "dep:serde",
@@ -127,6 +129,7 @@ jsonwebtoken = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
+percent-encoding = { workspace = true, optional = true }
 pg_escape = { workspace = true, optional = true }
 pkcs8 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
@@ -152,6 +155,7 @@ uuid = { workspace = true, optional = true, features = ["v4"] }
 zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 base64 = { workspace = true }
 
 chrono = { workspace = true }

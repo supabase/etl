@@ -1,9 +1,15 @@
-//! Shared retry helpers for destination-owned retry loops.
+//! Exponential backoff for destination-owned retry loops.
 //!
-//! This module centralizes exponential backoff mechanics while leaving retry
-//! classification, logging, and metrics at the destination call site.
+//! This module owns attempt counting, delay growth, and sleeping, while
+//! logging and metrics stay at the destination call site. A loop retries only
+//! errors that are [`Retryability::Retryable`], so local retries follow the
+//! same classification as the pipeline's retry policy.
 
 use std::{future::Future, time::Duration};
+
+use etl::error::Retryability;
+
+use crate::retry::ClassifiedError;
 
 /// Retry policy for one destination-owned operation.
 ///
@@ -16,15 +22,6 @@ pub(crate) struct RetryPolicy {
     pub(crate) initial_delay: Duration,
     /// Upper bound for the exponential backoff base delay.
     pub(crate) max_delay: Duration,
-}
-
-/// Retry decision for one failed attempt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RetryDecision {
-    /// Retry the operation after the computed delay.
-    Retry,
-    /// Stop retrying and return the error immediately.
-    Stop,
 }
 
 /// Retry metadata emitted before one sleep.
@@ -57,29 +54,34 @@ pub(crate) struct RetryFailure<E> {
     pub(crate) last_error: E,
 }
 
-/// Executes an async operation with exponential backoff.
+/// Executes an async operation with exponential backoff while it fails with a
+/// retryable error.
 ///
-/// The helper owns attempt counting, delay growth, and sleeping. Callers retain
-/// control over retry classification, delay shaping, logging, and metrics.
+/// The helper owns attempt counting, delay growth, and sleeping, and retries an
+/// error only when [`ClassifiedError::retryability`] is
+/// [`Retryability::Retryable`]. `stop_early` can end retries sooner, for
+/// example during shutdown or when resending in place is unsafe; it cannot
+/// retry a permanent error. Callers retain delay shaping, logging, and metrics.
 pub(crate) async fn retry_with_backoff<
     T,
     E,
     AttemptFn,
     AttemptFut,
-    ShouldRetry,
+    StopEarly,
     TransformDelay,
     OnRetry,
 >(
     policy: RetryPolicy,
-    mut should_retry: ShouldRetry,
+    mut stop_early: StopEarly,
     mut transform_delay: TransformDelay,
     mut on_retry: OnRetry,
     mut attempt_fn: AttemptFn,
 ) -> Result<T, RetryFailure<E>>
 where
+    E: ClassifiedError,
     AttemptFn: FnMut() -> AttemptFut,
     AttemptFut: Future<Output = Result<T, E>>,
-    ShouldRetry: FnMut(&E) -> RetryDecision,
+    StopEarly: FnMut(&E) -> bool,
     TransformDelay: FnMut(Duration) -> Duration,
     OnRetry: FnMut(RetryAttempt<'_, E>),
 {
@@ -93,7 +95,10 @@ where
             Ok(value) => return Ok(value),
             Err(error) => {
                 let retry_index = total_attempts;
-                if retry_index > policy.max_retries || should_retry(&error) == RetryDecision::Stop {
+                if retry_index > policy.max_retries
+                    || error.retryability() == Retryability::Permanent
+                    || stop_early(&error)
+                {
                     return Err(RetryFailure { total_attempts, last_error: error });
                 }
 
@@ -117,20 +122,40 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     };
 
     use super::*;
+
+    /// Error returned by test operations.
+    #[derive(Debug, PartialEq, Eq)]
+    struct TestError {
+        /// Zero-based attempt that failed.
+        attempt: usize,
+        /// Whether the failed attempt may succeed again.
+        retryability: Retryability,
+    }
+
+    impl ClassifiedError for TestError {
+        fn retryability(&self) -> Retryability {
+            self.retryability
+        }
+    }
+
+    /// Returns a retryable failure of `attempt`.
+    fn retryable(attempt: usize) -> TestError {
+        TestError { attempt, retryability: Retryability::Retryable }
+    }
 
     /// Retries until the operation succeeds.
     #[tokio::test(start_paused = true)]
     async fn retry_with_backoff_retries_until_success() {
         let attempts = Arc::new(AtomicUsize::new(0));
-        let seen_retries = Arc::new(Mutex::new(Vec::new()));
+        let (seen_retries_tx, seen_retries) = mpsc::channel();
 
         let attempts_for_task = Arc::clone(&attempts);
-        let seen_retries_for_task = Arc::clone(&seen_retries);
         let handle = tokio::spawn(async move {
             retry_with_backoff(
                 RetryPolicy {
@@ -138,20 +163,18 @@ mod tests {
                     initial_delay: Duration::from_millis(5),
                     max_delay: Duration::from_millis(20),
                 },
-                |_| RetryDecision::Retry,
+                |_| false,
                 |delay| delay,
-                move |attempt: RetryAttempt<'_, &'static str>| {
-                    seen_retries_for_task.lock().unwrap().push((
-                        attempt.retry_index,
-                        attempt.base_delay,
-                        attempt.sleep_delay,
-                    ));
+                move |attempt: RetryAttempt<'_, TestError>| {
+                    seen_retries_tx
+                        .send((attempt.retry_index, attempt.base_delay, attempt.sleep_delay))
+                        .unwrap();
                 },
                 move || {
                     let attempts = Arc::clone(&attempts_for_task);
                     async move {
                         let current = attempts.fetch_add(1, Ordering::SeqCst);
-                        if current < 2 { Err("retry me") } else { Ok("done") }
+                        if current < 2 { Err(retryable(current)) } else { Ok("done") }
                     }
                 },
             )
@@ -171,7 +194,7 @@ mod tests {
         assert_eq!(handle.await.unwrap().unwrap(), "done");
         assert_eq!(attempts.load(Ordering::SeqCst), 3);
         assert_eq!(
-            *seen_retries.lock().unwrap(),
+            seen_retries.try_iter().collect::<Vec<_>>(),
             vec![
                 (1, Duration::from_millis(5), Duration::from_millis(5),),
                 (2, Duration::from_millis(10), Duration::from_millis(10),),
@@ -182,8 +205,7 @@ mod tests {
     /// Caps exponential delay growth at the configured maximum.
     #[tokio::test(start_paused = true)]
     async fn retry_with_backoff_caps_delay_growth() {
-        let base_delays = Arc::new(Mutex::new(Vec::new()));
-        let base_delays_for_task = Arc::clone(&base_delays);
+        let (base_delays_tx, base_delays) = mpsc::channel();
         let handle = tokio::spawn(async move {
             retry_with_backoff(
                 RetryPolicy {
@@ -191,12 +213,12 @@ mod tests {
                     initial_delay: Duration::from_millis(5),
                     max_delay: Duration::from_millis(8),
                 },
-                |_| RetryDecision::Retry,
+                |_| false,
                 |delay| delay,
-                move |attempt: RetryAttempt<'_, &'static str>| {
-                    base_delays_for_task.lock().unwrap().push(attempt.base_delay);
+                move |attempt: RetryAttempt<'_, TestError>| {
+                    base_delays_tx.send(attempt.base_delay).unwrap();
                 },
-                || async { Err::<(), _>("still failing") },
+                || async { Err::<(), _>(retryable(0)) },
             )
             .await
         });
@@ -211,45 +233,64 @@ mod tests {
 
         let failure = handle.await.unwrap().unwrap_err();
         assert_eq!(failure.total_attempts, 4);
-        assert_eq!(failure.last_error, "still failing");
+        assert_eq!(failure.last_error, retryable(0));
         assert_eq!(
-            *base_delays.lock().unwrap(),
+            base_delays.try_iter().collect::<Vec<_>>(),
             vec![Duration::from_millis(5), Duration::from_millis(8), Duration::from_millis(8),]
         );
     }
 
-    /// Stops immediately when the caller marks an error as non-retriable.
+    /// Stops immediately on a permanent error, and when `stop_early` asks to,
+    /// even though the error is retryable.
     #[tokio::test]
-    async fn retry_with_backoff_stops_on_non_retriable_error() {
+    async fn retry_with_backoff_stops_on_permanent_error_or_early_stop() {
         let on_retry_calls = Arc::new(AtomicUsize::new(0));
-        let on_retry_calls_for_task = Arc::clone(&on_retry_calls);
+        let policy = RetryPolicy {
+            max_retries: 5,
+            initial_delay: Duration::from_millis(5),
+            max_delay: Duration::from_millis(20),
+        };
+        let permanent = TestError { attempt: 0, retryability: Retryability::Permanent };
 
+        let on_retry_calls_for_permanent = Arc::clone(&on_retry_calls);
         let failure = retry_with_backoff(
-            RetryPolicy {
-                max_retries: 5,
-                initial_delay: Duration::from_millis(5),
-                max_delay: Duration::from_millis(20),
-            },
-            |_| RetryDecision::Stop,
+            policy,
+            |_| false,
             |delay| delay,
-            move |_attempt: RetryAttempt<'_, &'static str>| {
-                on_retry_calls_for_task.fetch_add(1, Ordering::SeqCst);
+            move |_attempt: RetryAttempt<'_, TestError>| {
+                on_retry_calls_for_permanent.fetch_add(1, Ordering::SeqCst);
             },
-            || async { Err::<(), _>("stop now") },
+            || async {
+                Err::<(), _>(TestError { attempt: 0, retryability: Retryability::Permanent })
+            },
         )
         .await
         .unwrap_err();
-
         assert_eq!(failure.total_attempts, 1);
-        assert_eq!(failure.last_error, "stop now");
+        assert_eq!(failure.last_error, permanent);
+
+        let on_retry_calls_for_stop = Arc::clone(&on_retry_calls);
+        let failure = retry_with_backoff(
+            policy,
+            |_| true,
+            |delay| delay,
+            move |_attempt: RetryAttempt<'_, TestError>| {
+                on_retry_calls_for_stop.fetch_add(1, Ordering::SeqCst);
+            },
+            || async { Err::<(), _>(retryable(0)) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failure.total_attempts, 1);
+        assert_eq!(failure.last_error, retryable(0));
+
         assert_eq!(on_retry_calls.load(Ordering::SeqCst), 0);
     }
 
     /// Applies caller-provided delay shaping before sleeping.
     #[tokio::test(start_paused = true)]
     async fn retry_with_backoff_applies_transformed_delay() {
-        let seen_sleep_delays = Arc::new(Mutex::new(Vec::new()));
-        let seen_sleep_delays_for_task = Arc::clone(&seen_sleep_delays);
+        let (seen_sleep_delays_tx, seen_sleep_delays) = mpsc::channel();
         let handle = tokio::spawn(async move {
             retry_with_backoff(
                 RetryPolicy {
@@ -257,10 +298,10 @@ mod tests {
                     initial_delay: Duration::from_millis(5),
                     max_delay: Duration::from_millis(20),
                 },
-                |_| RetryDecision::Retry,
+                |_| false,
                 |delay| delay + Duration::from_millis(3),
-                move |attempt: RetryAttempt<'_, &'static str>| {
-                    seen_sleep_delays_for_task.lock().unwrap().push(attempt.sleep_delay);
+                move |attempt: RetryAttempt<'_, TestError>| {
+                    seen_sleep_delays_tx.send(attempt.sleep_delay).unwrap();
                 },
                 {
                     let attempts = Arc::new(AtomicUsize::new(0));
@@ -268,7 +309,7 @@ mod tests {
                         let attempts = Arc::clone(&attempts);
                         async move {
                             let current = attempts.fetch_add(1, Ordering::SeqCst);
-                            if current == 0 { Err("retry once") } else { Ok("done") }
+                            if current == 0 { Err(retryable(current)) } else { Ok("done") }
                         }
                     }
                 },
@@ -281,7 +322,10 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(handle.await.unwrap().unwrap(), "done");
-        assert_eq!(*seen_sleep_delays.lock().unwrap(), vec![Duration::from_millis(8)]);
+        assert_eq!(
+            seen_sleep_delays.try_iter().collect::<Vec<_>>(),
+            vec![Duration::from_millis(8)]
+        );
     }
 
     /// Returns the last error after exhausting retries.
@@ -294,14 +338,14 @@ mod tests {
                     initial_delay: Duration::from_millis(5),
                     max_delay: Duration::from_millis(20),
                 },
-                |_| RetryDecision::Retry,
+                |_| false,
                 |delay| delay,
-                |_attempt: RetryAttempt<'_, usize>| {},
+                |_attempt: RetryAttempt<'_, TestError>| {},
                 {
                     let attempts = Arc::new(AtomicUsize::new(0));
                     move || {
                         let attempts = Arc::clone(&attempts);
-                        async move { Err::<(), _>(attempts.fetch_add(1, Ordering::SeqCst)) }
+                        async move { Err::<(), _>(retryable(attempts.fetch_add(1, Ordering::SeqCst))) }
                     }
                 },
             )
@@ -316,6 +360,6 @@ mod tests {
 
         let failure = handle.await.unwrap().unwrap_err();
         assert_eq!(failure.total_attempts, 3);
-        assert_eq!(failure.last_error, 2);
+        assert_eq!(failure.last_error, retryable(2));
     }
 }

@@ -351,9 +351,10 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     install_crypto_provider();
 
     let database = spawn_source_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let database_schema = setup_test_database_schema(&database, TableSelection::Both).await;
     let bigquery_database = setup_bigquery_database().await;
     let users_schema = database_schema.users_schema();
+    let orders_schema = database_schema.orders_schema();
     let store = NotifyingStore::new();
     let pipeline_id: PipelineId = random();
 
@@ -363,6 +364,10 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         .unwrap();
     database
         .insert_values(users_schema.name.clone(), &["name", "age"], &[&"before_2", &2])
+        .await
+        .unwrap();
+    database
+        .insert_values(orders_schema.name.clone(), &["description"], &[&"unaffected"])
         .await
         .unwrap();
 
@@ -378,12 +383,19 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     );
 
     let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
+    let orders_sync_complete_notify = store.notify_on_table_sync_complete(orders_schema.id).await;
 
     pipeline.start().await.unwrap();
 
     users_sync_complete_notify.notified().await;
+    orders_sync_complete_notify.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    let previous_users_metadata =
+        store.get_destination_table_metadata(users_schema.id).await.unwrap().unwrap();
+    let previous_orders_metadata =
+        store.get_destination_table_metadata(orders_schema.id).await.unwrap().unwrap();
 
     let users_rows = bigquery_database.query_table(users_schema.name.clone()).await.unwrap();
     assert_eq!(
@@ -401,6 +413,11 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
         .unwrap();
     store.reset_table_state(users_schema.id).await.unwrap();
 
+    database
+        .insert_values(orders_schema.name.clone(), &["description"], &[&"after-reset"])
+        .await
+        .unwrap();
+
     let raw_destination = bigquery_database.build_destination(pipeline_id, store.clone()).await;
     let destination = TestDestinationWrapper::wrap(raw_destination);
 
@@ -413,21 +430,39 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     );
 
     let users_sync_complete_notify = store.notify_on_table_sync_complete(users_schema.id).await;
+    let orders_insert = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, orders_schema.id, 1)])
+        .await;
 
     pipeline.start().await.unwrap();
 
-    // BigQuery can keep the default Storage Write stream for a dropped and
-    // re-created table unavailable for several minutes. The destination is
-    // expected to keep retrying while preserving the physical `*_0` table id.
+    // Recopy must allocate a fresh physical identity so writes cannot reach
+    // a previously deleted incarnation of the destination table.
     users_sync_complete_notify.wait_for(BIGQUERY_RECREATED_TABLE_READY_TIMEOUT).notified().await;
+    orders_insert.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
     assert!(destination.was_table_dropped_for_copy(users_schema.id).await);
+    assert!(!destination.was_table_dropped_for_copy(orders_schema.id).await);
+    assert_ne!(
+        store.get_destination_table_metadata(users_schema.id).await.unwrap().unwrap().table_id(),
+        previous_users_metadata.table_id()
+    );
+    assert_eq!(
+        store.get_destination_table_metadata(orders_schema.id).await.unwrap().unwrap().table_id(),
+        previous_orders_metadata.table_id()
+    );
     let users_rows = bigquery_database.query_table(users_schema.name).await.unwrap();
     assert_eq!(
         parse_bigquery_table_rows::<BigQueryUser>(users_rows),
         vec![BigQueryUser::new(3, "after", 3)]
+    );
+
+    let orders_rows = bigquery_database.query_table(orders_schema.name).await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryOrder>(orders_rows),
+        vec![BigQueryOrder::new(1, "unaffected"), BigQueryOrder::new(2, "after-reset")]
     );
 }
 
@@ -867,8 +902,8 @@ async fn table_truncate_with_batching() {
 
     // Simulate an interrupted truncate that already created `test_users_1`
     // without the table options used by the restarted pipeline. BigQuery cannot
-    // replace it with a different partitioning kind, so recovery must preserve
-    // it and create the next unused generation.
+    // replace it with a different partitioning kind, so recovery creates a
+    // fresh version and cleans up the legacy table after switching the view.
     bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
@@ -954,7 +989,9 @@ async fn table_truncate_with_batching() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(users_metadata.table_id(), "test_users_2");
+    assert!(users_metadata.table_id().starts_with("test_users_"));
+    assert_ne!(users_metadata.table_id(), "test_users_1");
+    assert!(bigquery_database.get_table_metadata_by_id("test_users_1").await.is_none());
 
     // We query BigQuery directly to get the data which tests have inserted,
     // expecting that only the rows after truncation are there.

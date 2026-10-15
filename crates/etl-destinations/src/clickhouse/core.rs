@@ -11,9 +11,9 @@ use etl::{
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
-    event::{Event, EventSequenceKey},
+    event::{Event, EventPosition},
     schema::{
         ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
         IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
@@ -82,7 +82,7 @@ struct PendingRow {
     /// Source ordering for this DML event. MergeTree exposes the LSN and
     /// transaction ordinal separately; ReplacingMergeTree stores the packed
     /// key in `_etl_version`.
-    sequence_key: EventSequenceKey,
+    event_position: EventPosition,
     /// User column values in source schema order. The trailing CDC columns are
     /// appended at encode time and are not present here.
     cells: Vec<Cell>,
@@ -111,22 +111,22 @@ fn cdc_lsn_to_clickhouse_value(lsn: PgLsn) -> ClickHouseValue {
 ///
 /// MergeTree: `cdc_operation` (String), `cdc_lsn` (UInt64 commit LSN), and
 /// `cdc_tx_ordinal` (UInt64 transaction ordinal). ReplacingMergeTree:
-/// `_etl_version` (UInt128 packed `EventSequenceKey`) and `_etl_deleted` (UInt8
+/// `_etl_version` (UInt128 packed `EventPosition`) and `_etl_deleted` (UInt8
 /// tombstone flag).
 fn append_cdc_columns(
     values: &mut Vec<ClickHouseValue>,
     operation: CdcOperation,
-    sequence_key: EventSequenceKey,
+    event_position: EventPosition,
     engine: ClickHouseEngine,
 ) {
     match engine {
         ClickHouseEngine::MergeTree => {
             values.push(ClickHouseValue::String(operation.to_string()));
-            values.push(cdc_lsn_to_clickhouse_value(sequence_key.commit_lsn));
-            values.push(ClickHouseValue::UInt64(sequence_key.tx_ordinal));
+            values.push(cdc_lsn_to_clickhouse_value(event_position.commit_lsn));
+            values.push(ClickHouseValue::UInt64(event_position.tx_ordinal));
         }
         ClickHouseEngine::ReplacingMergeTree => {
-            let version = sequence_key.as_u128();
+            let version = event_position.as_u128();
             values.push(ClickHouseValue::UInt128(version));
             values
                 .push(ClickHouseValue::UInt8(u8::from(matches!(operation, CdcOperation::Delete))));
@@ -655,7 +655,8 @@ impl Default for ClickHouseClientConfig {
 ///
 /// Used to:
 /// - select the corresponding server-side budget,
-/// - map a generic clickhouse error onto the appropriate [`ErrorKind`].
+/// - name what failed when a generic clickhouse error maps onto an
+///   [`ErrorKind`].
 #[derive(Copy, Clone)]
 pub(crate) enum ClickHouseOperationKind {
     /// Connectivity check (`SELECT 1`).
@@ -672,19 +673,14 @@ impl ClickHouseOperationKind {
     /// Error kind used when the inner future returns a
     /// `clickhouse::error::Error`.
     ///
-    /// `retryable` says whether that error may succeed when sent again. DDL and
-    /// schema queries then get a timed retry instead of stopping for an
-    /// operator. Connectivity checks and inserts already get a timed retry.
-    pub(crate) fn failed_kind(self, retryable: bool) -> ErrorKind {
-        match (self, retryable) {
-            (ClickHouseOperationKind::Insert, _) => ErrorKind::DestinationAtomicBatchRetryable,
-            (ClickHouseOperationKind::ConnectivityCheck, _)
-            | (ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl, true) => {
-                ErrorKind::DestinationConnectionFailed
-            }
-            (ClickHouseOperationKind::SchemaQuery | ClickHouseOperationKind::Ddl, false) => {
-                ErrorKind::DestinationQueryFailed
-            }
+    /// The kind names what failed. Whether a retry can succeed comes from the
+    /// error itself.
+    pub(crate) fn failed_kind(self) -> ErrorKind {
+        match self {
+            ClickHouseOperationKind::ConnectivityCheck => ErrorKind::DestinationConnectionFailed,
+            ClickHouseOperationKind::SchemaQuery
+            | ClickHouseOperationKind::Ddl
+            | ClickHouseOperationKind::Insert => ErrorKind::DestinationQueryFailed,
         }
     }
 }
@@ -747,24 +743,31 @@ struct ClickHouseTableCacheEntry {
 /// That happens when the table changed after the layout was loaded, for
 /// example through an external `ALTER`. Evicting makes the next write reload
 /// and check the table, which reports the drift as `CorruptedTableSchema`
-/// instead of retrying the same rejected header. Other failures, such as
-/// timeouts and network errors, keep the layout so a retry needs no extra
-/// schema query. The entry is removed only while it still holds `layout`, so a
-/// failed insert cannot evict a layout that a concurrent writer already
-/// reloaded.
+/// instead of retrying the same rejected header, so the rejection becomes
+/// retryable. Other failures, such as timeouts and network errors, keep the
+/// layout so a retry needs no extra schema query. The entry is removed only
+/// while it still holds `layout`, so a failed insert cannot evict a layout that
+/// a concurrent writer already reloaded.
 fn evict_layout_after_rejected_insert(
     table_cache: &RwLock<HashMap<TableId, Arc<ClickHouseTableCacheEntry>>>,
     table_id: TableId,
     layout: &Arc<RowBinaryLayout>,
     failure: InsertRowsError,
 ) -> EtlError {
-    if failure.is_layout_rejection() {
+    if !failure.is_layout_rejection() {
+        return failure.into();
+    }
+
+    {
         let mut guard = table_cache.write();
         if guard.get(&table_id).is_some_and(|entry| Arc::ptr_eq(&entry.layout, layout)) {
             guard.remove(&table_id);
         }
     }
-    failure.into()
+
+    // ClickHouse rejects the stale header on every resend, but the next
+    // attempt loads the current layout, so a retry makes progress.
+    EtlError::from(failure).with_retryability(Retryability::Retryable)
 }
 
 /// Execution context captured by ClickHouse background event tasks.
@@ -902,34 +905,9 @@ impl EventBatchFences {
 
         let mut guards = Vec::with_capacity(fences.len());
         for fence in fences {
-            #[cfg(feature = "test-utils")]
-            if fence.try_lock().is_err() {
-                notify_fence_wait_for_tests();
-            }
             guards.push(fence.lock_owned().await);
         }
         guards
-    }
-}
-
-/// Tests waiting to hear that a batch dispatch had to wait for a fence.
-#[cfg(feature = "test-utils")]
-static FENCE_WAIT_OBSERVERS: Mutex<Vec<tokio::sync::oneshot::Sender<()>>> = Mutex::new(Vec::new());
-
-/// Returns a receiver that fires the next time a batch dispatch has to wait
-/// for a fence held by an earlier batch. Each receiver fires once.
-#[cfg(feature = "test-utils")]
-pub fn notify_on_fence_wait_for_tests() -> tokio::sync::oneshot::Receiver<()> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    FENCE_WAIT_OBSERVERS.lock().push(sender);
-    receiver
-}
-
-/// Fires every armed fence-wait observer.
-#[cfg(feature = "test-utils")]
-fn notify_fence_wait_for_tests() {
-    for observer in FENCE_WAIT_OBSERVERS.lock().drain(..) {
-        let _ = observer.send(());
     }
 }
 
@@ -1489,7 +1467,7 @@ where
                 append_cdc_columns(
                     &mut values,
                     CdcOperation::Insert,
-                    EventSequenceKey::new(PgLsn::from(0), 0),
+                    EventPosition::new(PgLsn::from(0), 0),
                     engine,
                 );
                 Ok(values)
@@ -1541,7 +1519,7 @@ where
 
         // A relation event identifies the exact target schema through its
         // snapshot ID and replication mask. It can therefore resume an
-        // interrupted change without inventing a DML event sequence key.
+        // interrupted change without inventing a DML event position.
         if metadata.is_pending() {
             let clickhouse_table_name = metadata.table_id().to_owned();
             self.recover_pending_metadata(table_id, &clickhouse_table_name, new_schema, metadata)
@@ -1872,19 +1850,19 @@ where
                 };
                 match event {
                     Event::Insert(insert) => {
-                        let sequence_key = insert.event_sequence_key();
+                        let event_position = insert.event_position();
                         let table_id = insert.replicated_table_schema.id();
                         let entry = pending
                             .entry(table_id)
                             .or_insert_with(|| (insert.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Insert,
-                            sequence_key,
+                            event_position,
                             cells: insert.table_row.into_values(),
                         });
                     }
                     Event::Update(update) => {
-                        let sequence_key = update.event_sequence_key();
+                        let event_position = update.event_position();
                         let source_updated_row = update.updated_table_row;
                         let source_old_row = update.old_table_row;
                         let rows_for_update = clickhouse_rows_for_update(
@@ -1905,19 +1883,19 @@ where
                         {
                             entry.1.push(PendingRow {
                                 operation: CdcOperation::Delete,
-                                sequence_key,
+                                event_position,
                                 cells: destination_old_key_tombstone.into_values(),
                             });
                         }
 
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Update,
-                            sequence_key,
+                            event_position,
                             cells: rows_for_update.destination_updated_row.into_values(),
                         });
                     }
                     Event::Delete(delete) => {
-                        let sequence_key = delete.event_sequence_key();
+                        let event_position = delete.event_position();
                         let source_old_row = clickhouse_delete_old_row(
                             &delete.replicated_table_schema,
                             delete.old_table_row,
@@ -1934,7 +1912,7 @@ where
                             .or_insert_with(|| (delete.replicated_table_schema, Vec::new()));
                         entry.1.push(PendingRow {
                             operation: CdcOperation::Delete,
-                            sequence_key,
+                            event_position,
                             cells: destination_old_row.into_values(),
                         });
                     }
@@ -2006,12 +1984,12 @@ where
             tasks.spawn(async move {
                 let rows: Vec<Vec<ClickHouseValue>> = rows
                     .into_iter()
-                    .map(|PendingRow { operation, sequence_key, cells }| {
+                    .map(|PendingRow { operation, event_position, cells }| {
                         let mut values: Vec<ClickHouseValue> = cells
                             .into_iter()
                             .map(cell_to_clickhouse_value)
                             .collect::<EtlResult<Vec<_>>>()?;
-                        append_cdc_columns(&mut values, operation, sequence_key, engine);
+                        append_cdc_columns(&mut values, operation, event_position, engine);
                         Ok(values)
                     })
                     .collect::<EtlResult<_>>()?;
