@@ -14,11 +14,7 @@ partial updates use the same destination and table format. With a supported
 primary key and `REPLICA IDENTITY DEFAULT`, Postgres can omit unchanged large
 TOAST values from updates. `REPLICA IDENTITY FULL` supplies complete update rows.
 
-Each record includes `_cdc_operation`, `_cdc_sequence_number`, and
-`_cdc_missing_columns ARRAY`. An omitted value is stored as a NULL placeholder
-with its column name in the array. An explicitly supplied SQL NULL has no entry
-and replaces the previous value. Complete records have an empty array. Deletes
-end a row's lifetime; their values are not carried forward into a later insert.
+Each record includes `_cdc_operation`, `_cdc_sequence_number`, and `_cdc_missing_columns ARRAY`. An omitted value is stored as a NULL placeholder with its PostgreSQL attribute number (`pg_attribute.attnum`) in the array. These IDs survive column renames and are not reused after a drop within the same source table. They are not row indexes or Snowflake column positions. An explicitly supplied SQL NULL has no entry and replaces the previous value. Complete records have an empty array. Deletes end a row's lifetime; their values are not carried forward into a later insert.
 
 ### Querying current state
 
@@ -26,6 +22,12 @@ end a row's lifetime; their values are not carried forward into a later insert.
 as a Rust `String`. Pass unquoted database, namespace, and physical table names
 and the matching ETL schema. The caller executes the SQL in Snowflake; ETL does
 not create, refresh, or manage downstream views or tables.
+
+The destination table does not store the mapping from column names to PostgreSQL
+attribute numbers. Custom SQL needs that mapping from ETL's applied schema or
+from `pg_attribute` after the source and destination schemas have converged.
+Snowflake column positions are not substitutes. Once generated, the query runs
+entirely in Snowflake; it does not contact PostgreSQL. Regenerate it after DDL.
 
 The query handles complete, partial, and mixed histories. It scans retained
 history for insert/delete boundaries, then resolves values from each key's
@@ -40,10 +42,19 @@ FULL does not fill in earlier partial records. Evaluate ingestion and query
 costs together for the workload.
 
 Partial updates require a supported nondeferrable primary key with every
-component replicated. Materialization also requires stable keys, a fixed
-replicated schema, uninterrupted publication coverage, and all accepted history
+component replicated. Materialization also requires stable key values and
+representation, uninterrupted publication coverage, and all accepted history
 from a coherent initial snapshot. History pruning is unsupported. Incompatible
 key, schema, or publication changes and lost history require a full resync.
+Column renames and drops preserve partial-update semantics. Generate the query
+from the schema snapshot ETL has applied to Snowflake after DDL.
+`_cdc_unresolved_columns` reports current column names, while stored omission
+metadata contains IDs. A dropped/re-added
+name identifies a new column. Added columns follow the same default-value support
+as complete rows: unsupported defaults and type changes can require a resync.
+Stable IDs do not extend that support. If using the live PostgreSQL catalog, wait
+until ETL has applied its DDL before generating/executing the query. pgoutput
+announces the changed relation with the next row event; DDL alone is not enough.
 See [Partial updates and materialization](https://supabase.github.io/etl/reference/destinations/#partial-updates-and-materialization)
 for supported key types, query diagnostics, and resync requirements.
 

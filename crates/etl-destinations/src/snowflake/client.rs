@@ -1206,7 +1206,7 @@ mod tests {
                         row["name"] = json!(if phase == 0 { "initial" } else { "updated" });
                     } else {
                         row["name"] = json!(null);
-                        row["_cdc_missing_columns"] = json!(["name"]);
+                        row["_cdc_missing_columns"] = json!([2]);
                     }
                     row
                 })

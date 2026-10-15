@@ -23,11 +23,15 @@ use crate::snowflake::{
 /// publication gaps or pruned events.
 ///
 /// The table must retain all ETL-owned history from a fresh snapshot under the
-/// documented stable-key and fixed-schema history contract. The query does not
-/// supply cross-table transaction atomicity. It scans retained history for
-/// lifetime boundaries, but resolves values only from each key's latest
-/// complete insert/update and later partial updates. This does not permit
-/// pruning stored history.
+/// documented stable-key and uninterrupted-publication contract. Supply the
+/// schema snapshot ETL has applied to the destination after column renames or
+/// drops. A live source catalog can be ahead of the destination. Omission
+/// metadata uses stable PostgreSQL attribute numbers, not names or current
+/// positions. Added columns follow the destination's existing default-value
+/// limitations. The query does not supply cross-table transaction atomicity. It
+/// scans retained history for lifetime boundaries, but resolves values only
+/// from each key's latest complete insert/update and later partial updates.
+/// This does not permit pruning stored history.
 pub fn materialization_query(
     database: &str,
     namespace: &str,
@@ -67,10 +71,8 @@ pub fn materialization_query(
             projection.push(format!("{name} as o{i}"));
             output.push(format!("o{i} as {name}"));
         } else {
-            let supplied = format!(
-                "iff(array_contains({}::variant, missing), 0, 1)",
-                quote_string_literal(&column.name)
-            );
+            let supplied =
+                format!("iff(array_contains({}::variant, missing), 0, 1)", column.ordinal_position);
             resolved.push(format!(
                 "first_value(c{i}) respect nulls over (partition by {keys} order by {supplied} \
                  desc, seq desc rows between unbounded preceding and unbounded following) as r{i}"

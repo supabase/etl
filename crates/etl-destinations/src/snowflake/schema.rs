@@ -13,7 +13,8 @@ use crate::snowflake::{
 pub(crate) const CDC_OPERATION_COLUMN: &str = "_cdc_operation";
 /// Name of the column storing the CDC sequence number.
 pub(crate) const CDC_SEQUENCE_COLUMN: &str = "_cdc_sequence_number";
-/// Name of the column listing values omitted from the CDC event.
+/// Name of the column listing PostgreSQL attribute numbers omitted from the CDC
+/// event.
 pub(super) const CDC_MISSING_COLUMNS_COLUMN: &str = "_cdc_missing_columns";
 
 /// Returns the Snowflake DDL type string for a given Postgres type.

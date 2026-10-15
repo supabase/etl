@@ -143,7 +143,8 @@ pub(crate) fn serialize_row(
     Ok(())
 }
 
-/// Serializes column names without allocating a second mask.
+/// Serializes stable PostgreSQL attribute numbers without allocating a second
+/// mask.
 struct MissingColumns<'a> {
     /// Columns in replicated order.
     cols: &'a [ColumnSchema],
@@ -158,7 +159,7 @@ impl Serialize for MissingColumns<'_> {
             let column = self.cols.get(index).ok_or_else(|| {
                 serde::ser::Error::custom("Missing column position exceeds row width")
             })?;
-            seq.serialize_element(&column.name)?;
+            seq.serialize_element(&column.ordinal_position)?;
         }
         seq.end()
     }
@@ -610,7 +611,7 @@ mod tests {
             .unwrap();
             let omitted: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(omitted.get("v"), None);
-            assert_eq!(omitted[CDC_MISSING_COLUMNS_COLUMN], json!(["v"]));
+            assert_eq!(omitted[CDC_MISSING_COLUMNS_COLUMN], json!([1]));
         }
     }
 
@@ -860,7 +861,7 @@ mod tests {
             vec![
                 ColumnSchema::new("payload".into(), Type::TEXT, -1, 1, true),
                 ColumnSchema::new("id".into(), Type::INT4, -1, 2, false).with_primary_key(1),
-                ColumnSchema::new("counter".into(), Type::INT4, -1, 3, true),
+                ColumnSchema::new("counter".into(), Type::INT4, -1, 7, true),
             ],
         )))
     }
@@ -896,7 +897,8 @@ mod tests {
         );
     }
 
-    /// Preserves omitted-column metadata through the large-row encoder.
+    /// Preserves source attribute numbers, including gaps, through the
+    /// large-row encoder.
     #[test]
     fn partial_update_large_row_frame_includes_missing_mask() {
         let schema = partial_update_schema();
@@ -925,7 +927,7 @@ mod tests {
         assert_eq!(batches.len(), 1);
         let data = zstd::decode_all(batches[0].bytes().as_ref()).unwrap();
         let encoded: serde_json::Value = serde_json::from_slice(&data).unwrap();
-        assert_eq!(encoded["_cdc_missing_columns"], json!(["counter"]));
+        assert_eq!(encoded["_cdc_missing_columns"], json!([7]));
         assert_eq!(encoded["payload"].as_str().unwrap().len(), 512 * 1024);
     }
 

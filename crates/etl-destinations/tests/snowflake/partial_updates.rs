@@ -266,8 +266,10 @@ async fn materialization_history_lifetimes_and_restart() {
 /// Verifies the same source workload with partial DEFAULT and complete FULL
 /// tuples against the same Snowflake writer and materialization query.
 async fn postgres_external_toast(full_identity: bool) {
+    etl_telemetry::tracing::init_test_tracing();
     use etl::{
         event::EventType,
+        store::TableStateType,
         test_utils::{
             database::{spawn_source_database, test_table_name},
             event::EventCondition,
@@ -283,6 +285,7 @@ async fn postgres_external_toast(full_identity: bool) {
             false,
             &[
                 ("id", "bigserial"),
+                ("discarded", "integer"),
                 ("payload", "text"),
                 ("counter", "integer"),
                 ("key_numeric", "numeric(40,9) not null default 12345678901234567890.123456789"),
@@ -297,6 +300,7 @@ async fn postgres_external_toast(full_identity: bool) {
         .unwrap();
     let source = name.as_quoted_identifier();
     for command in [
+        format!("alter table {source} drop column discarded"),
         format!(
             "alter table {source} replica identity {}",
             if full_identity { "full" } else { "default" }
@@ -322,7 +326,8 @@ async fn postgres_external_toast(full_identity: bool) {
     with_table_cleanup(&sql, &[&physical], || async {
         let store = NotifyingStore::new();
         let pipeline_id = rand::random();
-        let raw_destination = Destination::new(Client::new(auth, pipeline_id), store.clone());
+        let raw_destination =
+            Destination::new(Client::new(Arc::clone(&auth), pipeline_id), store.clone());
         let polling = raw_destination.clone();
         let destination = TestDestinationWrapper::wrap(raw_destination);
         let mut pipeline = create_pipeline(
@@ -406,6 +411,166 @@ async fn postgres_external_toast(full_identity: bool) {
             assert_eq!(row[8], "true");
             assert_eq!(parse_json_cell(&row[9]), json!([]));
         }
+        // The physical attribute number differs from the replicated row index
+        // because a column was dropped before the initial snapshot.
+        assert_eq!(
+            updates[0].replicated_table_schema.column_schemas().nth(1).unwrap().ordinal_position,
+            3
+        );
+        let fqn = format!("\"{}\".\"{}\".\"{physical}\"", config.database(), config.schema());
+        if !full_identity {
+            assert_eq!(
+                query_rows(
+                    &sql,
+                    &format!(
+                        "select count(*) from {fqn} where array_contains(3::variant, \
+                         \"_cdc_missing_columns\")"
+                    )
+                )
+                .await
+                .unwrap(),
+                vec![vec![json!("2")]],
+            );
+        }
+        // Restart at each boundary. Each phase uses real transactional DDL and
+        // pgoutput updates, and checks values after durability and shutdown.
+        // Only two source rows are needed to distinguish omission from NULL.
+        let mut previous_lsn = last.commit_lsn;
+        for (count, commands, columns, expected) in [
+            (
+                2_usize,
+                format!(
+                    "alter table {source} rename column id to record_id;
+                    alter table {source} rename column payload to details;
+                    alter table {source} rename column counter to scratch;
+                    update {source} set scratch = scratch + 1"
+                ),
+                "\"record_id\", \"details\", \"scratch\"",
+                vec![
+                    vec![json!("1"), json!("y".repeat(32768)), json!("3")],
+                    vec![json!("2"), json!(null), json!("2")],
+                ],
+            ),
+            (
+                4_usize,
+                format!(
+                    "alter table {source} drop column scratch;
+                    alter table {source} add column scratch text default 'fresh';
+                    alter table {source} alter column scratch set storage external;
+                    update {source} set scratch = repeat('z', 4096) where record_id = 1;
+                    update {source} set scratch = null where record_id = 2;
+                    alter table {source} rename column details to temporary;
+                    alter table {source} rename column scratch to details;
+                    alter table {source} rename column temporary to scratch;
+                    update {source} set record_id = record_id"
+                ),
+                "\"record_id\", \"scratch\", \"details\"",
+                vec![
+                    vec![json!("1"), json!("y".repeat(32768)), json!("z".repeat(4096))],
+                    vec![json!("2"), json!(null), json!(null)],
+                ],
+            ),
+            (
+                2_usize,
+                format!(
+                    "alter table {source} drop column scratch;
+                    alter table {source} add column scratch text default 'fresh';
+                    alter table {source} add column added_null text;
+                    update {source} set record_id = record_id"
+                ),
+                "\"record_id\", \"details\", \"scratch\", \"added_null\"",
+                vec![
+                    vec![json!("1"), json!("z".repeat(4096)), json!("fresh"), json!(null)],
+                    vec![json!("2"), json!(null), json!("fresh"), json!(null)],
+                ],
+            ),
+        ] {
+            let destination = TestDestinationWrapper::wrap(Destination::new(
+                Client::new(Arc::clone(&auth), pipeline_id),
+                store.clone(),
+            ));
+            let mut pipeline = create_pipeline(
+                &database.config,
+                pipeline_id,
+                "partial_toast".into(),
+                store.clone(),
+                destination.clone(),
+            );
+            // Restart can redeliver committed history. Only new transactions
+            // count toward this phase; the destination must skip replayed writes.
+            let changed = destination
+                .notify_on_events(move |events| {
+                    events.iter().filter(|event| matches!(event,
+                        Event::Update(update) if update.commit_lsn > previous_lsn
+                    )).count() == count
+                })
+                .await;
+            let failed = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+            pipeline.start().await.unwrap();
+            database
+                .client
+                .as_ref()
+                .unwrap()
+                .batch_execute(&format!("begin; {commands}; commit"))
+                .await
+                .unwrap();
+            let completion = pipeline.wait();
+            tokio::pin!(completion);
+            let completed = tokio::select! {
+                _ = changed.notified() => true,
+                _ = failed.notified() => false,
+                result = &mut completion => panic!("Pipeline finished before the DDL updates: {result:?}"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => false,
+            };
+            pipeline.shutdown();
+            completion.await.unwrap();
+            assert!(completed, "state: {:?}, events: {}", store.get_table_state(table_id).await.unwrap(), destination.get_events().await.len());
+            let events = destination.get_events().await;
+            let updates = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Update(update) if update.commit_lsn > previous_lsn => Some(update),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(updates.len(), count);
+            previous_lsn = updates.last().unwrap().commit_lsn;
+            assert!(
+                updates
+                    .iter()
+                    .any(|update| matches!(update.updated_table_row, UpdatedTableRow::Partial(_)))
+                    != full_identity
+            );
+            let current_schema = &updates.last().unwrap().replicated_table_schema;
+            let query = materialization_query(
+                config.database(),
+                config.schema(),
+                &physical,
+                current_schema,
+            )
+            .unwrap();
+            assert_eq!(
+                query_rows(
+                    &sql,
+                    &format!("select {columns} from ({query}) order by \"record_id\"")
+                )
+                .await
+                .unwrap(),
+                expected
+            );
+            assert_eq!(
+                query_rows(
+                    &sql,
+                    &format!(
+                        "select count_if(not \"_cdc_anchored\" or \
+                         array_size(\"_cdc_unresolved_columns\") > 0) from ({query})"
+                    )
+                )
+                .await
+                .unwrap(),
+                vec![vec![json!("0")]]
+            );
+        }
     })
     .await;
 }
@@ -473,10 +638,10 @@ async fn materialization_query_composite_keys_and_native_values() {
              '12345678901234567890.123456789', array_construct(1, null, 3), \
              parse_json('{{\"x\":1}}'), '2026-01-01'::date, '2026-01-01 00:00:00 \
              +00:00'::timestamp_tz, 'update', '02', null union all select 'A', 1, null, null, \
-             null, null, null, 'update', '03', array_construct('c0\"''', 'array', 'json', 'date', \
-             'time') union all select 'A', 2, null, null, null, null, null, 'delete', '02', \
-             array_construct() union all select 'A', 2, null, null, null, null, null, 'update', \
-             '03', array_construct('c0\"''', 'array', 'json', 'date', 'time')"
+             null, null, null, 'update', '03', array_construct(3, 4, 5, 6, 7) union all select \
+             'A', 2, null, null, null, null, null, 'delete', '02', array_construct() union all \
+             select 'A', 2, null, null, null, null, null, 'update', '03', array_construct(3, 4, \
+             5, 6, 7)"
         ))
         .await
         .unwrap();

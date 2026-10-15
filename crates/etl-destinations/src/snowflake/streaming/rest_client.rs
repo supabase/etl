@@ -836,7 +836,10 @@ mod tests {
             match status {
                 200 => dropped.unwrap(),
                 404 => {
-                    assert!(matches!(dropped, Err(Error::Snowpipe(SnowpipeError::ChannelNotFound))))
+                    assert!(matches!(
+                        dropped,
+                        Err(Error::Snowpipe(SnowpipeError::ChannelNotFound))
+                    ));
                 }
                 409 => assert!(matches!(
                     dropped,

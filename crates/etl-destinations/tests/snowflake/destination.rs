@@ -1001,7 +1001,7 @@ async fn write_events_delete_key_only() {
         assert_eq!(rows[0][3].as_str().unwrap(), expected_offset.as_ref());
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(rows[0][4].as_str().unwrap()).unwrap(),
-            serde_json::json!(["name"])
+            serde_json::json!([2])
         );
     })
     .await;

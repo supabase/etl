@@ -389,7 +389,10 @@ partial records.
 #### Missing values and materialization
 
 Each CDC record includes `_cdc_missing_columns ARRAY`. An omitted value is stored
-as a NULL placeholder with its column name in this array. An explicitly supplied
+as a NULL placeholder with its PostgreSQL attribute number (`pg_attribute.attnum`)
+in this array. These IDs remain stable across renames; dropping a column does
+not make its ID available for reuse within the same table. They are not row
+indexes or Snowflake column positions. An explicitly supplied
 SQL NULL has no entry; it replaces the previous value. Complete records have an
 empty array. Changed large values and initial copy rows must fit the compressed
 request limit.
@@ -400,6 +403,23 @@ physical_table, &replicated_schema)` to generate a `SELECT` query as a Rust
 SQL using a Snowflake warehouse. You can run it directly or use its result to
 create a snapshot table. ETL does not create, refresh or manage downstream views
 or tables.
+
+For custom SQL, obtain the column-name-to-ID mapping from ETL's applied schema,
+or query PostgreSQL after ETL has applied the matching schema to Snowflake:
+
+```sql
+select attname as column_name, attnum as column_id
+from pg_catalog.pg_attribute
+where attrelid = 'public.example_table'::regclass
+  and attnum > 0
+  and not attisdropped
+order by attnum;
+```
+
+Use the entries for the replicated columns. The destination table does not
+publish this mapping, and Snowflake column positions cannot replace PostgreSQL
+attribute numbers. Once generated, the materialization SQL executes entirely in
+Snowflake without querying PostgreSQL. Refresh the SQL after DDL.
 
 The query carries forward omitted values, preserves explicit NULLs and respects
 delete/reinsert boundaries. It returns `_cdc_anchored`,
@@ -419,7 +439,9 @@ pruning safe.
   key types are `smallint`, `integer`, `bigint`, `oid`, `boolean`, `text`,
   `varchar`, PostgreSQL `"char"`, `char(n)`, `name`, `uuid`, `bytea`, `numeric`,
   `date`, `timestamp`, and `timestamptz`. Other key types need separate validation.
-- A fixed replicated schema and key representation, including column names.
+- Stable key values and representation. Column renames and drops are supported;
+  regenerate the materialization query from the schema snapshot ETL has applied
+  to Snowflake after DDL.
   The materialization query reserves names beginning with `_cdc_`. The writer
   reserves its three physical CDC column names.
 - Complete, uninterrupted publication coverage with unchanged actions, column
@@ -432,6 +454,18 @@ change. Complete-row ingestion accepts a broader set of source schemas and
 schema changes. Successfully storing an event does not establish that its
 history meets the requirements for materializing CDC history. Publication changes are an
 operator responsibility; ETL cannot detect events Postgres never emits.
+
+The live source catalog can be ahead of Snowflake. If using its column IDs, wait
+until ETL has applied the DDL before generating/executing the query. pgoutput
+announces the changed relation with the next row event; DDL alone is not enough.
+
+Omission metadata keeps its meaning after a rename or drop, including renaming
+a key without changing its value. `_cdc_unresolved_columns` reports current
+column names. Dropping and re-adding a name creates a new column with a new ID.
+Added columns retain the destination's existing default-value limitations: only
+supported literal defaults populate historical records. This feature does not
+add support for arbitrary defaults or type changes. See
+[Schema changes](/explanation/schema-changes) for the existing DDL behavior.
 
 After incompatible key/schema/publication changes or lost history, request a
 full resync through the supported reset operation: recreate the owned destination
