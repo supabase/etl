@@ -219,6 +219,15 @@ impl BigQueryDatabase {
         .unwrap_or_else(|error| panic!("Failed to create BigQuery dataset: {error}"));
     }
 
+    /// Sets table and view names to use case-insensitive dataset lookup.
+    pub async fn set_case_insensitive_names(&self) {
+        let sql = format!(
+            "alter schema `{}.{}` set options (is_case_insensitive = true)",
+            self.project_id, self.dataset_id,
+        );
+        execute_query(&self.client, &self.project_id, QueryRequest::new(sql)).await.unwrap();
+    }
+
     /// Drops the dataset and all its contents.
     ///
     /// This function will not panic on errors - it logs them and continues.
@@ -434,6 +443,11 @@ impl BigQueryDatabase {
             .unwrap_or_default();
 
         parse_bigquery_table_rows(rows)
+    }
+
+    /// Executes SQL against the test dataset and waits for the job to finish.
+    pub async fn run_sql(&self, sql: String) {
+        execute_query(&self.client, &self.project_id, QueryRequest::new(sql)).await.unwrap();
     }
 
     /// Manually creates a table in the test dataset using column definitions.

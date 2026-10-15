@@ -130,6 +130,8 @@ its original name until a later truncate or resync creates a fresh version.
 BigQuery requires streaming to stop before a physical rename and can require
 hours before that rename becomes eligible, so ETL does not rename the streaming
 physical table. See BigQuery's [table-rename restrictions](https://docs.cloud.google.com/bigquery/docs/managing-tables#limitations_on_renaming_tables).
+In case-insensitive datasets, case-only source renames can conflict with the
+existing view name. ETL reports the conflict before changing the destination.
 See [Table renames](/explanation/schema-changes/#table-renames) for ordering,
 permissions, collision handling, and interrupted transitions.
 
@@ -192,9 +194,10 @@ does not inspect view SQL or infer which DDL statements completed.
 2. Keep the destination metadata and stored schema snapshots. They identify
    the physical table and logical view that reset must remove. Ensure that the
    recorded logical name has not been reassigned to another source; explicit
-   reset trusts that name. An interrupted table rename is rejected by reset
-   and requires operator reconciliation first. If ownership cannot be
-   established, use a new pipeline targeting an unused dataset.
+   reset trusts the recorded names. Do not reuse affected names while an
+   interrupted rename is being recovered. Partial renames can leave views
+   under another name; remove known leftover views if fresh creation reports
+   that its target already exists.
 3. Through the application's state-store integration, reset the affected table
    to `TableState::Init` using `StateStore::update_table_state`. Leave its
    destination metadata and schema snapshots intact. Enable initial copying
@@ -432,7 +435,8 @@ Snowflake uses direct Snowpipe Streaming and key-pair authentication.
 ### Source table renames
 
 ETL renames the downstream table when a source table is renamed within the
-same PostgreSQL schema. It drains pending writes, renames the table, applies
+same PostgreSQL schema. It drains pending writes, retires the old streaming
+channel before freeing its table name, renames the table, applies
 column changes, and reopens ingestion at the previous committed offset. The
 new snapshot is marked applied only after these steps succeed. Renames fail
 when the mapped target name is occupied. Moving the source table to another

@@ -765,6 +765,93 @@ async fn resync_after_source_name_swap_with_cold_client() {
     resync_after_source_name_swap(true).await;
 }
 
+/// A case-only source rename reuses the physical table and channel. Pending
+/// metadata from that transition must not prevent a safe copy reset.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn case_only_table_rename_preserves_rows_and_allows_pending_reset() {
+    let harness = TestHarness::new();
+    let name = format!("orders{}", uuid::Uuid::new_v4().simple());
+    let table_id = snowflake_table_name("public", &name);
+    with_table_cleanup(&harness.sql, &[&table_id], || async {
+        let before = make_table_schema(2210, "public", &name);
+        let after = TableSchema::with_snapshot_id(
+            before.id,
+            TableName::new("public".to_owned(), name.to_uppercase()),
+            before.column_schemas.clone(),
+            test_snapshot_id(100, 100),
+        );
+        harness.store.store_table_schema(before.clone()).await.unwrap();
+        harness.store.store_table_schema(after.clone()).await.unwrap();
+        let before = ReplicatedTableSchema::all(Arc::new(before));
+        let after = ReplicatedTableSchema::all(Arc::new(after));
+        write_table_copy_and_wait(
+            &harness.destination,
+            &before,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned())])],
+        )
+        .await;
+        let initial =
+            harness.store.get_destination_table_metadata(before.id()).await.unwrap().unwrap();
+
+        invoke_write_events(
+            &harness.destination,
+            WriteEventsDurability::RequireDurable,
+            vec![
+                Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+                Event::Insert(InsertEvent {
+                    commit_lsn: PgLsn::from(101),
+                    tx_ordinal: 0,
+                    replicated_table_schema: after.clone(),
+                    table_row: TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("renamed".to_owned()),
+                    ]),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+        harness.destination.shutdown().await.unwrap();
+
+        let applied =
+            harness.store.get_destination_table_metadata(after.id()).await.unwrap().unwrap();
+        assert!(applied.is_applied());
+        assert_eq!(applied.table_id(), table_id);
+        assert_eq!(applied.snapshot_id(), after.inner().snapshot_id);
+        let fqn = format!(
+            "\"{}\".\"{}\".\"{table_id}\"",
+            harness.config.database(),
+            harness.config.schema()
+        );
+        assert_eq!(
+            query_rows(
+                &harness.sql,
+                &format!("select \"id\", \"name\" from {fqn} order by \"id\"")
+            )
+            .await
+            .unwrap(),
+            vec![vec![json!("1"), json!("kept")], vec![json!("2"), json!("renamed")]]
+        );
+
+        let pending = initial
+            .with_schema_change(after.inner().snapshot_id, after.replication_mask().clone())
+            .unwrap();
+        harness.store.store_destination_table_metadata(after.id(), pending.clone()).await.unwrap();
+        let restarted = Destination::new(Client::new(build_auth(), 1), harness.store.clone());
+
+        drop_table_for_copy(&restarted, &after).await.unwrap();
+
+        assert!(!harness.sql.table_exists(&table_id).await.unwrap());
+        assert_eq!(
+            harness.store.get_destination_table_metadata(after.id()).await.unwrap(),
+            Some(pending)
+        );
+        restarted.shutdown().await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn write_events_insert_update_delete() {

@@ -92,7 +92,7 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        ensure_reset_table_name_is_unambiguous, warn_unsupported_column_type_change,
+        warn_unsupported_column_type_change,
     },
     retry::{classified_error, classified_error_with_detail},
 };
@@ -155,6 +155,14 @@ fn validate_ducklake_tombstone_namespace(schema: &ReplicatedTableSchema) -> EtlR
 /// Validates destination-specific DuckLake schema capabilities.
 fn validate_ducklake_schema_capabilities(schema: &ReplicatedTableSchema) -> EtlResult<()> {
     validate_ducklake_tombstone_namespace(schema)
+}
+
+/// Compares source names using DuckLake's ASCII-insensitive table identifiers.
+///
+/// Source schema moves remain unsupported, including case-only schema moves.
+fn same_ducklake_table_name(before: &TableName, after: &TableName) -> bool {
+    before.schema == after.schema
+        && DUCKLAKE_COLUMN_NAME_MAPPING.equivalent(&before.name, &after.name)
 }
 
 /// Validates a complete schema before creating or writing a DuckLake table.
@@ -2157,17 +2165,6 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        if let Some(metadata) =
-            self.store.get_destination_table_metadata(replicated_table_schema.id()).await?
-        {
-            ensure_reset_table_name_is_unambiguous(
-                "DuckLake",
-                &self.store,
-                replicated_table_schema.id(),
-                &metadata,
-            )
-            .await?;
-        }
         let table_name = self.resolve_destination_table_name(replicated_table_schema).await?;
         let table_write_permit = self.acquire_table_write_slot(&table_name).await?;
         self.copy_buffers.lock().remove(&table_name);
@@ -2799,7 +2796,7 @@ where
             // Table rename preserves the actual namespace recorded in metadata.
             let target =
                 DuckLakeTableName::new(before_table_name.schema(), &change.after_name().name);
-            if target.table().eq_ignore_ascii_case(before_table_name.table()) {
+            if same_ducklake_table_name(change.before_name(), change.after_name()) {
                 before_table_name.clone()
             } else {
                 target
@@ -3206,6 +3203,7 @@ where
     /// [`DestinationTableSchema::Applied`] is authoritative: startup trusts the
     /// recorded destination table and does not inspect or repair its physical
     /// schema. Missing or externally modified tables fail on ordinary use.
+    /// Tables scheduled for a fresh copy defer to the copy worker's reset.
     async fn prepare_tables_after_restart(&self) -> EtlResult<()> {
         let table_schemas = self.store.get_table_schemas().await?;
         let table_ids: HashSet<_> = table_schemas.iter().map(|schema| schema.id).collect();
@@ -3219,7 +3217,18 @@ where
             "ducklake recovering pending tables and rebuilding applied table state"
         );
 
+        let table_states = self.store.get_table_states().await?;
         for table_id in table_ids {
+            // The copy worker resets these tables before recreating them.
+            // Recovering their pending DDL here would block that reset.
+            if table_states.get(&table_id).is_some_and(|state| {
+                matches!(
+                    state.as_type(),
+                    TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy
+                )
+            }) {
+                continue;
+            }
             let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? else {
                 continue;
             };
@@ -3729,13 +3738,13 @@ where
                     ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask);
                 let plan = before_schema
                     .plan_schema_change(&after_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
-                if plan.diff().table_name_change().is_some() {
+                if !same_ducklake_table_name(before_schema.name(), after_schema.name()) {
                     return Err(etl_error!(
                         ErrorKind::InvalidState,
                         "Interrupted DuckLake table rename requires recovery",
                         format!(
-                            "Table '{table_name}' has a pending name change; reconcile the \
-                             destination and replay state before resuming"
+                            "Table '{table_name}' has a pending name change; restart the table \
+                             for a fresh copy and remove any leftover destination objects"
                         )
                     ));
                 }

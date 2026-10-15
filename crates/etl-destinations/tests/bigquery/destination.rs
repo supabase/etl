@@ -51,6 +51,60 @@ fn test_snapshot_id(value: u64) -> SnapshotId {
     SnapshotId::new(lsn, lsn)
 }
 
+/// Initial setup cannot replace a customer table or view, including an alias
+/// in a case-insensitive dataset, or claim ownership after rejecting it.
+#[tokio::test(flavor = "multi_thread")]
+async fn initial_setup_preserves_unowned_tables_and_views() {
+    install_crypto_provider();
+    init_test_tracing();
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+    for case_insensitive in [false, true] {
+        for object_kind in ["table", "view"] {
+            let database = setup_bigquery_database().await;
+            if case_insensitive {
+                database.set_case_insensitive_names().await;
+            }
+            let view_id = if case_insensitive { "PUBLIC_ORDERS" } else { "public_orders" };
+            database
+                .run_sql(format!(
+                    "create {object_kind} `{}.{}.{view_id}` as select 42 as id, 'customer' as \
+                     name, 10 as age",
+                    database.project_id(),
+                    database.dataset_id(),
+                ))
+                .await;
+            let store = MemoryStore::new();
+            let schema = make_users_schema("orders");
+            store.store_table_schema(schema.clone()).await.unwrap();
+            let destination = database.build_destination(1, store.clone()).await;
+
+            let error = write_table_rows(
+                &destination,
+                &ReplicatedTableSchema::all(Arc::new(schema.clone())),
+                vec![TableRow::new(vec![
+                    Cell::I32(1),
+                    Cell::String("copy".to_owned()),
+                    Cell::I32(20),
+                ])],
+            )
+            .await
+            .unwrap_err();
+            destination.shutdown().await.unwrap();
+
+            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+            assert!(store.get_destination_table_metadata(schema.id).await.unwrap().is_none());
+            assert_eq!(
+                parse_bigquery_table_rows::<BigQueryUser>(
+                    database.query_table(schema.name).await.unwrap(),
+                ),
+                vec![BigQueryUser::new(42, "customer", 10)]
+            );
+        }
+    }
+}
+
 /// Reusing the old source name must not let truncate or reset delete the
 /// renamed table's physical target, which still carries its original prefix.
 #[tokio::test(flavor = "multi_thread")]
@@ -158,18 +212,164 @@ async fn table_rename_preserves_physical_ownership_after_old_name_is_reused() {
     );
     destination.shutdown().await.unwrap();
 
-    // An uncertain Applied commit after the first rename must not authorize
-    // reset to delete the second source table now using its previous name.
+    // A pending rename can be reset using its recorded physical target and
+    // target view without touching the source that reused its previous name.
     let pending = initial
         .with_schema_change(renamed.inner().snapshot_id, renamed.replication_mask().clone())
         .unwrap();
     store.store_destination_table_metadata(renamed.id(), pending.clone()).await.unwrap();
     let destination = database.build_destination(1, store.clone()).await;
-    drop_table_for_copy(&destination, &renamed).await.unwrap_err();
-    assert!(database.get_table_metadata_by_id("public_orders").await.is_some());
-    assert!(database.get_table_metadata_by_id(applied.table_id()).await.is_some());
-    assert_eq!(store.get_destination_table_metadata(renamed.id()).await.unwrap(), Some(pending));
+
+    drop_table_for_copy(&destination, &renamed).await.unwrap();
     destination.shutdown().await.unwrap();
+
+    assert!(database.get_table_metadata_by_id("public_orders").await.is_some());
+    assert!(database.get_table_metadata_by_id("public_renamed").await.is_none());
+    assert_eq!(store.get_destination_table_metadata(renamed.id()).await.unwrap(), Some(pending));
+    store.prepare_table_state_for_copy(renamed.id()).await.unwrap();
+    store.store_table_schema(renamed.inner().clone()).await.unwrap();
+    let destination = database.build_destination(1, store.clone()).await;
+    write_table_rows(
+        &destination,
+        &renamed,
+        vec![TableRow::new(vec![Cell::I32(3), Cell::String("fresh".to_owned()), Cell::I32(30)])],
+    )
+    .await
+    .unwrap();
+    destination.shutdown().await.unwrap();
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(
+            database.query_table(renamed.name().clone()).await.unwrap()
+        ),
+        vec![BigQueryUser::new(3, "fresh", 30)]
+    );
+    assert!(database.get_table_metadata_by_id("public_orders").await.is_some());
+    let recopied = store.get_destination_table_metadata(renamed.id()).await.unwrap().unwrap();
+    assert!(recopied.is_applied());
+    assert_ne!(recopied.table_id(), applied.table_id());
+}
+
+/// Table-only renames across case and naming formats preserve the physical
+/// identity, remove old views, and accept later rows after each client restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_only_renames_preserve_physical_table_across_name_mappings() {
+    install_crypto_provider();
+    init_test_tracing();
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+    let database = setup_bigquery_database().await;
+    let store = MemoryStore::new();
+    let mut schema = make_users_schema("orders");
+    store.store_table_schema(schema.clone()).await.unwrap();
+    let destination = database.build_destination(1, store.clone()).await;
+    write_table_rows(
+        &destination,
+        &ReplicatedTableSchema::all(Arc::new(schema.clone())),
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned()), Cell::I32(10)])],
+    )
+    .await
+    .unwrap();
+    destination.shutdown().await.unwrap();
+    let table_id = store
+        .get_destination_table_metadata(schema.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_id()
+        .to_owned();
+    let mut expected = vec![BigQueryUser::new(1, "kept", 10)];
+
+    for (index, name) in ["Orders", "_orders", "orders"].into_iter().enumerate() {
+        let before_view_id =
+            etl_destinations::bigquery::table_name_to_bigquery_view_id(&schema.name).unwrap();
+        let lsn = 20 + u64::try_from(index).unwrap() * 10;
+        schema.name.name = name.to_owned();
+        schema.snapshot_id = test_snapshot_id(lsn);
+        store.store_table_schema(schema.clone()).await.unwrap();
+        let replicated = ReplicatedTableSchema::all(Arc::new(schema.clone()));
+        let destination = database.build_destination(1, store.clone()).await;
+        let row_id = i32::try_from(index).unwrap() + 2;
+
+        write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![
+                Event::Relation(RelationEvent { replicated_table_schema: replicated.clone() }),
+                Event::Insert(InsertEvent {
+                    commit_lsn: PgLsn::from(lsn + 1),
+                    tx_ordinal: 0,
+                    replicated_table_schema: replicated,
+                    table_row: TableRow::new(vec![
+                        Cell::I32(row_id),
+                        Cell::String("renamed".to_owned()),
+                        Cell::I32(20),
+                    ]),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+        destination.shutdown().await.unwrap();
+
+        let metadata = store.get_destination_table_metadata(schema.id).await.unwrap().unwrap();
+        assert!(metadata.is_applied());
+        assert_eq!(metadata.table_id(), table_id);
+        assert_eq!(metadata.snapshot_id(), schema.snapshot_id);
+        assert!(database.get_table_metadata_by_id(&before_view_id).await.is_none());
+        expected.push(BigQueryUser::new(row_id, "renamed", 20));
+        let mut rows = parse_bigquery_table_rows::<BigQueryUser>(
+            database.query_table(schema.name.clone()).await.unwrap(),
+        );
+        rows.sort();
+        assert_eq!(rows, expected);
+    }
+}
+
+/// Case-insensitive view lookup may make a PostgreSQL rename collide. Reject
+/// it before schema mutation and preserve the owned table's rows and metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn case_insensitive_table_rename_rejects_conflict_without_mutation() {
+    install_crypto_provider();
+    init_test_tracing();
+    if skip_if_missing_bigquery_env_vars() {
+        return;
+    }
+    let database = setup_bigquery_database().await;
+    database.set_case_insensitive_names().await;
+    let store = MemoryStore::new();
+    let mut schema = make_users_schema("orders");
+    store.store_table_schema(schema.clone()).await.unwrap();
+    let destination = database.build_destination(1, store.clone()).await;
+    write_table_rows(
+        &destination,
+        &ReplicatedTableSchema::all(Arc::new(schema.clone())),
+        vec![TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned()), Cell::I32(10)])],
+    )
+    .await
+    .unwrap();
+    let before = store.get_destination_table_metadata(schema.id).await.unwrap().unwrap();
+    schema.name.name = "Orders".to_owned();
+    schema.snapshot_id = test_snapshot_id(20);
+    store.store_table_schema(schema.clone()).await.unwrap();
+
+    let error = write_events(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![Event::Relation(RelationEvent {
+            replicated_table_schema: ReplicatedTableSchema::all(Arc::new(schema.clone())),
+        })],
+    )
+    .await
+    .unwrap_err();
+    destination.shutdown().await.unwrap();
+
+    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+    assert_eq!(store.get_destination_table_metadata(schema.id).await.unwrap(), Some(before));
+    assert_eq!(
+        parse_bigquery_table_rows::<BigQueryUser>(database.query_table(schema.name).await.unwrap()),
+        vec![BigQueryUser::new(1, "kept", 10)]
+    );
 }
 
 /// Parallel copy and retries preserve distinct keys, and partial transaction

@@ -488,12 +488,22 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             .await
     }
 
-    /// Renames the physical table before applying its column plan.
+    /// Retires the drained channel, then renames its physical table.
+    ///
+    /// Retire while the old name is still owned: after renaming, another
+    /// source can reuse both the table name and its derived channel name.
+    /// The retained committed offset seeds the channel opened by
+    /// [`Self::refresh_table`] after column DDL finishes.
     pub async fn rename_table(
         &self,
+        table_id: TableId,
         before_table_name: &str,
         after_table_name: &str,
     ) -> Result<()> {
+        self.wait_for_pending_durability().await?;
+        let channel = self.get_channel(table_id).await?;
+        let mut channel = channel.lock().await;
+        channel.retire_for_table_rename().await?;
         self.sql_client.rename_table(before_table_name, after_table_name).await
     }
 
@@ -1011,6 +1021,12 @@ mod tests {
         fail_append: bool,
         /// Rejects opening a particular rename target.
         fail_open_for: Option<String>,
+        /// Remote channel identities retired in transport order.
+        dropped_channels: std::sync::Mutex<Vec<(String, String)>>,
+        /// Rejects channel retirement before SQL can rename the table.
+        fail_drop: bool,
+        /// Reports that a retired remote channel was already absent.
+        missing_drop: bool,
         /// Counts attempted appends, including failures.
         append_attempts: AtomicUsize,
     }
@@ -1058,10 +1074,18 @@ mod tests {
             &self,
             _database: &str,
             _schema: &str,
-            _table: &str,
-            _channel: &str,
+            table: &str,
+            channel: &str,
         ) -> Result<()> {
-            unreachable!("destination tests do not drop channels")
+            self.dropped_channels.lock().unwrap().push((table.to_owned(), channel.to_owned()));
+            if self.fail_drop {
+                return Err(Error::Channel("Synthetic channel retirement failure.".to_owned()));
+            }
+            self.statuses.lock().unwrap().remove(table);
+            if self.missing_drop {
+                return Err(Error::Snowpipe(SnowpipeError::ChannelNotFound));
+            }
+            Ok(())
         }
 
         async fn insert_rows(
@@ -1324,13 +1348,15 @@ mod tests {
         }
     }
 
-    /// A renamed table's new channel inherits the confirmed delivery frontier;
-    /// failure to open it must leave the old handle available for diagnosis.
+    /// A renamed table's new channel inherits the confirmed delivery frontier
+    /// after retirement, including when the old remote channel is absent.
+    /// Failure to open it retains the local delivery proof for diagnosis.
     #[tokio::test]
     async fn rename_channel_preserves_committed_offset_and_failed_open_keeps_old_target() {
-        for fail_open in [false, true] {
+        for (fail_open, missing_drop) in [(false, false), (true, false), (false, true)] {
             let stream = Arc::new(RecordingStreamClient {
                 fail_open_for: fail_open.then(|| "RENAMED".to_owned()),
+                missing_drop,
                 ..Default::default()
             });
             let config =
@@ -1353,6 +1379,8 @@ mod tests {
             let offset = OffsetToken::new(10_u64.into(), 3);
             channel.open_at(&offset).await.unwrap();
 
+            channel.retire_for_table_rename().await.unwrap();
+
             let result = client.refresh_channel_target(&mut channel, "RENAMED").await;
             if fail_open {
                 assert!(result.is_err());
@@ -1367,6 +1395,61 @@ mod tests {
                 );
             }
             assert_eq!(channel.committed_offset(), Some(&offset));
+            assert_eq!(
+                *stream.dropped_channels.lock().unwrap(),
+                [("ORIGINAL".to_owned(), "supabase_etl_1_schema_ORIGINAL_ch0".to_owned())]
+            );
+            assert!(!stream.statuses.lock().unwrap().contains_key("ORIGINAL"));
+        }
+    }
+
+    /// SQL must not free the old table name until its channel is retired.
+    /// A retirement failure prevents SQL and preserves the committed offset.
+    #[tokio::test]
+    async fn table_rename_retires_channel_before_sql_and_preserves_offset_on_failure() {
+        for fail_drop in [false, true] {
+            let auth = Arc::new(PendingTokenProvider::default());
+            let stream = Arc::new(RecordingStreamClient { fail_drop, ..Default::default() });
+            let config =
+                Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+            let sql = SqlClient::new(config, Arc::clone(&auth), reqwest::Client::new());
+            let client = Client::with_clients(
+                sql,
+                Arc::clone(&stream),
+                "db".to_owned(),
+                "schema".to_owned(),
+                1,
+            );
+            let table_id = TableId::new(1);
+            let offset = OffsetToken::new(10_u64.into(), 3);
+            let mut channel = ChannelHandle::new(
+                Arc::clone(&stream),
+                1,
+                "db".to_owned(),
+                "schema".to_owned(),
+                "ORIGINAL".to_owned(),
+            );
+            channel.open_at(&offset).await.unwrap();
+            client.channels.write().await.insert(table_id, Arc::new(Mutex::new(channel)));
+
+            let mut rename = Box::pin(client.rename_table(table_id, "ORIGINAL", "RENAMED"));
+            let result = poll_once(rename.as_mut());
+
+            if fail_drop {
+                assert!(matches!(result, Poll::Ready(Err(Error::Channel(_)))));
+            } else {
+                assert!(result.is_pending());
+            }
+            drop(rename);
+            assert_eq!(auth.calls.load(Ordering::SeqCst), usize::from(!fail_drop));
+            assert_eq!(
+                *stream.dropped_channels.lock().unwrap(),
+                [("ORIGINAL".to_owned(), "supabase_etl_1_schema_ORIGINAL_ch0".to_owned())]
+            );
+            assert_eq!(
+                client.get_channel(table_id).await.unwrap().lock().await.committed_offset(),
+                Some(&offset)
+            );
         }
     }
 

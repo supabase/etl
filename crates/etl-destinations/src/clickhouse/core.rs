@@ -44,10 +44,7 @@ use crate::{
         },
         sql::quote_identifier,
     },
-    recovery::{
-        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        ensure_reset_table_name_is_unambiguous,
-    },
+    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
     table_name::try_stringify_table_name,
 };
 
@@ -1334,8 +1331,8 @@ where
                         ErrorKind::InvalidState,
                         "Interrupted ClickHouse table rename requires recovery",
                         format!(
-                            "Table {table_id} has a pending name change; reconcile the \
-                             destination before resuming"
+                            "Table {table_id} has a pending name change; restart the table for a \
+                             fresh copy and remove any leftover destination objects"
                         )
                     );
                 }
@@ -1453,18 +1450,10 @@ where
             ));
         }
 
-        // Destination metadata names the actual owned table. A pending source
-        // rename must not redirect reset toward an unowned destination.
+        // Reset trusts the recorded target. An interrupted rename may leave
+        // the new name occupied, which fresh creation will report as a
+        // conflict.
         let metadata = self.store.get_destination_table_metadata(schema.id()).await?;
-        if let Some(metadata) = &metadata {
-            ensure_reset_table_name_is_unambiguous(
-                "ClickHouse",
-                self.store.as_ref(),
-                schema.id(),
-                metadata,
-            )
-            .await?;
-        }
         let clickhouse_table_name = metadata.as_ref().map_or_else(
             || try_stringify_table_name(schema.name()),
             |metadata| Ok(metadata.table_id().to_owned()),

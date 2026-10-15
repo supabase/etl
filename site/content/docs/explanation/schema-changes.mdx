@@ -348,8 +348,10 @@ column plan is empty.
 | Iceberg | Deprecated. Table renames and other newer logical schemas remain unsupported. |
 
 Renames never replace an occupied destination target. If destination naming maps
-both source names to the same object, no physical rename is needed. This can
-happen with case-only renames in destinations with case-insensitive identifiers.
+both source names to the same object, DuckLake and Snowflake retain the physical
+table for ASCII-case-only source renames. BigQuery reports a name conflict for a
+case-only rename in a case-insensitive dataset; ClickHouse table names are
+case-sensitive.
 The active destinations also reject initial setup under an occupied name before
 recording ownership; an unrelated source cannot adopt a table while its rename
 is still waiting for the next relation barrier.
@@ -368,15 +370,17 @@ previously applied snapshot; the after endpoint is the incoming relation's
 snapshot. Both names refer to the same stable source table OID.
 
 These transitions are not atomic with ETL's metadata store. An interrupted
-rename stays `Applying` and blocks further writes until the destination and its
-metadata are reconciled. A resynchronization may first require manual cleanup
-of the renamed object, because pending metadata retains the previous physical
-name. ETL does not infer
-ownership from a matching column layout at the new name. DuckLake commits its
-planned DDL and replay-marker relocation together, but its replay-epoch metadata
-and ETL metadata still commit separately. DuckLake captures the replay epoch
-before DDL and persists that same epoch under the resulting name, so reusing
-the freed name cannot change the renamed table's replay frontier.
+rename stays `Applying` and blocks ordinary writes. Restart the affected table
+for a fresh copy. Reset drops the destination target recorded in metadata; a
+partially renamed table or view can remain under another name. Fresh creation
+rejects an occupied target, so remove known leftover objects before retrying.
+Do not reassign affected destination names to another table until recovery
+finishes: reset trusts the recorded names.
+
+DuckLake commits its planned DDL and replay-marker relocation together, but its
+replay-epoch metadata and ETL metadata still commit separately. DuckLake captures
+the replay epoch before DDL and persists that same epoch under the resulting
+name, so reusing the freed name cannot change the renamed table's replay frontier.
 BigQuery view creation/deletion and
 ClickHouse table/view changes can leave both or only some of their objects
 visible while a transition is incomplete.
@@ -457,7 +461,7 @@ outstanding remote jobs, and reset the table for a fresh copy while preserving
 its destination metadata and schema history. Explicit copy reset uses the
 durable table-copy phase to retry interrupted deletion; it does not write a
 `Creating` marker. See [Recovering a pending BigQuery transition](/reference/destinations/#recovering-a-pending-bigquery-transition)
-for the procedure and interrupted-rename limitations.
+for the reset procedure and leftover-object cleanup.
 
 `Applied` metadata is authoritative. It records that ETL completed setup for
 the destination table and logical schema, so a process restart or empty local
@@ -491,13 +495,15 @@ Recovery then follows each destination's DDL guarantees:
   in one transaction. Table rename runs first because renaming after column
   evolution can duplicate catalog columns in the pinned DuckLake version.
   Metadata stays `Applying` until ingestion state is ready. Column-only recovery can retry
-  unambiguous old or target states; table-renaming and column-rename-cycle
-  interruptions require operator recovery.
+  unambiguous old or target states. Restart the table for a fresh copy after
+  an interrupted physical table rename or column rename cycle. ASCII-case-only
+  table renames retain the physical name and can recover supported column changes.
 - ClickHouse resumes column-only changes when the physical columns match a
-  complete old or target endpoint. An interrupted table rename or partially
-  applied DDL sequence requires operator recovery.
+  complete old or target endpoint. Restart the table for a fresh copy after
+  an interrupted table rename or an ambiguous partially applied DDL sequence.
 - BigQuery and Snowflake leave interrupted nontransactional DDL in `Applying`
-  for operator recovery rather than guessing what completed.
+  until the table is restarted for a fresh copy. Reset uses the recorded
+  target; an occupied name during fresh creation requires leftover-object cleanup.
 - Iceberg rejects newer logical schemas before changing the destination.
 
 Resynchronize the affected table when recovery cannot prove a safe endpoint.

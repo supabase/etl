@@ -1466,8 +1466,10 @@ async fn schema_change_ordered_name_reuse() {
         tokio::pin!(completion);
         tokio::select! {
             () = events_notify.notified() => {}
+
             result = &mut completion => panic!("pipeline stopped before the post-rename row: {result:?}"),
         }
+
         pipeline.shutdown();
         completion.await.unwrap();
     }

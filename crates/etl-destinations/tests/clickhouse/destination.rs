@@ -2932,6 +2932,162 @@ async fn drop_table_for_copy_waits_for_admitted_write() {
     );
 }
 
+/// Initial setup rejects unowned tables, views, and companion-view names
+/// without changing customer rows or persisting destination ownership.
+#[tokio::test(flavor = "multi_thread")]
+async fn initial_setup_preserves_unowned_tables_and_views() {
+    init_test_tracing();
+    install_crypto_provider();
+    for engine in [ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree] {
+        for (object_kind, object_name) in [
+            ("table", "public_orders"),
+            ("view", "public_orders"),
+            ("view", "public_orders__current"),
+        ] {
+            if engine == ClickHouseEngine::MergeTree && object_name.ends_with("__current") {
+                continue;
+            }
+            let database = setup_clickhouse_database().await;
+            let engine_sql = if object_kind == "table" { "engine = Memory" } else { "" };
+            database
+                .db_client()
+                .query(&format!(
+                    "create {object_kind} \"{object_name}\" {engine_sql} as select toInt64(42) as \
+                     id, 'customer' as value"
+                ))
+                .execute()
+                .await
+                .unwrap();
+            let store = MemoryStore::new();
+            let schema = lifecycle_schema("orders");
+            store.store_table_schema(schema.inner().clone()).await.unwrap();
+            let destination = database.build_destination_with_engine(store.clone(), engine).await;
+
+            let error = write_table_rows_via_trait(
+                &destination,
+                &schema,
+                vec![TableRow::new(vec![Cell::I64(1), Cell::String("copy".to_owned())])],
+            )
+            .await
+            .unwrap_err();
+            destination.shutdown().await.unwrap();
+
+            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+            assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
+            assert_eq!(
+                database.query::<i64>(&format!("select id from \"{object_name}\"")).await,
+                vec![42]
+            );
+            let objects = database
+                .query::<String>(
+                    "select name from system.tables where database = currentDatabase() order by \
+                     name",
+                )
+                .await;
+            assert_eq!(objects, vec![object_name.to_owned()]);
+        }
+    }
+}
+
+/// Table-only renames cross case and underscore-encoding boundaries without
+/// losing rows or retaining old table/view names, including after restarts.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_only_renames_preserve_rows_and_views_across_name_mappings() {
+    init_test_tracing();
+    install_crypto_provider();
+    for engine in [ClickHouseEngine::MergeTree, ClickHouseEngine::ReplacingMergeTree] {
+        let database = setup_clickhouse_database().await;
+        let store = NotifyingStore::new();
+        let source_table_id = TableId::new(4249);
+        let schema = store_status_default_schema(
+            &store,
+            source_table_id,
+            &TableName::new("public".to_owned(), "orders".to_owned()),
+            test_snapshot_id(100, 100),
+            None,
+        )
+        .await;
+        let destination = database.build_destination_with_engine(store.clone(), engine).await;
+        destination
+            .write_table_rows(
+                &schema,
+                vec![TableRow::new(vec![Cell::I64(1), Cell::String("kept".to_owned())])],
+            )
+            .await
+            .unwrap();
+        destination.shutdown().await.unwrap();
+        let mut expected = vec![(1_i64, Some("kept".to_owned()))];
+
+        for (index, (name, table_id)) in [
+            ("Orders", "public_Orders"),
+            ("_orders", "_0607_public__orders"),
+            ("orders", "public_orders"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let lsn = 200 + u64::try_from(index).unwrap() * 10;
+            let schema = store_status_default_schema(
+                &store,
+                source_table_id,
+                &TableName::new("public".to_owned(), name.to_owned()),
+                test_snapshot_id(lsn, lsn),
+                None,
+            )
+            .await;
+            let destination = database.build_destination_with_engine(store.clone(), engine).await;
+            let row_id = i64::try_from(index).unwrap() + 2;
+
+            destination
+                .write_events(vec![
+                    Event::Relation(RelationEvent { replicated_table_schema: schema.clone() }),
+                    Event::Insert(InsertEvent {
+                        commit_lsn: PgLsn::from(lsn + 1),
+                        tx_ordinal: 0,
+                        replicated_table_schema: schema.clone(),
+                        table_row: TableRow::new(vec![
+                            Cell::I64(row_id),
+                            Cell::String("renamed".to_owned()),
+                        ]),
+                    }),
+                ])
+                .await
+                .unwrap();
+            destination.shutdown().await.unwrap();
+
+            let metadata =
+                store.get_destination_table_metadata(source_table_id).await.unwrap().unwrap();
+            assert!(metadata.is_applied());
+            assert_eq!(metadata.table_id(), table_id);
+            assert_eq!(metadata.snapshot_id(), schema.inner().snapshot_id);
+            expected.push((row_id, Some("renamed".to_owned())));
+            let query = current_state_query(engine, table_id, "id, status", &["id"], "id");
+            assert_eq!(database.query::<(i64, Option<String>)>(&query).await, expected);
+            let mut expected_tables = vec![table_id.to_owned()];
+            if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
+                expected_tables.push(format!("{table_id}__current"));
+                assert_eq!(
+                    database
+                        .query::<(i64, Option<String>)>(&format!(
+                            "select id, status from \"{table_id}__current\" order by id"
+                        ))
+                        .await,
+                    expected
+                );
+            }
+            assert_eq!(
+                database
+                    .query::<String>(
+                        "select name from system.tables where database = currentDatabase() order \
+                         by name"
+                    )
+                    .await,
+                expected_tables
+            );
+        }
+    }
+}
+
 /// Two replicated source tables after swapping names by rename.
 struct RenameSwap {
     clickhouse_db: ClickHouseTestDatabase,
@@ -3036,11 +3192,13 @@ async fn replicate_and_swap_orders_by_rename() -> RenameSwap {
     }
 }
 
-/// An uncertain rename commit cannot authorize recovery or reset to modify
-/// another table that has since adopted the previous name.
+/// Reset can discard a pending rename. A leftover at the new name causes a
+/// normal creation conflict until the operator removes it and retries copy.
 #[tokio::test(flavor = "multi_thread")]
-async fn interrupted_table_rename_preserves_reused_previous_name() {
+async fn interrupted_table_rename_can_reset_and_reports_leftover_target() {
     let swap = replicate_and_swap_orders_by_rename().await;
+    // Keep the previous name free during recovery of the interrupted rename.
+    drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
     let pending = DestinationTableMetadata::new_applied(
         "public_orders".to_owned(),
         swap.archived.inner().snapshot_id,
@@ -3061,33 +3219,55 @@ async fn interrupted_table_rename_preserves_reused_previous_name() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::InvalidState);
-    let error =
-        drop_table_for_copy_via_trait(&swap.destination, &swap.archived_renamed).await.unwrap_err();
-    assert_eq!(error.kind(), ErrorKind::InvalidState);
+
+    drop_table_for_copy_via_trait(&swap.destination, &swap.archived_renamed).await.unwrap();
     swap.destination.shutdown().await.unwrap();
 
     assert_eq!(
         swap.store.get_destination_table_metadata(swap.archived.id()).await.unwrap(),
         Some(pending)
     );
-    assert_eq!(
-        swap.clickhouse_db
-            .query::<String>(
-                "select name from system.tables where database = currentDatabase() order by name"
-            )
-            .await,
-        [
-            "public_orders",
-            "public_orders__current",
-            "public_ordersold",
-            "public_ordersold__current"
-        ]
-    );
+    swap.store.prepare_table_state_for_copy(swap.archived.id()).await.unwrap();
+    swap.store.store_table_schema(swap.archived_renamed.inner().clone()).await.unwrap();
+    let destination = swap
+        .clickhouse_db
+        .build_destination_with_engine(swap.store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+
+    let error = destination.write_table_rows(&swap.archived_renamed, vec![]).await.unwrap_err();
+    destination.shutdown().await.unwrap();
+
+    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+    assert!(swap.store.get_destination_table_metadata(swap.archived.id()).await.unwrap().is_none());
     assert_eq!(
         swap.clickhouse_db
             .query::<(i64, Option<String>)>("select id, status from public_ordersold")
             .await,
         [(1, Some("kept".to_owned()))]
+    );
+
+    // The operator removes the known leftover table and derived view before
+    // requesting another copy; ETL does not infer ownership from either name.
+    for sql in ["drop view public_ordersold__current", "drop table public_ordersold"] {
+        swap.clickhouse_db.db_client().query(sql).execute().await.unwrap();
+    }
+    let destination = swap
+        .clickhouse_db
+        .build_destination_with_engine(swap.store.clone(), ClickHouseEngine::ReplacingMergeTree)
+        .await;
+    destination
+        .write_table_rows(
+            &swap.archived_renamed,
+            vec![TableRow::new(vec![Cell::I64(2), Cell::String("fresh".to_owned())])],
+        )
+        .await
+        .unwrap();
+    destination.shutdown().await.unwrap();
+    assert_eq!(
+        swap.clickhouse_db
+            .query::<(i64, Option<String>)>("select id, status from public_ordersold")
+            .await,
+        [(2, Some("fresh".to_owned()))]
     );
 }
 

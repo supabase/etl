@@ -2229,6 +2229,7 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
     let mut completion = Box::pin(pipeline.wait());
     tokio::select! {
         () = table_sync_complete_notify.notified() => {}
+
         result = &mut completion => panic!("pipeline stopped before table synchronization: {result:?}"),
     }
 
@@ -2248,6 +2249,7 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     tokio::select! {
         () = events_notify.notified() => {}
+
         result = &mut completion => panic!("pipeline stopped before the initial row: {result:?}"),
     }
 
@@ -2318,14 +2320,14 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
         .await
         .unwrap();
 
-    {
-        tokio::select! {
-            () = events_notify.notified() => {}
-            result = &mut completion => panic!("pipeline stopped before the post-rename row: {result:?}"),
-        }
-        pipeline.shutdown();
-        completion.await.unwrap();
+    tokio::select! {
+        () = events_notify.notified() => {}
+
+        result = &mut completion => panic!("pipeline stopped before the post-rename row: {result:?}"),
     }
+
+    pipeline.shutdown();
+    completion.await.unwrap();
     drop(pipeline);
 
     let final_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();

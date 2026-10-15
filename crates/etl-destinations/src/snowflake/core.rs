@@ -22,10 +22,7 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::{
-    recovery::{
-        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        ensure_reset_table_name_is_unambiguous,
-    },
+    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
     snowflake::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
@@ -647,7 +644,7 @@ where
 
         if after_table_name != before_table_name {
             self.client
-                .rename_table(&before_table_name, &after_table_name)
+                .rename_table(table_id, &before_table_name, &after_table_name)
                 .await
                 .map_err(EtlError::from)?;
         }
@@ -756,23 +753,14 @@ where
             // them.
             let task_guard = self.tasks.drain().await?;
 
-            // Metadata identifies the actual owned target, including during
-            // an interrupted rename. Use it for both channel and table
-            // deletion rather than deriving a target from a newer snapshot.
+            // Reset trusts the recorded target. An interrupted rename may
+            // leave the new name occupied; fresh creation reports that
+            // conflict.
             let metadata = self
                 .writer
                 .store
                 .get_destination_table_metadata(replicated_table_schema.id())
                 .await?;
-            if let Some(metadata) = &metadata {
-                ensure_reset_table_name_is_unambiguous(
-                    "Snowflake",
-                    &self.writer.store,
-                    replicated_table_schema.id(),
-                    metadata,
-                )
-                .await?;
-            }
             let table_name = metadata.as_ref().map_or_else(
                 || {
                     try_stringify_table_name(replicated_table_schema.name())

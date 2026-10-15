@@ -37,7 +37,7 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        ensure_reset_table_name_is_unambiguous, warn_unsupported_column_type_change,
+        warn_unsupported_column_type_change,
     },
     table_name::try_stringify_table_name as table_name_to_bigquery_view_id,
 };
@@ -226,7 +226,7 @@ fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlR
         format!(
             "Table '{}' has schema state '{:?}'. Stop the pipeline, resolve any outstanding \
              BigQuery jobs, and reset the table for a fresh copy. Preserve destination metadata \
-             until reset completes. Reconcile interrupted table renames before resetting.",
+             until reset completes. Check for leftover destination objects before retrying.",
             metadata.table_id(),
             metadata.table_schema()
         )
@@ -961,7 +961,8 @@ where
         // crashes while in 'Applying' state, the destination table may be in an
         // partially changed state. Automatic recovery is not implemented:
         // stop the pipeline, resolve outstanding jobs, and reset for a fresh
-        // copy. A pending table rename requires reconciliation before reset.
+        // copy. A partial rename can leave destination objects for manual
+        // cleanup.
         let updated_metadata = DestinationTableMetadata::new_applied(
             current_metadata.table_id().to_owned(),
             before_snapshot_id,
@@ -1424,13 +1425,6 @@ where
             table.invalidate();
             return Ok(());
         };
-        ensure_reset_table_name_is_unambiguous(
-            "BigQuery",
-            &self.state_store,
-            source_table_id,
-            &metadata,
-        )
-        .await?;
         let table_id = parse_table_id_from_metadata(&metadata)?;
         let snapshot = metadata.snapshot_id();
         let name = if snapshot == replicated_table_schema.inner().snapshot_id {
@@ -1439,13 +1433,14 @@ where
             self.state_store
                 .get_table_schema(&source_table_id, snapshot)
                 .await?
+                .filter(|schema| schema.snapshot_id == snapshot)
                 .ok_or_else(|| {
                     etl_error!(
                         ErrorKind::InvalidState,
                         "Stored schema snapshot missing for BigQuery reset",
                         format!(
-                            "Table {source_table_id} needs snapshot {snapshot} to resolve its \
-                             owned view"
+                            "Table {source_table_id} needs exact snapshot {snapshot} to resolve \
+                             its owned view"
                         )
                     )
                 })?
@@ -2330,6 +2325,38 @@ mod tests {
         ]);
 
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
+    }
+
+    /// An older source snapshot cannot authorize deleting a view whose name
+    /// may now belong to another table.
+    #[tokio::test]
+    async fn reset_requires_exact_owned_snapshot_before_view_deletion() {
+        let destination = unavailable_destination(false).await;
+        let before = schema_for_table(1);
+        destination.state_store.store_table_schema(before.inner().clone()).await.unwrap();
+        let metadata = DestinationTableMetadata::new_applied(
+            table_target(&before).table_id.clone(),
+            SnapshotId::new(PgLsn::from(20), PgLsn::from(20)),
+            before.replication_mask().clone(),
+        );
+        destination
+            .state_store
+            .store_destination_table_metadata(before.id(), metadata.clone())
+            .await
+            .unwrap();
+        let mut after = before.inner().clone();
+        after.snapshot_id = SnapshotId::new(PgLsn::from(40), PgLsn::from(40));
+        after.name.name = "renamed".to_owned();
+        let after = ReplicatedTableSchema::all(Arc::new(after));
+
+        let error = destination.drop_table_for_copy_inner(&after).await.unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        assert_eq!(
+            destination.state_store.get_destination_table_metadata(before.id()).await.unwrap(),
+            Some(metadata)
+        );
+        destination.shutdown().await.unwrap();
     }
 
     /// Disjoint copy partitions must both reach append while the first is

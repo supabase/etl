@@ -6,60 +6,6 @@ use etl::{
     etl_error,
     schema::{ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
 };
-#[cfg(any(
-    feature = "bigquery",
-    feature = "clickhouse",
-    feature = "ducklake",
-    feature = "snowflake"
-))]
-use etl::{destination::DestinationTableSchema, store::SchemaStore};
-
-/// Rejects destructive reset while a rename leaves physical ownership
-/// uncertain.
-///
-/// After a remote rename, another source can already own the previous name.
-/// Pending metadata retains that name until Applied commits, so it cannot
-/// authorize dropping it. Column-only transitions retain their reset behavior.
-#[cfg(any(
-    feature = "bigquery",
-    feature = "clickhouse",
-    feature = "ducklake",
-    feature = "snowflake"
-))]
-pub(crate) async fn ensure_reset_table_name_is_unambiguous(
-    destination_name: &str,
-    store: &impl SchemaStore,
-    table_id: TableId,
-    metadata: &DestinationTableMetadata,
-) -> EtlResult<()> {
-    let DestinationTableSchema::Applying { previous_snapshot_id, snapshot_id, .. } =
-        metadata.table_schema()
-    else {
-        return Ok(());
-    };
-    let before_table_schema = store.get_table_schema(&table_id, *previous_snapshot_id).await?;
-    let after_table_schema = store.get_table_schema(&table_id, *snapshot_id).await?;
-    let (Some(before_table_schema), Some(after_table_schema)) =
-        (before_table_schema, after_table_schema)
-    else {
-        return Err(etl_error!(
-            ErrorKind::InvalidState,
-            "Stored schema snapshot missing for destination reset",
-            format!(
-                "{destination_name} table {table_id} needs snapshots {previous_snapshot_id} and \
-                 {snapshot_id} to establish ownership"
-            )
-        ));
-    };
-    if before_table_schema.name != after_table_schema.name {
-        return Err(etl_error!(
-            ErrorKind::InvalidState,
-            "Interrupted table rename requires reconciliation before reset",
-            format!("{destination_name} table {table_id} has uncertain physical ownership")
-        ));
-    }
-    Ok(())
-}
 
 /// Warns that a destination is intentionally skipping a column type change.
 #[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
@@ -171,13 +117,6 @@ pub(crate) fn ensure_destination_schema_matches_metadata(
 mod tests {
     use std::sync::Arc;
 
-    #[cfg(any(
-        feature = "bigquery",
-        feature = "clickhouse",
-        feature = "ducklake",
-        feature = "snowflake"
-    ))]
-    use etl::store::{MemoryStore, SchemaStore};
     use etl::{
         destination::DestinationTableMetadata,
         error::ErrorKind,
@@ -187,13 +126,6 @@ mod tests {
         },
     };
 
-    #[cfg(any(
-        feature = "bigquery",
-        feature = "clickhouse",
-        feature = "ducklake",
-        feature = "snowflake"
-    ))]
-    use crate::recovery::ensure_reset_table_name_is_unambiguous;
     use crate::recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
     };
@@ -201,53 +133,6 @@ mod tests {
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
         SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
-    }
-
-    /// Pending renames require reconciliation before a destructive reset;
-    /// column-only changes still permit resetting the recorded table.
-    #[cfg(any(
-        feature = "bigquery",
-        feature = "clickhouse",
-        feature = "ducklake",
-        feature = "snowflake"
-    ))]
-    #[tokio::test]
-    async fn reset_requires_stable_table_name_and_both_recovery_snapshots() {
-        for target_name in ["orders", "renamed"] {
-            let store = MemoryStore::new();
-            let old = TableSchema::new(
-                TableId::new(1),
-                TableName::new("public".to_owned(), "orders".to_owned()),
-                Vec::new(),
-            );
-            let new = TableSchema::with_snapshot_id(
-                old.id,
-                TableName::new("public".to_owned(), target_name.to_owned()),
-                Vec::new(),
-                test_snapshot_id(20, 20),
-            );
-            let pending = DestinationTableMetadata::new_applied(
-                "actual_table".to_owned(),
-                old.snapshot_id,
-                ReplicationMask::from_bytes(Vec::new()),
-            )
-            .with_schema_change(new.snapshot_id, ReplicationMask::from_bytes(Vec::new()))
-            .unwrap();
-            store.store_table_schema(new.clone()).await.unwrap();
-            let error = ensure_reset_table_name_is_unambiguous("Test", &store, old.id, &pending)
-                .await
-                .unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::InvalidState);
-
-            store.store_table_schema(old.clone()).await.unwrap();
-            let result =
-                ensure_reset_table_name_is_unambiguous("Test", &store, old.id, &pending).await;
-            if target_name == "orders" {
-                result.unwrap();
-            } else {
-                assert_eq!(result.unwrap_err().kind(), ErrorKind::InvalidState);
-            }
-        }
     }
 
     #[test]

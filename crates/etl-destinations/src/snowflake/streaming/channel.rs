@@ -505,6 +505,35 @@ impl<C: StreamClient> ChannelHandle<C> {
 
     /// Drop the channel without discarding uncommitted rows.
     pub async fn drop_channel(&mut self) -> Result<()> {
+        self.drop_remote_channel().await?;
+        self.progress = ChannelProgress::default();
+        self.copy_offset_ordinal = None;
+        self.copy_barrier_pending = false;
+        self.copy_durability_target = None;
+        self.continuation_token = None;
+        Ok(())
+    }
+
+    /// Retires a drained channel before its table name becomes reusable.
+    ///
+    /// Keep the confirmed offset so the replacement channel can inherit it.
+    /// Applying metadata blocks writes until that replacement is ready.
+    pub(in crate::snowflake) async fn retire_for_table_rename(&mut self) -> Result<()> {
+        match self.drop_remote_channel().await {
+            Ok(()) | Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)) => {}
+            Err(error) => return Err(error),
+        }
+        self.continuation_token = None;
+        Ok(())
+    }
+
+    /// Returns whether `offset` has already been committed.
+    pub fn is_offset_committed(&self, offset: &OffsetToken) -> bool {
+        self.progress.is_committed(offset)
+    }
+
+    /// Drops remote channel metadata while retaining local delivery proof.
+    async fn drop_remote_channel(&self) -> Result<()> {
         let deadline = Instant::now() + self.wait_timeout;
 
         loop {
@@ -513,14 +542,7 @@ impl<C: StreamClient> ChannelHandle<C> {
                 .drop_channel(&self.database, &self.schema, &self.table, &self.channel)
                 .await
             {
-                Ok(()) => {
-                    self.progress = ChannelProgress::default();
-                    self.copy_offset_ordinal = None;
-                    self.copy_barrier_pending = false;
-                    self.copy_durability_target = None;
-                    self.continuation_token = None;
-                    return Ok(());
-                }
+                Ok(()) => return Ok(()),
                 Err(error @ Error::Snowpipe(SnowpipeError::ChannelHasUncommittedRows)) => {
                     if Instant::now() >= deadline {
                         return Err(error);
@@ -536,11 +558,6 @@ impl<C: StreamClient> ChannelHandle<C> {
                 Err(error) => return Err(error),
             }
         }
-    }
-
-    /// Returns whether `offset` has already been committed.
-    pub fn is_offset_committed(&self, offset: &OffsetToken) -> bool {
-        self.progress.is_committed(offset)
     }
 
     /// Refreshes channel status within `deadline`.

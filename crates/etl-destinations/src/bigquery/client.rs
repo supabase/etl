@@ -931,7 +931,9 @@ impl BigQueryClient {
     /// Creates or replaces a view that points to the specified physical table.
     ///
     /// Refreshes the view schema after column changes and redirects the view
-    /// to a new physical table after truncation.
+    /// to a new physical table after truncation. Call only after destination
+    /// metadata establishes ownership of the view. Initial setup and renames
+    /// to an unused name use create-only DDL.
     pub async fn create_or_replace_view(
         &self,
         dataset_id: &BigQueryDatasetId,
