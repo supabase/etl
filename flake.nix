@@ -50,11 +50,26 @@
         ];
         buildDeps = with pkgs; [ openssl ];
 
+        # Keep the required runner without updating unrelated nixpkgs packages.
+        cargoNextest = pkgs.cargo-nextest.overrideAttrs (finalAttrs: _: {
+          version = (pkgs.lib.importTOML ./.config/nextest.toml).nextest-version.required;
+          src = pkgs.fetchFromGitHub {
+            owner = "nextest-rs";
+            repo = "nextest";
+            tag = "cargo-nextest-${finalAttrs.version}";
+            hash = "sha256-JcDSd3VswTuAhmHibwFJjJMSEbSReQ/SONrEcyEGYD4=";
+          };
+          cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+            inherit (finalAttrs) pname version src;
+            hash = "sha256-MW2cM2XjfAquhdeDNwvizk6owl1sVwK5mfCiSpjJN6E=";
+          };
+        });
+
         devTools = with pkgs; [
           actionlint
           cargo-deny
           cargo-llvm-cov
-          cargo-nextest
+          cargoNextest
           cargo-sort
           postgresql
           # actionlint checks workflow `run:` scripts with shellcheck, as in CI.
