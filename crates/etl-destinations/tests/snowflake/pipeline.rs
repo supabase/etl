@@ -16,7 +16,6 @@ use etl_destinations::snowflake::{
     AuthManager, Client, Destination, HttpExchanger, OffsetToken, SqlClient,
     test_utils::{load_test_config, query_rows},
 };
-use etl_postgres::tokio::test_utils::TableModification;
 use rand::random;
 use tokio::time::Duration;
 
@@ -125,22 +124,13 @@ async fn schema_change_batched_operations() {
             .await;
 
         database
-            .alter_table(
-                table_name.clone(),
-                &[
-                    TableModification::DropColumn { name: "replaced" },
-                    TableModification::AddColumn { name: "replaced", data_type: "text" },
-                    TableModification::AddColumn {
-                        name: "status",
-                        data_type: "text default 'new'::text",
-                    },
-                    TableModification::AddColumn { name: "score", data_type: "integer default 15" },
-                    TableModification::AddColumn {
-                        name: "active",
-                        data_type: "boolean default true",
-                    },
-                ],
-            )
+            .run_sql(&format!(
+                "alter table {} drop column replaced, add column replaced text, add column status \
+                 text default 'new'::text, add column score integer default 15, add column active \
+                 boolean default true, add constraint score_positive check (score > 0), set \
+                 (fillfactor = 80)",
+                table_name.as_quoted_identifier(),
+            ))
             .await
             .unwrap();
         database

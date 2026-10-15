@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use etl::{
     pipeline::PipelineId,
     schema::{
-        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, SchemaOperation,
+        ColumnAlterationKind, ColumnOperation, ColumnPresenceChangeReason, ColumnSchema,
         SchemaPlan, TableId,
     },
 };
@@ -497,21 +497,23 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.sql_client.rename_table(before_table_name, after_table_name).await
     }
 
-    /// Translates a validated schema plan into Snowflake DDL in the supplied
-    /// order.
+    /// Executes the plan's ordered column operations against the resolved
+    /// table.
+    ///
+    /// The caller handles any table rename before calling this method.
     pub async fn apply_schema_plan(&self, table_name: &str, plan: &SchemaPlan) -> Result<()> {
-        if plan.is_empty() {
+        if plan.ordered_column_operations().is_empty() {
             return Ok(());
         }
 
         // Translate the shared plan without revalidating names or regrouping
         // operations.
-        for operation in plan.ordered_operations() {
+        for operation in plan.ordered_column_operations() {
             match operation {
-                SchemaOperation::DropColumn { before_column_schema, reason: _ } => {
+                ColumnOperation::DropColumn { before_column_schema, reason: _ } => {
                     self.sql_client.drop_column(table_name, &before_column_schema.name).await?;
                 }
-                SchemaOperation::AddColumn { after_column_schema, reason } => {
+                ColumnOperation::AddColumn { after_column_schema, reason } => {
                     if !after_column_schema.nullable {
                         warn!(
                             table_name,
@@ -546,7 +548,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                         )
                         .await?;
                 }
-                SchemaOperation::AlterColumn { alteration } => {
+                ColumnOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
                     match alteration.kind() {
@@ -756,6 +758,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             }
             *channel = renamed;
         }
+
         Ok(())
     }
 

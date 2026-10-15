@@ -985,32 +985,6 @@ impl BigQueryClient {
         Ok(())
     }
 
-    /// Deletes a view only when its definition still targets the recorded
-    /// physical table, including after an interrupted logical rename.
-    pub(super) async fn drop_owned_view_if_exists(
-        &self,
-        dataset_id: &BigQueryDatasetId,
-        view_name: &BigQueryTableId,
-        physical_id: &BigQueryTableId,
-    ) -> EtlResult<()> {
-        let table =
-            match self.client.table().get(&self.project_id, dataset_id, view_name, None).await {
-                Ok(table) => table,
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => return Ok(()),
-                Err(error) => return Err(bq_error_to_etl_error(error)),
-            };
-        let expected_query =
-            format!("select * from {}", self.full_table_name(dataset_id, physical_id)?);
-        if table.view.as_ref().is_none_or(|view| view.query.trim() != expected_query) {
-            return Err(etl_error!(
-                ErrorKind::DestinationTableAlreadyExists,
-                "BigQuery view ownership does not match destination metadata",
-                format!("View '{view_name}' does not target recorded table '{physical_id}'")
-            ));
-        }
-        self.drop_view_if_exists(dataset_id, view_name).await
-    }
-
     /// Drops a table from BigQuery.
     ///
     /// Executes a DROP TABLE statement to remove the table and all its data.
@@ -1033,7 +1007,8 @@ impl BigQueryClient {
     /// Adds a column to an existing BigQuery table.
     ///
     /// Executes an ALTER TABLE ADD COLUMN statement to add a new column with
-    /// the specified schema. New columns must be nullable in BigQuery.
+    /// the specified schema. New columns must be nullable or repeated in
+    /// BigQuery.
     pub async fn add_column(
         &self,
         dataset_id: &BigQueryDatasetId,

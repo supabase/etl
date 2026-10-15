@@ -5,7 +5,12 @@
 
 use std::{error::Error as _, fmt, future::Future, path::Path, str::FromStr, time::Duration};
 
-use etl::{error::EtlError, pipeline::PipelineId, schema::TableName, store::DestinationStore};
+use etl::{
+    error::{EtlError, EtlResult},
+    pipeline::PipelineId,
+    schema::TableName,
+    store::DestinationStore,
+};
 use gcp_bigquery_client::{
     Client,
     client_builder::ClientBuilder,
@@ -19,8 +24,9 @@ use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{BigQueryDestination, query::execute_query, table_name_to_bigquery_table_id},
+    bigquery::{BigQueryDestination, BigQueryTableId, query::execute_query},
     retry::{RetryPolicy, retry_with_backoff},
+    table_name::try_stringify_table_name,
 };
 
 /// Maximum number of times we re-run a verification query.
@@ -161,6 +167,14 @@ pub fn get_sa_key_path() -> String {
 pub fn random_dataset_id() -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("etl_tests_{uuid}")
+}
+
+/// Returns the destination identifier used by BigQuery for a source table.
+///
+/// Uses the shared destination naming logic so live assertions address the
+/// same logical views as production writes.
+pub fn table_name_to_bigquery_table_id(table_name: &TableName) -> EtlResult<BigQueryTableId> {
+    try_stringify_table_name(table_name)
 }
 
 /// BigQuery database connection for testing.

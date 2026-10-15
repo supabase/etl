@@ -2722,13 +2722,11 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[
-                TableModification::DropColumn { name: "age" },
-                TableModification::AddColumn { name: "age", data_type: "text" },
-            ],
-        )
+        .run_sql(&format!(
+            "alter table {} drop column age, add column age text, add constraint age_nonempty \
+             check (age is null or length(age) > 0), set (fillfactor = 80)",
+            table_name.as_quoted_identifier(),
+        ))
         .await
         .unwrap();
 

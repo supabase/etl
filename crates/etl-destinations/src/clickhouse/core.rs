@@ -16,9 +16,9 @@ use etl::{
     etl_error,
     event::{Event, EventPosition},
     schema::{
-        ColumnAlterationKind, ColumnMetadataChange, ColumnPresenceChangeReason, ColumnSchema,
-        IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaOperation, SchemaPlan,
-        TableId, TableName, Type, is_array_type,
+        ColumnAlterationKind, ColumnMetadataChange, ColumnOperation, ColumnPresenceChangeReason,
+        ColumnSchema, IdentityType, PgLsn, ReplicatedTableSchema, SchemaDiff, SchemaPlan, TableId,
+        TableName, Type, is_array_type,
     },
     store::{SchemaStore, StateStore},
     task::{TaskGroup, TaskRegistry},
@@ -166,8 +166,8 @@ fn expected_clickhouse_columns(
 
 /// Rejects renames that move a ClickHouse nested subcolumn between parents.
 fn ensure_clickhouse_renames_are_supported(table_name: &str, plan: &SchemaPlan) -> EtlResult<()> {
-    for operation in plan.ordered_operations() {
-        let SchemaOperation::AlterColumn { alteration } = operation else {
+    for operation in plan.ordered_column_operations() {
+        let ColumnOperation::AlterColumn { alteration } = operation else {
             continue;
         };
         if alteration.kind() != ColumnAlterationKind::Rename {
@@ -239,8 +239,8 @@ fn ensure_clickhouse_type_changes_are_supported(
     table_name: &str,
     plan: &SchemaPlan,
 ) -> EtlResult<()> {
-    for operation in plan.ordered_operations() {
-        let SchemaOperation::AlterColumn { alteration } = operation else {
+    for operation in plan.ordered_column_operations() {
+        let ColumnOperation::AlterColumn { alteration } = operation else {
             continue;
         };
         if alteration.kind() != ColumnAlterationKind::Type {
@@ -1320,7 +1320,13 @@ where
                             )
                         },
                     )?;
-                if &before_table_schema.name != after_schema.name() {
+                let before_schema = ReplicatedTableSchema::from_mask(
+                    Arc::clone(&before_table_schema),
+                    before_replication_mask,
+                );
+                let plan = before_schema
+                    .plan_schema_change(after_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
+                if plan.diff().table_name_change().is_some() {
                     // A name alone cannot prove ownership after an interrupted
                     // remote rename. Do not infer success from a matching
                     // column layout at a possibly unrelated target.
@@ -1334,12 +1340,6 @@ where
                     );
                 }
                 let actual_columns = self.client.table_columns(clickhouse_table_name).await?;
-                let before_schema = ReplicatedTableSchema::from_mask(
-                    Arc::clone(&before_table_schema),
-                    before_replication_mask,
-                );
-                let plan = before_schema
-                    .plan_schema_change(after_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
                 ensure_clickhouse_renames_are_supported(clickhouse_table_name, &plan)?;
                 for endpoint_schema in [&before_schema, after_schema] {
                     reject_legacy_merge_tree_layout(
@@ -1375,13 +1375,14 @@ where
                         .get(&after_column_name)
                         .is_some_and(|ordinal| *ordinal != after_column.ordinal_position)
                 });
-                let has_structural_operations = plan.ordered_operations().iter().any(|operation| {
-                    matches!(
-                        operation,
-                        SchemaOperation::DropColumn { .. } | SchemaOperation::AddColumn { .. }
-                    ) || matches!(operation, SchemaOperation::AlterColumn { alteration }
+                let has_structural_operations =
+                    plan.ordered_column_operations().iter().any(|operation| {
+                        matches!(
+                            operation,
+                            ColumnOperation::DropColumn { .. } | ColumnOperation::AddColumn { .. }
+                        ) || matches!(operation, ColumnOperation::AlterColumn { alteration }
                         if alteration.kind() == ColumnAlterationKind::Rename)
-                });
+                    });
 
                 let recovery_endpoint = classify_clickhouse_schema_recovery_endpoint(
                     table_id,
@@ -1616,8 +1617,8 @@ where
         let before_table_name = metadata.table_id();
         let plan =
             before_schema.plan_schema_change(after_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
-        let after_table_name = if before_schema.name() != after_schema.name() {
-            try_stringify_table_name(after_schema.name())?
+        let after_table_name = if let Some(change) = plan.diff().table_name_change() {
+            try_stringify_table_name(change.after_name())?
         } else {
             before_table_name.to_owned()
         };
@@ -1711,8 +1712,10 @@ where
         Ok(())
     }
 
-    /// Translates a shared ordered schema plan into ClickHouse DDL and
-    /// refreshes the ReplacingMergeTree current-state view when needed.
+    /// Executes the plan's ordered column operations against the resolved table
+    /// and refreshes the ReplacingMergeTree current-state view when needed.
+    ///
+    /// The caller handles any table rename before calling this method.
     ///
     /// New columns are placed at their after-schema position before the
     /// trailing CDC columns because RowBinary encoding is positional.
@@ -1731,7 +1734,7 @@ where
         let is_replacing_merge_tree =
             matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree);
         ensure_clickhouse_type_changes_are_supported(table_name, plan)?;
-        if plan.is_empty() {
+        if plan.ordered_column_operations().is_empty() {
             if is_replacing_merge_tree {
                 self.refresh_current_view(table_name, after_schema).await?;
             }
@@ -1739,9 +1742,10 @@ where
         }
 
         // Inspect endpoint facts before applying anything. This validation does
-        // not emit DDL; all DDL below still comes from `ordered_operations`.
-        // ReplacingMergeTree cannot alter the source-primary-key expression
-        // used as its sort and deduplication key.
+        // not emit DDL; all DDL below still comes from
+        // `ordered_column_operations`. ReplacingMergeTree cannot alter
+        // the source-primary-key expression used as its sort and
+        // deduplication key.
         if is_replacing_merge_tree {
             reject_pk_alters_under_replacing_merge_tree(
                 table_name,
@@ -1766,13 +1770,13 @@ where
 
         // Translate the shared plan without revalidating names or regrouping
         // operations.
-        for operation in plan.ordered_operations() {
+        for operation in plan.ordered_column_operations() {
             match operation {
-                SchemaOperation::DropColumn { before_column_schema, reason: _ } => {
+                ColumnOperation::DropColumn { before_column_schema, reason: _ } => {
                     self.client.drop_column(table_name, &before_column_schema.name).await?;
                     user_column_names.retain(|name| name != &before_column_schema.name);
                 }
-                SchemaOperation::AddColumn { after_column_schema, reason } => {
+                ColumnOperation::AddColumn { after_column_schema, reason } => {
                     let (destination_column_schema, force_nullable) =
                         clickhouse_add_column_definition(after_column_schema, *reason);
                     if force_nullable
@@ -1823,7 +1827,7 @@ where
                         .await?;
                     user_column_names.insert(insertion_index, after_column_schema.name.clone());
                 }
-                SchemaOperation::AlterColumn { alteration } => {
+                ColumnOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
                     match alteration.kind() {

@@ -175,8 +175,24 @@ live catalog state.
 A single comma-separated `ALTER TABLE` produces one post-statement snapshot,
 even when it changes multiple columns. Separate ALTER statements produce
 distinct snapshots, including when they share a transaction. PostgreSQL does
-not allow table or column renames in a comma-separated ALTER action list;
-those require separate statements.
+not allow renames, `SET SCHEMA`, `ATTACH PARTITION`, or `DETACH PARTITION` in a
+comma-separated ALTER action list; those require separate statements. See
+[PostgreSQL's multi-action rules](https://www.postgresql.org/docs/current/sql-altertable.html#SQL-ALTERTABLE-DESC).
+
+Mixed action lists use the same snapshot path as individual statements; ETL
+does not split SQL on commas or forward PostgreSQL action syntax to a
+destination. For example, an add/drop-column action can share a statement with
+a default, nullability, or constraint change. Only changes represented in
+ETL's schema and supported by the destination become downstream DDL. General
+constraints, storage settings, triggers, and security policies are not mirrored
+to destinations. Replica-identity changes affect row decoding and remain
+subject to the maintenance and destination compatibility rules below.
+
+PostgreSQL executes compound alterations in
+[passes determined by action type](https://github.com/postgres/postgres/blob/REL_18_STABLE/src/backend/commands/tablecmds.c#L130-L158),
+so their effects need not follow textual order. For example, `SET DEFAULT`
+followed by `DROP DEFAULT` in one statement can retain the set default, while
+separate statements remove it. ETL captures the resulting catalog state.
 
 Without intervening DML, the next relation uses only the latest captured
 snapshot. The destination therefore plans from its previously applied snapshot
@@ -219,16 +235,21 @@ membership changes are supported.
 ### Ordered schema plans
 
 ETL compares the previously applied logical snapshot with the new one. The
-destination handles a table rename first, if needed, then executes a
-column-only schema plan against the resulting actual table name. Column
-operations are ordered as follows:
+schema plan exposes the exact source changes through `diff()`, including an
+optional `table_name_change()` with the before and after qualified names.
+Destination naming can map those names to the same object, so the destination
+decides whether an actual rename is needed.
+
+The destination handles that rename first, then executes
+`ordered_column_operations()` against the resulting actual table name. Table
+renames are separate from this sequence. Column operations are ordered as follows:
 
 1. Drop columns that are no longer present.
 2. Apply column renames, using a temporary name when needed to break a rename cycle.
 3. Add new columns.
 4. Apply type, nullability, and default alterations in order.
 
-The column plan does not carry table names or table-rename operations.
+The ordered column sequence does not carry table names or table-rename operations.
 Renaming first lets DuckLake commit table and column changes together without
 duplicating catalog columns in the pinned engine. A move to
 another PostgreSQL schema is rejected before destination DDL or metadata changes.
@@ -417,16 +438,26 @@ Destination metadata records the target snapshot and replication mask. While a
 change is `Applying`, it also records the previous snapshot and previous
 replication mask as one logical recovery endpoint.
 
-Initial table setup uses a separate `Creating` state. If setup is interrupted,
-ETL retries the destination's idempotent write-path setup for that exact target
-schema and records `Applied` only after the destination is ready for writes.
+Initial table setup uses a separate `Creating` state and records `Applied`
+only after the destination is ready for writes. ClickHouse, DuckLake, and
+Iceberg can resume their supported initial-creation setup. BigQuery warns and
+rejects both `Creating` and `Applying` on a cache miss; automatic recovery is
+not implemented. BigQuery also uses `Creating` for truncation's replacement
+physical table and requires its view to be installed before recording `Applied`.
 Iceberg also uses `Creating` to bracket its ETL-owned drop-and-recreate
 implementation of source truncation, so an interrupted recreation can finish
 before replayed writes continue.
-Ancillary objects that are not required for writes, such as BigQuery's
-customer-facing view, have their own idempotent reconciliation. This keeps
-creation recovery separate from partially applied schema changes, which may
-require operator recovery.
+Creation recovery is separate from partially applied schema changes, which may
+require operator recovery. BigQuery's applied cache is populated only after
+setup completes; on restart, `Applied` metadata repopulates it without view DDL.
+External edits to metadata are not observed by that warm cache.
+
+For BigQuery, the simple recovery path is to stop the pipeline, resolve any
+outstanding remote jobs, and reset the table for a fresh copy while preserving
+its destination metadata and schema history. Explicit copy reset uses the
+durable table-copy phase to retry interrupted deletion; it does not write a
+`Creating` marker. See [Recovering a pending BigQuery transition](/reference/destinations/#recovering-a-pending-bigquery-transition)
+for the procedure and interrupted-rename limitations.
 
 `Applied` metadata is authoritative. It records that ETL completed setup for
 the destination table and logical schema, so a process restart or empty local

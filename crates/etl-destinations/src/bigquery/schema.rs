@@ -19,6 +19,31 @@ const BIGQUERY_CDC_SPECIAL_COLUMN: &str = "_CHANGE_TYPE";
 /// Special column name for Change Data Capture sequence ordering in BigQuery.
 const BIGQUERY_CDC_SEQUENCE_COLUMN: &str = "_CHANGE_SEQUENCE_NUMBER";
 
+/// Selects the Storage Write descriptor semantics for a replication phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WriteMode {
+    /// Initial-copy rows preserve source scalar-column nullability.
+    Copy,
+    /// CDC rows allow missing scalar fields because deletes may contain only
+    /// primary-key values, including when non-key columns are NOT NULL.
+    Cdc,
+}
+
+impl WriteMode {
+    /// Resolves scalar presence requirements while keeping arrays repeated in
+    /// both write modes.
+    fn column_mode(self, column_schema: &ColumnSchema) -> ColumnMode {
+        if is_array_type(&column_schema.typ) {
+            ColumnMode::Repeated
+        } else {
+            match self {
+                Self::Copy if !column_schema.nullable => ColumnMode::Required,
+                Self::Copy | Self::Cdc => ColumnMode::Nullable,
+            }
+        }
+    }
+}
+
 /// Returns the BigQuery default for a complete source column, if supported.
 ///
 /// This applies both expression-and-type compatibility and column-level
@@ -256,11 +281,10 @@ pub(super) fn postgres_to_bigquery_type(typ: &Type) -> String {
 ///
 /// Maps data types and nullability to BigQuery column specifications, setting
 /// appropriate column modes and always adding CDC operation and sequence
-/// columns. Streaming rows allow missing scalar columns for sparse mutations;
-/// copy rows preserve the source nullability.
-pub(crate) fn column_schemas_to_table_descriptor(
+/// columns. [`WriteMode`] determines scalar-field presence requirements.
+pub(super) fn column_schemas_to_table_descriptor(
     replicated_table_schema: &ReplicatedTableSchema,
-    allow_missing_columns: bool,
+    write_mode: WriteMode,
 ) -> TableDescriptor {
     let field_count = replicated_table_schema.column_schemas().len() + 2;
     let mut field_descriptors = Vec::with_capacity(field_count);
@@ -291,18 +315,7 @@ pub(crate) fn column_schemas_to_table_descriptor(
             _ => ColumnType::String,
         };
 
-        let mode = if is_array_type(&column_schema.typ) {
-            ColumnMode::Repeated
-        } else if allow_missing_columns {
-            // CDC delete rows can omit non-key columns, so the writer schema
-            // must accept missing scalar fields even when the destination table
-            // column is defined as NOT NULL.
-            ColumnMode::Nullable
-        } else if column_schema.nullable {
-            ColumnMode::Nullable
-        } else {
-            ColumnMode::Required
-        };
+        let mode = write_mode.column_mode(column_schema);
 
         field_descriptors.push(FieldDescriptor {
             number,
@@ -632,7 +645,7 @@ mod tests {
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = column_schemas_to_table_descriptor(&schema, true);
+        let descriptor = column_schemas_to_table_descriptor(&schema, WriteMode::Cdc);
 
         assert_eq!(descriptor.field_descriptors.len(), 6);
 
@@ -674,7 +687,7 @@ mod tests {
 
         let columns = create_columns_spec(&schema).unwrap();
         let primary_key = add_primary_key_clause(&schema).unwrap();
-        let descriptor = column_schemas_to_table_descriptor(&schema, false);
+        let descriptor = column_schemas_to_table_descriptor(&schema, WriteMode::Copy);
 
         assert_eq!(
             columns,
@@ -693,20 +706,34 @@ mod tests {
     }
 
     #[test]
-    fn column_schemas_to_table_descriptor_preserves_required_mode_for_table_copy() {
+    fn column_schemas_to_table_descriptor_uses_write_mode() {
         let columns = vec![
             test_column("id", Type::INT4, 1, false, Some(1)),
             test_column("name", Type::TEXT, 2, true, None),
+            test_column("required_name", Type::TEXT, 3, false, None),
+            test_column("tags", Type::TEXT_ARRAY, 4, false, None),
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = column_schemas_to_table_descriptor(&schema, false);
-
-        assert!(matches!(descriptor.field_descriptors[0].mode, ColumnMode::Required));
-        assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
-        assert_eq!(descriptor.field_descriptors.len(), 4);
-        assert_eq!(descriptor.field_descriptors[3].name, BIGQUERY_CDC_SEQUENCE_COLUMN);
-        assert!(matches!(descriptor.field_descriptors[3].mode, ColumnMode::Required));
+        for write_mode in [WriteMode::Copy, WriteMode::Cdc] {
+            let descriptor = column_schemas_to_table_descriptor(&schema, write_mode);
+            assert_eq!(descriptor.field_descriptors.len(), 6);
+            for index in [0, 2] {
+                assert!(match write_mode {
+                    WriteMode::Copy => {
+                        matches!(descriptor.field_descriptors[index].mode, ColumnMode::Required)
+                    }
+                    WriteMode::Cdc => {
+                        matches!(descriptor.field_descriptors[index].mode, ColumnMode::Nullable)
+                    }
+                });
+            }
+            assert!(matches!(descriptor.field_descriptors[1].mode, ColumnMode::Nullable));
+            assert!(matches!(descriptor.field_descriptors[3].mode, ColumnMode::Repeated));
+            assert!(matches!(descriptor.field_descriptors[4].mode, ColumnMode::Required));
+            assert!(matches!(descriptor.field_descriptors[5].mode, ColumnMode::Required));
+            assert_eq!(descriptor.field_descriptors[5].name, BIGQUERY_CDC_SEQUENCE_COLUMN);
+        }
     }
 
     #[test]
@@ -725,7 +752,7 @@ mod tests {
         ];
         let schema = test_replicated_schema(columns);
 
-        let descriptor = column_schemas_to_table_descriptor(&schema, true);
+        let descriptor = column_schemas_to_table_descriptor(&schema, WriteMode::Cdc);
 
         assert_eq!(descriptor.field_descriptors.len(), 12);
 
@@ -773,7 +800,7 @@ mod tests {
             test_column("oid_col", Type::OID, 1, true, None),
             test_column("oid_array_col", Type::OID_ARRAY, 2, true, None),
         ]);
-        let descriptor = column_schemas_to_table_descriptor(&schema, false);
+        let descriptor = column_schemas_to_table_descriptor(&schema, WriteMode::Copy);
 
         // OIDs are unsigned 32-bit values, so a large cluster hands out values
         // above `i32::MAX`.

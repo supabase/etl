@@ -136,9 +136,9 @@ pub(crate) fn ensure_relation_schema_transition(
 /// Requires an arriving schema to match the exact endpoint in destination
 /// metadata.
 ///
-/// Caches may avoid remote work after this check, but they cannot replace it:
-/// the durable snapshot ID and replication mask define the only row shape the
-/// current destination table may accept.
+/// The applied snapshot ID and replication mask define the only row shape the
+/// destination table may accept. Metadata can come from an applied cache when
+/// the destination maintains that cache through every lifecycle transition.
 pub(crate) fn ensure_destination_schema_matches_metadata(
     destination_name: &str,
     table_id: TableId,

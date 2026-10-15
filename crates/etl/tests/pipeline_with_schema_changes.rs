@@ -353,6 +353,7 @@ async fn relation_message_updates_when_table_is_renamed() {
         )
         .await;
     let after_table_name = TableName::new(before_table_name.schema.clone(), "renamed".to_owned());
+
     let events_ready = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
@@ -381,6 +382,7 @@ async fn relation_message_updates_when_table_is_renamed() {
     transaction.commit_transaction().await;
 
     events_ready.notified().await;
+
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;

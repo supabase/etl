@@ -26,7 +26,7 @@ use etl::schema::ColumnNameMapping;
 const BIGQUERY_COLUMN_NAME_MAPPING: ColumnNameMapping = ColumnNameMapping::AsciiLowercase;
 
 pub use core::BigQueryDestination;
-#[cfg(feature = "test-utils")]
-pub use core::table_name_to_bigquery_table_id;
 
 pub use client::{BigQueryClient, BigQueryDatasetId, BigQueryProjectId, BigQueryTableId};
+#[cfg(feature = "test-utils")]
+pub use test_utils::table_name_to_bigquery_table_id;

@@ -613,8 +613,8 @@ where
             before_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         let before_table_name = metadata.table_id().to_owned();
         let plan = before_schema.plan_schema_change(after_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
-        let after_table_name = if before_schema.name() != after_schema.name() {
-            try_stringify_table_name(after_schema.name())?.to_uppercase()
+        let after_table_name = if let Some(change) = plan.diff().table_name_change() {
+            try_stringify_table_name(change.after_name())?.to_uppercase()
         } else {
             before_table_name.clone()
         };

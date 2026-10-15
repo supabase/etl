@@ -18,8 +18,8 @@ use etl::{
     etl_error,
     event::{Event, EventPosition},
     schema::{
-        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
-        SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
+        ColumnAlterationKind, ColumnOperation, ColumnPresenceChangeReason, ColumnSchema,
+        ReplicatedTableSchema, SchemaDiff, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
     },
     store::{DestinationStore, TableStateType},
     task::{TaskGroup, TaskRegistry, abort_and_join},
@@ -1123,7 +1123,7 @@ fn ensure_ducklake_schema_plan_recoverable(
     table_name: &DuckLakeTableName,
     plan: &SchemaPlan,
 ) -> EtlResult<()> {
-    if plan.has_rename_cycles() {
+    if plan.has_column_rename_cycles() {
         return Err(etl_error!(
             ErrorKind::InvalidState,
             "DuckLake rename cycle recovery is ambiguous",
@@ -1168,9 +1168,9 @@ fn plan_ducklake_schema_ddl_with_nullability(
     let mut statements = Vec::new();
 
     // Preserve shared operation order while rendering replay-safe DuckLake DDL.
-    for operation in plan.ordered_operations() {
+    for operation in plan.ordered_column_operations() {
         match operation {
-            SchemaOperation::DropColumn { before_column_schema, reason: _ }
+            ColumnOperation::DropColumn { before_column_schema, reason: _ }
                 if reused_dropped_column_names.contains(&before_column_schema.name) =>
             {
                 // Keep a dropped column under a deterministic tombstone name
@@ -1224,7 +1224,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                     }
                 }
             }
-            SchemaOperation::DropColumn { before_column_schema, reason: _ } => {
+            ColumnOperation::DropColumn { before_column_schema, reason: _ } => {
                 let Some(index) = find_ducklake_column(&column_names, &before_column_schema.name)
                 else {
                     debug!(
@@ -1242,7 +1242,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                 nullable_column_names.remove(&before_column_schema.name);
                 column_names.remove(index);
             }
-            SchemaOperation::AddColumn { after_column_schema, reason } => {
+            ColumnOperation::AddColumn { after_column_schema, reason } => {
                 if !after_column_schema.nullable {
                     warn!(
                         table_name = %table_name,
@@ -1314,7 +1314,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                 column_names.push(after_column_schema.name.clone());
                 nullable_column_names.insert(after_column_schema.name.clone());
             }
-            SchemaOperation::AlterColumn { alteration }
+            ColumnOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Rename =>
             {
                 let before = alteration.before_column_schema();
@@ -1390,12 +1390,12 @@ fn plan_ducklake_schema_ddl_with_nullability(
                     }
                 }
             }
-            SchemaOperation::AlterColumn { alteration }
+            ColumnOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Type =>
             {
                 warn_unsupported_column_type_change("ducklake", table_name, alteration);
             }
-            SchemaOperation::AlterColumn { alteration }
+            ColumnOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Nullability =>
             {
                 let before = alteration.before_column_schema();
@@ -1432,7 +1432,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                     );
                 }
             }
-            SchemaOperation::AlterColumn { alteration }
+            ColumnOperation::AlterColumn { alteration }
                 if alteration.kind() == ColumnAlterationKind::Default =>
             {
                 let before = alteration.before_column_schema();
@@ -1473,7 +1473,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                     });
                 }
             }
-            SchemaOperation::AlterColumn { .. } => unreachable!(
+            ColumnOperation::AlterColumn { .. } => unreachable!(
                 "column alteration kind should match one of the supported planner kinds"
             ),
         }
@@ -2795,10 +2795,10 @@ where
         let before_schema =
             ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());
         let plan = before_schema.plan_schema_change(after_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
-        let after_table_name = if before_schema.name() != after_schema.name() {
+        let after_table_name = if let Some(change) = plan.diff().table_name_change() {
             // Table rename preserves the actual namespace recorded in metadata.
             let target =
-                DuckLakeTableName::new(before_table_name.schema(), &after_schema.name().name);
+                DuckLakeTableName::new(before_table_name.schema(), &change.after_name().name);
             if target.table().eq_ignore_ascii_case(before_table_name.table()) {
                 before_table_name.clone()
             } else {
@@ -2871,7 +2871,7 @@ where
         after_table_name: Option<&DuckLakeTableName>,
         plan: &SchemaPlan,
     ) -> EtlResult<()> {
-        if after_table_name.is_none() && plan.is_empty() {
+        if after_table_name.is_none() && plan.ordered_column_operations().is_empty() {
             debug!(table = %before_table_name, "ducklake schema plan is empty");
             return Ok(());
         }
@@ -3729,7 +3729,7 @@ where
                     ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask);
                 let plan = before_schema
                     .plan_schema_change(&after_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
-                if before_schema.name() != after_schema.name() {
+                if plan.diff().table_name_change().is_some() {
                     return Err(etl_error!(
                         ErrorKind::InvalidState,
                         "Interrupted DuckLake table rename requires recovery",

@@ -1478,8 +1478,10 @@ async fn logical_replication_replays_consecutive_renames_as_one_final_relation()
     }));
 }
 
-/// Comma-separated actions produce one snapshot; separate statements in the
-/// same transaction retain separate snapshots. Both replay before one relation.
+/// Mixed comma-separated actions produce one snapshot; separate statements in
+/// the same transaction retain every endpoint, including column-shape no-ops.
+/// Both replay before one relation, with dropped attnums and literal commas
+/// intact.
 #[tokio::test(flavor = "multi_thread")]
 async fn logical_replication_compound_and_separate_alters_preserve_snapshot_boundaries() {
     init_test_tracing();
@@ -1487,7 +1489,11 @@ async fn logical_replication_compound_and_separate_alters_preserve_snapshot_boun
         let mut database = spawn_source_database().await;
         let table_name = test_table_name("compound_alter");
         let table_id = database
-            .create_table(table_name.clone(), true, &[("value", "text not null")])
+            .create_table(
+                table_name.clone(),
+                true,
+                &[("value", "text not null"), ("count", "integer"), ("legacy", "text")],
+            )
             .await
             .unwrap();
         let publication_name = "compound_alter_pub";
@@ -1500,34 +1506,43 @@ async fn logical_replication_compound_and_separate_alters_preserve_snapshot_boun
 
         let transaction = database.begin_transaction().await;
         let quoted = table_name.as_quoted_identifier();
+        let actions = [
+            "add column extra integer default 7",
+            "drop column legacy",
+            "alter column count type bigint using count::bigint",
+            "alter column value drop not null",
+            // PostgreSQL groups compound ALTER work into passes: DROP DEFAULT
+            // runs before SET DEFAULT here, unlike separate statements.
+            "alter column value set default 'left,right'",
+            "alter column value drop default",
+            "add constraint extra_positive check (extra > 0)",
+            "replica identity full",
+        ];
         if compound {
             transaction
-                .run_sql(&format!(
-                    "alter table {quoted} add column extra integer default 7, alter column value \
-                     drop not null"
-                ))
+                .run_sql(&format!("alter table {quoted} {}", actions.join(", ")))
                 .await
                 .unwrap();
         } else {
-            transaction
-                .run_sql(&format!("alter table {quoted} add column extra integer default 7"))
-                .await
-                .unwrap();
-            transaction
-                .run_sql(&format!("alter table {quoted} alter column value drop not null"))
-                .await
-                .unwrap();
+            for action in actions {
+                transaction.run_sql(&format!("alter table {quoted} {action}")).await.unwrap();
+            }
         }
         transaction.insert_values(table_name.clone(), &["value"], &[&"after ddl"]).await.unwrap();
         transaction.commit_transaction().await;
 
-        let columns = vec!["id".to_owned(), "value".to_owned(), "extra".to_owned()];
+        let columns =
+            vec!["id".to_owned(), "value".to_owned(), "count".to_owned(), "extra".to_owned()];
         let mut expected = vec![ExpectedStreamMarker::Begin];
-        for _ in 0..if compound { 1 } else { 2 } {
+        for index in 0..if compound { 1 } else { actions.len() } {
+            let mut endpoint_columns = columns.clone();
+            if !compound && index == 0 {
+                endpoint_columns.insert(3, "legacy".to_owned());
+            }
             expected.push(ExpectedStreamMarker::DdlMessage(
                 table_id.into_inner(),
                 None,
-                columns.clone(),
+                endpoint_columns,
             ));
         }
         expected.extend([
@@ -1553,13 +1568,29 @@ async fn logical_replication_compound_and_separate_alters_preserve_snapshot_boun
             })
             .collect();
         for (index, payload) in ddl.iter().enumerate() {
+            let action_index = if compound { actions.len() - 1 } else { index };
             assert_eq!(payload["nspname"], table_name.schema);
             assert_eq!(payload["relname"], table_name.name);
+            assert_eq!(
+                payload["identity"]["relreplident"],
+                if action_index == 7 { "f" } else { "d" }
+            );
             let columns = payload["columns"].as_array().unwrap();
             let value = columns.iter().find(|column| column["attname"] == "value").unwrap();
-            assert_eq!(value["attnotnull"], !compound && index == 0);
+            assert_eq!(value["attnotnull"], action_index < 3);
+            assert_eq!(
+                value["default_expression"],
+                if compound || action_index == 4 {
+                    json!("'left,right'::text")
+                } else {
+                    JsonValue::Null
+                }
+            );
+            let count = columns.iter().find(|column| column["attname"] == "count").unwrap();
+            assert_eq!(count["atttypid"], if action_index >= 2 { 20 } else { 23 });
             let extra = columns.iter().find(|column| column["attname"] == "extra").unwrap();
             assert_eq!(extra["default_expression"], "7");
+            assert_eq!(extra["attnum"], 5);
         }
     }
 }

@@ -1016,82 +1016,139 @@ async fn copy_table_can_be_dropped_and_recreated_repeatedly() {
     }
 }
 
-/// Interrupted creation must abandon its old identity even if it still exists.
+/// Pending metadata blocks writes after restart, whether the physical table
+/// exists or was removed. Explicit reset preserves metadata until copy-state
+/// preparation clears it, then a fresh copy uses a new physical identity.
 #[tokio::test(flavor = "multi_thread")]
-async fn table_creation_recovers_after_destination_restart() {
+async fn pending_metadata_requires_explicit_reset_after_restart() {
     install_crypto_provider();
     init_test_tracing();
-
     if skip_if_missing_bigquery_env_vars() {
         return;
     }
-
-    let bigquery_database = setup_bigquery_database().await;
-    for delete_before_restart in [false, true] {
+    let database = setup_bigquery_database().await;
+    for (delete_before_restart, applying) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
         let store = MemoryStore::new();
-        let table_name = format!("destination_creation_recovery_{}", uuid::Uuid::new_v4().simple());
-        let table_schema = make_users_schema(&table_name);
-        let replicated_table_schema = ReplicatedTableSchema::all(Arc::new(table_schema.clone()));
-        let table_id = replicated_table_schema.id();
-        store.store_table_schema(table_schema).await.unwrap();
-
-        let destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-        write_table_rows(&destination, &replicated_table_schema, Vec::new()).await.unwrap();
-        destination.shutdown().await.unwrap();
-        let applied_metadata =
-            store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-
-        // Both a surviving creation and a deleted incarnation must be
-        // abandoned.
+        let name = format!("pending_metadata_{}", uuid::Uuid::new_v4().simple());
+        let schema = make_users_schema(&name);
+        store.store_table_schema(schema.clone()).await.unwrap();
+        let mut schema = ReplicatedTableSchema::all(Arc::new(schema));
+        let destination = database.build_destination(1, store.clone()).await;
+        write_table_rows(&destination, &schema, Vec::new()).await.unwrap();
         if delete_before_restart {
-            drop_table_for_copy(&destination, &replicated_table_schema).await.unwrap();
+            drop_table_for_copy(&destination, &schema).await.unwrap();
         }
-        let creating_metadata = etl::destination::DestinationTableMetadata::new_creating(
-            applied_metadata.table_id().to_owned(),
-            applied_metadata.snapshot_id(),
-            applied_metadata.replication_mask().clone(),
-        );
-        store.store_destination_table_metadata(table_id, creating_metadata).await.unwrap();
+        destination.shutdown().await.unwrap();
+        let applied = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+        let pending = if applying {
+            let mut after = schema.inner().clone();
+            after.snapshot_id = test_snapshot_id(20);
+            store.store_table_schema(after.clone()).await.unwrap();
+            schema = ReplicatedTableSchema::all(Arc::new(after));
+            applied
+                .clone()
+                .with_schema_change(schema.inner().snapshot_id, schema.replication_mask().clone())
+                .unwrap()
+        } else {
+            let physical_id = if delete_before_restart {
+                applied.table_id().to_owned()
+            } else {
+                // Model truncate interrupted after creation, before view
+                // replacement. The view still points to the
+                // previous physical table.
+                let physical_id = format!(
+                    "{}_42",
+                    etl_destinations::bigquery::table_name_to_bigquery_table_id(schema.name())
+                        .unwrap()
+                );
+                database
+                    .create_table(
+                        &physical_id,
+                        &[("id", "int64"), ("name", "string"), ("age", "int64")],
+                    )
+                    .await;
+                physical_id
+            };
+            etl::destination::DestinationTableMetadata::new_creating(
+                physical_id,
+                applied.snapshot_id(),
+                applied.replication_mask().clone(),
+            )
+        };
+        store.store_destination_table_metadata(schema.id(), pending.clone()).await.unwrap();
 
-        let restarted_destination = bigquery_database.build_destination(1_u64, store.clone()).await;
-        write_table_rows(
-            &restarted_destination,
-            &replicated_table_schema,
+        let restarted = database.build_destination(1, store.clone()).await;
+        let error = write_table_rows(
+            &restarted,
+            &schema,
             vec![TableRow::new(vec![
                 Cell::I32(1),
-                Cell::String("recovered".to_owned()),
+                Cell::String("blocked".to_owned()),
+                Cell::I32(42),
+            ])],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidState);
+        restarted.shutdown().await.unwrap();
+        assert_eq!(
+            store.get_destination_table_metadata(schema.id()).await.unwrap(),
+            Some(pending.clone())
+        );
+        assert_eq!(
+            database.get_table_metadata_by_id(applied.table_id()).await.is_none(),
+            delete_before_restart
+        );
+        if !delete_before_restart {
+            assert!(database.wait_for_no_rows(schema.name().clone()).await);
+        }
+
+        // Recovery uses the same drop -> prepare -> copy sequence as table
+        // sync. Reopening after each drop models a crash before copy-state
+        // preparation, with no process-local state surviving.
+        for _ in 0..2 {
+            let reset = database.build_destination(1, store.clone()).await;
+            drop_table_for_copy(&reset, &schema).await.unwrap();
+            reset.shutdown().await.unwrap();
+            assert_eq!(
+                store.get_destination_table_metadata(schema.id()).await.unwrap(),
+                Some(pending.clone())
+            );
+            assert!(database.get_table_metadata_by_id(pending.table_id()).await.is_none());
+            if pending.table_id() != applied.table_id() {
+                // Reset does not discover the obsolete truncate version.
+                assert!(database.get_table_metadata_by_id(applied.table_id()).await.is_some());
+            }
+        }
+        store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+        assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        let reset = database.build_destination(1, store.clone()).await;
+        write_table_rows(
+            &reset,
+            &schema,
+            vec![TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("recopied".to_owned()),
                 Cell::I32(42),
             ])],
         )
         .await
         .unwrap();
-        restarted_destination.shutdown().await.unwrap();
+        reset.shutdown().await.unwrap();
 
-        let recovered_metadata =
-            store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-        assert!(recovered_metadata.is_applied());
-        assert_ne!(recovered_metadata.table_id(), applied_metadata.table_id());
-        assert_eq!(recovered_metadata.snapshot_id(), applied_metadata.snapshot_id());
-        assert_eq!(recovered_metadata.replication_mask(), applied_metadata.replication_mask());
-
-        // Recovery can reclaim this exact recorded identity after the new
-        // physical target and view become authoritative.
-        assert!(
-            bigquery_database.get_table_metadata_by_id(applied_metadata.table_id()).await.is_none()
-        );
-
-        let rows =
-            bigquery_database.query_table(replicated_table_schema.name().clone()).await.unwrap();
+        let recovered = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+        assert!(recovered.is_applied());
+        assert_ne!(recovered.table_id(), applied.table_id());
+        assert_ne!(recovered.table_id(), pending.table_id());
+        assert_eq!(recovered.snapshot_id(), schema.inner().snapshot_id);
+        assert_eq!(recovered.replication_mask(), schema.replication_mask());
+        let rows = database.query_table(schema.name().clone()).await.unwrap();
         assert_eq!(
             parse_bigquery_table_rows::<BigQueryUser>(rows),
-            vec![BigQueryUser::new(1, "recovered", 42)]
-        );
-        drop_table_for_copy(&restarted_destination, &replicated_table_schema).await.unwrap();
-        assert!(
-            bigquery_database
-                .get_table_metadata_by_id(recovered_metadata.table_id())
-                .await
-                .is_none()
+            vec![BigQueryUser::new(2, "recopied", 42)]
         );
     }
 }
@@ -1120,9 +1177,18 @@ async fn applied_metadata_does_not_recreate_a_missing_table_after_restart() {
     let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(applied_metadata.is_applied());
 
-    // Removing the destination object without clearing its durable metadata
-    // simulates out-of-band deletion after successful table preparation.
-    drop_table_for_copy(&destination, &replicated_table_schema).await.unwrap();
+    // Remove the physical object outside the destination lifecycle, preserving
+    // Applied metadata so preparation cannot silently recreate lost data.
+    bigquery_database
+        .client()
+        .table()
+        .delete(
+            bigquery_database.project_id(),
+            bigquery_database.dataset_id(),
+            applied_metadata.table_id(),
+        )
+        .await
+        .unwrap();
 
     let restarted_destination = bigquery_database.build_destination(1_u64, store.clone()).await;
     write_table_rows(

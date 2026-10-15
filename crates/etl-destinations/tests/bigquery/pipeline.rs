@@ -900,10 +900,8 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // Simulate an interrupted truncate that already created `test_users_1`
-    // without the table options used by the restarted pipeline. BigQuery cannot
-    // replace it with a different partitioning kind, so recovery creates a
-    // fresh version and cleans up the legacy table after switching the view.
+    // An unrecorded physical table with the same prefix must not be adopted
+    // or deleted. Fresh identities use the configured options independently.
     bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
@@ -991,7 +989,7 @@ async fn table_truncate_with_batching() {
         .unwrap();
     assert!(users_metadata.table_id().starts_with("test_users_"));
     assert_ne!(users_metadata.table_id(), "test_users_1");
-    assert!(bigquery_database.get_table_metadata_by_id("test_users_1").await.is_none());
+    assert!(bigquery_database.get_table_metadata_by_id("test_users_1").await.is_some());
 
     // We query BigQuery directly to get the data which tests have inserted,
     // expecting that only the rows after truncation are there.
@@ -2296,13 +2294,11 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
     // Exercise same-name replacement in one multi-action ALTER TABLE. DDL
     // capture records only its final snapshot, where `age` has a new attnum.
     database
-        .alter_table(
-            table_name.clone(),
-            &[
-                TableModification::DropColumn { name: "age" },
-                TableModification::AddColumn { name: "age", data_type: "text" },
-            ],
-        )
+        .run_sql(&format!(
+            "alter table {} drop column age, add column age text, add constraint age_nonempty \
+             check (age is null or length(age) > 0), set (fillfactor = 80)",
+            table_name.as_quoted_identifier(),
+        ))
         .await
         .unwrap();
 
