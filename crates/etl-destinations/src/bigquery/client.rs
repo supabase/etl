@@ -20,7 +20,7 @@ use gcp_bigquery_client::{
         },
         rpc::Status as GoogleRpcStatus,
     },
-    model::{query_request::QueryRequest, query_response::ResultSet},
+    model::{error_proto::ErrorProto, query_request::QueryRequest, query_response::ResultSet},
     storage::{AppendRequest, AppendResult, StorageApiConfig, StreamName, TableDescriptor},
     yup_oauth2::parse_service_account_key,
 };
@@ -249,8 +249,8 @@ enum AppendRequestProcessResult {
     Success,
     /// Request had row-level errors.
     RowErrors { errors: Vec<RowError> },
-    /// Request had a request-level error.
-    RequestError { error: BQError },
+    /// Request had one or more request-level errors.
+    RequestErrors { errors: Vec<BQError> },
 }
 
 /// Aggregated result of processing a set of append requests.
@@ -348,10 +348,12 @@ fn retry_delay_with_jitter(delay: Duration) -> Duration {
 
 /// Processes one append result and determines its success or failure mode.
 ///
-/// Row errors are permanent failures (bad data, schema mismatch) and fail
-/// immediately. Request errors are surfaced for retry decision by the caller.
+/// Permanent row errors take precedence over request retries. Otherwise,
+/// every request error is retained so a transient failure cannot hide a
+/// permanent failure from another wire message in the same batch.
 fn process_append_result(append_result: AppendResult) -> AppendRequestProcessResult {
     let mut row_errors = Vec::new();
+    let mut request_errors = Vec::new();
 
     for response in append_result.responses {
         match response {
@@ -363,13 +365,15 @@ fn process_append_result(append_result: AppendResult) -> AppendRequestProcessRes
                 }
             }
             Err(status) => {
-                return AppendRequestProcessResult::RequestError { error: BQError::from(status) };
+                request_errors.push(BQError::from(status));
             }
         }
     }
 
     if !row_errors.is_empty() {
         AppendRequestProcessResult::RowErrors { errors: row_errors }
+    } else if !request_errors.is_empty() {
+        AppendRequestProcessResult::RequestErrors { errors: request_errors }
     } else {
         AppendRequestProcessResult::Success
     }
@@ -399,6 +403,21 @@ fn error_code_label(error: &BQError) -> &'static str {
             Code::Unauthenticated => "unauthenticated",
         },
         _ => "other",
+    }
+}
+
+/// Structured job failures are retryable only for documented transient reasons.
+impl ClassifiedError for ErrorProto {
+    fn retryability(&self) -> Retryability {
+        if self
+            .reason
+            .as_deref()
+            .is_some_and(|reason| TRANSIENT_BIGQUERY_RESPONSE_REASONS.contains(&reason))
+        {
+            Retryability::Retryable
+        } else {
+            Retryability::Permanent
+        }
     }
 }
 
@@ -746,6 +765,103 @@ fn is_missing_column_default_error(error: &EtlError) -> bool {
         })
 }
 
+/// Classifies every append response before deciding whether to retry.
+///
+/// Metadata probes can fail independently of appends. Preserve those failures
+/// while checking the remaining responses for permanent rejections.
+async fn process_append_results(
+    client: &BigQueryClient,
+    append_requests: Vec<BigQueryAppendRequest>,
+    append_results: Vec<AppendResult>,
+) -> AppendProcessingResult {
+    let mut errors = Vec::new();
+    let mut retryable_request_details = vec![None; append_requests.len()];
+
+    for append_result in append_results {
+        let request_index = append_result.request_index;
+
+        match process_append_result(append_result) {
+            AppendRequestProcessResult::Success => {
+                debug!(request_index, "append request processed successfully");
+            }
+            AppendRequestProcessResult::RowErrors { errors: row_errors } => {
+                let error_count = row_errors.len();
+                if error_count > 0 {
+                    error!(
+                        request_index,
+                        error_count, "append request has row errors, failing append operation"
+                    );
+
+                    counter!(ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL)
+                        .increment(error_count as u64);
+                }
+
+                for row_error in row_errors {
+                    errors.push(row_error_to_etl_error(row_error));
+                }
+            }
+            AppendRequestProcessResult::RequestErrors { errors: request_errors } => {
+                // Request-level errors retain their request index, so only
+                // the affected request needs to be classified and retried.
+                for request_error in request_errors {
+                    let retry_detail = match retryable_storage_write_error_detail(
+                        client,
+                        &append_requests[request_index],
+                        &request_error,
+                    )
+                    .await
+                    {
+                        Ok(detail) => detail,
+                        Err(error) => {
+                            // A failed existence probe must not hide a
+                            // permanent failure in another wire response.
+                            errors.push(error);
+                            continue;
+                        }
+                    };
+                    if let Some(detail) = retry_detail {
+                        retryable_request_details[request_index] = Some(detail);
+                        continue;
+                    }
+
+                    let error_code = error_code_label(&request_error);
+                    warn!(
+                        request_index,
+                        error = %request_error,
+                        "append request failed after library retries"
+                    );
+
+                    counter!(
+                        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
+                        "error_code" => error_code
+                    )
+                    .increment(1);
+
+                    errors.push(bq_error_to_etl_error(request_error));
+                }
+            }
+        }
+    }
+
+    if !errors.is_empty() {
+        return AppendProcessingResult::Error(errors.into());
+    }
+
+    if retryable_request_details.iter().any(Option::is_some) {
+        let pending_requests = append_requests
+            .into_iter()
+            .zip(retryable_request_details)
+            .filter_map(|(request, detail)| {
+                detail.map(|detail| RetryableAppendRequest { request, detail })
+            })
+            .collect();
+
+        return AppendProcessingResult::Retry { pending_requests };
+    }
+
+    AppendProcessingResult::Success
+}
+
 /// Client for interacting with Google BigQuery.
 ///
 /// Provides methods for table management, data insertion, and query execution
@@ -968,21 +1084,43 @@ impl BigQueryClient {
 
     /// Returns the physical table selected by an ETL-created view.
     ///
-    /// Returns `None` when `view_id` is absent, is not a view, or has a query
-    /// ETL did not render. Physical table IDs carry a unique suffix, so a view
-    /// selecting one was created for that table.
+    /// Returns `None` only when `view_id` is absent. Existing objects must be
+    /// GoogleSQL logical views with the single-table definition ETL creates.
+    /// The caller establishes ownership of the logical view through
+    /// destination metadata; the physical name is opaque.
     pub(super) async fn view_target_table_id(
         &self,
         dataset_id: &BigQueryDatasetId,
         view_id: &BigQueryTableId,
     ) -> EtlResult<Option<BigQueryTableId>> {
-        match self.client.table().get(&self.project_id, dataset_id, view_id, None).await {
-            Ok(table) => Ok(table.view.and_then(|view| {
-                parse_view_query_table_id(&view.query, &self.project_id, dataset_id)
-            })),
-            Err(BQError::ResponseError { error }) if error.error.code == 404 => Ok(None),
-            Err(error) => Err(bq_error_to_etl_error(error)),
+        let table = match self.client.table().get(&self.project_id, dataset_id, view_id, None).await
+        {
+            Ok(table) => table,
+            Err(BQError::ResponseError { error }) if error.error.code == 404 => return Ok(None),
+            Err(error) => return Err(bq_error_to_etl_error(error)),
+        };
+        let invalid_definition = || {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "Invalid BigQuery logical view definition",
+                format!(
+                    "View '{view_id}' must use GoogleSQL to select all columns from one fully \
+                     qualified table in the configured project and dataset."
+                )
+            )
+        };
+
+        if table.r#type.as_deref() != Some("VIEW") {
+            return Err(invalid_definition());
         }
+        let view = table.view.ok_or_else(invalid_definition)?;
+        if view.use_legacy_sql != Some(false) {
+            return Err(invalid_definition());
+        }
+
+        parse_view_query_table_id(&view.query, &self.project_id, dataset_id)
+            .map(Some)
+            .ok_or_else(invalid_definition)
     }
 
     /// Drops a view from BigQuery.
@@ -1367,84 +1505,15 @@ impl BigQueryClient {
             }
         };
 
-        let mut errors = Vec::new();
-        let mut retryable_request_details = vec![None; append_requests.len()];
-
-        for append_result in append_results {
-            let request_index = append_result.request_index;
-
-            match process_append_result(append_result) {
-                AppendRequestProcessResult::Success => {
-                    debug!(request_index, "append request processed successfully");
-                }
-                AppendRequestProcessResult::RowErrors { errors: row_errors } => {
-                    let error_count = row_errors.len();
-                    if error_count > 0 {
-                        error!(
-                            request_index,
-                            error_count, "append request has row errors, failing append operation"
-                        );
-
-                        counter!(ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL)
-                            .increment(error_count as u64);
-                    }
-
-                    for row_error in row_errors {
-                        errors.push(row_error_to_etl_error(row_error));
-                    }
-                }
-                AppendRequestProcessResult::RequestError { error: request_error } => {
-                    // Request-level errors retain their request index, so only
-                    // the affected request needs to be classified and retried.
-                    if let Some(detail) = retryable_storage_write_error_detail(
-                        self,
-                        &append_requests[request_index],
-                        &request_error,
-                    )
-                    .await?
-                    {
-                        retryable_request_details[request_index] = Some(detail);
-                        continue;
-                    }
-
-                    let error_code = error_code_label(&request_error);
-                    warn!(
-                        request_index,
-                        error = %request_error,
-                        "append request failed after library retries"
-                    );
-
-                    counter!(
-                        ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL,
-                        "error_code" => error_code
-                    )
-                    .increment(1);
-
-                    errors.push(bq_error_to_etl_error(request_error));
-                }
-            }
-        }
-
-        if !errors.is_empty() {
-            return Ok(AppendProcessingResult::Error(errors.into()));
-        }
-
-        if retryable_request_details.iter().any(Option::is_some) {
-            let pending_requests = append_requests
-                .into_iter()
-                .zip(retryable_request_details)
-                .filter_map(|(request, detail)| {
-                    detail.map(|detail| RetryableAppendRequest { request, detail })
-                })
-                .collect();
-
-            return Ok(AppendProcessingResult::Retry { pending_requests });
-        }
-
-        Ok(AppendProcessingResult::Success)
+        Ok(process_append_results(self, append_requests, append_results).await)
     }
 
-    /// Invalidates all connections used by the storage write api.
+    /// Recreates pooled Storage Write connections for subsequent append RPCs.
+    ///
+    /// In-flight appends retain their channels, so this is neither a write
+    /// barrier nor cancellation. Lifecycle callers must enforce their own
+    /// write ordering and target fencing. The SDK logs recreation failures; a
+    /// later append opens a connection lazily if recreation failed.
     pub async fn invalidate_all_connections(&self) {
         self.client.storage().invalidate_all_connections().await;
     }
@@ -1506,8 +1575,112 @@ mod tests {
         error::{NestedResponseError, ResponseError},
         google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},
     };
+    use serde_json::json;
 
     use super::*;
+    use crate::bigquery::test_client::http_fixture;
+
+    /// Builds the metadata returned for a GoogleSQL logical view.
+    fn logical_view_metadata(query: &str) -> serde_json::Value {
+        json!({
+            "tableReference": {
+                "projectId": "project", "datasetId": "dataset", "tableId": "logical"
+            },
+            "schema": {"fields": []},
+            "type": "VIEW",
+            "view": {"query": query, "useLegacySql": false}
+        })
+    }
+
+    /// Target discovery needs only the view metadata, including for names
+    /// generated by earlier releases or a now-missing physical table.
+    #[tokio::test]
+    async fn view_target_table_id_reads_current_and_legacy_definitions() {
+        for physical_table_id in [
+            "public_orders_1",
+            "public_orders_0000000000000000000000001",
+            "supabase_etl_1_42_0000000000000000000000001",
+        ] {
+            let query = format!("SELECT * FROM `project.dataset.{physical_table_id}`;\n");
+            let (client, server) = http_fixture(vec![(200, logical_view_metadata(&query))]).await;
+            let client = BigQueryClient { project_id: "project".to_owned(), client };
+
+            assert_eq!(
+                client
+                    .view_target_table_id(&"dataset".to_owned(), &"logical".to_owned())
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(physical_table_id)
+            );
+
+            let requests = server.await.unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].0.contains("/tables/logical"));
+        }
+    }
+
+    /// Invalid existing objects never supply a physical cleanup target.
+    #[tokio::test]
+    async fn view_target_table_id_rejects_invalid_metadata() {
+        let valid = logical_view_metadata("select * from `project.dataset.physical`");
+        let mut legacy = valid.clone();
+        legacy["view"]["useLegacySql"] = json!(true);
+        let mut default_dialect = valid.clone();
+        default_dialect["view"].as_object_mut().unwrap().remove("useLegacySql");
+        let mut ordinary_table = valid.clone();
+        ordinary_table["type"] = json!("TABLE");
+        let mut missing_definition = valid;
+        missing_definition.as_object_mut().unwrap().remove("view");
+
+        for metadata in [
+            legacy,
+            default_dialect,
+            ordinary_table,
+            missing_definition,
+            logical_view_metadata("select * from `project.other.physical`"),
+            logical_view_metadata(r"select * from `project.dataset.phy\x73ical`"),
+        ] {
+            let (client, server) = http_fixture(vec![(200, metadata)]).await;
+            let client = BigQueryClient { project_id: "project".to_owned(), client };
+
+            let error = client
+                .view_target_table_id(&"dataset".to_owned(), &"logical".to_owned())
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidState);
+
+            assert_eq!(server.await.unwrap().len(), 1);
+        }
+    }
+
+    /// Only a missing view is an absent target; other API failures propagate.
+    #[tokio::test]
+    async fn view_target_table_id_distinguishes_missing_views_from_request_failures() {
+        for status in [404, 403, 503] {
+            let (client, server) = http_fixture(vec![(
+                status,
+                json!({"error": {"code": status, "message": "Metadata unavailable", "errors": []}}),
+            )])
+            .await;
+            let client = BigQueryClient { project_id: "project".to_owned(), client };
+
+            let result =
+                client.view_target_table_id(&"dataset".to_owned(), &"logical".to_owned()).await;
+            if status == 404 {
+                assert_eq!(result.unwrap(), None);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+                assert_eq!(
+                    error.retryability(),
+                    if status == 503 { Retryability::Retryable } else { Retryability::Permanent }
+                );
+            }
+
+            assert_eq!(server.await.unwrap().len(), 1);
+        }
+    }
 
     fn replicated_schema_with_identity(table_id: u32, table_name: &str) -> ReplicatedTableSchema {
         ReplicatedTableSchema::all(Arc::new(TableSchema::new(
@@ -1756,6 +1929,33 @@ mod tests {
         assert_eq!(BQError::NoToken.retryability(), Retryability::Permanent);
     }
 
+    /// Terminal job errors use their structured reason, without guessing from
+    /// a message or treating an unknown reason as transient.
+    #[test]
+    fn job_error_classification_uses_structured_reason() {
+        for reason in [
+            "backendError",
+            "internalError",
+            "badGateway",
+            "rateLimitExceeded",
+            "jobBackendError",
+            "jobInternalError",
+            "jobRateLimitExceeded",
+        ] {
+            let error = ErrorProto { reason: Some(reason.to_owned()), ..Default::default() };
+            assert_eq!(error.retryability(), Retryability::Retryable, "{reason}");
+        }
+
+        for reason in [None, Some("invalidQuery"), Some("accessDenied"), Some("unknown")] {
+            let error = ErrorProto {
+                reason: reason.map(str::to_owned),
+                message: Some("backendError".to_owned()),
+                ..Default::default()
+            };
+            assert_eq!(error.retryability(), Retryability::Permanent);
+        }
+    }
+
     /// The converted ETL error carries the BigQuery error's classification
     /// together with its kind.
     #[test]
@@ -1873,7 +2073,148 @@ mod tests {
             successful_bytes_sent: 0,
         });
 
-        assert!(matches!(result, AppendRequestProcessResult::RequestError { .. }));
+        assert!(matches!(result, AppendRequestProcessResult::RequestErrors { .. }));
+    }
+
+    /// All wire responses contribute to the retry decision, including when a
+    /// table-existence probe fails before a permanent rejection is inspected.
+    #[tokio::test]
+    async fn append_failure_classification_preserves_permanent_rejections() {
+        for probe_fails in [false, true] {
+            for reverse in [false, true] {
+                let responses = if probe_fails {
+                    vec![(
+                        503,
+                        json!({
+                            "error": {"code": 503, "message": "Metadata unavailable",
+                                "errors": [{"reason": "backendError"}]}
+                        }),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                let (client, server) = http_fixture(responses).await;
+                let client = BigQueryClient::from_test_client(client);
+                let request = client
+                    .create_append_request(
+                        1,
+                        0,
+                        &"dataset".to_owned(),
+                        &"physical".to_owned(),
+                        TableDescriptor { field_descriptors: Vec::new() },
+                        Vec::new(),
+                    )
+                    .unwrap();
+                let mut responses = vec![
+                    Err(if probe_fails {
+                        tonic::Status::not_found("Requested entity was not found")
+                    } else {
+                        tonic::Status::invalid_argument("schema_mismatch_extra_fields")
+                    }),
+                    Err(tonic::Status::permission_denied("Permission denied")),
+                ];
+                if reverse {
+                    responses.reverse();
+                }
+                let result = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    process_append_results(
+                        &client,
+                        vec![request],
+                        vec![AppendResult {
+                            request_index: 0,
+                            responses,
+                            total_bytes_sent: 128,
+                            successful_bytes_sent: 0,
+                        }],
+                    ),
+                )
+                .await
+                .unwrap();
+
+                let AppendProcessingResult::Error(error) = result else {
+                    panic!("expected the permanent append rejection");
+                };
+                assert_eq!(error.retryability(), Retryability::Permanent);
+                assert!(error.to_string().contains("BigQuery permission denied"));
+
+                let requests = server.await.unwrap();
+                assert_eq!(requests.len(), usize::from(probe_fails));
+                if probe_fails {
+                    assert!(requests[0].0.contains("/tables/physical"));
+                }
+            }
+        }
+    }
+
+    /// Every wire failure survives aggregation, so a schema-lag response
+    /// cannot hide a permanent rejection from the same managed append.
+    #[test]
+    fn process_append_result_preserves_mixed_request_failures() {
+        for reverse in [false, true] {
+            let mut responses = vec![
+                Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields")),
+                Err(tonic::Status::permission_denied("Permission denied")),
+            ];
+            if reverse {
+                responses.reverse();
+            }
+            let result = process_append_result(AppendResult {
+                request_index: 0,
+                responses,
+                total_bytes_sent: 128,
+                successful_bytes_sent: 0,
+            });
+
+            let AppendRequestProcessResult::RequestErrors { errors } = result else {
+                panic!("expected both request failures");
+            };
+            assert_eq!(errors.len(), 2);
+            assert!(errors.iter().any(|error| {
+                error_code_label(error) == "permission_denied"
+                    && error.retryability() == Retryability::Permanent
+            }));
+            let error: EtlError =
+                errors.into_iter().map(bq_error_to_etl_error).collect::<Vec<_>>().into();
+            assert_eq!(error.retryability(), Retryability::Permanent);
+        }
+    }
+
+    /// A row rejection is permanent even if another wire message also reports
+    /// a retryable request error, regardless of response order.
+    #[test]
+    fn process_append_result_prioritizes_row_errors_over_request_retries() {
+        for reverse in [false, true] {
+            let mut response = successful_append_response();
+            response.row_errors.push(RowError {
+                index: 7,
+                code: RowErrorCode::FieldsError as i32,
+                message: "Rejected row".to_owned(),
+            });
+            let mut responses = vec![
+                Ok(response),
+                Err(tonic::Status::invalid_argument("schema_mismatch_extra_fields")),
+            ];
+            if reverse {
+                responses.reverse();
+            }
+            let result = process_append_result(AppendResult {
+                request_index: 0,
+                responses,
+                total_bytes_sent: 128,
+                successful_bytes_sent: 0,
+            });
+
+            let AppendRequestProcessResult::RowErrors { errors } = result else {
+                panic!("expected the permanent row rejection");
+            };
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].index, 7);
+            assert_eq!(
+                row_error_to_etl_error(errors.into_iter().next().unwrap()).retryability(),
+                Retryability::Permanent
+            );
+        }
     }
 
     #[test]
@@ -1931,7 +2272,7 @@ mod tests {
             successful_bytes_sent: 0,
         });
 
-        assert!(matches!(result, AppendRequestProcessResult::RequestError { .. }));
+        assert!(matches!(result, AppendRequestProcessResult::RequestErrors { .. }));
     }
 
     #[test]

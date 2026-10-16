@@ -46,7 +46,7 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        pending_table_rename,
+        owned_source_table_names,
     },
     table_name::try_stringify_table_name,
 };
@@ -1042,16 +1042,20 @@ where
         snapshot_id: etl::schema::SnapshotId,
         replication_mask: etl::schema::ReplicationMask,
     ) -> EtlResult<()> {
-        let metadata = DestinationTableMetadata::new_creating(
-            clickhouse_table_name.to_owned(),
-            snapshot_id,
-            replication_mask,
-        );
-        self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+        let metadata = DestinationTableMetadata::new_creating(snapshot_id, replication_mask);
+        self.store
+            .store_destination_table_metadata(table_id, metadata.clone(), clickhouse_table_name)
+            .await?;
 
         self.issue_create_table_stmt(clickhouse_table_name, schema).await?;
 
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        self.store
+            .store_destination_table_metadata(
+                table_id,
+                metadata.to_applied(),
+                clickhouse_table_name,
+            )
+            .await?;
 
         Ok(())
     }
@@ -1203,13 +1207,11 @@ where
             return Ok((entry.table_name.clone(), Arc::clone(&entry.layout)));
         }
 
-        // Load durable metadata once under the lock so table identity and state
-        // cannot race a schema transition.
+        // Load durable metadata once under the lock so table state cannot race
+        // a schema transition. Matching metadata proves this schema's
+        // snapshot, whose source name determines the table name.
         let metadata = self.store.get_destination_table_metadata(table_id).await?;
-        let clickhouse_table_name = metadata.as_ref().map_or_else(
-            || try_stringify_table_name(schema.name()),
-            |metadata| Ok(metadata.table_id().to_owned()),
-        )?;
+        let clickhouse_table_name = try_stringify_table_name(schema.name())?;
         if let Some(metadata) = &metadata {
             ensure_destination_schema_matches_metadata("ClickHouse", table_id, metadata, schema)?;
         }
@@ -1259,7 +1261,6 @@ where
         )?;
 
         let applied_metadata = DestinationTableMetadata::new_applied(
-            clickhouse_table_name.clone(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );
@@ -1315,9 +1316,10 @@ where
                 let plan = before_schema
                     .plan_schema_change(after_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
                 if plan.diff().table_name_change().is_some() {
-                    // A name alone cannot prove ownership after an interrupted
-                    // remote rename. Do not infer success from a matching
-                    // column layout at a possibly unrelated target.
+                    // Matching columns at the target name cannot prove the
+                    // interrupted rename completed. Reset owns both endpoint
+                    // names, but recovery must not infer completion from a
+                    // matching column layout.
                     bail!(
                         ErrorKind::InvalidState,
                         "Interrupted ClickHouse table rename requires recovery",
@@ -1421,7 +1423,13 @@ where
             &actual_columns,
         )?;
 
-        self.store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
+        self.store
+            .store_destination_table_metadata(
+                table_id,
+                metadata.to_applied(),
+                clickhouse_table_name,
+            )
+            .await?;
         self.table_cache.write().remove(&table_id);
         Ok(())
     }
@@ -1441,40 +1449,25 @@ where
             ));
         }
 
-        // Reset trusts the recorded target, except after an interrupted rename
-        // has already moved it.
-        let metadata = self.store.get_destination_table_metadata(schema.id()).await?;
-        let mut clickhouse_table_name = metadata.as_ref().map_or_else(
-            || try_stringify_table_name(schema.name()),
-            |metadata| Ok(metadata.table_id().to_owned()),
-        )?;
-        let mut vacated_table_name = None;
-        if let Some(metadata) = &metadata
-            && let Some((_, after_name)) =
-                pending_table_rename(&*self.store, schema.id(), metadata).await?
-        {
-            // The relation path proved the after name vacant before recording
-            // Applying, and ClickHouse renames atomically. A vacant before name
-            // with an occupied after name therefore means the rename executed.
-            let after_table_name = try_stringify_table_name(&after_name)?;
-            if after_table_name != clickhouse_table_name
-                && self.client.table_engine(&clickhouse_table_name).await?.is_none()
-                && self.client.table_engine(&after_table_name).await?.is_some()
-            {
-                vacated_table_name =
-                    Some(std::mem::replace(&mut clickhouse_table_name, after_table_name));
-            }
-        }
+        // ETL owns the tables named after every snapshot recorded in metadata.
+        // An interrupted rename can leave the table under either name, so drop
+        // whichever exist. Without metadata, ETL owns nothing to drop.
+        let table_names = match self.store.get_destination_table_metadata(schema.id()).await? {
+            Some(metadata) => owned_source_table_names(&*self.store, schema.id(), &metadata)
+                .await?
+                .iter()
+                .map(try_stringify_table_name)
+                .collect::<EtlResult<Vec<_>>>()?,
+            None => Vec::new(),
+        };
 
-        if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
-            // An interrupted rename can leave the before-name view behind.
-            for table_name in std::iter::once(&clickhouse_table_name).chain(&vacated_table_name) {
+        for table_name in &table_names {
+            if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
                 let drop_view = drop_current_view_sql(table_name);
                 self.client.execute_ddl(DdlKind::DropView, &drop_view).await?;
             }
+            self.client.drop_table(table_name).await?;
         }
-
-        self.client.drop_table(&clickhouse_table_name).await?;
         self.table_cache.write().remove(&schema.id());
 
         Ok(())
@@ -1559,8 +1552,10 @@ where
         // snapshot ID and replication mask. It can therefore resume an
         // interrupted change without inventing a DML event position.
         if metadata.is_pending() {
-            let before_table_name = metadata.table_id().to_owned();
-            self.recover_pending_metadata(table_id, &before_table_name, after_schema, metadata)
+            // Recovery rejects pending renames, so the table still carries the
+            // after schema's name whenever recovery proceeds.
+            let clickhouse_table_name = try_stringify_table_name(after_schema.name())?;
+            self.recover_pending_metadata(table_id, &clickhouse_table_name, after_schema, metadata)
                 .await?;
             return Ok(());
         }
@@ -1603,14 +1598,10 @@ where
         let before_schema =
             ReplicatedTableSchema::from_mask(before_table_schema, before_replication_mask.clone());
 
-        let before_table_name = metadata.table_id();
         let plan =
             before_schema.plan_schema_change(after_schema, CLICKHOUSE_COLUMN_NAME_MAPPING)?;
-        let after_table_name = if let Some(change) = plan.diff().table_name_change() {
-            try_stringify_table_name(change.after_name())?
-        } else {
-            before_table_name.to_owned()
-        };
+        let before_table_name = try_stringify_table_name(before_schema.name())?;
+        let after_table_name = try_stringify_table_name(after_schema.name())?;
         validate_clickhouse_table_name(
             &after_table_name,
             after_schema.name(),
@@ -1619,27 +1610,29 @@ where
         if after_table_name != before_table_name {
             self.ensure_table_absent(&after_table_name).await?;
         }
-        ensure_clickhouse_renames_are_supported(before_table_name, &plan)?;
-        ensure_clickhouse_type_changes_are_supported(before_table_name, &plan)?;
+        ensure_clickhouse_renames_are_supported(&before_table_name, &plan)?;
+        ensure_clickhouse_type_changes_are_supported(&before_table_name, &plan)?;
         if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
             reject_pk_alters_under_replacing_merge_tree(
-                before_table_name,
+                &before_table_name,
                 plan.diff(),
                 &before_schema,
                 after_schema,
             )?;
         }
+
         // Applied metadata proves the table is at the current layout, so the
         // current endpoint alone identifies a closed-alpha MergeTree table.
         // Reject it before any cache, metadata, or DDL mutation so the operator
         // sees the upgrade instruction with the table and metadata untouched,
         // exactly as the DML and recovery paths behave.
-        let actual_columns = self.client.table_columns(before_table_name).await?;
+        let actual_columns = self.client.table_columns(&before_table_name).await?;
         reject_legacy_merge_tree_layout(
-            before_table_name,
+            &before_table_name,
             &expected_clickhouse_columns(&before_schema, self.inserter_config.engine),
             &actual_columns,
         )?;
+
         // A cached RowBinary layout is valid only for Applied metadata. Remove
         // it before persisting Applying so cancellation cannot leave pending
         // durable metadata reachable through the old cache. If the metadata
@@ -1648,23 +1641,22 @@ where
         self.table_cache.write().remove(&table_id);
 
         // Mark as Applying before DDL changes.
-        let updated_metadata = DestinationTableMetadata::new_applied(
-            before_table_name.to_owned(),
-            before_snapshot_id,
-            before_replication_mask,
-        )
-        .with_schema_change(after_snapshot_id, after_replication_mask)?;
-        self.store.store_destination_table_metadata(table_id, updated_metadata).await?;
+        let updated_metadata =
+            DestinationTableMetadata::new_applied(before_snapshot_id, before_replication_mask)
+                .with_schema_change(after_snapshot_id, after_replication_mask)?;
+        self.store
+            .store_destination_table_metadata(table_id, updated_metadata, &before_table_name)
+            .await?;
 
         if after_table_name != before_table_name {
             let sql = format!(
                 "rename table {} to {}",
-                quote_identifier(before_table_name),
+                quote_identifier(&before_table_name),
                 quote_identifier(&after_table_name),
             );
             self.client.execute_ddl(DdlKind::RenameTable, &sql).await?;
             if matches!(self.inserter_config.engine, ClickHouseEngine::ReplacingMergeTree) {
-                let sql = drop_current_view_sql(before_table_name);
+                let sql = drop_current_view_sql(&before_table_name);
                 self.client.execute_ddl(DdlKind::DropView, &sql).await?;
             }
         }
@@ -1685,10 +1677,10 @@ where
             .store_destination_table_metadata(
                 table_id,
                 DestinationTableMetadata::new_applied(
-                    after_table_name,
                     after_snapshot_id,
                     after_schema.replication_mask().clone(),
                 ),
+                &after_table_name,
             )
             .await?;
 
@@ -3074,7 +3066,6 @@ mod tests {
     fn initial_creation_recovery_rejects_a_different_schema_target() {
         let arriving_schema = replicated_schema(IdentityType::PrimaryKey);
         let metadata = DestinationTableMetadata::new_creating(
-            "public_users".to_owned(),
             test_snapshot_id(1_u64, 1_u64),
             arriving_schema.replication_mask().clone(),
         );

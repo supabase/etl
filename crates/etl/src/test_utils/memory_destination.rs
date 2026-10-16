@@ -99,15 +99,16 @@ where
             {
                 metadata.to_applied()
             }
-            Some(metadata) => DestinationTableMetadata::new_applied(
-                metadata.table_id().to_owned(),
-                replicated_table_schema.inner().snapshot_id,
-                replicated_table_schema.replication_mask().clone(),
-            ),
-            None => Self::build_destination_table_metadata(replicated_table_schema),
+            _ => Self::build_destination_table_metadata(replicated_table_schema),
         };
 
-        self.store.store_destination_table_metadata(table_id, metadata).await?;
+        self.store
+            .store_destination_table_metadata(
+                table_id,
+                metadata,
+                &replicated_table_schema.name().to_string(),
+            )
+            .await?;
 
         Ok(())
     }
@@ -116,12 +117,10 @@ where
     fn build_destination_table_metadata(
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> DestinationTableMetadata {
-        let table_id = replicated_table_schema.id();
         let snapshot_id = replicated_table_schema.inner().snapshot_id;
         let replication_mask = replicated_table_schema.replication_mask().clone();
-        let destination_table_id = format!("memory_{}", table_id.into_inner());
 
-        DestinationTableMetadata::new_applied(destination_table_id, snapshot_id, replication_mask)
+        DestinationTableMetadata::new_applied(snapshot_id, replication_mask)
     }
 }
 

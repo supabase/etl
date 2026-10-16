@@ -84,6 +84,17 @@ use crate::support::{
     table_name::table_name_schemas,
 };
 
+/// Stores the exact source snapshots that lifecycle resets use to find owned
+/// destination names.
+async fn lifecycle_store(schemas: &[&ReplicatedTableSchema]) -> MemoryStore {
+    let store = MemoryStore::new();
+    for schema in schemas {
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+    }
+
+    store
+}
+
 /// Checks name and view isolation across copy, CDC, restart, truncate, and
 /// reset.
 async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
@@ -94,7 +105,7 @@ async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
     let cases = table_name_schemas();
     let destination = database.build_destination_with_engine(store.clone(), engine).await;
     let mut original_metadata = Vec::new();
-    for (schema, name) in &cases {
+    for (schema, _) in &cases {
         store.store_table_schema(schema.inner().clone()).await.unwrap();
         write_table_rows_via_trait(
             &destination,
@@ -104,7 +115,6 @@ async fn boundary_underscore_names_survive_lifecycle(engine: ClickHouseEngine) {
         .await
         .unwrap();
         let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-        assert_eq!(metadata.table_id(), name);
         original_metadata.push(metadata);
     }
     destination.shutdown().await.unwrap();
@@ -248,8 +258,8 @@ async fn overlong_encoded_names_preserve_native_clickhouse_error() {
     );
 }
 
-/// Rejects unsupported names consistently before copy, CDC, or reset creates
-/// destination objects or ownership metadata.
+/// Unsupported names cannot create objects or claim ownership through copy or
+/// CDC. Without destination metadata, reset has nothing to drop.
 #[tokio::test(flavor = "multi_thread")]
 async fn unsupported_boundary_names_fail_before_destination_setup() {
     init_test_tracing();
@@ -290,8 +300,7 @@ async fn unsupported_boundary_names_fail_before_destination_setup() {
         .await
         .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::ValidationError);
-        let error = drop_table_for_copy_via_trait(&destination, &schema).await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ValidationError);
+        drop_table_for_copy_via_trait(&destination, &schema).await.unwrap();
         assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
     }
     destination.shutdown().await.unwrap();
@@ -1193,17 +1202,16 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
     let store = MemoryStore::new();
     let schema = store_id_value_schema(&store, "upgrade").await;
     let metadata = DestinationTableMetadata::new_applied(
-        "retained_rows".to_owned(),
         schema.inner().snapshot_id,
         schema.replication_mask().clone(),
     );
-    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+    store.store_destination_table_metadata(schema.id(), metadata.clone(), "").await.unwrap();
 
     // Use the previous release's DDL, not the current schema generator.
     database
         .db_client()
         .query(
-            "create table retained_rows (id Int64, value String, cdc_operation String, cdc_lsn \
+            "create table public_upgrade (id Int64, value String, cdc_operation String, cdc_lsn \
              UInt64) engine = MergeTree() order by tuple()",
         )
         .execute()
@@ -1211,7 +1219,7 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
         .unwrap();
     database
         .db_client()
-        .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
+        .query("insert into public_upgrade values (1, 'retained', 'INSERT', 10)")
         .execute()
         .await
         .unwrap();
@@ -1232,14 +1240,14 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
     drop(destination);
 
     assert_eq!(
-        database.query::<(i64, String)>("select id, value from retained_rows").await,
+        database.query::<(i64, String)>("select id, value from public_upgrade").await,
         vec![(1, "retained".to_owned())]
     );
     assert_eq!(
         database
             .query::<String>(
                 "select name from system.columns where database = currentDatabase() and table = \
-                 'retained_rows' order by position",
+                 'public_upgrade' order by position",
             )
             .await,
         vec!["id", "value", "cdc_operation", "cdc_lsn"]
@@ -1252,7 +1260,9 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
     // WHEN: the ordinal column is added and the destination restarts.
     database
         .db_client()
-        .query("alter table retained_rows add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn")
+        .query(
+            "alter table public_upgrade add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn",
+        )
         .execute()
         .await
         .unwrap();
@@ -1273,7 +1283,7 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
     assert_eq!(
         database
             .query::<(i64, String, u64, u64)>(
-                "select id, value, cdc_lsn, cdc_tx_ordinal from retained_rows order by id",
+                "select id, value, cdc_lsn, cdc_tx_ordinal from public_upgrade order by id",
             )
             .await,
         vec![(1, "retained".to_owned(), 10, 0), (2, "resumed".to_owned(), 100, 7)]
@@ -1292,17 +1302,16 @@ async fn legacy_merge_tree_rejects_schema_change_before_altering() {
     let store = MemoryStore::new();
     let schema = store_id_value_schema(&store, "upgrade").await;
     let metadata = DestinationTableMetadata::new_applied(
-        "retained_rows".to_owned(),
         schema.inner().snapshot_id,
         schema.replication_mask().clone(),
     );
-    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+    store.store_destination_table_metadata(schema.id(), metadata.clone(), "").await.unwrap();
 
     // Use the previous release's DDL, not the current schema generator.
     database
         .db_client()
         .query(
-            "create table retained_rows (id Int64, value String, cdc_operation String, cdc_lsn \
+            "create table public_upgrade (id Int64, value String, cdc_operation String, cdc_lsn \
              UInt64) engine = MergeTree() order by tuple()",
         )
         .execute()
@@ -1310,7 +1319,7 @@ async fn legacy_merge_tree_rejects_schema_change_before_altering() {
         .unwrap();
     database
         .db_client()
-        .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
+        .query("insert into public_upgrade values (1, 'retained', 'INSERT', 10)")
         .execute()
         .await
         .unwrap();
@@ -1348,14 +1357,14 @@ async fn legacy_merge_tree_rejects_schema_change_before_altering() {
     drop(destination);
 
     assert_eq!(
-        database.query::<(i64, String)>("select id, value from retained_rows").await,
+        database.query::<(i64, String)>("select id, value from public_upgrade").await,
         vec![(1, "retained".to_owned())]
     );
     assert_eq!(
         database
             .query::<String>(
                 "select name from system.columns where database = currentDatabase() and table = \
-                 'retained_rows' order by position",
+                 'public_upgrade' order by position",
             )
             .await,
         vec!["id", "value", "cdc_operation", "cdc_lsn"]
@@ -1374,16 +1383,15 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
     let store = MemoryStore::new();
     let schema = store_id_value_schema(&store, "upgrade").await;
     let metadata = DestinationTableMetadata::new_applied(
-        "retained_rows".to_owned(),
         schema.inner().snapshot_id,
         schema.replication_mask().clone(),
     );
-    store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+    store.store_destination_table_metadata(schema.id(), metadata.clone(), "").await.unwrap();
 
     database
         .db_client()
         .query(
-            "create table retained_rows (id Int64, value String, _etl_version UInt128, \
+            "create table public_upgrade (id Int64, value String, _etl_version UInt128, \
              _etl_deleted UInt8) engine = ReplacingMergeTree(_etl_version, _etl_deleted) order by \
              id",
         )
@@ -1393,7 +1401,7 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
     database
         .db_client()
         .query(
-            "create view retained_rows__current as select id, value from retained_rows final \
+            "create view public_upgrade__current as select id, value from public_upgrade final \
              where _etl_deleted = 0",
         )
         .execute()
@@ -1401,7 +1409,7 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
         .unwrap();
     database
         .db_client()
-        .query("insert into retained_rows values (1, 'old', 0, 0), (2, 'retained', 0, 0)")
+        .query("insert into public_upgrade values (1, 'old', 0, 0), (2, 'retained', 0, 0)")
         .execute()
         .await
         .unwrap();
@@ -1429,7 +1437,7 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
     // unchanged.
     assert_eq!(
         database
-            .query::<(i64, String)>("select id, value from retained_rows__current order by id")
+            .query::<(i64, String)>("select id, value from public_upgrade__current order by id")
             .await,
         vec![(1, "updated".to_owned()), (2, "retained".to_owned())]
     );
@@ -2453,13 +2461,12 @@ async fn schema_change_recovery_rejects_stale_snapshot_merge_tree() {
 
     // Interrupted schema change: metadata targets snapshot 200, previous 100.
     let metadata = DestinationTableMetadata::new_applied(
-        "public_stale_recovery".to_owned(),
         test_snapshot_id(100_u64, 100_u64),
         replication_mask.clone(),
     )
     .with_schema_change(test_snapshot_id(200_u64, 200_u64), replication_mask)
     .unwrap();
-    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata, "").await.unwrap();
 
     let destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
@@ -2503,13 +2510,12 @@ async fn schema_change_recovery_rejects_mismatched_mask_merge_tree() {
     let arriving_schema =
         ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(vec![1, 0]));
     let metadata = DestinationTableMetadata::new_applied(
-        "public_mask_recovery".to_owned(),
         test_snapshot_id(100_u64, 100_u64),
         target_mask.clone(),
     )
     .with_schema_change(test_snapshot_id(200_u64, 200_u64), target_mask)
     .unwrap();
-    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata, "").await.unwrap();
 
     let destination =
         clickhouse_db.build_destination_with_engine(store, ClickHouseEngine::MergeTree).await;
@@ -2583,15 +2589,12 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .unwrap()
         .expect("metadata should exist after table creation");
     assert!(applied_metadata.is_applied());
-    let clickhouse_table_name = applied_metadata.table_id().to_owned();
-    let interrupted_metadata = DestinationTableMetadata::new_applied(
-        clickhouse_table_name.clone(),
-        test_snapshot_id(100_u64, 100_u64),
-        old_mask,
-    )
-    .with_schema_change(test_snapshot_id(200_u64, 200_u64), new_mask)
-    .unwrap();
-    store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
+    let clickhouse_table_name = "public_recovery__replay";
+    let interrupted_metadata =
+        DestinationTableMetadata::new_applied(test_snapshot_id(100_u64, 100_u64), old_mask)
+            .with_schema_change(test_snapshot_id(200_u64, 200_u64), new_mask)
+            .unwrap();
+    store.store_destination_table_metadata(table_id, interrupted_metadata, "").await.unwrap();
 
     // WHEN: a restarted destination, with an empty process-local cache,
     // receives the target relation and must replay the interrupted diff from
@@ -2605,7 +2608,7 @@ async fn schema_change_recovery_replays_interrupted_diff_merge_tree() {
         .unwrap();
 
     // THEN: recovery adds `email` and marks snapshot 200 applied.
-    let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
+    let columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "recovery must add the interrupted column");
 
     let recovered_metadata = store
@@ -2681,15 +2684,12 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         .unwrap()
         .expect("metadata should exist after table creation");
     assert!(applied_metadata.is_applied());
-    let clickhouse_table_name = applied_metadata.table_id().to_owned();
-    let interrupted_metadata = DestinationTableMetadata::new_applied(
-        clickhouse_table_name.clone(),
-        test_snapshot_id(100_u64, 100_u64),
-        old_mask,
-    )
-    .with_schema_change(target_table_schema.snapshot_id, target_mask.clone())
-    .unwrap();
-    store.store_destination_table_metadata(table_id, interrupted_metadata).await.unwrap();
+    let clickhouse_table_name = "public_recovery__mask__contraction";
+    let interrupted_metadata =
+        DestinationTableMetadata::new_applied(test_snapshot_id(100_u64, 100_u64), old_mask)
+            .with_schema_change(target_table_schema.snapshot_id, target_mask.clone())
+            .unwrap();
+    store.store_destination_table_metadata(table_id, interrupted_metadata, "").await.unwrap();
 
     let restarted_destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
@@ -2701,7 +2701,7 @@ async fn schema_change_recovery_replays_interrupted_mask_contraction_merge_tree(
         .await
         .unwrap();
 
-    assert_eq!(clickhouse_db.column_names(&clickhouse_table_name).await, vec!["id", "name"]);
+    assert_eq!(clickhouse_db.column_names(clickhouse_table_name).await, vec!["id", "name"]);
     let recovered_metadata = store
         .get_destination_table_metadata(table_id)
         .await
@@ -2885,7 +2885,10 @@ async fn drop_table_for_copy_waits_for_admitted_write() {
     let clickhouse_db = setup_clickhouse_database().await;
     let schema = lifecycle_schema("resetrace");
     let destination = clickhouse_db
-        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .build_destination_with_engine(
+            lifecycle_store(&[&schema]).await,
+            ClickHouseEngine::MergeTree,
+        )
         .await;
     destination.write_table_rows(&schema, vec![]).await.unwrap();
     let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
@@ -3058,7 +3061,6 @@ async fn table_only_renames_preserve_rows_and_views_across_name_mappings() {
             let metadata =
                 store.get_destination_table_metadata(source_table_id).await.unwrap().unwrap();
             assert!(metadata.is_applied());
-            assert_eq!(metadata.table_id(), table_id);
             assert_eq!(metadata.snapshot_id(), schema.inner().snapshot_id);
             expected.push((row_id, Some("renamed".to_owned())));
             let query = current_state_query(engine, table_id, "id, status", &["id"], "id");
@@ -3192,15 +3194,12 @@ async fn replicate_and_swap_orders_by_rename() -> RenameSwap {
     }
 }
 
-/// Reset after an interrupted rename that already moved the table drops it
-/// under its new name, so a fresh copy succeeds without manual cleanup.
+/// An Applying reset drops both snapshot-derived tables and their views, even
+/// after another source has reused the previous name. A fresh copy can follow.
 #[tokio::test(flavor = "multi_thread")]
-async fn interrupted_table_rename_reset_drops_renamed_target() {
+async fn applying_table_rename_reset_drops_both_owned_names() {
     let swap = replicate_and_swap_orders_by_rename().await;
-    // Free the previous name, as if no other source had claimed it yet.
-    drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
     let pending = DestinationTableMetadata::new_applied(
-        "public_orders".to_owned(),
         swap.archived.inner().snapshot_id,
         swap.archived.replication_mask().clone(),
     )
@@ -3209,7 +3208,10 @@ async fn interrupted_table_rename_reset_drops_renamed_target() {
         swap.archived_renamed.replication_mask().clone(),
     )
     .unwrap();
-    swap.store.store_destination_table_metadata(swap.archived.id(), pending.clone()).await.unwrap();
+    swap.store
+        .store_destination_table_metadata(swap.archived.id(), pending.clone(), "")
+        .await
+        .unwrap();
 
     let error = swap
         .destination
@@ -3256,60 +3258,10 @@ async fn interrupted_table_rename_reset_drops_renamed_target() {
     );
 }
 
-/// Reset after a rename that never executed drops only the recorded table. An
-/// unrelated table holding the after name survives, and fresh creation reports
-/// it so the operator can drop it.
+/// After completed source renames, an Applied reset drops only the current
+/// snapshot's table and view, preserving the other source's table.
 #[tokio::test(flavor = "multi_thread")]
-async fn unexecuted_table_rename_reset_keeps_occupied_target() {
-    let swap = replicate_and_swap_orders_by_rename().await;
-    // `public_orders` belongs to the replacement table.
-    let reclaimed = store_status_default_schema(
-        &swap.store,
-        swap.archived.id(),
-        &TableName::new("public".to_owned(), "orders".to_owned()),
-        test_snapshot_id(300, 300),
-        None,
-    )
-    .await;
-    let pending = DestinationTableMetadata::new_applied(
-        "public_ordersold".to_owned(),
-        swap.archived_renamed.inner().snapshot_id,
-        swap.archived_renamed.replication_mask().clone(),
-    )
-    .with_schema_change(reclaimed.inner().snapshot_id, reclaimed.replication_mask().clone())
-    .unwrap();
-    swap.store.store_destination_table_metadata(swap.archived.id(), pending).await.unwrap();
-
-    drop_table_for_copy_via_trait(&swap.destination, &reclaimed).await.unwrap();
-    swap.destination.shutdown().await.unwrap();
-
-    assert_eq!(
-        swap.clickhouse_db
-            .query::<String>(
-                "select name from system.tables where database = currentDatabase() order by name",
-            )
-            .await,
-        vec!["public_orders".to_owned(), "public_orders__current".to_owned()]
-    );
-
-    swap.store.prepare_table_state_for_copy(swap.archived.id()).await.unwrap();
-    swap.store.store_table_schema(reclaimed.inner().clone()).await.unwrap();
-    let destination = swap
-        .clickhouse_db
-        .build_destination_with_engine(swap.store.clone(), ClickHouseEngine::ReplacingMergeTree)
-        .await;
-    let error = destination.write_table_rows(&reclaimed, vec![]).await.unwrap_err();
-    destination.shutdown().await.unwrap();
-
-    assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
-    assert!(swap.store.get_destination_table_metadata(swap.archived.id()).await.unwrap().is_none());
-}
-
-/// After source tables swap names by rename, resetting one drops only its own
-/// table and view, and its fresh copy claims its current name without touching
-/// the table that previously held that name.
-#[tokio::test(flavor = "multi_thread")]
-async fn rename_swap_reset_recopies_only_its_own_table() {
+async fn applied_table_reset_after_name_swap_preserves_other_table() {
     let swap = replicate_and_swap_orders_by_rename().await;
 
     drop_table_for_copy_via_trait(&swap.destination, &swap.replacement_renamed).await.unwrap();
@@ -3342,14 +3294,13 @@ async fn rename_swap_reset_recopies_only_its_own_table() {
         .unwrap();
     swap.destination.shutdown().await.unwrap();
 
-    assert_eq!(
+    assert!(
         swap.store
             .get_destination_table_metadata(swap.replacement_id)
             .await
             .unwrap()
             .unwrap()
-            .table_id(),
-        "public_orders"
+            .is_applied()
     );
     for (table, status) in [("public_orders", "recopied"), ("public_ordersold", "kept")] {
         assert_eq!(
@@ -3587,7 +3538,10 @@ async fn write_admission_waits_for_table_reset() {
     let gated_schema = lifecycle_schema_with_id("gated", 7100);
     let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
     let destination = clickhouse_db
-        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .build_destination_with_engine(
+            lifecycle_store(&[&gated_schema, &bystander_schema]).await,
+            ClickHouseEngine::MergeTree,
+        )
         .await;
     destination.write_table_rows(&gated_schema, vec![]).await.unwrap();
     destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
@@ -3657,7 +3611,10 @@ async fn concurrent_writes_complete_independently_and_reset_drains_both() {
     let left_schema = lifecycle_schema_with_id("left", 7100);
     let right_schema = lifecycle_schema_with_id("right", 7200);
     let destination = clickhouse_db
-        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .build_destination_with_engine(
+            lifecycle_store(&[&left_schema, &right_schema]).await,
+            ClickHouseEngine::MergeTree,
+        )
         .await;
     destination.write_table_rows(&left_schema, vec![]).await.unwrap();
     destination.write_table_rows(&right_schema, vec![]).await.unwrap();
@@ -3856,7 +3813,10 @@ async fn table_reset_succeeds_after_failed_write() {
     let failing_schema = lifecycle_schema_with_id("failing", 7100);
     let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
     let destination = clickhouse_db
-        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .build_destination_with_engine(
+            lifecycle_store(&[&failing_schema, &bystander_schema]).await,
+            ClickHouseEngine::MergeTree,
+        )
         .await;
     destination.write_table_rows(&failing_schema, vec![]).await.unwrap();
     destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();
@@ -3905,7 +3865,10 @@ async fn failed_table_reset_publishes_error_and_reopens_admission() {
     let failing_schema = lifecycle_schema_with_id("resetfail", 7100);
     let bystander_schema = lifecycle_schema_with_id("bystander", 7200);
     let destination = clickhouse_db
-        .build_destination_with_engine(MemoryStore::new(), ClickHouseEngine::MergeTree)
+        .build_destination_with_engine(
+            lifecycle_store(&[&failing_schema, &bystander_schema]).await,
+            ClickHouseEngine::MergeTree,
+        )
         .await;
     destination.write_table_rows(&failing_schema, vec![]).await.unwrap();
     destination.write_table_rows(&bystander_schema, vec![]).await.unwrap();

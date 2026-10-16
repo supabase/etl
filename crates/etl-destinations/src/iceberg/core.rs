@@ -228,12 +228,14 @@ where
                 ));
             }
         }
-        let iceberg_table_name = metadata.table_id().to_owned();
+        let iceberg_table_name = table_name_to_iceberg_table_name(
+            replicated_table_schema.name(),
+            inner.namespace.is_single(),
+        )?;
 
         replicated_table_schema.validate_destination_column_names(ICEBERG_COLUMN_NAME_MAPPING)?;
         let column_schemas = Self::build_cdc_column_schemas(replicated_table_schema);
         let recreating_metadata = DestinationTableMetadata::new_creating(
-            iceberg_table_name.clone(),
             replicated_table_schema.inner().snapshot_id,
             replicated_table_schema.replication_mask().clone(),
         );
@@ -249,7 +251,13 @@ where
         // missing-table window. If replay reaches earlier DML first, normal
         // Creating recovery recreates the table so the batch can advance to
         // this truncate again.
-        self.store.store_destination_table_metadata(table_id, recreating_metadata.clone()).await?;
+        self.store
+            .store_destination_table_metadata(
+                table_id,
+                recreating_metadata.clone(),
+                &iceberg_table_name,
+            )
+            .await?;
 
         self.client
             .drop_table_if_exists(&namespace, iceberg_table_name.clone())
@@ -257,12 +265,16 @@ where
             .map_err(iceberg_error_to_etl_error)?;
 
         self.client
-            .create_table_if_missing(&namespace, iceberg_table_name, &column_schemas)
+            .create_table_if_missing(&namespace, iceberg_table_name.clone(), &column_schemas)
             .await
             .map_err(iceberg_error_to_etl_error)?;
 
         self.store
-            .store_destination_table_metadata(table_id, recreating_metadata.to_applied())
+            .store_destination_table_metadata(
+                table_id,
+                recreating_metadata.to_applied(),
+                &iceberg_table_name,
+            )
             .await?;
 
         Ok(())
@@ -273,23 +285,18 @@ where
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let table_id = replicated_table_schema.id();
+        // Iceberg rejects table renames, so the current source name always
+        // determines the table name.
         let table_name = replicated_table_schema.name();
         let table_namespace = schema_to_namespace(&table_name.schema);
-        let (default_table_name, namespace) = {
+        let (iceberg_table_name, namespace) = {
             let inner = self.inner.lock().await;
-            let default_table_name =
+            let iceberg_table_name =
                 table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
             let namespace = inner.namespace.get_or(&table_namespace).to_owned();
 
-            (default_table_name, namespace)
+            (iceberg_table_name, namespace)
         };
-        let iceberg_table_name =
-            if let Some(metadata) = self.store.get_destination_table_metadata(table_id).await? {
-                metadata.table_id().to_owned()
-            } else {
-                default_table_name
-            };
 
         self.client
             .drop_table_if_exists(&namespace, iceberg_table_name.clone())
@@ -495,9 +502,6 @@ where
         let iceberg_table_name =
             table_name_to_iceberg_table_name(table_name, inner.namespace.is_single())?;
         let existing_metadata = self.store.get_destination_table_metadata(table_id).await?;
-        let iceberg_table_name = existing_metadata
-            .as_ref()
-            .map_or(iceberg_table_name, |metadata| metadata.table_id().to_owned());
 
         // We prepare the namespace.
         let namespace = schema_to_namespace(&table_name.schema);
@@ -536,11 +540,16 @@ where
             }
             None => {
                 let metadata = DestinationTableMetadata::new_creating(
-                    iceberg_table_name.clone(),
                     replicated_table_schema.inner().snapshot_id,
                     replicated_table_schema.replication_mask().clone(),
                 );
-                self.store.store_destination_table_metadata(table_id, metadata.clone()).await?;
+                self.store
+                    .store_destination_table_metadata(
+                        table_id,
+                        metadata.clone(),
+                        &iceberg_table_name,
+                    )
+                    .await?;
                 metadata
             }
         };
@@ -556,7 +565,11 @@ where
             .map_err(iceberg_error_to_etl_error)?;
 
         self.store
-            .store_destination_table_metadata(table_id, creating_metadata.to_applied())
+            .store_destination_table_metadata(
+                table_id,
+                creating_metadata.to_applied(),
+                &iceberg_table_name,
+            )
             .await?;
 
         Ok((namespace, iceberg_table_name))
@@ -904,7 +917,6 @@ mod tests {
     fn iceberg_relation_accepts_only_identical_applied_schema() {
         let schema = replicated_schema();
         let creating_metadata = DestinationTableMetadata::new_creating(
-            "public_users_changelog".to_owned(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );
@@ -913,7 +925,6 @@ mod tests {
         assert_eq!(creating_error.kind(), ErrorKind::InvalidState);
 
         let metadata = DestinationTableMetadata::new_applied(
-            "public_users_changelog".to_owned(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );
@@ -932,7 +943,6 @@ mod tests {
         assert_eq!(newer_error.kind(), ErrorKind::CorruptedTableSchema);
 
         let newer_metadata = DestinationTableMetadata::new_applied(
-            "public_users_changelog".to_owned(),
             test_snapshot_id(2_u64, 2_u64),
             schema.replication_mask().clone(),
         );

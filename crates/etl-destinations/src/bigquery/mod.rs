@@ -5,6 +5,8 @@ mod metrics;
 mod query;
 mod schema;
 mod sql;
+#[cfg(test)]
+mod test_client;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 

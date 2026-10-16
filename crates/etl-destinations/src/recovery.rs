@@ -128,38 +128,39 @@ pub(crate) fn ensure_destination_schema_matches_metadata(
     ))
 }
 
-/// Returns the exact source names at both endpoints of a pending table rename.
+/// Returns the source table names whose destination objects ETL owns.
 ///
-/// [`DestinationTableMetadata::table_id`] keeps the before identifier during
-/// Applying, although remote DDL may already have moved the table. Resets use
-/// these names to find the object an interrupted rename left behind. Returns
-/// `None` for other states or unchanged names, in which case callers trust the
-/// recorded identifier. Schema retention keeps both recorded endpoints, so a
-/// missing endpoint fails instead of guessing.
+/// Destinations derive object names deterministically from source names, and
+/// ETL owns the names derived from every snapshot recorded in metadata: the
+/// current snapshot, and during [`DestinationTableSchema::Applying`] also the
+/// previous one. An interrupted rename can leave the table under either name,
+/// so resets remove the objects under all of them. Duplicate names are
+/// returned once, previous name first.
 #[cfg(any(
     feature = "bigquery",
     feature = "clickhouse",
     feature = "ducklake",
     feature = "snowflake"
 ))]
-pub(crate) async fn pending_table_rename<S: SchemaStore + Sync>(
+pub(crate) async fn owned_source_table_names<S: SchemaStore + Sync>(
     store: &S,
     table_id: TableId,
     metadata: &DestinationTableMetadata,
-) -> EtlResult<Option<(TableName, TableName)>> {
-    let DestinationTableSchema::Applying { snapshot_id, previous_snapshot_id, .. } =
-        metadata.table_schema()
-    else {
-        return Ok(None);
-    };
-
-    let before_schema = store.get_exact_table_schema(&table_id, *previous_snapshot_id).await?;
-    let after_schema = store.get_exact_table_schema(&table_id, *snapshot_id).await?;
-    if before_schema.name == after_schema.name {
-        return Ok(None);
+) -> EtlResult<Vec<TableName>> {
+    let mut names = Vec::with_capacity(2);
+    if let DestinationTableSchema::Applying { previous_snapshot_id, .. } = metadata.table_schema() {
+        names.push(
+            store.get_exact_table_schema(&table_id, *previous_snapshot_id).await?.name.clone(),
+        );
     }
 
-    Ok(Some((before_schema.name.clone(), after_schema.name.clone())))
+    let current_name =
+        store.get_exact_table_schema(&table_id, metadata.snapshot_id()).await?.name.clone();
+    if !names.contains(&current_name) {
+        names.push(current_name);
+    }
+
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -255,16 +256,12 @@ mod tests {
             snapshot_id,
         ));
         let schema = ReplicatedTableSchema::all(table_schema);
-        let metadata = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
-            snapshot_id,
-            schema.replication_mask().clone(),
-        );
+        let metadata =
+            DestinationTableMetadata::new_applied(snapshot_id, schema.replication_mask().clone());
 
         ensure_destination_schema_matches_metadata("Test", table_id, &metadata, &schema).unwrap();
 
         let different_snapshot = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
             test_snapshot_id(300_u64, 300_u64),
             schema.replication_mask().clone(),
         );
@@ -278,7 +275,6 @@ mod tests {
         assert_eq!(snapshot_error.kind(), ErrorKind::DestinationSchemaRewind);
 
         let different_mask = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
             snapshot_id,
             ReplicationMask::from_bytes(vec![0]),
         );

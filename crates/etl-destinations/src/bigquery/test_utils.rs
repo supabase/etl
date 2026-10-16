@@ -24,7 +24,9 @@ use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{BigQueryDestination, BigQueryTableId, query::execute_query},
+    bigquery::{
+        BigQueryDestination, BigQueryTableId, query::execute_query, sql::parse_view_query_table_id,
+    },
     retry::{RetryPolicy, retry_with_backoff},
     table_name::try_stringify_table_name,
 };
@@ -358,24 +360,28 @@ impl BigQueryDatabase {
         }
     }
 
+    /// Returns the physical table that a source table's logical view selects.
+    ///
+    /// Returns `None` when the view does not exist.
+    pub async fn physical_table_id(&self, table_name: &TableName) -> Option<String> {
+        let view_id = table_name_to_bigquery_view_id(table_name).unwrap();
+        let view_query = self.get_table_metadata_by_id(&view_id).await?.view.unwrap().query;
+
+        Some(
+            parse_view_query_table_id(&view_query, &self.project_id, &self.dataset_id)
+                .unwrap_or_else(|| panic!("Unexpected BigQuery view definition: {view_query}")),
+        )
+    }
+
     /// Queries the schema (column metadata) of the physical table behind a
     /// logical view.
     ///
-    /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    /// Resolves the physical table from the view definition because renamed
-    /// tables keep the prefix of their original view ID. Returns `None` when
-    /// the view does not exist.
+    /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS,
+    /// or `None` when the view does not exist.
     pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
-        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
-        let view_query = self.get_table_metadata_by_id(&view_id).await?.view.unwrap().query;
-        // Views select from a backtick-quoted `project.dataset.table` path.
-        let physical_table_id = view_query
-            .trim_end()
-            .strip_suffix('`')
-            .and_then(|path| path.rsplit('.').next())
-            .unwrap_or_else(|| panic!("Unexpected BigQuery view definition: {view_query}"));
+        let physical_table_id = self.physical_table_id(&table_name).await?;
 
         let query = format!(
             "select column_name, data_type, ordinal_position from \

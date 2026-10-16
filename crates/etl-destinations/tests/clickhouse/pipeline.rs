@@ -2767,7 +2767,6 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
 
     let final_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(final_metadata.is_applied());
-    assert_eq!(final_metadata.table_id(), clickhouse_table_name);
     // Applying the relation must advance the durable destination schema.
     assert!(final_metadata.snapshot_id() > initial_snapshot_id);
 
@@ -2925,7 +2924,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         applied_snapshot_id > initial_snapshot_id,
         "snapshot_id should increase after schema change"
     );
-    let clickhouse_table_name = applied_metadata.table_id().to_owned();
+    let clickhouse_table_name = "test_schema__stale__replay";
 
     // --- WHEN: a fresh destination on the same store replays the old relation
     // ---
@@ -2941,11 +2940,11 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     let err = result.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 
-    let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
+    let columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "email column must survive the stale replay");
 
     let query =
-        current_state_query(engine, &clickhouse_table_name, "id, name, email", &["id"], "id");
+        current_state_query(engine, clickhouse_table_name, "id, name, email", &["id"], "id");
     let rows: Vec<StaleReplayRow> = clickhouse_db.query(&query).await;
     assert_eq!(rows.len(), 2, "expected Alice + Bob");
     assert_eq!(rows[0].id, 1);

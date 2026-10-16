@@ -26,9 +26,8 @@ pub enum DestinationTableSchema {
     },
     /// The current schema has been successfully applied.
     ///
-    /// The supported schema and mapped logical table name match this snapshot.
-    /// The destination-specific physical identifier is stored separately and
-    /// may differ from the logical name, for example a BigQuery view's target.
+    /// The destination table carries the supported schema and the name
+    /// destinations derive from this snapshot.
     ///
     /// Destinations treat this state as authoritative. Restart and cache misses
     /// may rebuild process-local or derived non-data-bearing state, but must
@@ -65,13 +64,14 @@ impl DestinationTableSchema {
 ///
 /// The schema variant contains every field required by its state, making
 /// incomplete recovery metadata unrepresentable in memory.
+///
+/// Destinations name their objects deterministically from source table names,
+/// so metadata records snapshots rather than destination identifiers. ETL owns
+/// the destination names derived from every snapshot recorded here: the
+/// current snapshot, and during [`DestinationTableSchema::Applying`] also the
+/// previous one. Resetting a table removes the objects under those names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestinationTableMetadata {
-    /// The name or identifier of the data-bearing destination table.
-    ///
-    /// During Applying, this retains the before name even if remote DDL has
-    /// already renamed the table. Applied records the resulting identifier.
-    table_id: String,
     /// The schema state stored for the destination table.
     table_schema: DestinationTableSchema,
 }
@@ -79,35 +79,13 @@ pub struct DestinationTableMetadata {
 impl DestinationTableMetadata {
     /// Creates metadata for a table being created or recreated at the
     /// destination.
-    pub fn new_creating(
-        table_id: String,
-        snapshot_id: SnapshotId,
-        replication_mask: ReplicationMask,
-    ) -> Self {
-        Self {
-            table_id,
-            table_schema: DestinationTableSchema::Creating { snapshot_id, replication_mask },
-        }
+    pub fn new_creating(snapshot_id: SnapshotId, replication_mask: ReplicationMask) -> Self {
+        Self { table_schema: DestinationTableSchema::Creating { snapshot_id, replication_mask } }
     }
 
     /// Creates metadata for a table whose schema has been applied.
-    pub fn new_applied(
-        table_id: String,
-        snapshot_id: SnapshotId,
-        replication_mask: ReplicationMask,
-    ) -> Self {
-        Self {
-            table_id,
-            table_schema: DestinationTableSchema::Applied { snapshot_id, replication_mask },
-        }
-    }
-
-    /// Returns the destination-specific physical table identifier.
-    ///
-    /// During [`DestinationTableSchema::Applying`], this is the before
-    /// identifier and may no longer address the remotely renamed table.
-    pub fn table_id(&self) -> &str {
-        &self.table_id
+    pub fn new_applied(snapshot_id: SnapshotId, replication_mask: ReplicationMask) -> Self {
+        Self { table_schema: DestinationTableSchema::Applied { snapshot_id, replication_mask } }
     }
 
     /// Returns the destination table schema metadata.
@@ -200,11 +178,8 @@ mod tests {
     fn creating_metadata_contains_only_the_target_schema() {
         let snapshot_id = SnapshotId::initial();
         let replication_mask = ReplicationMask::from_bytes(vec![1]);
-        let metadata = DestinationTableMetadata::new_creating(
-            "users".to_owned(),
-            snapshot_id,
-            replication_mask.clone(),
-        );
+        let metadata =
+            DestinationTableMetadata::new_creating(snapshot_id, replication_mask.clone());
 
         assert_eq!(
             metadata.table_schema(),
@@ -220,7 +195,6 @@ mod tests {
         let previous_replication_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
 
         let metadata = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
             previous_snapshot_id,
             previous_replication_mask.clone(),
         )
@@ -243,7 +217,6 @@ mod tests {
         let snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(21));
         let replication_mask = ReplicationMask::from_bytes(vec![1, 1]);
         let metadata = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
             SnapshotId::initial(),
             ReplicationMask::from_bytes(vec![1, 0]),
         )
@@ -261,23 +234,17 @@ mod tests {
     fn pending_metadata_cannot_start_another_schema_change() {
         let snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(21));
         let replication_mask = ReplicationMask::from_bytes(vec![1]);
-        let creating_metadata = DestinationTableMetadata::new_creating(
-            "users".to_owned(),
-            SnapshotId::initial(),
-            replication_mask.clone(),
-        );
+        let creating_metadata =
+            DestinationTableMetadata::new_creating(SnapshotId::initial(), replication_mask.clone());
         let error = creating_metadata
             .with_schema_change(snapshot_id, replication_mask.clone())
             .unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidState);
 
-        let applying_metadata = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
-            SnapshotId::initial(),
-            replication_mask.clone(),
-        )
-        .with_schema_change(snapshot_id, replication_mask.clone())
-        .unwrap();
+        let applying_metadata =
+            DestinationTableMetadata::new_applied(SnapshotId::initial(), replication_mask.clone())
+                .with_schema_change(snapshot_id, replication_mask.clone())
+                .unwrap();
         let error = applying_metadata
             .with_schema_change(SnapshotId::new(PgLsn::from(30), PgLsn::from(31)), replication_mask)
             .unwrap_err();

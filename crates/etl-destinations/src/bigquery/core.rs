@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, str::FromStr, sync::Arc};
+use std::{collections::HashMap, fmt::Display, sync::Arc};
 
 use etl::{
     bail,
@@ -7,7 +7,7 @@ use etl::{
         Destination, DestinationTableMetadata, DestinationWriteStatus, DropTableForCopyResult,
         TableCopyBatchId, WriteEventsDurability, WriteEventsResult, WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventPosition},
     pipeline::PipelineId,
@@ -37,13 +37,16 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        pending_table_rename, warn_unsupported_column_type_change,
+        owned_source_table_names, warn_unsupported_column_type_change,
     },
     table_name::try_stringify_table_name as table_name_to_bigquery_view_id,
 };
 
 /// Width of a random table-ID suffix encoding a full 128-bit UUID in base 36.
 const RANDOM_TABLE_ID_SUFFIX_LENGTH: usize = 25;
+
+/// Leading component of every physical table ID allocated by ETL.
+const PHYSICAL_TABLE_ID_PREFIX: &str = "supabase_etl_";
 
 /// Internal CDC sequence ordinal for single-row changes and generated deletes.
 const BIGQUERY_SEQUENCE_ORDINAL_FIRST: u64 = 0;
@@ -72,131 +75,44 @@ const BIGQUERY_RESERVED_COLUMN_PREFIXES: [&str; 9] = [
     "_CHANGE_TIMESTAMP",
 ];
 
-/// The suffix distinguishing physical tables created under the same view ID.
+/// Allocates a fresh physical table ID for a source table.
 ///
-/// Existing metadata may contain a legacy numeric suffix; new tables always
-/// receive a random suffix.
-#[derive(Debug, PartialEq)]
-enum TableIdSuffix {
-    /// A legacy numeric suffix, retained only for reading existing metadata.
-    Legacy(u64),
-    /// A random identity independent of clocks, resets, and metadata history.
-    Random(Uuid),
-}
-
-impl Display for TableIdSuffix {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Legacy(suffix) => write!(f, "{suffix}"),
-            Self::Random(uuid) => {
-                // Base 36 retains every UUID bit in 25 lowercase characters.
-                // Fixed width distinguishes it from every legacy u64 suffix;
-                // lowercase also works in case-insensitive BigQuery datasets.
-                let mut value = uuid.as_u128();
-                let mut digits = ['0'; RANDOM_TABLE_ID_SUFFIX_LENGTH];
-                for digit in digits.iter_mut().rev() {
-                    // The remainder is below 36, so both conversions succeed.
-                    let remainder = u32::try_from(value % 36).unwrap();
-                    *digit = char::from_digit(remainder, 36).unwrap();
-                    value /= 36;
-                }
-                for digit in digits {
-                    write!(f, "{digit}")?;
-                }
-                Ok(())
-            }
-        }
+/// IDs have the form `supabase_etl_<pipeline_id>_<table_oid>_<suffix>`. The
+/// random suffix means physical names are never reused: reusing a deleted
+/// name could let Storage Write API appends be acknowledged without reaching
+/// the replacement table while BigQuery propagates the change. Views locate
+/// their table by reading this ID from the view definition, so tables named by
+/// earlier releases keep working.
+fn new_physical_table_id(pipeline_id: PipelineId, source_table_id: TableId) -> BigQueryTableId {
+    // Base 36 retains every UUID bit in 25 lowercase characters, which also
+    // works in case-insensitive datasets.
+    let mut value = Uuid::new_v4().as_u128();
+    let mut suffix = ['0'; RANDOM_TABLE_ID_SUFFIX_LENGTH];
+    for digit in suffix.iter_mut().rev() {
+        // The remainder is below 36, so both conversions succeed.
+        let remainder = u32::try_from(value % 36).unwrap();
+        *digit = char::from_digit(remainder, 36).unwrap();
+        value /= 36;
     }
-}
 
-/// A physical BigQuery table identifier distinct from its stable logical view.
-///
-/// Each creation attempt receives a fresh UUID. Physical names are never
-/// deliberately reused, avoiding stale table and ingestion references while
-/// deletion and creation propagate through BigQuery.
-///
-/// The prefix records the view ID at creation and remains unchanged when the
-/// view is renamed. Both legacy numeric and random suffixes identify physical
-/// tables.
-#[derive(Debug, PartialEq)]
-struct PhysicalBigQueryTableId(BigQueryTableId, TableIdSuffix);
+    let mut table_id =
+        format!("{PHYSICAL_TABLE_ID_PREFIX}{pipeline_id}_{}_", source_table_id.into_inner());
+    table_id.extend(suffix);
 
-impl PhysicalBigQueryTableId {
-    /// Allocates a fresh physical table ID using the initial view ID as a
-    /// prefix.
-    fn new(view_id: BigQueryTableId) -> Self {
-        Self(view_id, TableIdSuffix::Random(Uuid::new_v4()))
-    }
-}
-
-impl FromStr for PhysicalBigQueryTableId {
-    type Err = EtlError;
-
-    /// Parses legacy numeric suffixes and fixed-width lowercase base-36 UUIDs.
-    fn from_str(table_id: &str) -> Result<Self, Self::Err> {
-        let parsed = table_id.rsplit_once('_').and_then(|(name_prefix, suffix)| {
-            if name_prefix.is_empty() || suffix.is_empty() {
-                return None;
-            }
-
-            let suffix = if suffix.len() == RANDOM_TABLE_ID_SUFFIX_LENGTH {
-                if !suffix.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()) {
-                    return None;
-                }
-                TableIdSuffix::Random(Uuid::from_u128(u128::from_str_radix(suffix, 36).ok()?))
-            } else {
-                if suffix.len() > 20
-                    || (suffix.len() > 1 && suffix.starts_with('0'))
-                    || !suffix.bytes().all(|byte| byte.is_ascii_digit())
-                {
-                    return None;
-                }
-                TableIdSuffix::Legacy(suffix.parse().ok()?)
-            };
-
-            Some(Self(name_prefix.to_owned(), suffix))
-        });
-
-        parsed.ok_or_else(|| {
-            etl_error!(
-                ErrorKind::DestinationTableNameInvalid,
-                "Invalid physical BigQuery table ID",
-                format!(
-                    "Table ID '{table_id}' must end in a u64 suffix or a 25-character lowercase \
-                     base-36 suffix"
-                )
-            )
-        })
-    }
-}
-
-impl Display for PhysicalBigQueryTableId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}_{}", self.0, self.1)
-    }
-}
-
-/// Resolves the physical target independently of its current logical view.
-///
-/// A source rename changes the view name but retains the physical identity.
-fn parse_table_id_from_metadata(
-    metadata: &DestinationTableMetadata,
-) -> EtlResult<PhysicalBigQueryTableId> {
-    metadata.table_id().parse()
+    table_id
 }
 
 /// Attempts physical-table deletion without making replication depend on
 /// cleanup.
 ///
-/// Call only for an obsolete table after switching the view and persisting
-/// metadata, or after dropping the logical view during an explicit reset.
-/// Failed deletions can leave orphans requiring manual cleanup.
+/// Call only for a table no view selects anymore. Failures are logged and can
+/// leave the table behind for manual cleanup.
 async fn delete_obsolete_table(
     client: &BigQueryClient,
     dataset_id: &BigQueryDatasetId,
-    table_id: PhysicalBigQueryTableId,
+    table_id: &BigQueryTableId,
 ) {
-    if let Err(error) = client.drop_table_if_exists(dataset_id, &table_id.to_string()).await {
+    if let Err(error) = client.drop_table_if_exists(dataset_id, table_id).await {
         warn!(
             %dataset_id,
             %table_id,
@@ -209,44 +125,38 @@ async fn delete_obsolete_table(
 }
 
 /// Ensures BigQuery metadata is ready for streaming operations.
-fn ensure_bigquery_metadata_applied(metadata: &DestinationTableMetadata) -> EtlResult<()> {
+fn ensure_bigquery_metadata_applied(
+    source_table_id: TableId,
+    metadata: &DestinationTableMetadata,
+) -> EtlResult<()> {
     if metadata.is_applied() {
         return Ok(());
     }
 
     warn!(
-        destination_table_id = metadata.table_id(),
+        table_id = %source_table_id,
         table_schema = ?metadata.table_schema(),
-        "bigquery table has unfinished metadata; automatic recovery is not implemented"
+        "bigquery table has unfinished metadata; reset the table to recover"
     );
 
     Err(etl_error!(
         ErrorKind::InvalidState,
         "BigQuery destination table schema is not applied",
         format!(
-            "Table '{}' has schema state '{:?}'. Stop the pipeline, resolve any outstanding \
-             BigQuery jobs, and reset the table for a fresh copy. Preserve destination metadata \
-             until reset completes. Check for leftover destination objects before retrying.",
-            metadata.table_id(),
+            "Table {source_table_id} has schema state '{:?}'. Stop the pipeline, let any \
+             outstanding BigQuery jobs finish, and reset the table for a fresh copy.",
             metadata.table_schema()
         )
     ))
 }
 
-/// Immutable physical write identity and logical name for a source table.
+/// Physical write target and logical name for an applied source snapshot.
 #[derive(Debug)]
 struct TableTarget {
-    /// Rendered physical table ID used by requests and destination metadata.
+    /// Physical table ID selected by the view and used by Storage Write.
     table_id: BigQueryTableId,
     /// Source name identifying the logical view for this applied snapshot.
     source_table_name: TableName,
-}
-
-impl TableTarget {
-    /// Renders a physical table ID once for all batches targeting it.
-    fn new(table_id: PhysicalBigQueryTableId, source_table_name: TableName) -> Self {
-        Self { table_id: table_id.to_string(), source_table_name }
-    }
 }
 
 impl Display for TableTarget {
@@ -269,23 +179,6 @@ struct AppliedTable {
 }
 
 impl AppliedTable {
-    /// Loads an applied physical identity without probing or repairing
-    /// BigQuery.
-    fn from_metadata(
-        metadata: DestinationTableMetadata,
-        schema: &ReplicatedTableSchema,
-    ) -> EtlResult<Self> {
-        ensure_bigquery_metadata_applied(&metadata)?;
-        ensure_destination_schema_matches_metadata("BigQuery", schema.id(), &metadata, schema)?;
-
-        let target = Arc::new(TableTarget::new(
-            parse_table_id_from_metadata(&metadata)?,
-            schema.name().clone(),
-        ));
-
-        Ok(Self { metadata, target })
-    }
-
     /// Resolves a batch only when it matches this completed source endpoint.
     fn target_for_schema(&self, schema: &ReplicatedTableSchema) -> EtlResult<Arc<TableTarget>> {
         ensure_destination_schema_matches_metadata(
@@ -619,58 +512,37 @@ where
         table.lock_owned().await
     }
 
-    /// Schedules optimistic deletion only after the replacement is
-    /// authoritative.
-    ///
-    /// Only the recorded physical identity is eligible. Failures are logged
-    /// and can leave orphaned tables requiring manual cleanup; there is no
-    /// rediscovery scan or persistent cleanup queue.
-    async fn schedule_table_cleanup(&self, obsolete_table_id: PhysicalBigQueryTableId) {
+    /// Schedules optimistic deletion of a table that a view no longer selects.
+    async fn schedule_table_cleanup(&self, obsolete_table_id: BigQueryTableId) {
         let client = self.client.clone();
         let dataset_id = self.dataset_id.clone();
 
         self.tasks
             .spawn_with(move || async move {
-                delete_obsolete_table(&client, &dataset_id, obsolete_table_id).await;
+                delete_obsolete_table(&client, &dataset_id, &obsolete_table_id).await;
             })
             .await;
     }
 
-    /// Records a new physical identity before issuing create-only table DDL.
-    ///
-    /// The caller must invalidate any applied cache before this transition.
-    /// Creating remains durable until the logical view and setup both finish.
-    async fn create_physical_table(
-        &self,
-        schema: &ReplicatedTableSchema,
-        target: &TableTarget,
-    ) -> EtlResult<DestinationTableMetadata> {
-        let creating = DestinationTableMetadata::new_creating(
-            target.table_id.clone(),
-            schema.inner().snapshot_id,
-            schema.replication_mask().clone(),
-        );
-
-        self.state_store.store_destination_table_metadata(schema.id(), creating.clone()).await?;
-
-        self.client
-            .create_table(
-                &self.dataset_id,
-                &target.table_id,
-                schema,
-                self.max_staleness_mins,
-                self.table_options.get(&schema.id()),
+    /// Resolves the physical table that a logical view selects.
+    async fn resolve_view_target(&self, view_id: &BigQueryTableId) -> EtlResult<BigQueryTableId> {
+        self.client.view_target_table_id(&self.dataset_id, view_id).await?.ok_or_else(|| {
+            etl_error!(
+                ErrorKind::InvalidState,
+                "BigQuery view does not select an ETL table",
+                format!(
+                    "View '{view_id}' is missing or does not have the definition ETL creates. \
+                     Reset the table for a fresh copy."
+                )
             )
-            .await?;
-
-        Ok(creating)
+        })
     }
 
     /// Creates a fresh physical table and view before publishing Applied.
     ///
-    /// Creating reserves the physical identity before remote DDL. Failures
-    /// retain that record and never populate the applied cache. Both objects
-    /// use create-only DDL so an occupied name cannot be silently adopted.
+    /// Creating records ownership of the view name before remote DDL, so a
+    /// reset can remove a partial setup. Both objects use create-only DDL so an
+    /// occupied name cannot be silently adopted.
     async fn create_table_for_schema(
         &self,
         schema: &ReplicatedTableSchema,
@@ -678,49 +550,69 @@ where
         validate_bigquery_table_shape(schema)?;
 
         let view_id = table_name_to_bigquery_view_id(schema.name())?;
-
         if self.client.table_exists(&self.dataset_id, &view_id).await? {
             bail!(
                 ErrorKind::DestinationTableAlreadyExists,
                 "BigQuery destination view already exists",
                 format!(
-                    "View '{view_id}' exists, but this pipeline has no destination metadata \
+                    "View '{view_id}' exists, but this source table has no destination metadata \
                      proving ownership. Drop the view or use another dataset before retrying."
                 )
             );
         }
 
-        let target = Arc::new(TableTarget::new(
-            PhysicalBigQueryTableId::new(view_id.clone()),
-            schema.name().clone(),
-        ));
+        let table_id = new_physical_table_id(self.pipeline_id, schema.id());
+        let creating_metadata = DestinationTableMetadata::new_creating(
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        self.state_store
+            .store_destination_table_metadata(schema.id(), creating_metadata.clone(), &table_id)
+            .await?;
 
-        let creating_metadata = self.create_physical_table(schema, &target).await?;
-        self.client.create_view(&self.dataset_id, &view_id, &target.table_id).await?;
+        self.client
+            .create_table(
+                &self.dataset_id,
+                &table_id,
+                schema,
+                self.max_staleness_mins,
+                self.table_options.get(&schema.id()),
+            )
+            .await?;
+        self.client.create_view(&self.dataset_id, &view_id, &table_id).await?;
 
         let applied_metadata = creating_metadata.to_applied();
         self.state_store
-            .store_destination_table_metadata(schema.id(), applied_metadata.clone())
+            .store_destination_table_metadata(schema.id(), applied_metadata.clone(), &table_id)
             .await?;
 
-        debug!(%target, "created bigquery table and view");
+        let target = Arc::new(TableTarget { table_id, source_table_name: schema.name().clone() });
+        debug!(%view_id, %target, "created bigquery table and view");
 
         Ok(AppliedTable { metadata: applied_metadata, target })
     }
 
     /// Loads an applied endpoint on a cache miss or creates a new table.
     ///
-    /// Existing Applied metadata is trusted without remote DDL. Pending
-    /// metadata warns and fails; creation recovery is deliberately separate
-    /// from normal preparation and is not implemented.
+    /// Applied metadata names the view, whose definition supplies the physical
+    /// table. Pending metadata fails until a reset removes the partial
+    /// transition.
     async fn load_or_create_table(
         &self,
         schema: &ReplicatedTableSchema,
     ) -> EtlResult<AppliedTable> {
-        match self.state_store.get_destination_table_metadata(schema.id()).await? {
-            Some(metadata) => AppliedTable::from_metadata(metadata, schema),
-            None => self.create_table_for_schema(schema).await,
-        }
+        let Some(metadata) = self.state_store.get_destination_table_metadata(schema.id()).await?
+        else {
+            return self.create_table_for_schema(schema).await;
+        };
+        ensure_bigquery_metadata_applied(schema.id(), &metadata)?;
+        ensure_destination_schema_matches_metadata("BigQuery", schema.id(), &metadata, schema)?;
+
+        let view_id = table_name_to_bigquery_view_id(schema.name())?;
+        let table_id = self.resolve_view_target(&view_id).await?;
+        let target = Arc::new(TableTarget { table_id, source_table_name: schema.name().clone() });
+
+        Ok(AppliedTable { metadata, target })
     }
 
     /// Prepares writes from the applied cache, loading metadata only on a miss.
@@ -750,6 +642,30 @@ where
         Ok((target, descriptor))
     }
 
+    /// Resolves the applied table for a lifecycle operation, loading it on a
+    /// cache miss.
+    ///
+    /// Returns `None` when no destination metadata exists.
+    async fn load_applied_table<'a>(
+        &self,
+        table: &'a mut TableState,
+        schema: &ReplicatedTableSchema,
+    ) -> EtlResult<Option<&'a mut AppliedTable>> {
+        if table.applied.is_none() {
+            if self.state_store.get_destination_table_metadata(schema.id()).await?.is_none() {
+                return Ok(None);
+            }
+            table.applied = Some(self.load_or_create_table(schema).await?);
+        }
+
+        let Some(applied) = table.applied.as_mut() else {
+            unreachable!("the applied table is loaded when metadata exists");
+        };
+        applied.target_for_schema(schema)?;
+
+        Ok(Some(applied))
+    }
+
     /// Resolves lifecycle metadata from the applied cache or the durable store.
     async fn get_applied_destination_table_metadata(
         &self,
@@ -761,7 +677,7 @@ where
         }
         let metadata = self.state_store.get_destination_table_metadata(source_table_id).await?;
         if let Some(metadata) = &metadata {
-            ensure_bigquery_metadata_applied(metadata)?;
+            ensure_bigquery_metadata_applied(source_table_id, metadata)?;
         }
 
         Ok(metadata)
@@ -877,11 +793,7 @@ where
 
         // The guard above proves that equal snapshots have equal masks.
         if before_snapshot_id == after_snapshot_id {
-            if let Some(applied) = &table.applied {
-                applied.target_for_schema(after_schema)?;
-            } else {
-                table.applied = Some(AppliedTable::from_metadata(current_metadata, after_schema)?);
-            }
+            self.load_applied_table(&mut table, after_schema).await?;
 
             // Schema hasn't changed, nothing to do.
             debug!(
@@ -918,14 +830,10 @@ where
         let plan = before_schema.plan_schema_change(after_schema, BIGQUERY_COLUMN_NAME_MAPPING)?;
         validate_bigquery_schema_plan(after_schema, &plan)?;
 
-        // The applied snapshot identifies the logical view; metadata resolves
-        // the physical target even after that view has been renamed.
+        // Each endpoint's source name determines its view. The physical table
+        // stays the same across a rename, so only the view moves.
         let before_view_id = table_name_to_bigquery_view_id(before_schema.name())?;
-        let after_view_id = if let Some(change) = plan.diff().table_name_change() {
-            table_name_to_bigquery_view_id(change.after_name())?
-        } else {
-            before_view_id.clone()
-        };
+        let after_view_id = table_name_to_bigquery_view_id(after_schema.name())?;
 
         if before_view_id != after_view_id
             && self.client.table_exists(&self.dataset_id, &after_view_id).await?
@@ -935,27 +843,25 @@ where
                 "BigQuery rename target already exists",
                 format!(
                     "Cannot rename view '{before_view_id}' to '{after_view_id}': the target \
-                     exists, but this pipeline has no destination metadata proving ownership. \
+                     exists, but this source table has no destination metadata proving ownership. \
                      Drop the target before retrying."
                 )
             );
         }
 
-        // A source rename changes the view ID while preserving the physical
-        // table ID recorded in metadata.
-        let table_id = parse_table_id_from_metadata(&current_metadata)?;
+        // The before view selects the physical table that the change alters.
+        let table_id = match &table.applied {
+            Some(applied) => applied.target.table_id.clone(),
+            None => self.resolve_view_target(&before_view_id).await?,
+        };
 
         // Mark as applying before making changes with the after snapshot and
         // replication mask.
         //
-        // NOTE: BigQuery does not support transactional DDL, so if the system
-        // crashes while in 'Applying' state, the destination table may be in an
-        // partially changed state. Automatic recovery is not implemented:
-        // stop the pipeline, resolve outstanding jobs, and reset for a fresh
-        // copy. A partial rename can leave destination objects for manual
-        // cleanup.
+        // BigQuery DDL is not transactional. If this transition is
+        // interrupted, Applying blocks writes until a reset drops the views
+        // under both names and their physical table.
         let updated_metadata = DestinationTableMetadata::new_applied(
-            current_metadata.table_id().to_owned(),
             before_snapshot_id,
             before_replication_mask.clone(),
         )
@@ -966,16 +872,14 @@ where
         table.invalidate();
 
         self.state_store
-            .store_destination_table_metadata(source_table_id, updated_metadata.clone())
+            .store_destination_table_metadata(source_table_id, updated_metadata.clone(), &table_id)
             .await?;
 
         // BigQuery cannot rename views. Recently streamed physical tables can
         // require hours of downtime before renaming, so retain the
         // physical identity and move only the logical view.
         if before_view_id != after_view_id {
-            self.client
-                .create_view(&self.dataset_id, &after_view_id, &table_id.to_string())
-                .await?;
+            self.client.create_view(&self.dataset_id, &after_view_id, &table_id).await?;
             self.client.drop_view_if_exists(&self.dataset_id, &before_view_id).await?;
         }
 
@@ -990,7 +894,8 @@ where
 
         // Refresh the view so its schema matches the altered table. A view
         // created by the rename above already matches when no column changed.
-        let table_target = Arc::new(TableTarget::new(table_id, after_schema.name().clone()));
+        let table_target =
+            Arc::new(TableTarget { table_id, source_table_name: after_schema.name().clone() });
         if before_view_id == after_view_id || !plan.ordered_column_operations().is_empty() {
             self.client
                 .create_or_replace_view(&self.dataset_id, &after_view_id, &table_target.table_id)
@@ -1008,7 +913,11 @@ where
         // Applied includes both the logical view and refreshed ingestion state.
         let applied_metadata = updated_metadata.to_applied();
         self.state_store
-            .store_destination_table_metadata(source_table_id, applied_metadata.clone())
+            .store_destination_table_metadata(
+                source_table_id,
+                applied_metadata.clone(),
+                &table_target.table_id,
+            )
             .await?;
         table.applied = Some(AppliedTable { metadata: applied_metadata, target: table_target });
 
@@ -1031,7 +940,7 @@ where
     async fn apply_schema_plan(
         &self,
         source_table_id: &TableId,
-        table_id: &PhysicalBigQueryTableId,
+        table_id: &BigQueryTableId,
         plan: &SchemaPlan,
     ) -> EtlResult<()> {
         if plan.ordered_column_operations().is_empty() {
@@ -1048,20 +957,16 @@ where
             "applying bigquery table schema plan"
         );
 
-        let table_id = table_id.to_string();
-
         // Apply the shared plan without regrouping operations.
         for operation in plan.ordered_column_operations() {
             match operation {
                 ColumnOperation::DropColumn { before_column_schema, reason: _ } => {
                     self.client
-                        .drop_column(&self.dataset_id, &table_id, &before_column_schema.name)
+                        .drop_column(&self.dataset_id, table_id, &before_column_schema.name)
                         .await?;
                 }
                 ColumnOperation::AddColumn { after_column_schema, reason: _ } => {
-                    self.client
-                        .add_column(&self.dataset_id, &table_id, after_column_schema)
-                        .await?;
+                    self.client.add_column(&self.dataset_id, table_id, after_column_schema).await?;
 
                     // BigQuery leaves existing scalar values NULL and arrays
                     // empty. SET DEFAULT affects only future inserts, so
@@ -1071,7 +976,7 @@ where
                         self.client
                             .set_column_default(
                                 &self.dataset_id,
-                                &table_id,
+                                table_id,
                                 &after_column_schema.name,
                                 &default_expression,
                             )
@@ -1092,14 +997,14 @@ where
                             self.client
                                 .rename_column(
                                     &self.dataset_id,
-                                    &table_id,
+                                    table_id,
                                     &before.name,
                                     &after.name,
                                 )
                                 .await?;
                         }
                         ColumnAlterationKind::Type => {
-                            warn_unsupported_column_type_change("bigquery", &table_id, alteration);
+                            warn_unsupported_column_type_change("bigquery", table_id, alteration);
                         }
                         ColumnAlterationKind::Nullability => {
                             // Unsupported metadata changes can leave BigQuery
@@ -1107,7 +1012,7 @@ where
                             // tolerate that state.
                             if !before.nullable && after.nullable {
                                 self.client
-                                    .drop_column_not_null(&self.dataset_id, &table_id, &before.name)
+                                    .drop_column_not_null(&self.dataset_id, table_id, &before.name)
                                     .await?;
                             } else {
                                 warn!(
@@ -1121,7 +1026,7 @@ where
                         ColumnAlterationKind::Default => {
                             if before.default_expression.is_some() {
                                 self.client
-                                    .clear_column_default(&self.dataset_id, &table_id, &before.name)
+                                    .clear_column_default(&self.dataset_id, table_id, &before.name)
                                     .await?;
                             }
 
@@ -1130,7 +1035,7 @@ where
                                     self.client
                                         .set_column_default(
                                             &self.dataset_id,
-                                            &table_id,
+                                            table_id,
                                             &before.name,
                                             &default_expression,
                                         )
@@ -1311,13 +1216,14 @@ where
         Ok(())
     }
 
-    /// Handles table truncation by creating new physical tables and updating
-    /// views.
+    /// Handles table truncation by swapping each view to a fresh empty table.
     ///
-    /// Creates fresh empty tables with independently allocated IDs, updates
-    /// views to point to them, and schedules cleanup of the old tables.
-    /// Uses the provided schemas directly instead of looking them up from a
-    /// store.
+    /// Creating the new table and atomically replacing the view means readers
+    /// always see one complete table: the old one before the replacement, the
+    /// new one after. The schema state stays unchanged; only the write-only
+    /// fallback ID is updated. The old table is then deleted optimistically.
+    /// An interrupted truncate can leave an unselected table behind; replay
+    /// repeats the truncate before any later row.
     async fn process_truncate_for_schemas(
         &self,
         replicated_table_schemas: impl IntoIterator<Item = ReplicatedTableSchema>,
@@ -1325,14 +1231,11 @@ where
         for replicated_table_schema in replicated_table_schemas {
             let source_table_id = replicated_table_schema.id();
             let mut table = self.lock_table(source_table_id).await;
-            let view_id = table_name_to_bigquery_view_id(replicated_table_schema.name())?;
 
-            // If no destination table metadata exists, it means the table was
-            // never created in BigQuery (e.g., due to validation errors during
-            // copy). In this case, we skip the truncate since there's nothing
-            // to truncate.
-            let Some(metadata) =
-                self.get_applied_destination_table_metadata(source_table_id, &table).await?
+            // Without metadata the table was never created, for example after
+            // a validation error during copy, so there is nothing to truncate.
+            let Some(applied) =
+                self.load_applied_table(&mut table, &replicated_table_schema).await?
             else {
                 warn!(
                     table_id = %source_table_id,
@@ -1340,55 +1243,43 @@ where
                 );
                 continue;
             };
-            ensure_destination_schema_matches_metadata(
-                "BigQuery",
-                source_table_id,
-                &metadata,
-                &replicated_table_schema,
-            )?;
 
-            // Capture the recorded target before creation while holding
-            // serialization. Name prefixes are not ownership: another source
-            // can reuse a name after a rename while this table
-            // retains its physical name.
-            let obsolete_table_id = parse_table_id_from_metadata(&metadata)?;
-            let next_table_target = Arc::new(TableTarget::new(
-                PhysicalBigQueryTableId::new(view_id.clone()),
-                replicated_table_schema.name().clone(),
-            ));
+            let metadata = applied.metadata.clone();
+            let obsolete_table_id = applied.target.table_id.clone();
 
-            // Recreation follows the same pending-state contract as initial
-            // creation. A failed or cancelled transition cannot reload an old
-            // Applied record while its logical view may point elsewhere.
+            // Invalidate before DDL: if the view replacement fails ambiguously,
+            // the next write rereads the view instead of trusting a stale
+            // target.
             table.invalidate();
-            let creating =
-                self.create_physical_table(&replicated_table_schema, &next_table_target).await?;
 
-            // Update the view to point to the new table.
+            let view_id = table_name_to_bigquery_view_id(replicated_table_schema.name())?;
+            let table_id = new_physical_table_id(self.pipeline_id, source_table_id);
             self.client
-                .create_or_replace_view(&self.dataset_id, &view_id, &next_table_target.table_id)
+                .create_table(
+                    &self.dataset_id,
+                    &table_id,
+                    &replicated_table_schema,
+                    self.max_staleness_mins,
+                    self.table_options.get(&source_table_id),
+                )
                 .await?;
+            self.client.create_or_replace_view(&self.dataset_id, &view_id, &table_id).await?;
 
-            // Update the metadata to point to the new table.
-            let metadata = creating.to_applied();
+            // Retain the new physical ID for fallback inspection only. The
+            // view remains authoritative if this metadata write fails.
             self.state_store
-                .store_destination_table_metadata(source_table_id, metadata.clone())
+                .store_destination_table_metadata(source_table_id, metadata.clone(), &table_id)
                 .await?;
-            table.applied = Some(AppliedTable { metadata, target: Arc::clone(&next_table_target) });
 
-            // These operations are not transactional. Interrupted recreation
-            // stays Creating until a table reset, which deletes both the
-            // recorded replacement and the table the view selects. If Applied
-            // commits
-            // before acknowledgement or checkpointing fails, replay creates
-            // another fresh table for the truncate. Cleanup targets only the
-            // recorded obsolete identity after the replacement is Applied.
+            // Release Storage Write API connections to the replaced table.
+            self.client.invalidate_all_connections().await;
+            let target = Arc::new(TableTarget {
+                table_id: table_id.clone(),
+                source_table_name: replicated_table_schema.name().clone(),
+            });
+            table.applied = Some(AppliedTable { metadata, target });
 
-            info!(
-                table_id = source_table_id.0,
-                %next_table_target,
-                "successfully processed truncate, view updated"
-            );
+            info!(table_id = source_table_id.0, %view_id, %table_id, "truncated bigquery table");
 
             self.schedule_table_cleanup(obsolete_table_id).await;
         }
@@ -1396,114 +1287,72 @@ where
         Ok(())
     }
 
-    /// Resolves the logical view recorded by the metadata endpoint snapshot.
-    async fn applied_view_id(
-        &self,
-        replicated_table_schema: &ReplicatedTableSchema,
-        metadata: &DestinationTableMetadata,
-    ) -> EtlResult<BigQueryTableId> {
-        let source_table_id = replicated_table_schema.id();
-        let snapshot = metadata.snapshot_id();
-        let name = if snapshot == replicated_table_schema.inner().snapshot_id {
-            replicated_table_schema.name().clone()
-        } else {
-            self.state_store.get_exact_table_schema(&source_table_id, snapshot).await?.name.clone()
-        };
-
-        table_name_to_bigquery_view_id(&name)
-    }
-
-    /// Drops owned logical views and optimistically deletes their physical
-    /// tables.
+    /// Drops the owned views and deletes their physical tables before a copy.
     ///
-    /// Deletes the recorded physical table and any other ETL table the
-    /// recorded view still selects. View deletion must succeed before reset
-    /// can proceed. Physical deletion failures are logged and may leave tables
-    /// for manual cleanup.
+    /// ETL owns the views named after every snapshot recorded in metadata and
+    /// the tables they select. An interrupted rename can leave a view under
+    /// either name, so each existing view is dropped and its table deleted,
+    /// whatever its naming form. View deletion must succeed; table deletion is
+    /// best effort and can leave a table behind for manual cleanup.
     ///
-    /// The table-sync lifecycle owns recovery: it retains the original metadata
-    /// until this operation succeeds, then clears copy state before recreating
-    /// the table. A failed or interrupted reset is retried from the same
-    /// durable copy phase. Creating is reserved for fresh physical table
-    /// creation.
+    /// The table-sync lifecycle retains the metadata until this succeeds, then
+    /// clears copy state before recreating the table, so an interrupted reset
+    /// is retried.
     async fn drop_table_for_copy_inner(
         &self,
         replicated_table_schema: &ReplicatedTableSchema,
     ) -> EtlResult<()> {
-        let mut table = self.lock_table(replicated_table_schema.id()).await;
         let source_table_id = replicated_table_schema.id();
+        let mut table = self.lock_table(source_table_id).await;
         let metadata = match &table.applied {
             Some(applied) => Some(applied.metadata.clone()),
             None => self.state_store.get_destination_table_metadata(source_table_id).await?,
         };
-        let Some(metadata) = metadata else {
-            table.invalidate();
-            return Ok(());
-        };
-        let table_id = parse_table_id_from_metadata(&metadata)?;
 
         // Invalidate before remote calls: cancellation or an ambiguous error
         // can leave the view removed even when this call does not report
-        // success. Keep metadata unchanged so the table-sync worker can retry
-        // deletion after a restart, before it permits copy or streaming writes
-        // again.
+        // success.
         table.invalidate();
 
-        let physical_table_id = table_id.to_string();
-        let mut view_ids = Vec::new();
-        let mut obsolete_table_ids = Vec::new();
-        match pending_table_rename(&self.state_store, source_table_id, &metadata).await? {
-            // An interrupted rename may leave a view under either name, and the
-            // name it no longer holds may already belong to another source.
-            // Select only views that still read this table's physical identity.
-            Some((before_name, after_name)) => {
-                for name in [before_name, after_name] {
-                    let view_id = table_name_to_bigquery_view_id(&name)?;
-                    let target =
-                        self.client.view_target_table_id(&self.dataset_id, &view_id).await?;
+        let Some(metadata) = metadata else {
+            return Ok(());
+        };
 
-                    if target.as_deref() == Some(physical_table_id.as_str()) {
-                        view_ids.push(view_id);
-                    }
-                }
-            }
-            // The recorded view is owned, and so is the table it selects. An
-            // interrupted truncate records its replacement table while the view
-            // can still select the previous one, which would otherwise be
-            // orphaned with its rows.
-            None => {
-                let view_id = self.applied_view_id(replicated_table_schema, &metadata).await?;
-                if let Some(target) =
-                    self.client.view_target_table_id(&self.dataset_id, &view_id).await?
-                    && target != physical_table_id
-                    && let Ok(target) = target.parse::<PhysicalBigQueryTableId>()
-                {
-                    obsolete_table_ids.push(target);
-                }
+        let view_ids = owned_source_table_names(&self.state_store, source_table_id, &metadata)
+            .await?
+            .iter()
+            .map(table_name_to_bigquery_view_id)
+            .collect::<EtlResult<Vec<_>>>()?;
 
-                view_ids.push(view_id);
-            }
-        }
-
-        // Removing the logical view is required. Once it is gone, failures to
-        // delete its old physical target cannot expose stale data after
-        // recopy. Outside an interrupted rename, explicit reset trusts the
-        // recorded logical name; reusing it for another source before reset
-        // completes requires operator reconciliation.
+        // Each owned view selects the table holding its rows, whatever its
+        // naming form. Read it before dropping the view.
+        let mut table_ids = Vec::new();
         for view_id in &view_ids {
+            match self.client.view_target_table_id(&self.dataset_id, view_id).await {
+                Ok(Some(table_id)) => table_ids.push(table_id),
+                Ok(None) => {}
+                Err(error) => {
+                    // Discovery is part of best-effort physical cleanup. The
+                    // owned logical name must still be released for the copy.
+                    warn!(
+                        error = %error,
+                        %view_id,
+                        "could not discover bigquery table before removing view"
+                    );
+                }
+            }
             self.client.drop_view_if_exists(&self.dataset_id, view_id).await?;
         }
 
-        obsolete_table_ids.push(table_id);
-        for table_id in obsolete_table_ids {
+        for table_id in &table_ids {
             delete_obsolete_table(&self.client, &self.dataset_id, table_id).await;
         }
 
-        // Release Storage Write API connections that may still refer to the
-        // deleted physical tables. Subsequent copies allocate fresh names.
+        // Release Storage Write API connections to the deleted tables.
+        // Subsequent copies allocate fresh names.
         self.client.invalidate_all_connections().await;
 
-        info!(table_id = source_table_id.0, "removed bigquery view before copy");
+        info!(table_id = source_table_id.0, "removed bigquery views and tables before copy");
 
         Ok(())
     }
@@ -2246,10 +2095,10 @@ mod tests {
 
     /// Builds a cached physical target matching the test schema's logical name.
     fn table_target(schema: &ReplicatedTableSchema) -> Arc<TableTarget> {
-        Arc::new(TableTarget::new(
-            PhysicalBigQueryTableId::new(table_name_to_bigquery_view_id(schema.name()).unwrap()),
-            schema.name().clone(),
-        ))
+        Arc::new(TableTarget {
+            table_id: new_physical_table_id(1, schema.id()),
+            source_table_name: schema.name().clone(),
+        })
     }
 
     fn replicated_schema(identity_type: IdentityType) -> ReplicatedTableSchema {
@@ -2280,21 +2129,21 @@ mod tests {
         ReplicatedTableSchema::all(Arc::new(schema))
     }
 
-    /// Seeds durable metadata and the applied cache so requests reach append
-    /// without DDL.
+    /// Seeds the stored schema, durable metadata, and the applied cache so
+    /// requests reach append without DDL.
     async fn seed_table(
         destination: &BigQueryDestination<MemoryStore>,
         schema: &ReplicatedTableSchema,
     ) {
+        destination.state_store.store_table_schema(schema.inner().clone()).await.unwrap();
         let target = table_target(schema);
         let metadata = DestinationTableMetadata::new_applied(
-            target.table_id.clone(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );
         destination
             .state_store
-            .store_destination_table_metadata(schema.id(), metadata.clone())
+            .store_destination_table_metadata(schema.id(), metadata.clone(), "")
             .await
             .unwrap();
         destination.lock_table(schema.id()).await.applied = Some(AppliedTable { metadata, target });
@@ -2362,21 +2211,20 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
-    /// An older source snapshot cannot authorize deleting a view whose name
-    /// may now belong to another table.
+    /// Reset cannot identify owned views without the exact recorded snapshot,
+    /// so it fails instead of guessing a name that may belong to another table.
     #[tokio::test]
     async fn reset_requires_exact_owned_snapshot_before_view_deletion() {
         let destination = unavailable_destination(false).await;
         let before = schema_for_table(1);
         destination.state_store.store_table_schema(before.inner().clone()).await.unwrap();
         let metadata = DestinationTableMetadata::new_applied(
-            table_target(&before).table_id.clone(),
             SnapshotId::new(PgLsn::from(20), PgLsn::from(20)),
             before.replication_mask().clone(),
         );
         destination
             .state_store
-            .store_destination_table_metadata(before.id(), metadata.clone())
+            .store_destination_table_metadata(before.id(), metadata.clone(), "")
             .await
             .unwrap();
         let mut after = before.inner().clone();
@@ -2502,36 +2350,45 @@ mod tests {
         assert!(Arc::ptr_eq(&next, &table.prepare_descriptor(&next_schema, WriteMode::Cdc)));
     }
 
-    /// Applied metadata loads without remote DDL; warm batches trust the
-    /// cached endpoint until a lifecycle transition invalidates it.
+    /// A cache miss validates metadata before reading the view; warm batches
+    /// trust the cached endpoint until a lifecycle transition invalidates it.
     #[tokio::test]
-    async fn preparation_uses_applied_cache_and_loads_metadata_only_on_a_miss() {
+    async fn preparation_uses_applied_cache_and_validates_metadata_on_a_miss() {
         let destination = unavailable_destination(false).await;
         let schema = replicated_schema(IdentityType::PrimaryKey);
-        let target = table_target(&schema);
         let metadata = DestinationTableMetadata::new_applied(
-            target.table_id.clone(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );
         destination
             .state_store
-            .store_destination_table_metadata(schema.id(), metadata.clone())
+            .store_destination_table_metadata(schema.id(), metadata.clone(), "")
             .await
             .unwrap();
 
-        // A cold Applied load succeeds even though every remote request fails.
+        // A cold load reads the view, which an unavailable BigQuery rejects.
+        assert_eq!(
+            destination
+                .prepare_table_for_writes(&schema, WriteMode::Copy)
+                .await
+                .unwrap_err()
+                .kind(),
+            ErrorKind::DestinationAuthenticationError
+        );
+        assert!(destination.lock_table(schema.id()).await.applied.is_none());
+
+        // A warm cache serves later batches without remote calls or store
+        // reads.
+        seed_table(&destination, &schema).await;
         let (resolved, descriptor) =
             destination.prepare_table_for_writes(&schema, WriteMode::Copy).await.unwrap();
-        assert_eq!(resolved.table_id, target.table_id);
         let pending = DestinationTableMetadata::new_creating(
-            "other_table_1".to_owned(),
             metadata.snapshot_id(),
             metadata.replication_mask().clone(),
         );
         destination
             .state_store
-            .store_destination_table_metadata(schema.id(), pending.clone())
+            .store_destination_table_metadata(schema.id(), pending.clone(), "")
             .await
             .unwrap();
         let (reused_target, reused_descriptor) =
@@ -2571,18 +2428,33 @@ mod tests {
             ErrorKind::InvalidState
         );
 
+        // On a miss, pending or mismatched metadata fails before any remote
+        // request and leaves both the store and the cache unchanged.
         destination.lock_table(schema.id()).await.invalidate();
         let applying = metadata
-            .clone()
             .with_schema_change(
                 SnapshotId::new(PgLsn::from(1), PgLsn::from(1)),
                 schema.replication_mask().clone(),
             )
             .unwrap();
-        for incomplete in [pending, applying] {
+        let mismatched = [
+            (SnapshotId::new(PgLsn::from(1), PgLsn::from(1)), schema.replication_mask().clone()),
+            (schema.inner().snapshot_id, ReplicationMask::from_bytes(vec![1, 0])),
+        ]
+        .map(|(snapshot, mask)| {
+            (
+                DestinationTableMetadata::new_applied(snapshot, mask),
+                ErrorKind::DestinationSchemaRewind,
+            )
+        });
+        for (stored, kind) in
+            [(pending, ErrorKind::InvalidState), (applying, ErrorKind::InvalidState)]
+                .into_iter()
+                .chain(mismatched)
+        {
             destination
                 .state_store
-                .store_destination_table_metadata(schema.id(), incomplete.clone())
+                .store_destination_table_metadata(schema.id(), stored.clone(), "")
                 .await
                 .unwrap();
             assert_eq!(
@@ -2591,51 +2463,14 @@ mod tests {
                     .await
                     .unwrap_err()
                     .kind(),
-                ErrorKind::InvalidState
+                kind
             );
             assert_eq!(
                 destination.state_store.get_destination_table_metadata(schema.id()).await.unwrap(),
-                Some(incomplete)
+                Some(stored)
             );
             assert!(destination.lock_table(schema.id()).await.applied.is_none());
         }
-        for (snapshot, mask) in [
-            (SnapshotId::new(PgLsn::from(1), PgLsn::from(1)), schema.replication_mask().clone()),
-            (schema.inner().snapshot_id, ReplicationMask::from_bytes(vec![1, 0])),
-        ] {
-            let mismatched =
-                DestinationTableMetadata::new_applied(target.table_id.clone(), snapshot, mask);
-            destination
-                .state_store
-                .store_destination_table_metadata(schema.id(), mismatched)
-                .await
-                .unwrap();
-            assert_eq!(
-                destination
-                    .prepare_table_for_writes(&schema, WriteMode::Copy)
-                    .await
-                    .unwrap_err()
-                    .kind(),
-                ErrorKind::DestinationSchemaRewind
-            );
-            assert!(destination.lock_table(schema.id()).await.applied.is_none());
-        }
-
-        let replacement = table_target(&schema);
-        let metadata = DestinationTableMetadata::new_applied(
-            replacement.table_id.clone(),
-            schema.inner().snapshot_id,
-            schema.replication_mask().clone(),
-        );
-        destination
-            .state_store
-            .store_destination_table_metadata(schema.id(), metadata)
-            .await
-            .unwrap();
-        let (reloaded, _) =
-            destination.prepare_table_for_writes(&schema, WriteMode::Copy).await.unwrap();
-        assert_eq!(reloaded.table_id, replacement.table_id);
-        assert!(!Arc::ptr_eq(&resolved, &reloaded));
     }
 
     /// Failed or cancelled schema DDL clears the old cache and leaves durable
@@ -2736,13 +2571,14 @@ mod tests {
         }
     }
 
-    /// A failed truncate retains Creating and cannot reuse cached Applied
-    /// state or implicitly restart creation on the next write.
+    /// A failed truncate leaves metadata unchanged and drops the cached
+    /// target, so the next write rereads whatever table the view selects.
     #[tokio::test]
-    async fn failed_truncate_preserves_pending_metadata_and_invalidates_cache() {
+    async fn failed_truncate_keeps_metadata_and_invalidates_cache() {
         let destination = unavailable_destination(false).await;
         let schema = replicated_schema(IdentityType::PrimaryKey);
         seed_table(&destination, &schema).await;
+        destination.lock_table(schema.id()).await.prepare_descriptor(&schema, WriteMode::Copy);
         let before = destination
             .state_store
             .get_destination_table_metadata(schema.id())
@@ -2751,34 +2587,15 @@ mod tests {
             .unwrap();
 
         let error = destination.process_truncate_for_schemas([schema.clone()]).await.unwrap_err();
+
         assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
-        let pending = destination
-            .state_store
-            .get_destination_table_metadata(schema.id())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(pending.is_creating());
-        assert_ne!(pending.table_id(), before.table_id());
-        assert_eq!(pending.snapshot_id(), before.snapshot_id());
-        assert_eq!(pending.replication_mask(), before.replication_mask());
-        {
-            let table = destination.lock_table(schema.id()).await;
-            assert!(table.applied.is_none());
-            assert!(table.prepared_schema.is_none());
-        }
-        assert_eq!(
-            destination
-                .prepare_table_for_writes(&schema, WriteMode::Copy)
-                .await
-                .unwrap_err()
-                .kind(),
-            ErrorKind::InvalidState
-        );
         assert_eq!(
             destination.state_store.get_destination_table_metadata(schema.id()).await.unwrap(),
-            Some(pending)
+            Some(before)
         );
+        let table = destination.lock_table(schema.id()).await;
+        assert!(table.applied.is_none());
+        assert!(table.prepared_schema.is_none());
     }
 
     #[test]
@@ -2807,44 +2624,17 @@ mod tests {
         assert_ne!(first_view_id, second_view_id);
     }
 
+    /// Physical IDs name their pipeline and source table and are never reused.
     #[test]
-    fn physical_bigquery_table_id_parses_and_roundtrips_valid_ids() {
-        for (input, name_prefix, suffix) in [
-            ("users_table_123", "users_table", 123),
-            ("simple_table_0", "simple_table", 0),
-            ("test_table_18446744073709551615", "test_table", u64::MAX),
-            ("a__b_c__d_42", "a__b_c__d", 42),
-            ("_0102_a__b_0", "_0102_a__b", 0),
-            ("_0102_a__b_18446744073709551615", "_0102_a__b", u64::MAX),
-            ("_0201_a__b_0", "_0201_a__b", 0),
-            ("_0101_____42", "_0101____", 42),
-            ("_0104_a__b_0_7", "_0104_a__b_0", 7),
-            ("_0102_a_b__7", "_0102_a_b_", 7),
-            ("_0607_Public__Orders_42", "_0607_Public__Orders", 42),
-        ] {
-            let parsed = input.parse::<PhysicalBigQueryTableId>().unwrap();
-            assert_eq!(parsed.0, name_prefix);
-            assert_eq!(parsed.1, TableIdSuffix::Legacy(suffix));
-            assert_eq!(parsed.to_string(), input);
-        }
-    }
+    fn physical_table_ids_are_fresh_and_name_their_source_table() {
+        let first = new_physical_table_id(1, TableId::new(16384));
+        let second = new_physical_table_id(1, TableId::new(16384));
 
-    /// Covers every UUID bit and the fixed-width distinction from legacy IDs.
-    #[test]
-    fn table_id_suffix_encoding_is_compact_and_lossless() {
-        for value in [0, 1, u128::from(u64::MAX), u128::MAX] {
-            let table_id = PhysicalBigQueryTableId(
-                "users".to_owned(),
-                TableIdSuffix::Random(Uuid::from_u128(value)),
-            );
-            let encoded = table_id.to_string();
-            assert_eq!(encoded.len(), "users_".len() + 25);
-            assert!(
-                encoded
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-            );
-            assert_eq!(encoded.parse::<PhysicalBigQueryTableId>().unwrap(), table_id);
+        assert_ne!(first, second);
+        for table_id in [first, second] {
+            let suffix = table_id.strip_prefix("supabase_etl_1_16384_").unwrap();
+            assert_eq!(suffix.len(), RANDOM_TABLE_ID_SUFFIX_LENGTH);
+            assert!(suffix.bytes().all(|byte| byte.is_ascii_digit() || byte.is_ascii_lowercase()));
         }
     }
 
@@ -2852,16 +2642,15 @@ mod tests {
     fn bigquery_streaming_requires_applied_metadata() {
         let schema = replicated_schema(IdentityType::PrimaryKey);
         let creating_metadata = DestinationTableMetadata::new_creating(
-            "users_table_0".to_owned(),
             schema.inner().snapshot_id,
             schema.replication_mask().clone(),
         );
 
-        let error = ensure_bigquery_metadata_applied(&creating_metadata).unwrap_err();
+        let error = ensure_bigquery_metadata_applied(schema.id(), &creating_metadata).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidState);
 
         let applied_metadata = creating_metadata.to_applied();
-        ensure_bigquery_metadata_applied(&applied_metadata).unwrap();
+        ensure_bigquery_metadata_applied(schema.id(), &applied_metadata).unwrap();
 
         let applying_metadata = applied_metadata
             .with_schema_change(
@@ -2869,7 +2658,7 @@ mod tests {
                 schema.replication_mask().clone(),
             )
             .unwrap();
-        let error = ensure_bigquery_metadata_applied(&applying_metadata).unwrap_err();
+        let error = ensure_bigquery_metadata_applied(schema.id(), &applying_metadata).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidState);
     }
 
@@ -3150,39 +2939,6 @@ mod tests {
                 ensure_bigquery_primary_key_unchanged(&current_schema, &target_schema).unwrap_err();
 
             assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
-        }
-    }
-
-    /// Malformed suffixes fail without slicing Unicode or accepting overflow.
-    #[test]
-    fn physical_bigquery_table_id_rejects_invalid_ids() {
-        for input in [
-            "",
-            "tablewithoutversion",
-            "users_table_00",
-            "users_table_01",
-            "users_table_not_a_number",
-            "table_word",
-            "users_table_-123",
-            "users_table_18446744073709551616",
-            "users_table_",
-            "_123",
-            "users_é",
-            "users_１２３",
-            "users_+1",
-            "users_ 1",
-            "users_1\n",
-            "users_000000000000000000000",
-            "users_000000000000000000000000",
-            "users_000000000000000000000000 ",
-            "_0000000000000000000000000",
-            "users_zzzzzzzzzzzzzzzzzzzzzzzzz",
-            "users_000000000000000000000000Z",
-            "users_00000000000000000000000é",
-            "users_00000000000000000000000000",
-        ] {
-            let error = input.parse::<PhysicalBigQueryTableId>().unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::DestinationTableNameInvalid);
         }
     }
 

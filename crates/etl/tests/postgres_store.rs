@@ -599,10 +599,10 @@ async fn cancelled_table_delete_refreshes_all_caches() {
         .store_destination_table_metadata(
             schema.id,
             DestinationTableMetadata::new_applied(
-                "destination_table".to_owned(),
                 SnapshotId::initial(),
                 ReplicationMask::from_bytes(vec![1; schema.column_schemas.len()]),
             ),
+            "",
         )
         .await
         .unwrap();
@@ -662,7 +662,6 @@ async fn cache_preparation_loads_every_domain() {
         let schema = create_sample_table_schema();
         let other_table_id = TableId::new(67890);
         let metadata = DestinationTableMetadata::new_applied(
-            "destination_table".to_owned(),
             SnapshotId::initial(),
             ReplicationMask::from_bytes(vec![1; schema.column_schemas.len()]),
         );
@@ -675,7 +674,7 @@ async fn cache_preparation_loads_every_domain() {
             .await
             .unwrap();
         store.store_table_schema(schema.clone()).await.unwrap();
-        store.store_destination_table_metadata(schema.id, metadata.clone()).await.unwrap();
+        store.store_destination_table_metadata(schema.id, metadata.clone(), "").await.unwrap();
         store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
         drop(store);
 
@@ -1624,46 +1623,32 @@ async fn multiple_pipelines_isolation() {
 
     // Test destination table metadata isolation.
     let metadata1 = DestinationTableMetadata::new_applied(
-        "pipeline1_table".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let metadata2 = DestinationTableMetadata::new_applied(
-        "pipeline2_table".to_owned(),
         SnapshotId::initial(),
-        ReplicationMask::from_bytes(vec![1, 1, 1]),
+        ReplicationMask::from_bytes(vec![1, 0, 1]),
     );
 
-    store1.store_destination_table_metadata(table_id, metadata1.clone()).await.unwrap();
-    store2.store_destination_table_metadata(table_id, metadata2.clone()).await.unwrap();
+    store1.store_destination_table_metadata(table_id, metadata1.clone(), "").await.unwrap();
+    store2.store_destination_table_metadata(table_id, metadata2.clone(), "").await.unwrap();
 
     assert_eq!(
-        store1
-            .get_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .map(|m| m.table_id().to_owned()),
-        Some("pipeline1_table".to_owned())
+        store1.get_destination_table_metadata(table_id).await.unwrap(),
+        Some(metadata1.clone())
     );
     assert_eq!(
-        store2
-            .get_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .map(|m| m.table_id().to_owned()),
-        Some("pipeline2_table".to_owned())
+        store2.get_destination_table_metadata(table_id).await.unwrap(),
+        Some(metadata2.clone())
     );
 
     // Verify isolation persists after loading from database
     let new_store1 = PostgresStore::new(pipeline_id1, database.config.clone()).await.unwrap();
     new_store1.load_cache().await.unwrap();
     assert_eq!(
-        new_store1
-            .get_destination_table_metadata(table_id)
-            .await
-            .unwrap()
-            .map(|m| m.table_id().to_owned()),
-        Some("pipeline1_table".to_owned())
+        new_store1.get_destination_table_metadata(table_id).await.unwrap(),
+        Some(metadata1.clone())
     );
 
     // Deleting one pipeline's state must preserve the other pipeline's state.
@@ -1786,18 +1771,16 @@ async fn delete_table_state_deletes_state_schema_metadata_and_progress_for_table
     store.store_table_schema(table_2_schema.clone()).await.unwrap();
 
     let metadata1 = DestinationTableMetadata::new_applied(
-        "dest_table_1".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let metadata2 = DestinationTableMetadata::new_applied(
-        "dest_table_2".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
 
-    store.store_destination_table_metadata(table_1_id, metadata1).await.unwrap();
-    store.store_destination_table_metadata(table_2_id, metadata2).await.unwrap();
+    store.store_destination_table_metadata(table_1_id, metadata1, "").await.unwrap();
+    store.store_destination_table_metadata(table_2_id, metadata2, "").await.unwrap();
     store
         .upsert_replication_checkpoint(
             WorkerType::TableSync { table_id: table_1_id },
@@ -1910,17 +1893,15 @@ async fn prepare_table_state_for_copy_preserves_state_and_deletes_copy_data() {
     store.store_table_schema(other_table_schema).await.unwrap();
 
     let metadata = DestinationTableMetadata::new_applied(
-        "dest_table".to_owned(),
         test_snapshot_id(100u64, 100u64),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let other_metadata = DestinationTableMetadata::new_applied(
-        "other_dest_table".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1]),
     );
-    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
-    store.store_destination_table_metadata(other_table_id, other_metadata).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata, "").await.unwrap();
+    store.store_destination_table_metadata(other_table_id, other_metadata, "").await.unwrap();
     store
         .upsert_replication_checkpoint(WorkerType::TableSync { table_id }, PgLsn::from(200u64))
         .await
@@ -1981,17 +1962,15 @@ async fn reset_table_states_for_resync_resets_states_and_apply_checkpoint_only()
     store.store_table_schema(table_2_schema).await.unwrap();
 
     let metadata1 = DestinationTableMetadata::new_applied(
-        "dest_table_1".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1, 1]),
     );
     let metadata2 = DestinationTableMetadata::new_applied(
-        "dest_table_2".to_owned(),
         SnapshotId::initial(),
         ReplicationMask::from_bytes(vec![1, 1]),
     );
-    store.store_destination_table_metadata(table_1_id, metadata1).await.unwrap();
-    store.store_destination_table_metadata(table_2_id, metadata2).await.unwrap();
+    store.store_destination_table_metadata(table_1_id, metadata1, "").await.unwrap();
+    store.store_destination_table_metadata(table_2_id, metadata2, "").await.unwrap();
     store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(500u64)).await.unwrap();
     store
         .upsert_replication_checkpoint(
@@ -2112,7 +2091,6 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
         &expected_mask_bytes,
         "Loaded replication mask should match inserted bytea"
     );
-    assert_eq!(metadata.table_id(), "test_dest_table");
 
     // Rows written before the previous-mask migration load with no recovery
     // endpoint, then gain one automatically on their next schema transition.
@@ -2121,7 +2099,20 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1, 1, 0]);
     let applying_metadata =
         legacy_metadata.with_schema_change(test_snapshot_id(10, 11), target_mask.clone()).unwrap();
-    store.store_destination_table_metadata(table_id, applying_metadata).await.unwrap();
+    store
+        .store_destination_table_metadata(table_id, applying_metadata, "new_fallback_id")
+        .await
+        .unwrap();
+    let fallback_id: String = sqlx::query_scalar(
+        "select destination_table_id from etl.destination_tables_metadata where pipeline_id = $1 \
+         and table_id = $2",
+    )
+    .bind(pipeline_id as i64)
+    .bind(SqlxTableId(table_id.into_inner()))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(fallback_id, "new_fallback_id");
 
     let reloaded_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     reloaded_store.load_cache().await.unwrap();
@@ -2262,7 +2253,6 @@ async fn replication_mask_various_patterns() {
             expected_mask,
             metadata.replication_mask().as_slice()
         );
-        assert_eq!(metadata.table_id(), *dest_name, "Destination table ID mismatch");
     }
 }
 
@@ -2277,14 +2267,10 @@ async fn destination_metadata_roundtrip_preserves_composite_snapshot_and_replica
     // Store metadata with a composite snapshot ID and a specific mask.
     let original_mask = ReplicationMask::from_bytes(vec![1, 0, 1, 0, 1, 1, 0, 0]);
     let snapshot_id = SnapshotId::new(PgLsn::from(200), PgLsn::from(100));
-    let metadata = DestinationTableMetadata::new_applied(
-        "roundtrip_table".to_owned(),
-        snapshot_id,
-        original_mask.clone(),
-    );
+    let metadata = DestinationTableMetadata::new_applied(snapshot_id, original_mask.clone());
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata, "").await.unwrap();
 
     // Load the metadata through a fresh store.
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
@@ -2316,16 +2302,13 @@ async fn destination_metadata_roundtrip_preserves_previous_logical_endpoint() {
     let target_mask = ReplicationMask::from_bytes(vec![1, 1, 1]);
     let previous_snapshot_id = SnapshotId::new(PgLsn::from(200), PgLsn::from(100));
     let previous_mask = ReplicationMask::from_bytes(vec![1, 0, 1]);
-    let metadata = DestinationTableMetadata::new_applied(
-        "roundtrip_table".to_owned(),
-        previous_snapshot_id,
-        previous_mask.clone(),
-    )
-    .with_schema_change(target_snapshot_id, target_mask.clone())
-    .unwrap();
+    let metadata =
+        DestinationTableMetadata::new_applied(previous_snapshot_id, previous_mask.clone())
+            .with_schema_change(target_snapshot_id, target_mask.clone())
+            .unwrap();
 
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-    store.store_destination_table_metadata(table_id, metadata).await.unwrap();
+    store.store_destination_table_metadata(table_id, metadata, "").await.unwrap();
 
     let new_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     new_store.load_cache().await.unwrap();

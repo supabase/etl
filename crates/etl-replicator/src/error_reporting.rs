@@ -147,8 +147,9 @@ where
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+        destination_table_id: &str,
     ) -> EtlResult<()> {
-        self.inner.store_destination_table_metadata(table_id, metadata).await
+        self.inner.store_destination_table_metadata(table_id, metadata, destination_table_id).await
     }
 }
 

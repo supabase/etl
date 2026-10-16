@@ -37,8 +37,8 @@ impl DuckLakePendingInlineSizeSampler {
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
-            .bind(table_name.schema())
-            .bind(table_name.table())
+            .bind(table_name.schema().to_ascii_lowercase())
+            .bind(table_name.table().to_ascii_lowercase())
             .fetch_one(&self.pool)
             .await
             .map_err(|source| {
@@ -82,8 +82,8 @@ fn pending_inline_data_bytes_query(metadata_schema: &str) -> String {
              JOIN {metadata_schema}.{ducklake_schema} AS s ON s.schema_id = t.schema_id
              WHERE t.end_snapshot IS NULL
                AND s.end_snapshot IS NULL
-               AND s.schema_name = $1
-               AND t.table_name = $2
+               AND translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $1
+               AND translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $2
              LIMIT 1
          ),
          target_inline_tables AS (

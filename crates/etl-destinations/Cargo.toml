@@ -35,7 +35,6 @@ ducklake = [
     "dep:r2d2",
     "dep:rand",
     "dep:regex",
-    "dep:serde",
     "dep:serde_json",
     "dep:sqlx",
     "dep:tokio-postgres",

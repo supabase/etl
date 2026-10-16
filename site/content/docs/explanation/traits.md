@@ -146,6 +146,8 @@ its variable-width decimal display string.
 ```rust
 pub trait SchemaStore: CachedStore {
     fn get_table_schema(&self, table_id: &TableId, snapshot_id: SnapshotId) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+    // Provided: the exact version, built on `get_table_schema`.
+    fn get_exact_table_schema(&self, table_id: &TableId, snapshot_id: SnapshotId) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send where Self: Sync;
     fn get_table_schemas(&self) -> impl Future<Output = EtlResult<Vec<Arc<TableSchema>>>> + Send;
     fn store_table_schema(&self, table_schema: TableSchema) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send;
     fn prune_table_schemas(&self, retention_snapshot_ids: BTreeMap<TableId, SnapshotId>) -> impl Future<Output = EtlResult<u64>> + Send;
@@ -156,7 +158,8 @@ pub trait SchemaStore: CachedStore {
 
 | Method | Purpose |
 |--------|---------|
-| `get_table_schema()` | Returns the newest cached schema at or before the requested snapshot, or `None` |
+| `get_table_schema()` | Returns the newest cached schema at or before the requested snapshot, or `None`. Use it to resolve the schema in effect at a replication boundary |
+| `get_exact_table_schema()` | Provided. Returns the schema stored at exactly the requested snapshot, such as one recorded in destination metadata, and fails with `MissingTableSchema` otherwise |
 | `get_table_schemas()` | Returns every retained schema version for every table, recovering an unusable cache when needed |
 | `store_table_schema()` | Saves a schema version to both cache and persistent storage and returns the cached `Arc` |
 | `prune_table_schemas()` | Keeps the newest schema at or before each table's boundary and all newer versions; removes older versions from storage and cache |
@@ -185,7 +188,7 @@ pub trait StateStore: CachedStore {
 
     // Destination table metadata
     fn get_destination_table_metadata(&self, table_id: TableId) -> impl Future<Output = EtlResult<Option<DestinationTableMetadata>>> + Send;
-    fn store_destination_table_metadata(&self, table_id: TableId, metadata: DestinationTableMetadata) -> impl Future<Output = EtlResult<()>> + Send;
+    fn store_destination_table_metadata(&self, table_id: TableId, metadata: DestinationTableMetadata, destination_table_id: &str) -> impl Future<Output = EtlResult<()>> + Send;
 }
 ```
 
@@ -254,6 +257,12 @@ Destination table metadata connects source table IDs to destination state. Its s
 |--------|---------|
 | `get_destination_table_metadata()` | Returns destination table metadata for a source table from cache |
 | `store_destination_table_metadata()` | Saves destination table metadata to both cache and persistent storage |
+
+The metadata write also accepts a destination identifier, which Postgres
+retains only for fallback inspection while snapshot-based naming is evaluated.
+Metadata loaders never select that column, and no identifier is exposed through
+`DestinationTableMetadata`. Destinations resolve their objects from the recorded
+snapshots and, for BigQuery, the logical view definition.
 
 ### Table States
 

@@ -437,7 +437,7 @@ impl<C: StreamClient> ChannelHandle<C> {
     ///
     /// Opening fences older continuation tokens. If rows are still in flight,
     /// the request is retried rather than allowing Snowflake to discard them.
-    pub async fn open_at(&mut self, offset: &OffsetToken) -> Result<ChannelStatusResponse> {
+    pub(crate) async fn open_at(&mut self, offset: &OffsetToken) -> Result<ChannelStatusResponse> {
         self.open_with_deadline(Some(offset), Instant::now() + self.wait_timeout).await
     }
 

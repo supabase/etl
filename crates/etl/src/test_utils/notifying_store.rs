@@ -406,6 +406,7 @@ impl StateStore for NotifyingStore {
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+        _destination_table_id: &str,
     ) -> EtlResult<()> {
         let mut inner = self.inner.write().await;
         Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);

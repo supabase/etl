@@ -101,34 +101,65 @@ pub(super) fn view_query(
     Ok(format!("select * from {}", quote_table_path(project_id, dataset_id, table_id)?))
 }
 
-/// Parses the physical table ID from a query rendered by [`view_query`].
+/// Consumes an ASCII SQL keyword without changing identifier case.
+fn consume_keyword<'a>(query: &'a str, keyword: &str) -> Option<&'a str> {
+    let (prefix, rest) = query.split_at_checked(keyword.len())?;
+    prefix.eq_ignore_ascii_case(keyword).then_some(rest)
+}
+
+/// Decodes one backtick-quoted path using the escapes ETL emits.
 ///
-/// Returns `None` for any other query, including one selecting from another
-/// project or dataset.
+/// Other GoogleSQL escapes are deliberately rejected rather than decoded
+/// incorrectly. Both current and legacy ETL view definitions only escape
+/// backticks and backslashes.
+fn consume_quoted_path(query: &str) -> Option<(String, &str)> {
+    let mut chars = query.strip_prefix('`')?.chars();
+    let mut path = String::new();
+
+    loop {
+        match chars.next()? {
+            '`' => return Some((path, chars.as_str())),
+            '\\' => match chars.next()? {
+                ch @ ('\\' | '`') => path.push(ch),
+                _ => return None,
+            },
+            ch if ch.is_control() => return None,
+            ch => path.push(ch),
+        }
+    }
+}
+
+/// Parses the physical table ID from an ETL logical view definition.
+///
+/// Accepts only `SELECT * FROM` one fully qualified, backtick-quoted table in
+/// the expected project and dataset, with optional ASCII whitespace and one
+/// trailing semicolon. Keywords are case-insensitive, identifiers are not.
+/// Current and legacy ETL renderers both use this shape. Joins, filters,
+/// aliases, wildcard tables, decorators, and additional statements fail closed.
 pub(super) fn parse_view_query_table_id(
     query: &str,
     project_id: &BigQueryProjectId,
     dataset_id: &BigQueryDatasetId,
 ) -> Option<BigQueryTableId> {
-    let project_id = escape_identifier(project_id, "BigQuery project id").ok()?;
-    let dataset_id = escape_identifier(dataset_id, "BigQuery dataset id").ok()?;
-    let escaped_table_id = query
-        .trim()
-        .strip_prefix(&format!("select * from `{project_id}.{dataset_id}."))?
-        .strip_suffix('`')?;
+    escape_identifier(project_id, "BigQuery project id").ok()?;
+    escape_identifier(dataset_id, "BigQuery dataset id").ok()?;
 
-    let mut table_id = String::with_capacity(escaped_table_id.len());
-    let mut chars = escaped_table_id.chars();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\\' => table_id.push(chars.next()?),
-            // An unescaped backtick ends the quoted path early.
-            '`' => return None,
-            _ => table_id.push(ch),
-        }
+    let query = consume_keyword(query.trim_ascii_start(), "select")?.trim_ascii_start();
+    let query = query.strip_prefix('*')?.trim_ascii_start();
+    let query = consume_keyword(query, "from")?.trim_ascii_start();
+    let (path, rest) = consume_quoted_path(query)?;
+    let rest = rest.trim_ascii();
+    if !rest.is_empty() && rest != ";" {
+        return None;
     }
 
-    (!table_id.is_empty()).then_some(table_id)
+    let prefix = format!("{project_id}.{dataset_id}.");
+    let table_id = path.strip_prefix(&prefix)?;
+    if table_id.is_empty() || table_id.contains(['.', '*', '$', '@']) {
+        return None;
+    }
+
+    Some(table_id.to_owned())
 }
 
 #[cfg(test)]
@@ -176,11 +207,33 @@ mod tests {
     fn parse_view_query_table_id_round_trips_rendered_queries() {
         let project_id = "project".to_owned();
         let dataset_id = "data`set".to_owned();
-        for table_id in ["public_orders_1", "pwn`name\\suffix"] {
+        for table_id in [
+            "public_orders_1",
+            "public_orders_0000000000000000000000001",
+            "supabase_etl_1_42_0000000000000000000000001",
+            "注文 Ä-1",
+            "pwn`name\\suffix",
+        ] {
             let query = view_query(&project_id, &dataset_id, &table_id.to_owned()).unwrap();
             assert_eq!(
                 parse_view_query_table_id(&query, &project_id, &dataset_id).as_deref(),
                 Some(table_id)
+            );
+        }
+    }
+
+    /// Harmless formatting does not change the selected physical table.
+    #[test]
+    fn parse_view_query_table_id_accepts_keyword_case_and_whitespace() {
+        for query in [
+            "SELECT * FROM `project.dataset.table`",
+            "\tSeLeCt\n*\r\nFrOm\t`project.dataset.table` ;\n",
+            "select*from`project.dataset.table`;",
+        ] {
+            assert_eq!(
+                parse_view_query_table_id(query, &"project".to_owned(), &"dataset".to_owned())
+                    .as_deref(),
+                Some("table")
             );
         }
     }
@@ -193,10 +246,31 @@ mod tests {
             "",
             "select * from `project.dataset.`",
             "select * from `project.other.table`",
+            "select * from `other.dataset.table`",
             "select id from `project.dataset.table`",
             "select * from `project.dataset.ta`ble`",
             "select * from `project.dataset.table\\",
             "select * from `project.dataset.table` where true",
+            "select * from `project.dataset.table` join `project.dataset.other` using (id)",
+            "select * from `project.dataset.table` t",
+            "select * from `project.dataset.table`; select * from `project.dataset.other`",
+            "select * from `project.dataset.table`;;",
+            "select * from `project.dataset.table.*`",
+            "select * from `project.dataset.table*`",
+            "select * from `project.dataset.table$20260101`",
+            "select * from `project.dataset.table@123`",
+            "select * from `project.dataset.table\n`",
+            r"select * from `project.dataset.ta\nble`",
+            r"select * from `project.dataset.ta\x62le`",
+            r"select * from `project.dataset.ta\u0062le`",
+            r"select * from `project.dataset.ta\qble`",
+            "select * from `project.dataset.table\\`",
+            "select * from `project.dataset.table",
+            "sélèct * from `project.dataset.table`",
+            "selec表 * from `project.dataset.table`",
+            "select * fröm `project.dataset.table`",
+            "select * fro表 `project.dataset.table`",
+            "select * from `project.dataset.表` où true",
         ] {
             assert_eq!(parse_view_query_table_id(query, &project_id, &dataset_id), None);
         }

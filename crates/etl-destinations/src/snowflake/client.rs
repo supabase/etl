@@ -56,10 +56,10 @@ pub(super) struct TableLifecycleGuard {
 /// With event admission blocked, [`Client::detach_table_for_copy`] runs inside
 /// the reset-preparation timeout: it discards the table's pending streaming
 /// target, removes its cached channel, and carries any removed channel together
-/// with its table name in this value.
+/// with the owned table names in this value.
 ///
 /// [`Client::drop_detached_table_for_copy`] consumes the value outside that
-/// timeout to drop the Snowpipe channel and Snowflake table. This split keeps
+/// timeout to drop the Snowpipe channels and Snowflake tables. This split keeps
 /// local draining and lock acquisition bounded without cancelling a remote drop
 /// whose outcome would then be unknown. The table lifecycle guard remains held
 /// through both phases, preventing setup from publishing a stale channel.
@@ -72,8 +72,8 @@ pub(super) struct DetachedTableForCopy<C> {
     table: TableLifecycleGuard,
     /// Previously cached channel handle, when one existed in this process.
     channel: Option<Arc<Mutex<ChannelHandle<C>>>>,
-    /// Snowflake table name to drop after retiring local state.
-    table_name: String,
+    /// Owned Snowflake table names to drop after retiring local state.
+    table_names: Vec<String>,
 }
 
 /// Maximum accepted Snowflake row batches before forcing a durability wait.
@@ -91,6 +91,14 @@ const TRUNCATE_ATTEMPT_NAMESPACE: Uuid = Uuid::from_u128(0x4b929faf_9687_4544_a3
 
 /// Version tag for the truncate-attempt identity encoding.
 const TRUNCATE_ATTEMPT_IDENTITY_VERSION: &[u8] = b"supabase-etl/snowflake/truncate-attempt/v1";
+
+/// Treats an already absent remote channel as successfully dropped.
+fn ignore_missing_channel(result: Result<()>) -> Result<()> {
+    match result {
+        Ok(()) | Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
 
 /// Stable identity for one physical Snowflake truncate attempt.
 #[derive(Clone, Copy)]
@@ -626,6 +634,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
         Ok(())
     }
+
     /// Applies a source truncate to Snowflake and positions the table's
     /// Snowpipe channel at `truncate_offset`.
     ///
@@ -695,7 +704,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     pub(super) async fn detach_table_for_copy(
         &self,
         table_id: TableId,
-        table_name: &str,
+        table_names: Vec<String>,
     ) -> Result<DetachedTableForCopy<C>> {
         // Event tasks must be drained before taking this gate, since they may
         // need it to finish opening a channel. Never wait on it under a
@@ -707,38 +716,46 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         let channel = self.channels.write().await.remove(&table_id);
         pending.observe_metrics();
 
-        Ok(DetachedTableForCopy { table, channel, table_name: table_name.to_owned() })
+        Ok(DetachedTableForCopy { table, channel, table_names })
     }
 
-    /// Drops the remote channel and table for previously detached local state.
+    /// Drops the remote channels and tables for previously detached local
+    /// state.
+    ///
+    /// An interrupted rename can leave the table under any owned name, so
+    /// every existing owned table has its channel retired before it is
+    /// dropped. Names without a table are skipped.
     pub(super) async fn drop_detached_table_for_copy(
         &self,
         detached: DetachedTableForCopy<C>,
     ) -> Result<()> {
-        let DetachedTableForCopy { table, channel, table_name } = detached;
+        let DetachedTableForCopy { table, channel, table_names } = detached;
 
-        let drop_channel_result = if let Some(channel) = channel {
+        let mut cached_table_name = None;
+        if let Some(channel) = channel {
             let mut guard = channel.lock().await;
-            guard.drop_channel().await
-        } else {
-            let mut handle = ChannelHandle::new(
-                Arc::clone(&self.stream_client),
-                self.pipeline_id,
-                self.database.clone(),
-                self.schema.clone(),
-                table_name.clone(),
-            );
-            handle.drop_channel().await
-        };
-        match drop_channel_result {
-            Ok(()) => {}
-            Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)) => {}
-            Err(error) => return Err(error),
+            cached_table_name = Some(guard.table_name().to_owned());
+            ignore_missing_channel(guard.drop_channel().await)?;
         }
 
-        let result = self.sql_client.drop_table(&table_name).await;
+        for table_name in &table_names {
+            if cached_table_name.as_ref() != Some(table_name)
+                && self.sql_client.object_exists(table_name).await?
+            {
+                let mut handle = ChannelHandle::new(
+                    Arc::clone(&self.stream_client),
+                    self.pipeline_id,
+                    self.database.clone(),
+                    self.schema.clone(),
+                    table_name.clone(),
+                );
+                ignore_missing_channel(handle.drop_channel().await)?;
+            }
+            self.sql_client.drop_table(table_name).await?;
+        }
         drop(table);
-        result
+
+        Ok(())
     }
 
     /// Reopens ingestion under the target name while preserving the confirmed
@@ -1173,11 +1190,10 @@ mod tests {
                 IdentityMask::from_bytes(vec![1, 0]),
             );
             let metadata = DestinationTableMetadata::new_applied(
-                name.clone(),
                 schema.inner().snapshot_id,
                 schema.replication_mask().clone(),
             );
-            store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+            store.store_destination_table_metadata(schema.id(), metadata, "").await.unwrap();
             let mut channel = ChannelHandle::new(
                 Arc::clone(&stream),
                 client.pipeline_id,
@@ -1679,7 +1695,7 @@ mod tests {
         let table_id = TableId::new(1);
         let mut setup = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
         assert!(poll_once(setup.as_mut()).is_pending());
-        let mut reset = Box::pin(client.detach_table_for_copy(table_id, "TABLE"));
+        let mut reset = Box::pin(client.detach_table_for_copy(table_id, vec!["TABLE".to_owned()]));
         assert!(poll_once(reset.as_mut()).is_pending());
 
         drop(setup);
@@ -1716,10 +1732,11 @@ mod tests {
             .record(table_id, accepted_batch(10, 1, 2, 20))
             .unwrap();
 
-        let detached = client.detach_table_for_copy(table_id, table_name).await.unwrap();
+        let detached =
+            client.detach_table_for_copy(table_id, vec![table_name.to_owned()]).await.unwrap();
 
         assert!(detached.channel.is_some());
-        assert_eq!(detached.table_name, table_name);
+        assert_eq!(detached.table_names, [table_name]);
         assert!(!client.channels.read().await.contains_key(&table_id));
         let pending = client.pending_durability.lock().await;
         assert!(pending.is_empty());

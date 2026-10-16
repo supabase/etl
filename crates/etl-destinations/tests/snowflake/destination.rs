@@ -271,8 +271,8 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
             .await;
             let metadata =
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-            assert_eq!(metadata.table_id(), name);
             original_metadata.push(metadata);
+            assert!(harness.sql.object_exists(name).await.unwrap());
         }
 
         // Case-only collisions with an already-created table use the existing
@@ -688,7 +688,6 @@ async fn resync_after_source_name_swap(cold_client: bool) {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(metadata.table_id(), original_destination);
             assert_eq!(metadata.snapshot_id(), replacement_renamed.inner().snapshot_id);
 
             drop_table_for_copy(destination, &replacement_renamed).await.unwrap();
@@ -744,7 +743,7 @@ async fn resync_after_source_name_swap(cold_client: bool) {
                 );
                 let metadata =
                     harness.store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-                assert_eq!(metadata.table_id(), table_name);
+                assert!(metadata.is_applied());
             }
         },
     )
@@ -817,7 +816,6 @@ async fn case_only_table_rename_preserves_rows_and_allows_pending_reset() {
         let applied =
             harness.store.get_destination_table_metadata(after.id()).await.unwrap().unwrap();
         assert!(applied.is_applied());
-        assert_eq!(applied.table_id(), table_id);
         assert_eq!(applied.snapshot_id(), after.inner().snapshot_id);
         let fqn = format!(
             "\"{}\".\"{}\".\"{table_id}\"",
@@ -837,7 +835,11 @@ async fn case_only_table_rename_preserves_rows_and_allows_pending_reset() {
         let pending = initial
             .with_schema_change(after.inner().snapshot_id, after.replication_mask().clone())
             .unwrap();
-        harness.store.store_destination_table_metadata(after.id(), pending.clone()).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(after.id(), pending.clone(), "")
+            .await
+            .unwrap();
         let restarted = Destination::new(Client::new(build_auth(), 1), harness.store.clone());
 
         drop_table_for_copy(&restarted, &after).await.unwrap();
@@ -1211,11 +1213,14 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1383,11 +1388,14 @@ async fn schema_evolution_add_column_defaults() {
         assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1700,11 +1708,14 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
         assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1842,11 +1853,14 @@ async fn schema_evolution_drop_column() {
         assert!(committed.is_some(), "initial data should commit before DDL");
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -2010,11 +2024,14 @@ async fn schema_evolution_interleaved_ddl_dml() {
         assert!(committed.is_some(), "initial data should commit before DDL");
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             replicated_v1.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         // Phase 1: Insert(v1) + ADD COLUMN
         invoke_write_events(
@@ -2245,10 +2262,10 @@ async fn json_null_preservation_and_legacy_defaults() {
             .store_destination_table_metadata(
                 schema.id(),
                 DestinationTableMetadata::new_applied(
-                    sf_table.clone(),
                     SnapshotId::initial(),
                     schema.replication_mask().clone(),
                 ),
+                "",
             )
             .await
             .unwrap();
