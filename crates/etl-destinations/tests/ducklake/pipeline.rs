@@ -3,17 +3,21 @@
 //! These tests use a PostgreSQL-backed DuckLake catalog and verify the final
 //! table contents by querying DuckLake directly through DuckDB.
 
+use std::time::Duration;
+
 use duckdb::Connection;
 use etl::{
     config::BatchConfig,
+    error::ErrorKind,
     event::EventType,
     pipeline::PipelineId,
-    store::StateStore,
+    store::{StateStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
-        event::EventCondition,
+        event::{EventCondition, has_relation_with_column},
+        faults::FaultAction,
         notifying_store::NotifyingStore,
-        pipeline::{create_pipeline, create_pipeline_with_batch_config},
+        pipeline::{PipelineBuilder, create_pipeline, create_pipeline_with_batch_config},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_mock_data, setup_test_database_schema},
     },
@@ -265,6 +269,26 @@ fn query_publication_add_rows(
 ) -> Vec<(i64, String, Option<String>)> {
     let sql = format!(
         "select id, name, status from {} order by id",
+        qualified_lake_table_name(table_name)
+    );
+    let mut statement = conn.prepare(&sql).unwrap();
+    let mut rows = statement.query([]).unwrap();
+    let mut result = Vec::new();
+
+    while let Some(row) = rows.next().unwrap() {
+        result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
+    }
+
+    result
+}
+
+/// Queries `(id, value, note)` rows after a replayed add-column schema change.
+fn query_noted_rows(
+    conn: &Connection,
+    table_name: &DuckLakeTableName,
+) -> Vec<(i64, String, Option<String>)> {
+    let sql = format!(
+        "select id, value, note from {} order by id",
         qualified_lake_table_name(table_name)
     );
     let mut statement = conn.prepare(&sql).unwrap();
@@ -1105,6 +1129,139 @@ async fn schema_change_add_column() {
                 score: Some(7),
             },
         ]
+    );
+}
+
+/// A timed retry after a lost acknowledgement for the write that applied an
+/// add-column schema change resumes without a resync.
+///
+/// If the retry replays the pre-DDL relation and rows, DuckLake must skip the
+/// stale relation and drop the already-applied rows instead of stopping the
+/// pipeline.
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_after_schema_change_resumes_without_resync() {
+    init_test_tracing();
+
+    // GIVEN: a Ready table replicated into a wrapped DuckLake destination with
+    // a batch window that holds all scenario transactions, a timed retry, and
+    // a lost acknowledgement for the write that carries the new schema.
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("ducklake_retry_schema_change");
+    let table_id = database
+        .create_table(
+            table_name.clone(),
+            false,
+            &[("id", "bigint primary key"), ("value", "text not null")],
+        )
+        .await
+        .unwrap();
+    let publication_name = "test_pub_ducklake_retry_schema_change";
+    database.create_publication(publication_name, std::slice::from_ref(&table_name)).await.unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value) values (0, 'warm-up')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    let lake = create_test_lake("retry_after_schema_change").await;
+    let catalog_url = lake.catalog_url.clone();
+    let data_url = lake.data_url.clone();
+    let ducklake_table_name = table_name_to_ducklake_table_name(&table_name).unwrap();
+    let store = NotifyingStore::new();
+    let pipeline_id: PipelineId = random();
+    let destination = build_destination(&catalog_url, &data_url, store.clone()).await;
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication_name.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_batch_config(BatchConfig {
+        max_fill_ms: 5000,
+        memory_budget_ratio: 0.2,
+        max_bytes: BatchConfig::DEFAULT_MAX_BYTES,
+    })
+    .with_retry_config(1000, 2)
+    .build();
+    let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
+    let table_ready_notify = store
+        .notify_on_table_state_type(table_id, TableStateType::Ready)
+        .await
+        .wait_for(Duration::from_secs(60));
+
+    pipeline.start().await.unwrap();
+    table_sync_complete_notify.notified().await;
+
+    // A copied table becomes Ready only after CDC for it is decoded and
+    // flushed.
+    database
+        .run_sql(&format!("delete from {} where id = 0", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    table_ready_notify.notified().await;
+    destination.clear_events().await;
+
+    destination
+        .inject_write_events_fault_when(
+            move |events| has_relation_with_column(events, table_id, "note"),
+            FaultAction::fail_after_write(
+                ErrorKind::DestinationTimeout,
+                "injected lost acknowledgement after schema change",
+            ),
+        )
+        .await;
+    let replay_acknowledged_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await
+        .wait_for(Duration::from_secs(120));
+
+    // WHEN: an insert, an add-column DDL, and an insert using the new column
+    // commit as three separate source transactions.
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value) values (1, 'before')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("alter table {} add column note text", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!(
+            "insert into {} (id, value, note) values (2, 'after', 'noted')",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+
+    // THEN: the retry is acknowledged while the pipeline keeps running, and
+    // DuckLake holds both rows with the added column.
+    let pipeline_wait = pipeline.wait();
+    tokio::pin!(pipeline_wait);
+    tokio::select! {
+        biased;
+
+        result = &mut pipeline_wait => {
+            panic!("pipeline stopped before the retried batch was acknowledged: {result:?}");
+        }
+
+        () = replay_acknowledged_notify.notified() => {}
+    }
+    pipeline.shutdown();
+    pipeline_wait.await.unwrap();
+    drop(destination);
+    checkpoint_lake(&catalog_url, &data_url);
+
+    let conn = open_lake_conn(&catalog_url, &data_url);
+    assert_eq!(query_table_columns(&conn, &ducklake_table_name), ["id", "value", "note"]);
+    assert_eq!(
+        query_noted_rows(&conn, &ducklake_table_name),
+        [(1, "before".to_owned(), None), (2, "after".to_owned(), Some("noted".to_owned()))]
     );
 }
 
