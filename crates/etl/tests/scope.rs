@@ -198,6 +198,14 @@ async fn query_rows(server: &mut DuplexStream, rows: &[Vec<&str>]) -> anyhow::Re
 async fn snapshot_connection(
     snapshot: &'static str,
 ) -> anyhow::Result<(scope::Connection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
+    snapshot_connection_with_rows(snapshot, 0..0, None).await
+}
+
+async fn snapshot_connection_with_rows(
+    snapshot: &'static str,
+    mut rows: std::ops::Range<usize>,
+    mut first_fetch: Option<std::sync::Arc<tokio::sync::Barrier>>,
+) -> anyhow::Result<(scope::Connection, tokio::task::JoinHandle<anyhow::Result<()>>)> {
     let (client, mut server) = tokio::io::duplex(8192);
     let peer = tokio::spawn(async move {
         authenticate(&mut server).await?;
@@ -219,6 +227,20 @@ async fn snapshot_connection(
                 query_rows(&mut server, &[vec!["owned", "0/100", snapshot, "pgoutput"]]).await?;
             } else if query.starts_with(b"SELECT pg_catalog.pg_logical_emit_message") {
                 query_rows(&mut server, &[vec!["0/200"]]).await?;
+            } else if query.starts_with(b"FETCH FORWARD") {
+                if let Some(barrier) = first_fetch.take() {
+                    // A sequential scan cannot release this gate: every reader
+                    // must issue its first FETCH before any may return rows.
+                    barrier.wait().await;
+                }
+                let count: usize = std::str::from_utf8(&query)?
+                    .split_whitespace()
+                    .nth(2)
+                    .context("test FETCH count absent")?
+                    .parse()?;
+                let values: Vec<_> = rows.by_ref().take(count).map(|id| id.to_string()).collect();
+                let result: Vec<_> = values.iter().map(|value| vec![value.as_str()]).collect();
+                query_rows(&mut server, &result).await?;
             } else {
                 query_rows(&mut server, &[]).await?;
             }
@@ -232,7 +254,7 @@ async fn snapshot_connection(
             replication: true,
         },
         Box::new(client),
-        scope::Limits { message_bytes: 4096, query_rows: 8, io_timeout: Duration::from_secs(10) },
+        scope::Limits { message_bytes: 4096, query_rows: 64, io_timeout: Duration::from_secs(10) },
     )
     .await?;
     Ok((connection, peer))
@@ -293,6 +315,166 @@ async fn scope_snapshot_requires_every_partition_on_the_same_exported_cut() -> a
     guard_peer.await??;
     left_peer.await??;
     right_peer.await??;
+    Ok(())
+}
+
+#[derive(Default)]
+struct SnapshotDestination {
+    pages: usize,
+    bytes: usize,
+    keys: Vec<usize>,
+    last_keys: std::collections::BTreeMap<usize, usize>,
+    completed: std::collections::BTreeSet<usize>,
+    page_bytes: usize,
+}
+
+impl etl::pipeline::CaptureDestination for SnapshotDestination {
+    async fn authorize(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn authorize_feedback(&self, _through: u64) -> anyhow::Result<()> {
+        anyhow::bail!("provisional pages cannot authorize feedback")
+    }
+
+    async fn snapshot_page(
+        &mut self,
+        partition: usize,
+        rows: Vec<scope::pipeline::SnapshotRow>,
+        exhausted: bool,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.completed.contains(&partition), "partition already complete");
+        let bytes = serde_json::to_vec(&rows)?.len();
+        anyhow::ensure!(bytes <= self.page_bytes, "encoded page exceeds its byte bound");
+        self.bytes += bytes;
+        self.pages += 1;
+        for row in rows {
+            anyhow::ensure!(row.relation == 42 && row.cells.len() == 1, "row identity differs");
+            let scope::Cell::Text(id) = &row.cells[0] else {
+                anyhow::bail!("test source key absent")
+            };
+            let key = id.parse()?;
+            anyhow::ensure!(
+                self.last_keys.insert(partition, key).is_none_or(|last| last < key),
+                "partition source order differs"
+            );
+            self.keys.push(key);
+        }
+        if exhausted {
+            self.completed.insert(partition);
+        }
+        Ok(())
+    }
+
+    async fn seal(&mut self, _unit: scope::pipeline::Unit) -> anyhow::Result<u64> {
+        anyhow::bail!("copy must return reader seals before sealing a unit")
+    }
+}
+
+/// Exercises real FETCH streams across the former request-exhaustion case and
+/// the supported narrow-row population. The four-way gate proves overlap;
+/// no timer or throughput assertion can turn sequential readers into a pass.
+#[tokio::test]
+async fn scope_snapshot_packs_large_baselines_with_concurrent_readers() -> anyhow::Result<()> {
+    use scope::snapshot::{self, Cursor};
+    const READERS: usize = 4;
+    const PAGE_BYTES: usize = 496 * 1024;
+    for population in [10_000, 131_072] {
+        let (mut exporter, exporter_peer) = snapshot_connection("00000001-00000002-1").await?;
+        let (mut guard, guard_peer) = snapshot_connection("00000001-00000002-1").await?;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(READERS));
+        let mut readers = Vec::new();
+        let mut peers = vec![exporter_peer, guard_peer];
+        for reader in 0..READERS {
+            let (connection, peer) = snapshot_connection_with_rows(
+                "00000001-00000002-1",
+                reader * population / READERS..(reader + 1) * population / READERS,
+                Some(barrier.clone()),
+            )
+            .await?;
+            readers.push(connection);
+            peers.push(peer);
+        }
+        let relations = [source_relation()];
+        snapshot::begin(
+            &mut exporter,
+            &mut guard,
+            &mut readers.iter_mut().collect::<Vec<_>>(),
+            "owned",
+            &relations,
+        )
+        .await?;
+        let plan = snapshot::integer_ranges(0, population as i64 - 1, READERS)?
+            .into_iter()
+            .map(|selection| snapshot::Partition { relation: 42, selection })
+            .collect::<Vec<_>>();
+        let cursors = readers
+            .into_iter()
+            .map(|reader| Cursor::new(reader, 64))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut destination = SnapshotDestination { page_bytes: PAGE_BYTES, ..Default::default() };
+        let seals = tokio::time::timeout(
+            Duration::from_secs(10),
+            snapshot::copy(cursors, &plan, &relations, PAGE_BYTES, &mut destination),
+        )
+        .await??;
+        assert_eq!(snapshot::seal_scope(&plan, &seals)?, 256);
+        assert_eq!(destination.completed, (0..READERS).collect());
+        destination.keys.sort_unstable();
+        assert_eq!(destination.keys, (0..population).collect::<Vec<_>>());
+        // The old 64-row retention required 157 / 2048 requests. Even the
+        // original 80-request allowance now leaves room for the manifest.
+        assert!(destination.pages + 1 < 80);
+        assert!(destination.bytes < 16 * 1024 * 1024);
+        if population == 10_000 {
+            assert_eq!(destination.pages, READERS);
+        }
+        drop(exporter);
+        drop(guard);
+        for peer in peers {
+            peer.await??;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn scope_snapshot_copies_empty_partitions_and_refuses_oversized_rows() -> anyhow::Result<()> {
+    use scope::snapshot::{self, Cursor};
+    for oversized in [false, true] {
+        let (mut exporter, exporter_peer) = snapshot_connection("00000001-00000002-1").await?;
+        let (mut guard, guard_peer) = snapshot_connection("00000001-00000002-1").await?;
+        let (mut reader, reader_peer) =
+            snapshot_connection_with_rows("00000001-00000002-1", 0..usize::from(oversized), None)
+                .await?;
+        let relations = [source_relation()];
+        snapshot::begin(&mut exporter, &mut guard, &mut [&mut reader], "owned", &relations).await?;
+        let plan = snapshot::integer_ranges(0, 63, 64)?
+            .into_iter()
+            .map(|selection| snapshot::Partition { relation: 42, selection })
+            .collect::<Vec<_>>();
+        let mut destination = SnapshotDestination { page_bytes: 32, ..Default::default() };
+        let result =
+            snapshot::copy(vec![Cursor::new(reader, 64)?], &plan, &relations, 32, &mut destination)
+                .await;
+        if oversized {
+            assert!(matches!(
+                result.err().context("oversized row accepted")?.downcast_ref::<CaptureRefusal>(),
+                Some(CaptureRefusal::Capacity)
+            ));
+            assert_eq!(destination.pages, 0);
+        } else {
+            let seals = result?;
+            assert_eq!(snapshot::seal_scope(&plan, &seals)?, 256);
+            assert_eq!(destination.completed.len(), 64);
+            assert_eq!(destination.pages, 64);
+        }
+        drop(exporter);
+        drop(guard);
+        exporter_peer.await??;
+        guard_peer.await??;
+        reader_peer.await??;
+    }
     Ok(())
 }
 

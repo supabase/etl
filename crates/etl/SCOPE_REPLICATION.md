@@ -10,6 +10,12 @@ tables) completes at the common cut. Streaming then emits complete source
 transactions and explicitly qualified quiet intervals. Physical WAL heads and
 server keepalives do not establish complete input.
 
+Readers scan their frozen partitions concurrently with one bounded page and one
+lookahead row per reader. Destination callbacks remain serialized. Source FETCH
+counts bound wire batches; encoded byte counts bound retained pages across
+multiple batches. Partition completion remains exact at the common cut. A reader
+or destination failure cancels the cohort before sealing.
+
 The embedding host supplies a `SourceFactory` for secured transports and a
 `CaptureDestination` for provisional snapshot pages and complete capture units.
 Only `seal` transfers durability responsibility. The returned position must name
@@ -31,7 +37,8 @@ admission and query visibility belong to the embedding destination.
 
 The `scope` integration test target uses in-memory PostgreSQL protocol peers. It
 covers allocation guards, complete transaction boundaries, publication scoping,
-common-snapshot partition completeness, connection lifetime, exact quiet markers,
+common-snapshot partition completeness, large byte-packed baselines, concurrent
+readers, empty partitions, oversized rows, connection lifetime, exact quiet markers,
 feedback ceilings and preservation of typed schema refusals. It requires no
 PostgreSQL server or external destination.
 

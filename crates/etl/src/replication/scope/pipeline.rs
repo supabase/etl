@@ -44,6 +44,7 @@ pub struct ScopeCheckpoint {
     pub captured: Option<u64>,
 }
 
+#[derive(serde::Serialize)]
 pub struct SnapshotRow {
     pub relation: u32,
     pub cells: Vec<Cell>,
@@ -357,48 +358,18 @@ impl ScopePipeline {
         )
         .await?;
         self.require_schema().await?;
-        let mut cursors = readers
+        let cursors = readers
             .into_iter()
             .map(|reader| snapshot::Cursor::new(reader, self.config.fetch_rows))
             .collect::<anyhow::Result<Vec<_>>>()?;
-        for (partition, selection) in plan.iter().enumerate() {
-            let relation = self
-                .config
-                .relations
-                .iter()
-                .find(|r| r.oid == selection.relation)
-                .context("scope relation absent")?;
-            let cursor = &mut cursors[partition % self.config.snapshot_readers];
-            cursor.select(relation, &selection.selection).await?;
-            let mut rows = Vec::new();
-            let mut bytes = 0usize;
-            while let Some(values) = cursor.next().await? {
-                let cells: Vec<_> =
-                    values.into_iter().map(|value| value.map_or(Cell::Null, Cell::Text)).collect();
-                let size = serde_json::to_vec(&cells)?.len();
-                anyhow::ensure!(size <= self.config.page_bytes, super::CaptureRefusal::Capacity);
-                if !rows.is_empty()
-                    && (bytes + size > self.config.page_bytes
-                        || rows.len() >= self.config.fetch_rows)
-                {
-                    destination
-                        .authorize()
-                        .await
-                        .map_err(|error| error.context(super::AuthorizationFailure))?;
-                    destination.snapshot_page(partition, std::mem::take(&mut rows), false).await?;
-                    bytes = 0;
-                }
-                bytes += size;
-                rows.push(SnapshotRow { relation: relation.oid, cells });
-            }
-            destination
-                .authorize()
-                .await
-                .map_err(|error| error.context(super::AuthorizationFailure))?;
-            destination.snapshot_page(partition, rows, true).await?;
-        }
-        let seals =
-            futures::future::try_join_all(cursors.iter_mut().map(snapshot::Cursor::finish)).await?;
+        let seals = snapshot::copy(
+            cursors,
+            &plan,
+            &self.config.relations,
+            self.config.page_bytes,
+            destination,
+        )
+        .await?;
         anyhow::ensure!(
             snapshot::seal_scope(&plan, &seals)? == through,
             "scope snapshot cut differs"

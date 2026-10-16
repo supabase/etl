@@ -353,3 +353,88 @@ impl Cursor {
         })
     }
 }
+
+/// Scan the imported cohort concurrently, with at most one bounded page and
+/// one lookahead row per reader. Destination callbacks are serialized, but no
+/// source I/O holds their lock. Each partition stays on one reader, so its
+/// pages and terminal marker retain source order even when readers interleave.
+pub async fn copy<D: crate::pipeline::CaptureDestination>(
+    readers: Vec<Cursor>,
+    plan: &[Partition],
+    relations: &[Relation],
+    page_bytes: usize,
+    destination: &mut D,
+) -> anyhow::Result<Vec<CopySeal>> {
+    use super::pipeline::SnapshotRow;
+
+    let width = readers.len();
+    anyhow::ensure!(width > 0 && page_bytes > 2, "invalid snapshot copy bounds");
+    let destination = tokio::sync::Mutex::new(destination);
+    futures::future::try_join_all(readers.into_iter().enumerate().map(|(reader, mut cursor)| {
+        let destination = &destination;
+        async move {
+            for (partition, selection) in plan.iter().enumerate().skip(reader).step_by(width) {
+                let relation = relations
+                    .iter()
+                    .find(|relation| relation.oid == selection.relation)
+                    .context("scope relation absent")?;
+                destination
+                    .lock()
+                    .await
+                    .authorize()
+                    .await
+                    .map_err(|error| error.context(super::AuthorizationFailure))?;
+                cursor.select(relation, &selection.selection).await?;
+                let mut rows = Vec::new();
+                // Include JSON array delimiters and a separator for each row.
+                let mut bytes = 2usize;
+                let mut before_authorize = 0;
+                loop {
+                    if before_authorize == 0 {
+                        destination
+                            .lock()
+                            .await
+                            .authorize()
+                            .await
+                            .map_err(|error| error.context(super::AuthorizationFailure))?;
+                        before_authorize = cursor.fetch_rows;
+                    }
+                    let Some(values) = cursor.next().await? else {
+                        break;
+                    };
+                    before_authorize -= 1;
+                    let row = SnapshotRow {
+                        relation: relation.oid,
+                        cells: values
+                            .into_iter()
+                            .map(|value| value.map_or(super::Cell::Null, super::Cell::Text))
+                            .collect(),
+                    };
+                    let size = serde_json::to_vec(&row)?.len() + 1;
+                    anyhow::ensure!(size <= page_bytes - 2, super::CaptureRefusal::Capacity);
+                    if !rows.is_empty() && bytes + size > page_bytes {
+                        let mut destination = destination.lock().await;
+                        destination
+                            .authorize()
+                            .await
+                            .map_err(|error| error.context(super::AuthorizationFailure))?;
+                        destination
+                            .snapshot_page(partition, std::mem::take(&mut rows), false)
+                            .await?;
+                        bytes = 2;
+                    }
+                    bytes += size;
+                    rows.push(row);
+                }
+                let mut destination = destination.lock().await;
+                destination
+                    .authorize()
+                    .await
+                    .map_err(|error| error.context(super::AuthorizationFailure))?;
+                destination.snapshot_page(partition, rows, true).await?;
+            }
+            cursor.finish().await
+        }
+    }))
+    .await
+}
