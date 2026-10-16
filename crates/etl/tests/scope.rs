@@ -1,7 +1,10 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use etl::replication::{scope as postgres_capture, scope::*};
+use etl::scope::{
+    self, CaptureRefusal, CaptureUnit, Column, Connection, ConnectionOptions, Decoder, Limits,
+    Relation, capture,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 fn source_relation() -> Relation {
