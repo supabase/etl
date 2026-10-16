@@ -19,7 +19,9 @@ use etl_destinations::snowflake::{
 };
 use serde_json::{Value, json};
 
-use crate::snowflake::common::{build_auth, companion_query, with_table_cleanup};
+use crate::snowflake::common::{
+    build_auth, companion_query, wait_for_replication_checkpoint, with_table_cleanup,
+};
 
 /// Builds the source schema shared by the history and migration tests.
 fn table_schema(id: TableId, name: String) -> TableSchema {
@@ -509,8 +511,26 @@ async fn postgres_external_toast(full_identity: bool) {
                 .unwrap();
             let completion = pipeline.wait();
             tokio::pin!(completion);
+            // Accepted updates may be in a later batch than the schema change.
+            // Wait for their commit to become durable before stopping intake.
+            let durable = async {
+                changed.notified().await;
+                let commit_lsn = destination
+                    .get_events()
+                    .await
+                    .into_iter()
+                    .filter_map(|event| match event {
+                        Event::Update(update) if update.commit_lsn > previous_lsn => {
+                            Some(update.commit_lsn)
+                        }
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap();
+                wait_for_replication_checkpoint(&store, commit_lsn).await;
+            };
             let completed = tokio::select! {
-                _ = changed.notified() => true,
+                _ = durable => true,
 
                 _ = failed.notified() => false,
 
@@ -540,27 +560,20 @@ async fn postgres_external_toast(full_identity: bool) {
                     != full_identity
             );
             let query = companion_query(&config, &physical);
-            assert_eq!(
-                query_rows(
-                    &sql,
-                    &format!("select {columns} from ({query}) order by \"record_id\"")
-                )
-                .await
-                .unwrap(),
-                expected
-            );
-            assert_eq!(
-                query_rows(
-                    &sql,
-                    &format!(
-                        "select count_if(not \"_cdc_anchored\" or \
-                         array_size(\"_cdc_unresolved_columns\") > 0) from ({query})"
-                    )
-                )
-                .await
-                .unwrap(),
-                vec![vec![json!("0")]]
-            );
+            let mut rows = query_rows(
+                &sql,
+                &format!(
+                    "select {columns}, \"_cdc_anchored\", \"_cdc_unresolved_columns\" \
+                     from ({query}) order by \"record_id\""
+                ),
+            )
+            .await
+            .unwrap();
+            for row in &mut rows {
+                assert_eq!(parse_json_cell(&row.pop().unwrap()), json!([]));
+                assert_eq!(row.pop().unwrap(), "true");
+            }
+            assert_eq!(rows, expected);
         }
     })
     .await;
@@ -690,24 +703,21 @@ async fn materialization_query_composite_keys_and_native_values() {
         ))
         .await
         .unwrap();
-        let current = query_rows(
-            &sql,
-            &format!(
-                "select \"c0\"\"'\", \"array\", is_null_value(\"json\"), \"_cdc_anchored\", \
-                 \"_cdc_unresolved_columns\", \"_cdc_last_sequence\" from ({query}) where \
-                 collate(\"id\", 'utf8') = 'A' and \"shard\" = 1"
-            ),
-        )
-        .await
-        .unwrap();
+        let ordered = format!(
+            "select *, is_null_value(\"json\") from ({query}) order by collate(\"id\", 'utf8'), \
+             \"shard\""
+        );
+        let expected = query_rows(&sql, &ordered).await.unwrap();
+        let current =
+            expected.iter().filter(|row| row[0] == "A" && row[1] == "1").collect::<Vec<_>>();
         assert_eq!(current.len(), 1);
-        assert_eq!(&current[0][..4], &[Value::Null, Value::Null, json!("true"), json!("true")]);
-        assert_eq!(parse_json_cell(&current[0][4]), json!([]));
-        assert_eq!(current[0][5], "05");
+        assert_eq!(&current[0][2..4], &[Value::Null, Value::Null]);
+        assert_eq!(current[0][7], "true");
+        assert_eq!(parse_json_cell(&current[0][8]), json!([]));
+        assert_eq!(current[0][9], "05");
+        assert_eq!(current[0][10], "true");
 
         // Identical replayed events may tie on sequence without changing state.
-        let ordered = format!("{query} order by collate(\"id\", 'utf8'), \"shard\"");
-        let expected = query_rows(&sql, &ordered).await.unwrap();
         sql.execute_ddl(&format!("insert into {fqn} select * from {fqn}")).await.unwrap();
         assert_eq!(query_rows(&sql, &ordered).await.unwrap(), expected);
         // The empty unresolved expression is valid for a key-only projection

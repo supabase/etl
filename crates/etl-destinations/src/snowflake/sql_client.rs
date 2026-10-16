@@ -998,7 +998,7 @@ mod tests {
         assert!(
             validate_cdc_metadata(&malformed, &parse_show_columns(&malformed).unwrap()).is_err()
         );
-        let mut response = response("ARRAY", false, "".into());
+        let mut response = response("ARRAY", true, "".into());
         response.data.as_mut().unwrap()[1][1] =
             serde_json::json!({"type": "TEXT", "nullable": true}).to_string().into();
         assert!(validate_cdc_metadata(&response, &parse_show_columns(&response).unwrap()).is_err());

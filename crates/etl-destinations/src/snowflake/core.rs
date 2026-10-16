@@ -353,6 +353,9 @@ where
             })?;
         ensure_snowflake_metadata_applied(table_id, &metadata)?;
         ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
+        if self.client.is_table_ready(table_id).await {
+            return Ok(());
+        }
 
         self.initialize_table(table_schema).await?;
 

@@ -378,28 +378,6 @@ where
     seq.end()
 }
 
-/// Checks full row width and key presence before admitting a partial update.
-pub(super) fn validate_partial_update_row(
-    schema: &ReplicatedTableSchema,
-    row: &TableRow,
-) -> Result<()> {
-    if row.values().len() != schema.column_schemas().len() {
-        return Err(Error::UnsupportedLayout(
-            "Row width does not match the replicated layout".to_owned(),
-        ));
-    }
-    if schema
-        .column_schemas()
-        .zip(row.values())
-        .any(|(column, value)| column.primary_key() && matches!(value, Cell::Null))
-    {
-        return Err(Error::UnsupportedLayout(
-            "Every primary-key value must be present and nonnull".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 /// Expands a dense partial tuple without cloning its present payloads.
 fn expand_partial_row(
     schema: &ReplicatedTableSchema,
@@ -497,7 +475,15 @@ pub(super) fn normalize_update_row(
             }
             let (present, missing) = row.into_parts();
             let row = expand_partial_row(schema, present, &missing)?;
-            validate_partial_update_row(schema, &row)?;
+            if schema
+                .column_schemas()
+                .zip(row.values())
+                .any(|(column, value)| column.primary_key() && matches!(value, Cell::Null))
+            {
+                return Err(Error::UnsupportedLayout(
+                    "Every primary-key value must be present and nonnull".to_owned(),
+                ));
+            }
             if let Some(old) = old {
                 let (old, _) = normalize_delete_row(schema, Some(old))?;
                 for ((column, before), after) in

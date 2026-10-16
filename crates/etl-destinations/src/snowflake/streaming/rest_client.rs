@@ -317,10 +317,9 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
 
         if result.is_ok() || matches!(&result, Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)))
         {
-            // With pooled connections, reusing the pre-drop scoped token has
-            // stalled accepted writes after table recreation. Renewal avoids
-            // the observed stall; Snowflake's internal cause is unconfirmed.
-            // Include not-found replies so retried drops renew the token too.
+            // Refresh authentication after channel removal to avoid stalled
+            // writes when a table is recreated. Treat not-found as
+            // an already-completed drop.
             self.auth.invalidate_token().await;
         }
         result

@@ -22,7 +22,7 @@ use etl::{
     event::{Event, EventType, InsertEvent},
     pipeline::PipelineId,
     schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
-    store::{SchemaStore, StateStore, TableStateType, WorkerType},
+    store::{SchemaStore, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         destination::{write_events, write_table_rows},
@@ -40,7 +40,10 @@ use etl_destinations::snowflake::{
 };
 use sha2::{Digest, Sha256};
 
-use super::common::{build_auth, poll_destination_offset, poll_stream_offset, with_table_cleanup};
+use crate::snowflake::common::{
+    build_auth, poll_destination_offset, poll_stream_offset, wait_for_replication_checkpoint,
+    with_table_cleanup,
+};
 
 /// Measured Snowflake request limit, in bytes.
 const REQUEST_LIMIT_BYTES: usize = 4 * 1024 * 1024;
@@ -512,20 +515,10 @@ async fn large_rows_survive_copy_insert_and_full_replica_identity_update() {
         // Observing an UPDATE does not prove its COMMIT was consumed. Poll the
         // local store until durable progress covers it before stopping intake;
         // this avoids extra Snowflake status or SQL queries from the test.
-        let durable = tokio::time::timeout(PIPELINE_PROGRESS_TIMEOUT, async {
-            loop {
-                if harness
-                    .store
-                    .get_replication_checkpoint(WorkerType::Apply)
-                    .await
-                    .unwrap()
-                    .is_some_and(|lsn| lsn >= update_lsn)
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
+        let durable = tokio::time::timeout(
+            PIPELINE_PROGRESS_TIMEOUT,
+            wait_for_replication_checkpoint(&harness.store, update_lsn),
+        )
         .await;
         pipeline.shutdown_and_wait().await.unwrap();
         durable.unwrap();

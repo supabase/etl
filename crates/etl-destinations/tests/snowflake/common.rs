@@ -1,6 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use etl::store::DestinationStore;
+use etl::{
+    schema::PgLsn,
+    store::{DestinationStore, StateStore, WorkerType},
+};
 use etl_destinations::snowflake::{
     AuthManager, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient, SqlClient,
     StreamClient, test_utils,
@@ -40,6 +43,22 @@ pub async fn with_table_cleanup<F, Fut>(
 
     if let Err(e) = result {
         std::panic::resume_unwind(e);
+    }
+}
+
+/// Waits for the local apply checkpoint to cover a commit before stopping
+/// intake. Callers bound the wait so pipeline shutdown still runs on timeout.
+pub async fn wait_for_replication_checkpoint(store: &impl StateStore, commit_lsn: PgLsn) {
+    loop {
+        if store
+            .get_replication_checkpoint(WorkerType::Apply)
+            .await
+            .unwrap()
+            .is_some_and(|lsn| lsn >= commit_lsn)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

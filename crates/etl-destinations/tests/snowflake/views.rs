@@ -46,7 +46,8 @@ async fn companion_view_lifecycle_and_ownership() {
     let fqn = |name: &str| {
         format!("{}.{}.{}", quote(config.database()), quote(config.schema()), quote(name))
     };
-    let public = fqn(&format!("{physical}_CURRENT"));
+    let public_name = companion_name(&physical);
+    let public = fqn(&public_name);
     let pending = fqn(&format!("{physical}_CURRENT_PENDING"));
     let query = companion_query(&config, &physical);
     let original = TableSchema::new(
@@ -62,7 +63,8 @@ async fn companion_view_lifecycle_and_ownership() {
     store.store_table_schema(original).await.unwrap();
     let fresh = || Destination::new(Client::new(Arc::clone(&auth), 1178), store.clone());
     let destination = fresh();
-    with_table_cleanup(&sql, &[&physical, &keyless_physical, &long_physical], || async {
+    let cleanup_tables: [&str; 4] = [&physical, &keyless_physical, &long_physical, &public_name];
+    with_table_cleanup(&sql, &cleanup_tables, || async {
         // A foreign table occupying the view name must survive a failed setup.
         sql.execute_ddl(&format!("create transient table {public} (sentinel integer)"))
             .await
