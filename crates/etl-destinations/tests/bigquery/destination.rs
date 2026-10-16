@@ -240,7 +240,8 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     )
     .await
     .unwrap();
-    // Join version cleanup before checking or resetting the physical tables.
+    // Wait for version cleanup before shutdown can cancel it.
+    restarted.wait_for_background_tasks_for_tests().await.unwrap();
     restarted.shutdown().await.unwrap();
     let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
     assert_ne!(metadata.table_id(), original_metadata[0].table_id());

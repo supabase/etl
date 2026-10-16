@@ -584,6 +584,19 @@ where
         self
     }
 
+    /// Waits for admitted background tasks without cancelling them.
+    ///
+    /// Test callers must stop submitting writes and await every write result
+    /// first: a running write may need the same registry to schedule cleanup.
+    /// Cleanup errors are logged rather than propagated, so callers must still
+    /// verify physical deletion separately after this completion barrier.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn wait_for_background_tasks_for_tests(&self) -> EtlResult<()> {
+        drop(self.tasks.drain().await?);
+
+        Ok(())
+    }
+
     /// Locks one table without holding the registry during preparation or DDL.
     async fn lock_table(&self, table_id: TableId) -> OwnedMutexGuard<TableState> {
         let table = {
@@ -2149,9 +2162,15 @@ mod tests {
         storage::{ColumnMode, StorageApiConfig},
     };
     use prost::Message;
-    use tokio::sync::{Semaphore, mpsc};
+    use tokio::{
+        sync::{Semaphore, mpsc},
+        time::{Duration, timeout},
+    };
 
     use super::*;
+
+    /// Bounds lifecycle failures without using time to order cleanup.
+    const CLEANUP_TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Stops requests at authentication so lifecycle tests never contact
     /// BigQuery.
@@ -2171,8 +2190,8 @@ mod tests {
     /// Pauses real SDK requests before authentication can reach the network.
     #[derive(Clone)]
     struct PausedAuthenticator {
-        /// Reports when an append has passed table preparation.
-        reached: mpsc::UnboundedSender<()>,
+        /// Reports when a request enters and leaves the authentication gate.
+        progress: mpsc::UnboundedSender<()>,
         /// Closing this gate releases all requests with an authentication
         /// error.
         release: Arc<Semaphore>,
@@ -2181,8 +2200,9 @@ mod tests {
     #[async_trait::async_trait]
     impl Authenticator for PausedAuthenticator {
         async fn access_token(&self) -> Result<String, BQError> {
-            let _ = self.reached.send(());
+            let _ = self.progress.send(());
             let _ = self.release.acquire().await;
+            let _ = self.progress.send(());
             Err(BQError::NoToken)
         }
     }
@@ -2328,15 +2348,75 @@ mod tests {
         ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask)
     }
 
+    /// Shutdown cancels and reaps cleanup even while its request is blocked.
+    #[tokio::test]
+    async fn shutdown_cancels_obsolete_table_cleanup() {
+        timeout(CLEANUP_TEST_TIMEOUT, async {
+            let (progress, mut requests) = mpsc::unbounded_channel();
+            let release = Arc::new(Semaphore::new(0));
+            let destination = destination_with_authenticator(Arc::new(PausedAuthenticator {
+                progress,
+                release: Arc::clone(&release),
+            }))
+            .await;
+            let table_id = VersionedBigQueryTableId::new("obsolete_table".to_owned());
+
+            destination.schedule_table_cleanup(HashSet::from([table_id])).await;
+
+            requests.recv().await.unwrap();
+
+            // Leave authentication blocked so only cancellation can finish
+            // cleanup.
+            destination.shutdown().await.unwrap();
+            destination.wait_for_background_tasks_for_tests().await.unwrap();
+            assert!(requests.try_recv().is_err());
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The barrier awaits cleanup through its best-effort error without
+    /// cancelling it.
+    #[tokio::test]
+    async fn background_task_barrier_waits_for_cleanup_error() {
+        timeout(CLEANUP_TEST_TIMEOUT, async {
+            let (progress, mut requests) = mpsc::unbounded_channel();
+            let release = Arc::new(Semaphore::new(0));
+            let destination = destination_with_authenticator(Arc::new(PausedAuthenticator {
+                progress,
+                release: Arc::clone(&release),
+            }))
+            .await;
+            let table_id = VersionedBigQueryTableId::new("obsolete_table".to_owned());
+
+            destination.schedule_table_cleanup(HashSet::from([table_id])).await;
+
+            requests.recv().await.unwrap();
+            let wait = destination.wait_for_background_tasks_for_tests();
+            tokio::pin!(wait);
+            assert!(futures::poll!(&mut wait).is_pending());
+
+            release.close();
+            wait.await.unwrap();
+
+            // The request must finish with an authentication error, not be
+            // cancelled.
+            requests.try_recv().unwrap();
+            destination.shutdown().await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
     /// Disjoint copy partitions must both reach append while the first is
     /// pending; whole streaming-batch ordering is unnecessary for snapshot
     /// rows.
     #[tokio::test]
     async fn copy_partitions_append_concurrently() {
-        let (reached, mut requests) = mpsc::unbounded_channel();
+        let (progress, mut requests) = mpsc::unbounded_channel();
         let release = Arc::new(Semaphore::new(0));
         let destination = destination_with_authenticator(Arc::new(PausedAuthenticator {
-            reached,
+            progress,
             release: Arc::clone(&release),
         }))
         .await;
