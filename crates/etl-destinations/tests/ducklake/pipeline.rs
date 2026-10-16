@@ -91,7 +91,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
     let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
-        "{} attach {} as {} (data_path {});",
+        "{} attach {} as {} (data_path {}, automatic_migration false, ducklake_version '1.0');",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),

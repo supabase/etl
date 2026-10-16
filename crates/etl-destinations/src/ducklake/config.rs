@@ -21,7 +21,7 @@ use crate::{ducklake::LAKE_CATALOG, retry::classified_error};
 
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
+const DUCKDB_EXTENSION_VERSION: &str = "2.0.0-alpha43678";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
@@ -739,11 +739,13 @@ fn build_setup_plan_with_strategy(
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
 
+    // Keep existing and newly created catalogs readable after a DuckDB
+    // rollback.
     steps.push(DuckLakeSetupStep {
         label: "attach_catalog",
         sql: format!(
             "ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, \
-             AUTOMATIC_MIGRATION true{metadata_schema_clause});",
+             AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0'{metadata_schema_clause});",
             quote_literal(&format!("ducklake:{catalog_target}")),
             quote_literal(data_path),
             data_inlining_row_limit
@@ -776,6 +778,21 @@ mod tests {
         }
 
         tempdir
+    }
+
+    /// Ensures the release label and vendored extensions match the linked
+    /// sources.
+    #[test]
+    fn extension_version_matches_linked_duckdb() {
+        let connection = duckdb::Connection::open_in_memory().unwrap();
+        let (version, source_id): (String, String) = connection
+            .query_row("select library_version, source_id from pragma_version()", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+
+        assert_eq!(version, format!("v{DUCKDB_EXTENSION_VERSION}"));
+        assert_eq!(source_id, "d591bb1da2");
     }
 
     #[test]
@@ -1112,7 +1129,8 @@ mod tests {
             "DATA_INLINING_ROW_LIMIT {}",
             crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
-        assert!(sql.contains("AUTOMATIC_MIGRATION true"));
+        assert!(sql.contains("AUTOMATIC_MIGRATION false"));
+        assert!(sql.contains("DUCKLAKE_VERSION '1.0'"));
     }
 
     #[test]
@@ -1196,7 +1214,8 @@ mod tests {
             "DATA_INLINING_ROW_LIMIT {}",
             crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
-        assert!(sql.contains("AUTOMATIC_MIGRATION true"));
+        assert!(sql.contains("AUTOMATIC_MIGRATION false"));
+        assert!(sql.contains("DUCKLAKE_VERSION '1.0'"));
     }
 
     #[test]
@@ -1241,7 +1260,8 @@ mod tests {
             "DATA_INLINING_ROW_LIMIT {}",
             crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
-        assert!(sql.contains("AUTOMATIC_MIGRATION true"));
+        assert!(sql.contains("AUTOMATIC_MIGRATION false"));
+        assert!(sql.contains("DUCKLAKE_VERSION '1.0'"));
     }
 
     #[test]

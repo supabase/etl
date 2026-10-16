@@ -49,7 +49,7 @@ use etl::{
         write_table_rows as write_table_rows_with_status, write_table_rows_with_batch_id,
     },
 };
-use etl_config::shared::DuckLakeCopyBufferConfig;
+use etl_config::shared::{DuckLakeCopyBufferConfig, DuckLakeWriterConfig};
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, S3Config, table_name_to_ducklake_table_name,
 };
@@ -62,6 +62,11 @@ use etl_destinations::ducklake::{
     release_paused_copy_append_for_tests, reset_drop_table_for_copy_failure_for_tests,
     reset_ducklake_test_hooks, reset_paused_copy_append_for_tests,
     reset_pool_refresh_failure_for_tests, run_external_maintenance_watcher,
+};
+use etl_maintenance::ducklake::{
+    CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,
+    InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig,
+    RewriteDataFilesMaintenanceConfig, run_maintenance_once,
 };
 #[cfg(feature = "test-utils")]
 use etl_maintenance::{
@@ -292,7 +297,7 @@ fn try_open_lake_conn(catalog: &Url, data: &Url) -> Result<Connection, duckdb::E
     let conn = open_verification_connection();
     let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
-        "{} ATTACH {} AS {} (DATA_PATH {});",
+        "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0');",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),
@@ -624,7 +629,8 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// `write_table_rows` inserts rows that can be queried back through the
-/// DuckLake catalog using a separate DuckDB connection.
+/// DuckLake catalog using a separate DuckDB connection, retaining format 1.0
+/// when creating and reopening the catalog.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_basic() {
     let lake = create_test_lake("write_table_rows_basic").await;
@@ -647,7 +653,7 @@ async fn write_table_rows_basic() {
         None,
         None,
         None,
-        store,
+        store.clone(),
     )
     .await
     .unwrap();
@@ -662,6 +668,15 @@ async fn write_table_rows_basic() {
         )
         .await
         .unwrap();
+
+    destination.shutdown().await.unwrap();
+    drop(destination);
+    assert_eq!(lake.catalog_version().await, "1.0");
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store).await;
+    restarted_destination.shutdown().await.unwrap();
+    drop(restarted_destination);
+    assert_eq!(lake.catalog_version().await, "1.0");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 3);
@@ -678,6 +693,59 @@ async fn write_table_rows_basic() {
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name.as_deref(), Some("Alice"));
+}
+
+/// Maintenance discovers the PostgreSQL metadata schema and flushes inline
+/// rows without an exposed DuckDB metadata catalog or a format upgrade.
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
+    let lake = create_test_lake("maintenance_discovers_metadata_schema_and_flushes_rows").await;
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    conn.execute_batch(
+        "create table lake.main.maintenance_rows (id bigint); insert into \
+         lake.main.maintenance_rows values (1), (2);",
+    )
+    .unwrap();
+    drop(conn);
+    assert_eq!(lake.catalog_version().await, "1.0");
+
+    let writer_config = DuckLakeWriterConfig::default();
+    let target_file_size = writer_config.target_file_size().to_owned();
+    let outcome = run_maintenance_once(DuckLakeMaintenanceConfig {
+        catalog_url: lake.catalog_url.clone(),
+        data_path: lake.data_url.clone(),
+        s3: None,
+        metadata_schema: None,
+        writer_config,
+        inline_flush: InlineFlushMaintenanceConfig { enabled: true, min_inlined_bytes: 0 },
+        merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
+            enabled: false,
+            max_compacted_files: 40,
+            max_tables_per_run: 1,
+            target_file_size,
+        },
+        rewrite_data_files: RewriteDataFilesMaintenanceConfig {
+            enabled: false,
+            min_active_data_files: 0,
+            max_tables_per_run: 1,
+        },
+        expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+            enabled: false,
+            older_than: "7 days".to_owned(),
+        },
+        cleanup_old_files: CleanupOldFilesMaintenanceConfig { enabled: false },
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.inline_flush_tables, 1);
+    assert_eq!(outcome.inline_flush_rows, 2);
+    assert_eq!(lake.catalog_version().await, "1.0");
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let rows: i64 = conn
+        .query_row("select count(*) from lake.main.maintenance_rows", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 2);
 }
 
 /// COPY connections should retain direct-to-Parquet behavior while sharing the
