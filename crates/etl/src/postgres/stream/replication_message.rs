@@ -20,7 +20,9 @@ use crate::{
 };
 
 /// Decodes replication messages using the existing pgoutput protocol parser.
-fn decode_message(bytes: Bytes) -> EtlResult<ReplicationMessage<LogicalReplicationMessage>> {
+pub(crate) fn decode_message(
+    bytes: Bytes,
+) -> EtlResult<ReplicationMessage<LogicalReplicationMessage>> {
     let message = ReplicationMessage::parse(&bytes).map_err(|error| {
         etl_error!(
             ErrorKind::DeserializationError, "Failed to decode replication message", source: error
@@ -29,15 +31,15 @@ fn decode_message(bytes: Bytes) -> EtlResult<ReplicationMessage<LogicalReplicati
 
     match message {
         ReplicationMessage::XLogData(body) => {
-            let body = body.map_data(|bytes| LogicalReplicationMessage::parse(&bytes)).map_err(
-                |error| {
+            let body = body
+                .map_data(|bytes| crate::postgres::codec::pgoutput::parse(&bytes))
+                .map_err(|error| {
                     etl_error!(
                         ErrorKind::DeserializationError,
                         "Failed to decode logical replication message",
-                        source: error
+                        source: std::io::Error::other(error)
                     )
-                },
-            )?;
+                })?;
 
             Ok(ReplicationMessage::XLogData(body))
         }
