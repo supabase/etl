@@ -73,8 +73,8 @@ use crate::{
         inline_size::DuckLakePendingInlineSizeSampler,
         metrics::{
             DuckLakeMetricsSampler, ETL_DUCKLAKE_POOL_SIZE, query_catalog_maintenance_metrics,
-            query_table_storage_metrics, register_metrics,
-            resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
+            query_table_storage_metrics, register_metrics, resolve_ducklake_metadata_schema,
+            spawn_ducklake_metrics_sampler,
         },
         replay_epoch::{
             begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
@@ -1926,19 +1926,12 @@ where
             },
         )
         .await?;
+        let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
         let metadata_schema = match metadata_schema {
             Some(metadata_schema) => metadata_schema,
-            None => {
-                run_duckdb_blocking(
-                    Arc::clone(&pool),
-                    Arc::clone(&blocking_slots),
-                    resolve_ducklake_metadata_schema_blocking,
-                )
-                .await?
-            }
+            None => resolve_ducklake_metadata_schema(&metadata_pg_pool).await?,
         };
         let metadata_schema = Arc::<str>::from(metadata_schema);
-        let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
         ensure_replay_epoch_table_exists(&metadata_pg_pool, metadata_schema.as_ref()).await?;
         let table_creation_slots = Arc::new(Semaphore::new(1));
         let applied_batches_table_created = Arc::new(AtomicBool::new(false));
@@ -5298,7 +5291,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("1.5.3").join(platform_dir);
+            let extension_dir = root.join("2.0.0-alpha43678").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
@@ -5356,7 +5349,7 @@ mod tests {
         let catalog_attach_target =
             catalog_conninfo_from_url(catalog).expect("invalid catalog url");
         conn.execute_batch(&format!(
-            "{} ATTACH {} AS {} (DATA_PATH {});",
+            "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0');",
             ducklake_load_sql(),
             quote_literal(&format!("ducklake:{catalog_attach_target}")),
             quote_identifier(LAKE_CATALOG),
@@ -5559,10 +5552,11 @@ mod tests {
                 .expect("failed to finish table copy");
 
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-            let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
-                .expect("failed to resolve metadata schema");
             let metadata_pg_pool =
                 build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let metadata_schema = resolve_ducklake_metadata_schema(&metadata_pg_pool)
+                .await
+                .expect("failed to resolve metadata schema");
             let _rows_flushed =
                 flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
                     .expect("failed to materialize inlined rows for storage metrics test");
@@ -5630,10 +5624,11 @@ mod tests {
                 .expect("failed to finish table copy");
 
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-            let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
-                .expect("failed to resolve metadata schema");
             let metadata_pg_pool =
                 build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let metadata_schema = resolve_ducklake_metadata_schema(&metadata_pg_pool)
+                .await
+                .expect("failed to resolve metadata schema");
             let _rows_flushed =
                 flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
                     .expect("failed to materialize inlined rows for catalog metrics test");
@@ -5701,11 +5696,12 @@ mod tests {
             destination.shutdown().await.expect("failed to shutdown destination");
             drop(destination);
 
-            let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
-            let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
-                .expect("failed to resolve metadata schema");
+            let _conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_pg_pool =
                 build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let metadata_schema = resolve_ducklake_metadata_schema(&metadata_pg_pool)
+                .await
+                .expect("failed to resolve metadata schema");
             let metrics = query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
                 .await
                 .expect("failed to query catalog maintenance metrics");

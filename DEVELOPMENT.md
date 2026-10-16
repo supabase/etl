@@ -111,6 +111,36 @@ Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
 `cargo xtask postgres start` starts only the test Postgres clusters.
 `cargo xtask multigres --help` covers the optional Multigres cluster.
 
+### DuckDB prerelease
+
+DuckLake uses the Git-pinned `duckdb-rs` revision in `Cargo.toml`, which bundles
+DuckDB **v2.0.0-alpha43678** (`d591bb1da2`). Upstream labels this 2.0 build as
+alpha. The destination and maintenance runner must load extensions for that
+exact engine version; update their extension-version constants, the test
+helpers, and `scripts/bin/vendor-duckdb-extensions.sh` together when changing
+the dependency.
+
+The destination and maintenance runner attach with `AUTOMATIC_MIGRATION false`
+and `DUCKLAKE_VERSION '1.0'`. Existing catalogs stay on format `1.0`, and new
+catalogs are created in that format so the previous DuckDB 1.5.3 extension can
+still read them after a rollback. Disabling migration alone is insufficient:
+this prerelease defaults new catalogs to `1.1-dev1`. Catalogs already upgraded
+to `1.1-dev1` cannot be downgraded and are rejected by the format pin. Other
+clients sharing the catalog must also avoid migrating it.
+
+This upstream revision stamps its bundled sources with a development version
+instead of the published release label. `.cargo/config.toml` supplies the
+matching `CXXFLAGS` version definitions so signed extensions load. Keep those
+definitions in sync with the Git pin as well. If you supply your own `CXXFLAGS`
+or consume these crates from another workspace, include both definitions from
+that config; Cargo does not inherit dependency workspaces' configuration.
+The runtime version test also checks the source hash to catch a stale override.
+
+Run `cargo x vendor-duckdb --platform osx_arm64` for local Apple Silicon testing
+and set `ETL_DUCKDB_EXTENSION_ROOT` to the absolute path of
+`vendor/duckdb/extensions`. The pinned prerelease publishes extensions for
+`linux_amd64`, `linux_arm64`, `osx_amd64`, and `osx_arm64`.
+
 ## Migrations
 
 SQL is grouped by its owning subsystem:

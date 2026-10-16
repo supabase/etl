@@ -51,7 +51,7 @@ const LEGACY_REPLAY_EPOCH: &str = "__legacy__";
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
+const DUCKDB_EXTENSION_VERSION: &str = "2.0.0-alpha43678";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
@@ -747,11 +747,12 @@ fn build_setup_plan_with_strategy(
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
 
+    // Maintenance must preserve the destination's rollback-compatible format.
     steps.push(DuckLakeSetupStep {
         label: "attach_catalog",
         sql: format!(
             "ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, \
-             AUTOMATIC_MIGRATION true{metadata_schema_clause});",
+             AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0'{metadata_schema_clause});",
             quote_literal(&format!("ducklake:{catalog_target}")),
             quote_literal(data_path),
             ATTACH_DATA_INLINING_ROW_LIMIT
@@ -1602,6 +1603,27 @@ impl DuckLakeMaintenanceOutcome {
     }
 }
 
+/// Resolves the metadata schema without relying on DuckLake's internal DuckDB
+/// connection, which is no longer exposed as an attached catalog in DuckDB 2.0.
+async fn resolve_metadata_schema(metadata_pg_pool: &PgPool) -> EtlResult<String> {
+    let sql = "select table_schema from information_schema.tables
+               where table_name = 'ducklake_snapshot'
+               order by case
+                   when table_schema = 'main' then 0
+                   when table_schema = 'ducklake' then 1
+                   else 2
+               end, table_schema
+               limit 1;";
+    sqlx::query_scalar(sql).fetch_one(metadata_pg_pool).await.map_err(|source| {
+        etl_error!(
+            ErrorKind::DestinationQueryFailed,
+            "DuckLake metadata schema query failed",
+            format_query_error_detail(sql),
+            source: source
+        )
+    })
+}
+
 /// Runs one external DuckLake maintenance attempt.
 pub async fn run_maintenance_once(
     config: DuckLakeMaintenanceConfig,
@@ -1633,14 +1655,6 @@ pub async fn run_maintenance_once(
     if config.expire_snapshots.enabled {
         validate_expire_snapshots_older_than(&duckdb, &config.expire_snapshots.older_than).await?;
     }
-    let metadata_schema = match config.metadata_schema.clone() {
-        Some(metadata_schema) => metadata_schema,
-        None => resolve_metadata_schema(&duckdb).await?,
-    };
-    info!(
-        metadata_schema = %metadata_schema,
-        "ducklake external maintenance metadata schema resolved"
-    );
     let metadata_pg_pool = PgPoolOptions::new().max_connections(1).connect_lazy_with(
         ducklake_catalog_metadata_connect_options(&config.catalog_url).map_err(|source| {
             etl_error!(
@@ -1649,6 +1663,14 @@ pub async fn run_maintenance_once(
                 source: source
             )
         })?,
+    );
+    let metadata_schema = match config.metadata_schema.clone() {
+        Some(metadata_schema) => metadata_schema,
+        None => resolve_metadata_schema(&metadata_pg_pool).await?,
+    };
+    info!(
+        metadata_schema = %metadata_schema,
+        "ducklake external maintenance metadata schema resolved"
     );
     let table_names = list_ducklake_tables(&metadata_pg_pool, &metadata_schema).await?;
     info!(
@@ -1814,11 +1836,6 @@ async fn open_maintenance_executor(
         .await?;
     info!(target_file_size, "ducklake external maintenance connection ready");
     Ok(executor)
-}
-
-/// Resolves the hidden DuckLake metadata schema.
-async fn resolve_metadata_schema(duckdb: &DuckDbMaintenanceExecutor) -> EtlResult<String> {
-    duckdb.run(resolve_ducklake_metadata_schema_blocking).await
 }
 
 /// Lists active DuckLake table names from the metadata catalog.
@@ -3274,32 +3291,6 @@ fn table_storage_metrics_query(metadata_schema: &str) -> String {
     )
 }
 
-fn resolve_ducklake_metadata_schema_blocking(conn: &duckdb::Connection) -> EtlResult<String> {
-    let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
-    let sql = format!(
-        r#"SELECT table_schema
-           FROM information_schema.tables
-           WHERE table_catalog = {}
-             AND table_name = 'ducklake_snapshot'
-           ORDER BY CASE
-               WHEN table_schema = 'main' THEN 0
-               WHEN table_schema = 'ducklake' THEN 1
-               ELSE 2
-           END,
-           table_schema
-           LIMIT 1;"#,
-        quote_literal(&metadata_catalog),
-    );
-    conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|source| {
-        etl_error!(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake metadata schema query failed",
-            format_query_error_detail(&sql),
-            source: source
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3678,6 +3669,8 @@ mod tests {
         assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
         assert!(plan.steps()[2].sql.contains("URL_STYLE 'path'"));
         assert!(plan.steps()[2].sql.contains("USE_SSL true"));
+        assert!(plan.steps()[3].sql.contains("AUTOMATIC_MIGRATION false"));
+        assert!(plan.steps()[3].sql.contains("DUCKLAKE_VERSION '1.0'"));
         assert!(plan.steps()[4].sql.contains("'parquet_row_group_size_bytes', '128MiB'"));
         assert!(plan.steps()[4].sql.contains("'parquet_row_group_size', '2500000'"));
     }

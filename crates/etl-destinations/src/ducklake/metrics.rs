@@ -7,7 +7,7 @@ use chrono::Utc;
 use etl::error::{ErrorKind, EtlResult};
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
-use pg_escape::{quote_identifier, quote_literal};
+use pg_escape::quote_identifier;
 use sqlx::{AssertSqlSafe, PgPool};
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tokio_util::task::AbortOnDropHandle;
@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::{
     ducklake::{
-        DuckLakeTableName, LAKE_CATALOG, client::format_query_error_detail,
+        DuckLakeTableName, client::format_query_error_detail,
         inline_size::DuckLakePendingInlineSizeSampler,
     },
     retry::classified_error_with_detail,
@@ -620,31 +620,24 @@ fn epoch_age_seconds(now_epoch_ms: i64, oldest_epoch_ms: Option<i64>) -> i64 {
     oldest_epoch_ms.map_or(0, |epoch_ms| now_epoch_ms.saturating_sub(epoch_ms) / 1_000)
 }
 
-/// Resolves the schema name that DuckLake uses inside its hidden metadata
-/// catalog.
-pub(super) fn resolve_ducklake_metadata_schema_blocking(
-    conn: &duckdb::Connection,
+/// Resolves the schema directly from PostgreSQL because DuckLake on DuckDB 2.0
+/// no longer exposes its metadata connection as an attached DuckDB catalog.
+pub(super) async fn resolve_ducklake_metadata_schema(
+    metadata_pg_pool: &PgPool,
 ) -> EtlResult<String> {
-    let metadata_catalog = format!("__ducklake_metadata_{LAKE_CATALOG}");
-    let sql = format!(
-        r#"SELECT table_schema
-           FROM information_schema.tables
-           WHERE table_catalog = {}
-             AND table_name = 'ducklake_snapshot'
-           ORDER BY CASE
-               WHEN table_schema = 'main' THEN 0
-               WHEN table_schema = 'ducklake' THEN 1
-               ELSE 2
-           END,
-           table_schema
-           LIMIT 1;"#,
-        quote_literal(&metadata_catalog),
-    );
-    conn.query_row(&sql, [], |row| row.get::<_, String>(0)).map_err(|err| {
+    let sql = "select table_schema from information_schema.tables
+               where table_name = 'ducklake_snapshot'
+               order by case
+                   when table_schema = 'main' then 0
+                   when table_schema = 'ducklake' then 1
+                   else 2
+               end, table_schema
+               limit 1;";
+    sqlx::query_scalar(sql).fetch_one(metadata_pg_pool).await.map_err(|err| {
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake metadata schema query failed",
-            format_query_error_detail(&sql),
+            format_query_error_detail(sql),
             err,
         )
     })
