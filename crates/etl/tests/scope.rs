@@ -360,7 +360,7 @@ async fn scope_capture_loop_keeps_physical_wal_heads_out_of_feedback() -> anyhow
         let length = server.read_u32().await?;
         let mut command = vec![0; length as usize - 4];
         server.read_exact(&mut command).await?;
-        assert!(command.starts_with(br#"START_REPLICATION SLOT "owned""#));
+        assert!(command.starts_with(b"START_REPLICATION SLOT owned LOGICAL "));
         response(&mut server, b'W', &[0, 0, 0]).await?;
         let mut keepalive = vec![b'k'];
         keepalive.extend_from_slice(&9000u64.to_be_bytes());
@@ -381,6 +381,8 @@ async fn scope_capture_loop_keeps_physical_wal_heads_out_of_feedback() -> anyhow
         wal.extend_from_slice(&0i64.to_be_bytes());
         wal.extend(logical_message(0, 512, "etl_scope_barrier", expected_token.as_bytes()));
         response(&mut server, b'd', &wal).await?;
+        let mut pending = [0; 256];
+        while server.read(&mut pending).await? != 0 {}
         anyhow::Ok(())
     });
     let mut connection = Connection::connect(
@@ -440,6 +442,8 @@ async fn scope_capture_loop_preserves_schema_refusals() -> anyhow::Result<()> {
             wal.extend(message);
             response(&mut server, b'd', &wal).await?;
         }
+        let mut pending = [0; 256];
+        while server.read(&mut pending).await? != 0 {}
         anyhow::Ok(())
     });
     let mut connection = Connection::connect(
