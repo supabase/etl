@@ -7,7 +7,7 @@ use etl::{
     schema::{
         ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema, Type,
     },
-    store::{SchemaStore, StateStore, TableStateLifecycleStore},
+    store::{SchemaStore, StateStore, TableState, TableStateLifecycleStore},
     test_utils::{
         destination::{drop_table_for_copy, write_events, write_table_rows},
         notifying_store::NotifyingStore,
@@ -86,6 +86,7 @@ async fn companion_view_lifecycle_and_ownership() {
         .await
         .unwrap();
         write_table_rows(&destination, &schema, vec![]).await.unwrap();
+        store.update_table_state(schema.id(), TableState::Ready).await.unwrap();
         let expected = query_rows(&sql, &query).await.unwrap();
         assert_eq!(&expected[0][..2], &[json!("1"), json!("kept")]);
 
@@ -292,7 +293,11 @@ async fn companion_view_lifecycle_and_ownership() {
         // exists; old row values cannot leak into that generation.
         let reset = fresh();
         store.reset_table_states_for_resync().await.unwrap();
+        // Reset retains old metadata for cleanup. Startup must not restore its
+        // incompatible view or require the raw table after the drop succeeds.
+        reset.startup().await.unwrap();
         drop_table_for_copy(&reset, &unsupported).await.unwrap();
+        fresh().startup().await.unwrap();
         assert!(query_rows(&sql, &query).await.is_err());
         store.prepare_table_state_for_copy(schema.id()).await.unwrap();
         store.store_table_schema(schema.inner().clone()).await.unwrap();
@@ -309,6 +314,43 @@ async fn companion_view_lifecycle_and_ownership() {
         assert_eq!(&records[0][..2], &[json!("2"), json!("fresh")]);
         let grants = query_rows(&sql, &format!("show grants on view {public}")).await.unwrap();
         assert!(grants.iter().any(|row| row[1] == "SELECT" && row[5] == role));
+
+        // A source rename can be valid in PostgreSQL but unsupported when
+        // naming a new destination. Reopen and reset still use the owned name.
+        let source_renamed = ReplicatedTableSchema::all(Arc::new(TableSchema::with_snapshot_id(
+            schema.id(),
+            TableName::new("public".into(), "renamed\"source".into()),
+            schema.inner().column_schemas.clone(),
+            SnapshotId::new(45_u64.into(), 46_u64.into()),
+        )));
+        store.store_table_schema(source_renamed.inner().clone()).await.unwrap();
+        write_events(
+            &reset,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Relation(RelationEvent {
+                replicated_table_schema: source_renamed.clone(),
+            })],
+        )
+        .await
+        .unwrap();
+        let reopened = fresh();
+        write_events(
+            &reopened,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Relation(RelationEvent {
+                replicated_table_schema: source_renamed.clone(),
+            })],
+        )
+        .await
+        .unwrap();
+        assert_eq!(query_rows(&sql, &query).await.unwrap(), records);
+        drop_table_for_copy(&fresh(), &source_renamed).await.unwrap();
+        assert!(!sql.table_exists(&physical).await.unwrap());
+        assert!(query_rows(&sql, &query).await.is_err());
+        store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+        let error = write_table_rows(&fresh(), &source_renamed, vec![]).await.unwrap_err();
+        assert_eq!(error.kind(), etl::error::ErrorKind::ValidationError);
+        assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
 
         // Maximum-length PostgreSQL components can encode to a 249-character
         // raw name. The reserved view suffix must not reject such a table.
@@ -339,6 +381,13 @@ async fn companion_view_lifecycle_and_ownership() {
             )
             .await
             .unwrap();
+        store
+            .update_table_state(
+                long.id(),
+                TableState::SyncDone { lsn: 0_u64.into(), table_decoding_state: None },
+            )
+            .await
+            .unwrap();
         fresh().startup().await.unwrap();
         assert!(
             query_rows(&sql, &companion_query(&config, &long_physical)).await.unwrap().is_empty()
@@ -360,6 +409,7 @@ async fn companion_view_lifecycle_and_ownership() {
         )));
         store.store_table_schema(keyless.inner().clone()).await.unwrap();
         write_table_rows(&reset, &keyless, vec![]).await.unwrap();
+        store.update_table_state(keyless.id(), TableState::Ready).await.unwrap();
         assert!(sql.table_exists(&keyless_physical).await.unwrap());
         assert!(query_rows(&sql, &companion_query(&config, &keyless_physical)).await.is_err());
         // Raw-only tables do not reserve view names. Customer objects at either

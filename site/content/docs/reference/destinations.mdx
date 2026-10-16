@@ -503,9 +503,10 @@ For physical names longer than 239 characters, the view name is
 The second name is an internal recovery object, not a supported query interface.
 Before a drop or rename, the public view becomes temporarily unavailable; it is
 restored after the raw schema and new definition are ready. Add-only changes
-replace the definition without taking the public name offline. Startup also
-reconciles views for idle tables. Interrupted raw DDL follows the existing
-schema recovery/resync requirements.
+replace the definition without taking the public name offline. Startup
+reconciles views for tables that completed initial synchronization, including
+idle tables. Tables awaiting a fresh copy and errored tables are skipped.
+Interrupted raw DDL follows the existing schema recovery/resync requirements.
 
 Explicit view grants survive definition replacement and same-name resync.
 Do not attach custom policies, tags, or streams to ETL-owned views or change

@@ -138,7 +138,6 @@ where
 {
     table_schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
     let table_id = table_schema.id();
-    let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
     let columns: Vec<_> =
         table_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
 
@@ -164,6 +163,7 @@ where
     schema::validate_no_cdc_collisions(&columns).map_err(EtlError::from)?;
     let creating_metadata = match store.get_destination_table_metadata(table_id).await? {
         None => {
+            let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
             if client.table_exists(&table_name).await.map_err(EtlError::from)? {
                 bail!(
                     ErrorKind::DestinationTableAlreadyExists,
@@ -184,15 +184,15 @@ where
             // Record ownership before creating remote state so a restart can
             // find and remove a partial setup.
             let metadata = DestinationTableMetadata::new_creating(
-                table_name.clone(),
+                table_name,
                 snapshot_id,
                 replication_mask.clone(),
             );
             store.store_destination_table_metadata(table_id, metadata.clone()).await?;
-            Some(metadata)
+            metadata
         }
         Some(metadata) if metadata.is_applied() => {
-            // Another copy partition completed setup while this caller waited.
+            // A source rename does not change the destination this table owns.
             ensure_destination_schema_matches_metadata(
                 "Snowflake",
                 table_id,
@@ -218,6 +218,7 @@ where
                 &metadata,
                 table_schema,
             )?;
+            let table_name = try_stringify_table_name(table_schema.name())?.to_uppercase();
             if metadata.table_id() != table_name {
                 bail!(
                     ErrorKind::CorruptedTableSchema,
@@ -230,7 +231,7 @@ where
                 );
             }
 
-            Some(metadata)
+            metadata
         }
         Some(_) => {
             // Applying metadata belongs to schema evolution, which requires its
@@ -247,14 +248,13 @@ where
     };
 
     // Remote setup is retry-safe and remains inside the per-table permit.
-    client.prepare_table(&table, &table_name, &columns, true).await.map_err(EtlError::from)?;
+    let table_name = creating_metadata.table_id();
+    client.prepare_table(&table, table_name, &columns, true).await.map_err(EtlError::from)?;
 
-    client.prepare_view(&table, &table_name, table_schema).await.map_err(EtlError::from)?;
+    client.prepare_view(&table, table_name, table_schema).await.map_err(EtlError::from)?;
 
     // Publish completion only after the table, channel, and view are ready.
-    if let Some(metadata) = creating_metadata {
-        store.store_destination_table_metadata(table_id, metadata.to_applied()).await?;
-    }
+    store.store_destination_table_metadata(table_id, creating_metadata.to_applied()).await?;
 
     Ok(())
 }
@@ -701,14 +701,18 @@ where
     }
 
     async fn startup(&self) -> EtlResult<()> {
+        // Incomplete syncs restart from a fresh copy. Their retained metadata
+        // identifies old objects for cleanup, not tables to prepare for writes.
         let table_ids = self
             .writer
             .store
-            .get_table_schemas()
+            .get_table_states()
             .await?
             .iter()
-            .map(|schema| schema.id)
-            .collect::<HashSet<_>>();
+            .filter_map(|(table_id, state)| {
+                state.as_type().has_completed_table_sync().then_some(*table_id)
+            })
+            .collect::<Vec<_>>();
         stream::iter(table_ids.into_iter().map(Ok))
             .try_for_each_concurrent(VIEW_STARTUP_CONCURRENCY, |table_id| async move {
                 let Some(metadata) =
@@ -716,8 +720,7 @@ where
                 else {
                     return Ok(());
                 };
-                // Never publish a view over interrupted raw DDL or a pending
-                // reset.
+                // Never publish a view over interrupted raw DDL.
                 if !metadata.is_applied() {
                     return Ok(());
                 }
@@ -790,8 +793,8 @@ where
                     replicated_table_schema.id(),
                     &table_name,
                     metadata.is_some(),
-                    table_name
-                        == try_stringify_table_name(replicated_table_schema.name())?.to_uppercase(),
+                    try_stringify_table_name(replicated_table_schema.name())
+                        .is_ok_and(|name| table_name == name.to_uppercase()),
                 )
                 .await
                 .map_err(EtlError::from)?;
@@ -927,10 +930,11 @@ mod tests {
     };
 
     use etl::{
+        destination::Destination as _,
         event::{RelationEvent, TruncateEvent},
         pipeline::PipelineId,
         schema::{IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema, Type},
-        store::StateStore,
+        store::{SchemaStore, StateStore, TableRetryPolicy, TableState},
         test_utils::notifying_store::NotifyingStore,
     };
 
@@ -1024,6 +1028,80 @@ mod tests {
         assert_eq!(operations[1].0.id(), schema.id());
         assert_eq!(operations[1].1, second_offset);
         assert!(matches!(iter.next(), Some(Event::Unsupported)));
+    }
+
+    /// Startup only prepares destinations whose initial synchronization
+    /// completed.
+    #[tokio::test]
+    async fn startup_skips_incomplete_and_errored_tables() {
+        let (destination, store) = test_destination();
+        let schema = replicated_schema();
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        store
+            .store_destination_table_metadata(
+                schema.id(),
+                DestinationTableMetadata::new_applied(
+                    "PUBLIC_USERS".into(),
+                    schema.inner().snapshot_id,
+                    schema.replication_mask().clone(),
+                ),
+            )
+            .await
+            .unwrap();
+
+        for state in [
+            TableState::Init,
+            TableState::DataSync,
+            TableState::FinishedCopy,
+            TableState::Errored {
+                reason: "Test failure".into(),
+                solution: None,
+                retry_policy: TableRetryPolicy::ManualRetry,
+                source_err: etl_error!(ErrorKind::Unknown, "Test failure"),
+            },
+        ] {
+            store.update_table_state(schema.id(), state).await.unwrap();
+            destination.startup().await.unwrap();
+        }
+
+        // Completed tables must still reach remote preparation. The test token
+        // provider deliberately rejects that request before any network call.
+        for state in [
+            TableState::SyncDone { lsn: 0_u64.into(), table_decoding_state: None },
+            TableState::Ready,
+        ] {
+            store.update_table_state(schema.id(), state).await.unwrap();
+            let error = destination.startup().await.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationError);
+        }
+    }
+
+    /// An owned table can reopen even when its renamed source cannot map to a
+    /// new target.
+    #[tokio::test]
+    async fn applied_table_reopens_without_remapping_source_name() {
+        let (destination, store) = test_destination();
+        let mut renamed = (*replicated_schema().inner()).clone();
+        renamed.name = TableName::new("public".into(), "renamed\"source".into());
+        let schema = ReplicatedTableSchema::all(Arc::new(renamed));
+
+        let error = destination.writer.initialize_table(&schema).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValidationError);
+        assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
+
+        store
+            .store_destination_table_metadata(
+                schema.id(),
+                DestinationTableMetadata::new_applied(
+                    "PUBLIC_USERS".into(),
+                    schema.inner().snapshot_id,
+                    schema.replication_mask().clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let error = destination.writer.initialize_table(&schema).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DestinationError);
     }
 
     #[tokio::test]
