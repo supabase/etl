@@ -1,24 +1,23 @@
 use std::time::Duration;
 
-use metrics::{counter, gauge};
+use metrics::counter;
 use tokio::{sync::watch, time::MissedTickBehavior};
-use tokio_postgres::types::PgLsn;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
 use crate::{
     error::{ErrorKind, EtlResult},
-    observability::{ETL_SLOT_INVALIDATIONS_TOTAL, ETL_TABLE_COPY_END_TO_END_LAG_BYTES},
-    postgres::{OutOfBandSourcePool, client::SlotState},
+    observability::ETL_SLOT_INVALIDATIONS_TOTAL,
+    postgres::client::SlotState,
+    replication::ReplicationLagMonitor,
     schema::TableId,
     task::abort_and_join,
 };
 
 /// Background monitor for a table sync worker's in-flight table copy.
 ///
-/// Periodically reports table-copy end-to-end replication lag and checks the
-/// worker's replication slot for invalidation, so the caller can abort the copy
-/// instead of continuing against a slot PostgreSQL has already dropped.
+/// Periodically checks the worker's replication slot for invalidation, so the
+/// caller can abort the copy instead of continuing against an unusable slot.
 #[derive(Debug)]
 pub(crate) struct TableSyncMonitor {
     handle: AbortOnDropHandle<()>,
@@ -30,8 +29,7 @@ impl TableSyncMonitor {
     pub(crate) fn spawn(
         table_id: TableId,
         slot_name: String,
-        consistent_point: PgLsn,
-        out_of_band_source_pool: OutOfBandSourcePool,
+        replication_lag_monitor: ReplicationLagMonitor,
         refresh_interval: Duration,
     ) -> Self {
         let (slot_invalidated_tx, slot_invalidated_rx) = watch::channel(false);
@@ -44,11 +42,9 @@ impl TableSyncMonitor {
 
             loop {
                 ticker.tick().await;
-                match out_of_band_source_pool.get_slot_state_and_current_wal_lsn(&slot_name).await {
-                    Ok((slot_state, source_current_lsn)) => {
-                        if let Some(source_current_lsn) = source_current_lsn {
-                            emit_replication_lag_metrics(consistent_point, source_current_lsn);
-                        }
+
+                match replication_lag_monitor.get_slot_state(&slot_name).await {
+                    Ok(slot_state) => {
                         if slot_state != SlotState::Invalidated {
                             continue;
                         }
@@ -116,13 +112,6 @@ impl TableSyncMonitor {
     }
 }
 
-/// Emits end-to-end lag metrics for a table sync while initial copy runs.
-fn emit_replication_lag_metrics(consistent_point: PgLsn, source_current_lsn: PgLsn) {
-    let table_copy_lag_bytes =
-        u64::from(source_current_lsn).saturating_sub(u64::from(consistent_point));
-    gauge!(ETL_TABLE_COPY_END_TO_END_LAG_BYTES).set(table_copy_lag_bytes as f64);
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -130,7 +119,7 @@ mod tests {
     use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 
     use crate::{
-        postgres::OutOfBandSourcePool, replication::table_sync::monitor::TableSyncMonitor,
+        replication::{ReplicationLagMonitor, table_sync::monitor::TableSyncMonitor},
         schema::TableId,
     };
 
@@ -149,9 +138,8 @@ mod tests {
             keepalive: TcpKeepaliveConfig::default(),
         };
         let interval = Duration::from_secs(60);
-        let pool = OutOfBandSourcePool::new(&connection, interval);
-        let monitor =
-            TableSyncMonitor::spawn(TableId::new(1), "unused".into(), 0.into(), pool, interval);
+        let pool = ReplicationLagMonitor::new(1, &connection, interval);
+        let monitor = TableSyncMonitor::spawn(TableId::new(1), "unused".into(), pool, interval);
 
         // Accept the sampler's connection without answering its handshake.
         let (_connection, _) =

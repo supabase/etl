@@ -26,7 +26,6 @@ pub(crate) const ETL_TABLE_COPY_PARTITION_ROWS: &str = "etl_table_copy_partition
 pub(crate) const ETL_TABLE_COPY_PARTITION_DURATION_SECONDS: &str =
     "etl_table_copy_partition_duration_seconds";
 pub(crate) const ETL_TABLE_COPY_PARTITIONS_TOTAL: &str = "etl_table_copy_partitions_total";
-pub(crate) const ETL_TABLE_COPY_END_TO_END_LAG_BYTES: &str = "etl_table_copy_end_to_end_lag_bytes";
 pub(crate) const ETL_BYTES_RECEIVED_TOTAL: &str = "etl_bytes_received_total";
 pub(crate) const ETL_BYTES_PROCESSED_TOTAL: &str = "etl_bytes_processed_total";
 pub(crate) const ETL_EVENTS_RECEIVED_TOTAL: &str = "etl_events_received_total";
@@ -55,11 +54,9 @@ pub(crate) const ETL_MEMORY_USED_BYTES: &str = "etl_memory_used_bytes";
 pub(crate) const ETL_MEMORY_TOTAL_BYTES: &str = "etl_memory_total_bytes";
 pub(crate) const ETL_BATCH_SIZE_TARGET_BYTES: &str = "etl_batch_size_target_bytes";
 pub(crate) const ETL_BATCH_REGISTERED_SLOTS: &str = "etl_batch_registered_slots";
-pub(crate) const ETL_APPLY_LOOP_RECEIVED_LAG_BYTES: &str = "etl_apply_loop_received_lag_bytes";
-pub(crate) const ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES: &str =
-    "etl_apply_loop_effective_flush_lag_bytes";
-pub(crate) const ETL_APPLY_LOOP_FLUSH_LAG_BYTES: &str = "etl_apply_loop_flush_lag_bytes";
-pub(crate) const ETL_APPLY_LOOP_END_TO_END_LAG_BYTES: &str = "etl_apply_loop_end_to_end_lag_bytes";
+pub(crate) const ETL_REPLICATION_WAL_LAG_BYTES: &str = "etl_replication_wal_lag_bytes";
+pub(crate) const ETL_REPLICATION_RECEIVE_WAL_LAG_BYTES: &str =
+    "etl_replication_receive_wal_lag_bytes";
 
 /// Label key for table state (used by table state metrics).
 pub(crate) const STATE_LABEL: &str = "state";
@@ -69,6 +66,8 @@ pub(crate) const POOL_LABEL: &str = "pool";
 pub(crate) const POSTGRES_STORE_POOL: &str = "postgres_store";
 /// Pool name for source queries outside replication connections.
 pub(crate) const OUT_OF_BAND_POOL: &str = "out_of_band";
+/// Label key for the pipeline identity.
+pub(crate) const PIPELINE_ID_LABEL: &str = "pipeline_id";
 /// Label key for the ETL worker type ("table_sync" or "apply").
 pub(crate) const WORKER_TYPE_LABEL: &str = "worker_type";
 /// Label key for the replication data path ("copy" or "cdc").
@@ -209,13 +208,6 @@ pub(crate) fn register_metrics() {
             ETL_TABLE_COPY_PARTITIONS_TOTAL,
             Unit::Count,
             "Total completed table copy partitions."
-        );
-
-        describe_gauge!(
-            ETL_TABLE_COPY_END_TO_END_LAG_BYTES,
-            Unit::Bytes,
-            "Current WAL bytes between the source current LSN and the table copy slot consistent \
-             point."
         );
 
         describe_counter!(
@@ -381,32 +373,18 @@ pub(crate) fn register_metrics() {
         );
 
         describe_gauge!(
-            ETL_APPLY_LOOP_RECEIVED_LAG_BYTES,
+            ETL_REPLICATION_WAL_LAG_BYTES,
             Unit::Bytes,
-            "Difference between the source Postgres current WAL position and the last LSN \
-             received by ETL."
+            "Replication lag in WAL bytes from the durable source head to safe progress, by \
+             worker_type and replication_path (copy or cdc). Copy uses its fixed snapshot \
+             boundary. Unknown or inactive measurements are -1. Not payload bytes or elapsed time."
         );
-
         describe_gauge!(
-            ETL_APPLY_LOOP_EFFECTIVE_FLUSH_LAG_BYTES,
+            ETL_REPLICATION_RECEIVE_WAL_LAG_BYTES,
             Unit::Bytes,
-            "Difference between ETL's last received LSN and checkpoint LSN. The checkpoint \
-             follows the last received LSN while the loop is fully idle and the last flush LSN \
-             while work is unresolved."
-        );
-
-        describe_gauge!(
-            ETL_APPLY_LOOP_FLUSH_LAG_BYTES,
-            Unit::Bytes,
-            "Difference between ETL's last received LSN and last flush LSN. The last flush LSN is \
-             the latest LSN whose data was durably flushed to the destination; idle-only progress \
-             is not included."
-        );
-
-        describe_gauge!(
-            ETL_APPLY_LOOP_END_TO_END_LAG_BYTES,
-            Unit::Bytes,
-            "Difference between the source Postgres current WAL position and ETL's checkpoint LSN."
+            "Receive lag in WAL bytes from the durable source head to consumed CDC progress, by \
+             worker_type and replication_path=cdc. Includes decoding, transport, and intake \
+             backpressure. Unknown or inactive measurements are -1. Not emitted during copy."
         );
     });
 }

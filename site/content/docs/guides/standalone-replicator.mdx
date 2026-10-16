@@ -250,6 +250,24 @@ non-production environment before operating the replicator on production data.
 - Back up configuration metadata, but never include credentials in diagnostic
   bundles or public issues.
 
+### Replication lag
+
+`etl_replication_wal_lag_bytes` measures replication lag: the source WAL head
+minus progress safe to acknowledge, including durable destination work and idle
+WAL. `etl_replication_receive_wal_lag_bytes` measures receive lag: the same
+head minus the worker's consumed position. The source head is durably flushed
+WAL on a primary and replayed WAL on a standby.
+
+Labels identify `pipeline_id`, `worker_type` (`apply` or `table_sync`), and
+`replication_path` (`copy` or `cdc`). Table-sync copy and CDC lag are separate
+maxima, so initial-copy backlog is distinct from catchup in the apply loop.
+Copy exposes only replication lag, measured from its fixed snapshot boundary;
+copying rows does not consume that WAL backlog.
+
+These are WAL address distances, not payload sizes or elapsed latency. Unknown
+values are **-1**; filter them out rather than treating them as zero. Query
+PostgreSQL directly for slot acknowledgment and retention details.
+
 See [Architecture](/explanation/architecture/) for the runtime model and
 [Extension Points](/explanation/traits/) if you need a custom destination or
 state store.

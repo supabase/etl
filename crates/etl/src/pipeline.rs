@@ -18,11 +18,11 @@ use crate::{
     bail,
     config::PipelineConfig,
     destination::PipelineDestination,
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     observability::register_metrics,
-    postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
-    replication::state::TableState,
+    postgres::{client::PgReplicationClient, migrations},
+    replication::{ReplicationLagMonitor, state::TableState},
     runtime::{ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool},
     schema::TableId,
     store::PipelineStore,
@@ -47,6 +47,8 @@ struct PipelineTasks {
     pool: Arc<TableSyncWorkerPool>,
     /// Sampler owned independently of the readings shared with workers.
     memory_monitor_task: AbortOnDropHandle<()>,
+    /// Single source sampler shared by copy and CDC worker registrations.
+    replication_lag_task: AbortOnDropHandle<()>,
 }
 
 /// Internal state tracking for pipeline lifecycle.
@@ -132,9 +134,9 @@ where
     /// store cache, creates the table synchronization worker pool, and starts
     /// the apply worker for processing replication stream events.
     ///
-    /// Invalid copy concurrency, an unsupported retry delay, or a blank trust
-    /// bundle with source TLS enabled returns [`ErrorKind::ConfigError`] before
-    /// any startup work.
+    /// Invalid copy concurrency, an unsupported retry delay, a zero monitor
+    /// interval, or a blank trust bundle with source TLS enabled returns
+    /// [`ErrorKind::ConfigError`] before any startup work.
     /// After this method succeeds, subsequent calls return
     /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
@@ -155,6 +157,10 @@ where
         validate_table_error_retry_delay_ms(self.config.table_error_retry_delay_ms).map_err(
             |err| etl_error!(ErrorKind::ConfigError, "Invalid table error retry delay", source: err),
         )?;
+
+        if self.config.table_sync_monitor_refresh_interval_ms == 0 {
+            bail!(ErrorKind::ConfigError, "Replication monitor refresh interval must be positive");
+        }
 
         info!(
             publication_name = %self.config.publication_name,
@@ -199,12 +205,15 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create a shared lazy pool for low-frequency, out-of-band source
-        // database queries that should not use the replication connection.
-        let out_of_band_source_pool = OutOfBandSourcePool::new(
+        // Share one lazy source SQL pool and one sampler across all copy and
+        // CDC workers without using their replication connections.
+        let replication_lag_monitor = ReplicationLagMonitor::new(
+            self.config.id,
             &self.config.pg_connection,
             Duration::from_millis(self.config.table_sync_monitor_refresh_interval_ms),
         );
+
+        let replication_lag_task = replication_lag_monitor.spawn_lag_metrics_task();
 
         // Start memory monitoring only after fallible startup work completes.
         // From this point onward, the monitor is owned by the started pipeline
@@ -221,7 +230,7 @@ where
             Arc::clone(&pool),
             self.store.clone(),
             self.destination.clone(),
-            out_of_band_source_pool,
+            replication_lag_monitor,
             self.shutdown_token.clone(),
             table_sync_worker_permits,
             memory_monitor,
@@ -229,7 +238,12 @@ where
         .spawn();
 
         self.state = PipelineState::Started {
-            tasks: Mutex::new(Some(PipelineTasks { apply_worker, pool, memory_monitor_task })),
+            tasks: Mutex::new(Some(PipelineTasks {
+                apply_worker,
+                pool,
+                memory_monitor_task,
+                replication_lag_task,
+            })),
         };
 
         Ok(())
@@ -253,8 +267,12 @@ where
             return Ok(());
         };
 
-        let Some(PipelineTasks { apply_worker, pool, memory_monitor_task }) =
-            tasks.lock().await.take()
+        let Some(PipelineTasks {
+            apply_worker,
+            pool,
+            memory_monitor_task,
+            mut replication_lag_task,
+        }) = tasks.lock().await.take()
         else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
         };
@@ -263,23 +281,32 @@ where
         // waiter skips the successful teardown sequence.
         let _shutdown_guard = self.shutdown_token.clone().drop_guard();
 
-        debug!("waiting for apply worker to complete");
+        // Sampling remains alive through draining, but a sampler panic or
+        // unexpected exit must not remain hidden behind a running worker.
+        tokio::select! {
+            result = async {
+                debug!("waiting for apply worker to complete");
+                // The apply worker can create table-sync tasks until it exits.
+                apply_worker.wait().await?;
+                self.shutdown();
 
-        // The apply worker may spawn table sync workers until it exits.
-        apply_worker.wait().await?;
-        self.shutdown();
+                debug!("waiting for table sync workers to complete");
+                pool.wait_all().await?;
 
-        debug!("waiting for table sync workers to complete");
+                debug!("waiting for destination shutdown to complete");
+                self.destination.shutdown().await
+            } => result?,
 
-        pool.wait_all().await?;
-
-        debug!("waiting for destination shutdown to complete");
-
-        self.destination.shutdown().await?;
+            result = &mut replication_lag_task => {
+                result.map_err(EtlError::from)?;
+                bail!(ErrorKind::InvalidState, "Replication lag sampler stopped unexpectedly");
+            }
+        }
 
         debug!("waiting for memory monitor to complete");
 
         // Consumers need fresh readings until workers and destination drain.
+        abort_and_join(replication_lag_task).await?;
         abort_and_join(memory_monitor_task).await?;
 
         Ok(())

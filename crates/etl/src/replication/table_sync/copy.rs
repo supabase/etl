@@ -16,7 +16,6 @@ use tokio::{
     pin,
     sync::{Mutex, watch},
 };
-use tokio_postgres::types::PgLsn;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -39,13 +38,13 @@ use crate::{
         ETL_TABLE_COPY_ROWS_TOTAL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL,
     },
     postgres::{
-        OutOfBandSourcePool, TableCopyRow, TableCopyStream,
+        TableCopyRow, TableCopyStream,
         client::{
             ChildPgReplicationClient, CtidPartition, PgChildReplicationTransaction,
             PgReplicationTransaction, PostgresConnectionUpdate,
         },
     },
-    replication::table_sync::monitor::TableSyncMonitor,
+    replication::{ReplicationLagMonitor, table_sync::monitor::TableSyncMonitor},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
@@ -231,8 +230,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     publication_name: Option<&str>,
     slot_name: String,
     max_copy_connections: u16,
-    consistent_point: PgLsn,
-    out_of_band_source_pool: OutOfBandSourcePool,
+    replication_lag_monitor: ReplicationLagMonitor,
     table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
     shutdown_token: CancellationToken,
@@ -288,8 +286,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     let mut monitor = TableSyncMonitor::spawn(
         table_id,
         slot_name.clone(),
-        consistent_point,
-        out_of_band_source_pool,
+        replication_lag_monitor,
         table_sync_monitor_interval,
     );
 
