@@ -282,7 +282,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         let http = self.http.clone();
         let request_body = ChannelLifecycleRequest::new(None);
 
-        retry_with_backoff(
+        let result = retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
             |_| false,
             |d| d,
@@ -313,7 +313,16 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
             },
         )
         .await
-        .map_err(|f| f.last_error)
+        .map_err(|f| f.last_error);
+
+        if result.is_ok() || matches!(&result, Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)))
+        {
+            // Refresh authentication after channel removal to avoid stalled
+            // writes when a table is recreated. Treat not-found as
+            // an already-completed drop.
+            self.auth.invalidate_token().await;
+        }
+        result
     }
 
     async fn channel_status(
@@ -792,6 +801,54 @@ mod tests {
         assert_eq!(error.retryability(), Retryability::Permanent);
         assert_eq!(server.await.unwrap(), vec!["token-0", "token-1"]);
         assert_eq!(auth.invalidations.load(Ordering::SeqCst), 2);
+    }
+
+    /// A removed channel starts its next incarnation with a fresh token, but
+    /// a refused drop keeps the current token.
+    #[tokio::test]
+    async fn dropped_channel_refreshes_token_before_reopen() {
+        let open_response = r#"{
+            "next_continuation_token":"placeholder-token",
+            "channel_status":{
+                "channel_status_code":"SUCCESS",
+                "created_on_ms":1,
+                "rows_inserted":0,
+                "rows_parsed":0,
+                "rows_error_count":0
+            }
+        }"#;
+        for (status, body, expected_token) in [
+            (200, "{}", "token-1"),
+            (404, "{}", "token-1"),
+            (409, r#"{"code":"ERR_CHANNEL_HAS_UNCOMMITTED_DATA"}"#, "token-0"),
+        ] {
+            let (url, server) = serve_responses(vec![(status, body), (200, open_response)]).await;
+            let auth = Arc::new(CountingTokenProvider::default());
+            let stream = RestStreamClient::new(
+                url.clone(),
+                auth,
+                Client::builder().no_proxy().build().unwrap(),
+            );
+            stream.ingest_host.set(url).unwrap();
+
+            let dropped = stream.drop_channel("DB", "SCHEMA", "TABLE", "CHANNEL").await;
+            match status {
+                200 => dropped.unwrap(),
+                404 => {
+                    assert!(matches!(
+                        dropped,
+                        Err(Error::Snowpipe(SnowpipeError::ChannelNotFound))
+                    ));
+                }
+                409 => assert!(matches!(
+                    dropped,
+                    Err(Error::Snowpipe(SnowpipeError::ChannelHasUncommittedRows))
+                )),
+                _ => unreachable!(),
+            }
+            stream.open_channel("DB", "SCHEMA", "TABLE", "CHANNEL", None).await.unwrap();
+            assert_eq!(server.await.unwrap(), vec!["token-0", expected_token]);
+        }
     }
 
     #[test]

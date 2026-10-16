@@ -143,6 +143,8 @@ pub enum ErrorKind {
     DestinationTableMissing,
     /// The destination schema is newer than a replayed schema snapshot.
     DestinationSchemaRewind,
+    /// A destination row or physical table violates its required layout.
+    DestinationLayoutUnsupported,
 
     // Data & Transformation Errors
     /// A value could not be converted between source and destination formats.
@@ -281,6 +283,7 @@ impl ErrorKind {
             | ErrorKind::DestinationNamespaceMissing
             | ErrorKind::DestinationTableMissing
             | ErrorKind::DestinationSchemaRewind
+            | ErrorKind::DestinationLayoutUnsupported
             | ErrorKind::ConversionError
             | ErrorKind::InvalidData
             | ErrorKind::ValidationError
