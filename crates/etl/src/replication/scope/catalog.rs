@@ -186,10 +186,7 @@ pub async fn read(
              pubtruncate::text,pubviaroot::text FROM pg_publication WHERE pubname='{publication}'"
         ))
         .await?;
-    anyhow::ensure!(
-        flags.len() == 1 && flags[0].len() == 6,
-        "PostgreSQL publication missing or ambiguous"
-    );
+    anyhow::ensure!(flags.len() == 1 && flags[0].len() == 6, super::CaptureRefusal::SchemaChanged);
     let flags = flags[0]
         .iter()
         .map(|value| boolean(value.as_deref().context("publication flag is NULL")?))
@@ -207,7 +204,7 @@ pub async fn read(
         .await?;
     anyhow::ensure!(
         !published.is_empty() && published.len() <= maximum_tables,
-        "PostgreSQL publication exceeds source scope bound"
+        super::CaptureRefusal::SchemaChanged
     );
     let mut tables = Vec::new();
     for row in published {

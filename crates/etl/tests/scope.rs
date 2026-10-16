@@ -227,6 +227,19 @@ async fn snapshot_connection_with_rows(
                 query_rows(&mut server, &[vec!["owned", "0/100", snapshot, "pgoutput"]]).await?;
             } else if query.starts_with(b"SELECT pg_catalog.pg_logical_emit_message") {
                 query_rows(&mut server, &[vec!["0/200"]]).await?;
+            } else if query.starts_with(b"SELECT system_identifier::text") {
+                query_rows(&mut server, &[vec!["1", "5", "160014"]]).await?;
+            } else if query.starts_with(b"SELECT current_setting('wal_level')") {
+                query_rows(&mut server, &[vec!["logical", "false", "1048576"]]).await?;
+            } else if query.starts_with(b"SELECT EXISTS (SELECT 1 FROM pg_event_trigger") {
+                query_rows(&mut server, &[vec!["true", "true"]]).await?;
+            } else if query.starts_with(b"SELECT puballtables::text") {
+                let flags = if std::str::from_utf8(&query)?.contains("missing_publication") {
+                    vec![]
+                } else {
+                    vec![vec!["false", "true", "true", "true", "true", "false"]]
+                };
+                query_rows(&mut server, &flags).await?;
             } else if query.starts_with(b"FETCH FORWARD") {
                 if let Some(barrier) = first_fetch.take() {
                     // A sequential scan cannot release this gate: every reader
@@ -258,6 +271,24 @@ async fn snapshot_connection_with_rows(
     )
     .await?;
     Ok((connection, peer))
+}
+
+#[tokio::test]
+async fn scope_catalog_refuses_missing_and_empty_publications() -> anyhow::Result<()> {
+    for publication in ["missing_publication", "selected_publication"] {
+        let (mut connection, peer) = snapshot_connection("00000001-00000002-1").await?;
+        let error = scope::catalog::read(&mut connection, publication, 8, 32)
+            .await
+            .err()
+            .context("missing or empty publication accepted")?;
+        assert!(matches!(
+            error.downcast_ref::<CaptureRefusal>(),
+            Some(CaptureRefusal::SchemaChanged)
+        ));
+        drop(connection);
+        peer.await??;
+    }
+    Ok(())
 }
 
 #[tokio::test]
