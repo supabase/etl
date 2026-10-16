@@ -7,7 +7,8 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_config::shared::{
-    validate_copy_concurrency, validate_source_tls_config, validate_table_error_retry_delay_ms,
+    Validate, validate_copy_concurrency, validate_source_tls_config,
+    validate_table_error_retry_delay_ms,
 };
 use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::{Mutex, Semaphore};
@@ -132,9 +133,9 @@ where
     /// store cache, creates the table synchronization worker pool, and starts
     /// the apply worker for processing replication stream events.
     ///
-    /// Invalid copy concurrency, an unsupported retry delay, or a blank trust
-    /// bundle with source TLS enabled returns [`ErrorKind::ConfigError`] before
-    /// any startup work.
+    /// Invalid copy concurrency, an unsupported retry delay, invalid slot
+    /// options, or a blank trust bundle with source TLS enabled returns
+    /// [`ErrorKind::ConfigError`] before any startup work.
     /// After this method succeeds, subsequent calls return
     /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
@@ -155,6 +156,9 @@ where
         validate_table_error_retry_delay_ms(self.config.table_error_retry_delay_ms).map_err(
             |err| etl_error!(ErrorKind::ConfigError, "Invalid table error retry delay", source: err),
         )?;
+        self.config.replication_slot.validate().map_err(|err| {
+            etl_error!(ErrorKind::ConfigError, "Invalid replication slot configuration", source: err)
+        })?;
 
         info!(
             publication_name = %self.config.publication_name,

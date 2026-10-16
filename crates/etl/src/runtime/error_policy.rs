@@ -187,6 +187,8 @@ mod tests {
             (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
             (ErrorKind::SourceTableCopyLockConflict, RetryDirective::Timed),
             (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
+            (ErrorKind::ReplicationSlotInUse, RetryDirective::Timed),
+            (ErrorKind::ReplicationSlotInvalidated, RetryDirective::Manual),
         ] {
             let error = EtlError::from((kind, "Test replication failure"));
             assert_eq!(build_error_handling_policy(&error).retry_directive(), retry);

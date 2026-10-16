@@ -25,8 +25,9 @@ pub use destination::{
 pub use health::ReplicatorHealthConfig;
 pub use pipeline::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PipelineConfig,
-    PipelineConfigWithoutSecrets, ReplicationSlotConfig, TableSyncCopyConfig,
-    validate_copy_concurrency, validate_source_tls_config, validate_table_error_retry_delay_ms,
+    PipelineConfigWithoutSecrets, ReplicationSlotConfig, ReplicationSlotPersistence,
+    TableSyncCopyConfig, validate_copy_concurrency, validate_source_tls_config,
+    validate_table_error_retry_delay_ms,
 };
 pub use replicator::{ReplicatorConfig, ReplicatorConfigWithoutSecrets};
 pub use sentry::SentryConfig;
