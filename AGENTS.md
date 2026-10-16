@@ -266,8 +266,10 @@ cleanup. Recovery correctness still applies: never checkpoint unfinished work.
   alive when requesting shutdown, then await it to finish cleanup.
 - **Apply:** stop intake and drain buffered batches and pending write results
   under existing deadlines, durability, and error policies. Do not force early
-  flushes or cancel in-flight apply writes. Coordination waits must observe
-  shutdown when a stopping worker may never publish the awaited state.
+  flushes or cancel in-flight apply writes. `drain_on_shutdown = false` is the
+  one opt-out: it abandons that work unacknowledged, for replay after restart.
+  Coordination waits must observe shutdown when a stopping worker may never
+  publish the awaited state.
 - **Copy and startup:** initial sync is replayable. Keep copy waits, including
   the final empty write and its result, cancellable. On controlled shutdown,
   abort and join copy children before releasing the snapshot. Cancel startup

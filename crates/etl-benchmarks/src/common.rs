@@ -951,6 +951,7 @@ pub fn pipeline_config(
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         max_copy_connections_per_table: tuning.max_copy_connections_per_table,
         run_source_migrations: true,
+        drain_on_shutdown: true,
     }
 }
 

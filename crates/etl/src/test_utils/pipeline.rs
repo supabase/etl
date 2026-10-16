@@ -112,6 +112,9 @@ pub struct PipelineBuilder<S, D> {
     settle_durable_interval_ms: Option<u64>,
     /// Logical replication slot configuration.
     replication_slot: ReplicationSlotConfig,
+    /// Whether shutdown drains buffered apply work. Default:
+    /// [`PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN`].
+    drain_on_shutdown: bool,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -171,7 +174,15 @@ where
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
             settle_durable_interval_ms: None,
             replication_slot: ReplicationSlotConfig::default(),
+            drain_on_shutdown: PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN,
         }
+    }
+
+    /// Sets whether shutdown drains buffered apply work before the apply loop
+    /// exits, or abandons it for replay on the next start.
+    pub fn with_drain_on_shutdown(mut self, drain_on_shutdown: bool) -> Self {
+        self.drain_on_shutdown = drain_on_shutdown;
+        self
     }
 
     /// Sets whether PostgreSQL failover support is enabled for replication
@@ -262,6 +273,7 @@ where
             memory_backpressure: Some(self.memory_backpressure),
             settle_durable_interval_ms: self.settle_durable_interval_ms,
             run_source_migrations: true,
+            drain_on_shutdown: self.drain_on_shutdown,
         };
 
         Pipeline::new(config, self.store, self.destination)
