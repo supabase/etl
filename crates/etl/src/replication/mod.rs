@@ -15,3 +15,5 @@ pub(crate) use apply::{
 pub(crate) use decoding_state::{PreviousRelationMasks, TableDecodingState};
 pub(crate) use table_sync::{TableSyncResult, start_table_sync};
 pub use worker_type::WorkerType;
+
+pub mod scope;

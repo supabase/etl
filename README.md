@@ -200,3 +200,9 @@ Report suspected vulnerabilities privately according to [SECURITY.md](SECURITY.m
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+### Scope-consistent capture
+
+An opt-in `ScopePipeline` supports embedding destinations that retain a complete
+common snapshot and whole source transactions before acknowledging PostgreSQL.
+See the [scope replication contract](crates/etl/SCOPE_REPLICATION.md).

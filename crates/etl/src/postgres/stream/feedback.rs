@@ -147,7 +147,9 @@ where
                     // backpressured. Repeat only supplied safe positions. The
                     // requested reply can drive idle processing once intake
                     // resumes.
-                    self.send_status_update(0.into(), 0.into(), true, StatusUpdateType::PeriodicKeepAlive).await?;
+                    self.send_status_update(
+                        0.into(), 0.into(), true, StatusUpdateType::PeriodicKeepAlive,
+                    ).await?;
 
                     // Fault injection may suppress a send. Still space retries
                     // rather than spinning on an already-expired deadline.
@@ -157,7 +159,12 @@ where
                 request = self.requests_rx.recv() => {
                     let Some(request) = request else { return Ok(()); };
 
-                    if self.send_status_update(request.write_lsn, request.flush_lsn, request.force, StatusUpdateType::KeepAlive).await? {
+                    if self.send_status_update(
+                        request.write_lsn,
+                        request.flush_lsn,
+                        request.force,
+                        StatusUpdateType::KeepAlive,
+                    ).await? {
                         deadline = Instant::now() + keep_alive_deadline_duration;
                     }
                 }
@@ -287,14 +294,10 @@ where
         // this exchange cannot sustain an infinite keepalive request loop.
         let request_reply: u8 = status_update_type.request_reply().into();
         // CopyBoth supplies the framing; this is the standby-status payload.
-        let mut message = BytesMut::with_capacity(34);
-        message.put_u8(STANDBY_STATUS_UPDATE_TAG);
-        message.put_u64(write_lsn.into());
-        message.put_u64(flush_lsn.into());
-        message.put_u64(flush_lsn.into());
-        message.put_i64(ts);
-        message.put_u8(request_reply);
-        self.sink.send(message.freeze()).await.map_err(Into::into)?;
+        self.sink
+            .send(status_update(write_lsn.into(), flush_lsn.into(), ts, request_reply))
+            .await
+            .map_err(Into::into)?;
 
         counter!(
             ETL_STATUS_UPDATES_TOTAL,
@@ -560,4 +563,16 @@ mod tests {
         );
         drop(feedback_handle);
     }
+}
+
+/// PostgreSQL status payload shared by every synchronization mode.
+pub(crate) fn status_update(write: u64, flush: u64, timestamp: i64, reply: u8) -> Bytes {
+    let mut message = BytesMut::with_capacity(34);
+    message.put_u8(STANDBY_STATUS_UPDATE_TAG);
+    message.put_u64(write);
+    message.put_u64(flush);
+    message.put_u64(flush);
+    message.put_i64(timestamp);
+    message.put_u8(reply);
+    message.freeze()
 }
