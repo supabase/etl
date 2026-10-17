@@ -344,7 +344,7 @@ column plan is empty.
 | BigQuery | Creates a view under the new mapped name and removes the old view. The physical table the view selects keeps its name. BigQuery has [no API or SQL view rename](https://docs.cloud.google.com/bigquery/docs/managing-views#rename_a_view). View-specific permissions or authorized-view configuration must be recreated for the new view. |
 | ClickHouse | Uses [`RENAME TABLE`](https://clickhouse.com/docs/reference/statements/rename). `ReplacingMergeTree` also rebuilds its `__current` view under the new name. |
 | DuckLake | Uses [`ALTER TABLE ... RENAME TO`](https://ducklake.select/docs/stable/duckdb/usage/schema_evolution#renaming-tables) before column changes. All planned DDL and relocation of existing replay markers commit in one transaction, and the table retains its replay epoch. A case-only rename keeps the same native table and moves its replay keys to the new source spelling. |
-| Snowflake | Uses [`ALTER TABLE ... RENAME TO`](https://docs.snowflake.com/en/sql-reference/sql/alter-table) and opens an ingestion channel for the new name at the previous channel's confirmed committed offset. |
+| Snowflake | Uses [`ALTER TABLE ... RENAME TO`](https://docs.snowflake.com/en/sql-reference/sql/alter-table) and opens an ingestion channel for the new name at the previous channel's confirmed committed offset. The companion view is recreated under the new name; explicit view grants must be recreated. |
 | Iceberg | Deprecated. Table renames and other newer logical schemas remain unsupported. |
 
 Renames never replace an occupied destination target. If destination naming maps

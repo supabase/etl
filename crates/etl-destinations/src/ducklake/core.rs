@@ -77,8 +77,8 @@ use crate::{
             resolve_ducklake_metadata_schema_blocking, spawn_ducklake_metrics_sampler,
         },
         replay_epoch::{
-            begin_table_replay_epoch_transition, complete_table_replay_epoch_transition,
-            ensure_replay_epoch_table_exists, preserve_renamed_table_replay_epoch,
+            begin_table_rename_replay_epoch_transition, begin_table_replay_epoch_transition,
+            complete_table_replay_epoch_transition, ensure_replay_epoch_table_exists,
             read_table_replay_epoch,
         },
         schema::{
@@ -2939,8 +2939,10 @@ where
     ///
     /// Replay markers move in the same transaction. The column renderer always
     /// receives the resulting actual table name and never handles table
-    /// renames. The captured replay epoch is persisted under the new name
-    /// after the native commit while the table write permit is still held.
+    /// renames. A pending target epoch protects relocated markers from external
+    /// maintenance if the process stops between the native commit and epoch
+    /// publication. The previous name retains its committed epoch, which still
+    /// protects its markers before the move.
     ///
     /// A table that was copied with data inlining disabled must restore its
     /// streaming setting before DuckLake applies a later schema change. This
@@ -2970,7 +2972,13 @@ where
         let rename = match after_table_name {
             Some(after_table_name) => Some((
                 after_table_name.clone(),
-                self.read_table_replay_epoch(before_table_name).await?,
+                begin_table_rename_replay_epoch_transition(
+                    &self.metadata_pg_pool,
+                    self.metadata_schema.as_ref(),
+                    before_table_name,
+                    after_table_name,
+                )
+                .await?,
             )),
             None => None,
         };
@@ -3057,7 +3065,7 @@ where
         if let Some((after_table_name, replay_epoch)) = rename {
             // Keep the epoch captured before DDL: a new owner can reuse the
             // freed name and rotate its epoch after the native rename commits.
-            preserve_renamed_table_replay_epoch(
+            complete_table_replay_epoch_transition(
                 &self.metadata_pg_pool,
                 self.metadata_schema.as_ref(),
                 &after_table_name,
@@ -5808,26 +5816,35 @@ mod tests {
                 .expect("failed to read pending replay epoch");
             assert_eq!(pending_replay_epoch, None);
 
-            // Model old-name reuse after native DDL commits but before the
-            // renamed table's epoch is persisted. The new owner must not
-            // supply the renamed table's replay proof.
-            let renamed_replay_epoch =
-                destination.read_table_replay_epoch(&table_name).await.unwrap();
+            // Capture ownership before native DDL frees the source name.
+            let after_table_name = DuckLakeTableName::new(table_name.schema(), "renamed");
+            let renamed_replay_epoch = begin_table_rename_replay_epoch_transition(
+                &destination.metadata_pg_pool,
+                destination.metadata_schema.as_ref(),
+                &table_name,
+                &after_table_name,
+            )
+            .await
+            .unwrap();
             let reused_name_replay_epoch =
                 destination.begin_table_replay_epoch_transition(&table_name).await.unwrap();
             destination
                 .complete_table_replay_epoch_transition(&table_name, &reused_name_replay_epoch)
                 .await
                 .unwrap();
-            let after_table_name = DuckLakeTableName::new(table_name.schema(), "renamed");
-            preserve_renamed_table_replay_epoch(
+            let resumed_epoch = begin_table_rename_replay_epoch_transition(
                 &destination.metadata_pg_pool,
                 destination.metadata_schema.as_ref(),
+                &table_name,
                 &after_table_name,
-                &renamed_replay_epoch,
             )
             .await
             .unwrap();
+            assert_eq!(resumed_epoch, renamed_replay_epoch);
+            destination
+                .complete_table_replay_epoch_transition(&after_table_name, &resumed_epoch)
+                .await
+                .unwrap();
             assert_ne!(renamed_replay_epoch, reused_name_replay_epoch);
             assert_eq!(
                 destination.read_table_replay_epoch(&table_name).await.unwrap(),
@@ -5837,6 +5854,171 @@ mod tests {
                 destination.read_table_replay_epoch(&after_table_name).await.unwrap(),
                 renamed_replay_epoch
             );
+            destination.shutdown().await.unwrap();
+        }
+
+        /// Maintenance between a case-only marker move and epoch publication
+        /// must retain replay proof even when the target has an older epoch.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn interrupted_case_only_rename_preserves_replay_through_maintenance() {
+            use etl::{event::InsertEvent, store::StateStore};
+            use etl_maintenance::ducklake::{
+                CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig,
+                ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,
+                MergeAdjacentFilesMaintenanceConfig, RewriteDataFilesMaintenanceConfig,
+                run_maintenance_once,
+            };
+
+            let dir = TempDir::new().unwrap();
+            let data = path_to_file_url(&dir.path().join("data"));
+            let (_catalog_database, catalog) = create_catalog_database().await;
+            let store = MemoryStore::new();
+            let before = make_schema(1, "public", "users");
+            let after = TableSchema::with_snapshot_id(
+                before.id,
+                TableName::new("public".to_owned(), "Users".to_owned()),
+                before.column_schemas.clone(),
+                etl::schema::SnapshotId::new(20_u64.into(), 20_u64.into()),
+            );
+            store.store_table_schema(before.clone()).await.unwrap();
+            store.store_table_schema(after.clone()).await.unwrap();
+            let before = ReplicatedTableSchema::all(Arc::new(before));
+            let after = ReplicatedTableSchema::all(Arc::new(after));
+            let before_name = DuckLakeTableName::from_source(before.name());
+            let after_name = DuckLakeTableName::from_source(after.name());
+            let destination = DuckLakeDestination::new(
+                catalog.clone(),
+                data.clone(),
+                1,
+                None,
+                None,
+                None,
+                None,
+                store.clone(),
+            )
+            .await
+            .unwrap();
+            destination.write_table_rows(&before, None, Vec::new()).await.unwrap();
+            destination.truncate_table(&before).await.unwrap();
+            let insert = InsertEvent {
+                commit_lsn: 30_u64.into(),
+                tx_ordinal: 0,
+                replicated_table_schema: before.clone(),
+                table_row: TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned())]),
+            };
+            destination.write_events(vec![Event::Insert(insert.clone())]).await.unwrap();
+
+            // A prior lifetime at the target name has its own committed epoch.
+            let stale_epoch =
+                destination.begin_table_replay_epoch_transition(&after_name).await.unwrap();
+            destination
+                .complete_table_replay_epoch_transition(&after_name, &stale_epoch)
+                .await
+                .unwrap();
+            let pending_epoch = begin_table_rename_replay_epoch_transition(
+                &destination.metadata_pg_pool,
+                destination.metadata_schema.as_ref(),
+                &before_name,
+                &after_name,
+            )
+            .await
+            .unwrap();
+            assert_ne!(pending_epoch, stale_epoch);
+            let metadata =
+                store.get_destination_table_metadata(before.id()).await.unwrap().unwrap();
+            store
+                .store_destination_table_metadata(
+                    before.id(),
+                    metadata
+                        .with_schema_change(
+                            after.inner().snapshot_id,
+                            after.replication_mask().clone(),
+                        )
+                        .unwrap(),
+                    "",
+                )
+                .await
+                .unwrap();
+
+            // Model a crash immediately after the native transaction commits.
+            // The Postgres epoch publication is deliberately left pending.
+            let moved_name = after_name.clone();
+            run_duckdb_blocking(
+                destination.streaming_pool().unwrap(),
+                Arc::clone(&destination.blocking_slots),
+                move |conn| {
+                    conn.execute_batch("begin transaction").unwrap();
+                    rename_table_replay_state(conn, &before_name, &moved_name, &pending_epoch)?;
+                    conn.execute_batch("commit").unwrap();
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+            destination.shutdown().await.unwrap();
+            drop(destination);
+
+            run_maintenance_once(DuckLakeMaintenanceConfig {
+                catalog_url: catalog.clone(),
+                data_path: data.clone(),
+                s3: None,
+                metadata_schema: None,
+                writer_config: DuckLakeWriterConfig::default(),
+                inline_flush: InlineFlushMaintenanceConfig { enabled: false, min_inlined_bytes: 0 },
+                merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
+                    enabled: false,
+                    max_compacted_files: 10,
+                    max_tables_per_run: 10,
+                    target_file_size: "256MB".to_owned(),
+                },
+                rewrite_data_files: RewriteDataFilesMaintenanceConfig {
+                    enabled: false,
+                    min_active_data_files: 10,
+                    max_tables_per_run: 10,
+                },
+                expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+                    enabled: false,
+                    older_than: "1 day".to_owned(),
+                },
+                cleanup_old_files: CleanupOldFilesMaintenanceConfig { enabled: false },
+            })
+            .await
+            .unwrap();
+
+            let destination =
+                DuckLakeDestination::new(catalog, data, 1, None, None, None, None, store.clone())
+                    .await
+                    .unwrap();
+            destination.startup().await.unwrap();
+            assert!(
+                store
+                    .get_destination_table_metadata(after.id())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_applied()
+            );
+            destination
+                .write_events(vec![Event::Insert(InsertEvent {
+                    replicated_table_schema: after,
+                    ..insert
+                })])
+                .await
+                .unwrap();
+            let count = run_duckdb_blocking(
+                destination.streaming_pool().unwrap(),
+                Arc::clone(&destination.blocking_slots),
+                |conn| {
+                    Ok(conn
+                        .query_row("select count(*) from lake.public.users", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap())
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(count, 1);
             destination.shutdown().await.unwrap();
         }
 

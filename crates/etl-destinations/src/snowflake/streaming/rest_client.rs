@@ -1,5 +1,6 @@
 use std::{string::String, sync::Arc, time::Duration};
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
@@ -24,6 +25,10 @@ const SNOWPIPE_RETRY_POLICY: RetryPolicy = RetryPolicy {
 };
 
 const USER_AGENT: &str = "supabase-etl/0.1.0";
+
+/// Encodes everything except RFC 3986 unreserved characters in path segments.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet =
+    &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
 /// [`StreamClient`] backed by the Snowpipe Streaming REST API.
 ///
@@ -139,7 +144,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         offset_token: Option<&OffsetToken>,
     ) -> Result<OpenChannelResponse> {
         let host = self.get_or_discover_host().await?;
-        let url = channel_url(host, database, schema, table, channel);
+        let url = channel_url(host, database, schema, table, channel)?;
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
@@ -212,7 +217,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         continuation_token: &str,
     ) -> Result<InsertRowsResponse> {
         let host = self.get_or_discover_host().await?;
-        let base_url = insert_url(host, database, schema, table, channel);
+        let base_url = insert_url(host, database, schema, table, channel)?;
 
         let compressed = batch.bytes().clone();
         let query_params = insert_query_params(batch, continuation_token);
@@ -271,13 +276,13 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         channel: &str,
     ) -> Result<()> {
         let host = self.get_or_discover_host().await?;
-        let url = channel_url(host, database, schema, table, channel);
+        let url = channel_url(host, database, schema, table, channel)?;
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
         let request_body = ChannelLifecycleRequest::new(None);
 
-        retry_with_backoff(
+        let result = retry_with_backoff(
             SNOWPIPE_RETRY_POLICY,
             |_| false,
             |d| d,
@@ -308,7 +313,16 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
             },
         )
         .await
-        .map_err(|f| f.last_error)
+        .map_err(|f| f.last_error);
+
+        if result.is_ok() || matches!(&result, Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)))
+        {
+            // Refresh authentication after channel removal to avoid stalled
+            // writes when a table is recreated. Treat not-found as
+            // an already-completed drop.
+            self.auth.invalidate_token().await;
+        }
+        result
     }
 
     async fn channel_status(
@@ -319,7 +333,7 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
         channel: &str,
     ) -> Result<ChannelStatusResponse> {
         let host = self.get_or_discover_host().await?;
-        let url = channel_status_url(host, database, schema, table);
+        let url = channel_status_url(host, database, schema, table)?;
 
         let auth = Arc::clone(&self.auth);
         let http = self.http.clone();
@@ -377,26 +391,50 @@ impl<T: TokenProvider + 'static> StreamClient for RestStreamClient<T> {
     }
 }
 
+/// Builds a Snowpipe endpoint while preserving each raw path segment.
+fn streaming_url(host: &str, segments: &[&str]) -> Result<String> {
+    let mut url = format!("{host}/v2/streaming");
+    for segment in segments {
+        // URL parsing normalizes dot-only segments even if their dots are
+        // percent-encoded, so these identifiers cannot be represented
+        // faithfully.
+        if matches!(*segment, "." | "..") {
+            return Err(Error::Encoding(
+                "Dot-only identifiers cannot be represented in Snowpipe REST paths".into(),
+            ));
+        }
+        url.push('/');
+        url.extend(utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET));
+    }
+    Ok(url)
+}
+
+/// Returns the managed default pipe name for a table.
 fn pipe_name(table: &str) -> String {
     format!("{table}-STREAMING")
 }
 
-fn channel_url(host: &str, db: &str, schema: &str, table: &str, channel: &str) -> String {
+/// Builds the endpoint shared by channel creation and deletion.
+fn channel_url(host: &str, db: &str, schema: &str, table: &str, channel: &str) -> Result<String> {
     let pipe = pipe_name(table);
-    format!("{host}/v2/streaming/databases/{db}/schemas/{schema}/pipes/{pipe}/channels/{channel}")
+    streaming_url(host, &["databases", db, "schemas", schema, "pipes", &pipe, "channels", channel])
 }
 
-fn insert_url(host: &str, db: &str, schema: &str, table: &str, channel: &str) -> String {
+/// Builds the row insertion endpoint without query parameters.
+fn insert_url(host: &str, db: &str, schema: &str, table: &str, channel: &str) -> Result<String> {
     let pipe = pipe_name(table);
-    format!(
-        "{host}/v2/streaming/data/databases/{db}/schemas/{schema}/pipes/{pipe}/channels/{channel}/\
-         rows"
+    streaming_url(
+        host,
+        &["data", "databases", db, "schemas", schema, "pipes", &pipe, "channels", channel, "rows"],
     )
 }
 
-fn channel_status_url(host: &str, db: &str, schema: &str, table: &str) -> String {
+/// Builds the status endpoint with its action suffix outside the encoded name.
+fn channel_status_url(host: &str, db: &str, schema: &str, table: &str) -> Result<String> {
     let pipe = pipe_name(table);
-    format!("{host}/v2/streaming/databases/{db}/schemas/{schema}/pipes/{pipe}:bulk-channel-status")
+    let mut url = streaming_url(host, &["databases", db, "schemas", schema, "pipes", &pipe])?;
+    url.push_str(":bulk-channel-status");
+    Ok(url)
 }
 
 fn insert_query_params(batch: &RowBatch, continuation_token: &str) -> [(&'static str, String); 3] {
@@ -605,6 +643,128 @@ mod tests {
         (url, server)
     }
 
+    /// Every identifier stays in its own segment after reqwest parses the URL.
+    #[test]
+    fn streaming_urls_preserve_identifier_segments() {
+        let cases = [
+            ("plain_A-1.~", "plain_A-1.~"),
+            ("a?b", "a%3Fb"),
+            ("a#b", "a%23b"),
+            ("a/b", "a%2Fb"),
+            (r"a\b", "a%5Cb"),
+            ("a%b", "a%25b"),
+            ("a%2Fb", "a%252Fb"),
+            ("a%252Fb", "a%25252Fb"),
+            ("%2E%2E", "%252E%252E"),
+            (" a b ", "%20a%20b%20"),
+            ("café", "caf%C3%A9"),
+            ("a\t\n\rb", "a%09%0A%0Db"),
+            ("a:bulk-channel-status", "a%3Abulk-channel-status"),
+            ("a+b", "a%2Bb"),
+        ];
+        let http = reqwest::Client::new();
+        for (identifier, encoded) in cases {
+            for position in 0..4 {
+                let mut names = ["DB", "SCHEMA", "TABLE", "CHANNEL"];
+                names[position] = identifier;
+                let [database, schema, table, channel] = names;
+                let mut expected = ["DB", "SCHEMA", "TABLE", "CHANNEL"];
+                expected[position] = encoded;
+                let [db_path, schema_path, table_path, channel_path] = expected;
+                let pipe_path = format!(
+                    "databases/{db_path}/schemas/{schema_path}/pipes/{table_path}-STREAMING"
+                );
+                let channel_path = format!("{pipe_path}/channels/{channel_path}");
+                let cases = [
+                    (
+                        reqwest::Method::PUT,
+                        channel_url("https://example.com", database, schema, table, channel),
+                        format!("/v2/streaming/{channel_path}"),
+                    ),
+                    (
+                        reqwest::Method::DELETE,
+                        channel_url("https://example.com", database, schema, table, channel),
+                        format!("/v2/streaming/{channel_path}"),
+                    ),
+                    (
+                        reqwest::Method::POST,
+                        insert_url("https://example.com", database, schema, table, channel),
+                        format!("/v2/streaming/data/{channel_path}/rows"),
+                    ),
+                    (
+                        reqwest::Method::POST,
+                        channel_status_url("https://example.com", database, schema, table),
+                        format!("/v2/streaming/{pipe_path}:bulk-channel-status"),
+                    ),
+                ];
+                for (method, url, expected_path) in cases {
+                    let request = http.request(method, url.unwrap()).build().unwrap();
+                    assert_eq!(request.url().path(), expected_path);
+                    assert_eq!(request.url().query(), None);
+                    assert_eq!(request.url().fragment(), None);
+                }
+            }
+        }
+    }
+
+    /// Dot-only components fail locally instead of changing the endpoint path.
+    #[test]
+    fn streaming_urls_reject_unrepresentable_dot_segments() {
+        for dot in [".", ".."] {
+            for (database, schema, channel) in
+                [(dot, "SCHEMA", "CHANNEL"), ("DB", dot, "CHANNEL"), ("DB", "SCHEMA", dot)]
+            {
+                for result in [
+                    channel_url("https://example.com", database, schema, "TABLE", channel),
+                    insert_url("https://example.com", database, schema, "TABLE", channel),
+                ] {
+                    let error = result.unwrap_err();
+                    assert!(matches!(error, Error::Encoding(_)));
+                    assert_eq!(error.retryability(), Retryability::Permanent);
+                }
+            }
+            for (database, schema) in [(dot, "SCHEMA"), ("DB", dot)] {
+                let error = channel_status_url("https://example.com", database, schema, "TABLE")
+                    .unwrap_err();
+                assert!(matches!(error, Error::Encoding(_)));
+            }
+
+            // The pipe suffix makes a dot-only table name representable.
+            let url = channel_url("https://example.com", "DB", "SCHEMA", dot, "CHANNEL").unwrap();
+            let url = reqwest::Url::parse(&url).unwrap();
+            assert_eq!(
+                url.path(),
+                format!(
+                    "/v2/streaming/databases/DB/schemas/SCHEMA/pipes/{dot}-STREAMING/channels/\
+                     CHANNEL"
+                )
+            );
+        }
+    }
+
+    /// Percent-encoded identifiers do not consume or re-encode insert tokens.
+    #[test]
+    fn streaming_insert_url_preserves_query_parameters() {
+        let url =
+            insert_url("https://example.com", "DB?", "SCHEMA#", "TABLE/", "CHANNEL%2F").unwrap();
+        let params = [
+            ("continuationToken", "placeholder-token?/#% +"),
+            ("startOffsetToken", "000000000000000a/0000000000000001"),
+            ("endOffsetToken", "000000000000000a/0000000000000002"),
+        ];
+        let request = reqwest::Client::new().post(url).query(&params).build().unwrap();
+        assert_eq!(
+            request.url().path(),
+            "/v2/streaming/data/databases/DB%3F/schemas/SCHEMA%23/pipes/TABLE%2F-STREAMING/\
+             channels/CHANNEL%252F/rows"
+        );
+        assert_eq!(request.url().fragment(), None);
+        assert_eq!(
+            request.url().query_pairs().collect::<Vec<_>>(),
+            params.map(|(key, value)| (key.into(), value.into())).to_vec()
+        );
+    }
+
     /// A rejected token is refreshed, and the request is resent once.
     #[tokio::test]
     async fn rejected_token_is_refreshed_and_resent_once() {
@@ -641,6 +801,54 @@ mod tests {
         assert_eq!(error.retryability(), Retryability::Permanent);
         assert_eq!(server.await.unwrap(), vec!["token-0", "token-1"]);
         assert_eq!(auth.invalidations.load(Ordering::SeqCst), 2);
+    }
+
+    /// A removed channel starts its next incarnation with a fresh token, but
+    /// a refused drop keeps the current token.
+    #[tokio::test]
+    async fn dropped_channel_refreshes_token_before_reopen() {
+        let open_response = r#"{
+            "next_continuation_token":"placeholder-token",
+            "channel_status":{
+                "channel_status_code":"SUCCESS",
+                "created_on_ms":1,
+                "rows_inserted":0,
+                "rows_parsed":0,
+                "rows_error_count":0
+            }
+        }"#;
+        for (status, body, expected_token) in [
+            (200, "{}", "token-1"),
+            (404, "{}", "token-1"),
+            (409, r#"{"code":"ERR_CHANNEL_HAS_UNCOMMITTED_DATA"}"#, "token-0"),
+        ] {
+            let (url, server) = serve_responses(vec![(status, body), (200, open_response)]).await;
+            let auth = Arc::new(CountingTokenProvider::default());
+            let stream = RestStreamClient::new(
+                url.clone(),
+                auth,
+                Client::builder().no_proxy().build().unwrap(),
+            );
+            stream.ingest_host.set(url).unwrap();
+
+            let dropped = stream.drop_channel("DB", "SCHEMA", "TABLE", "CHANNEL").await;
+            match status {
+                200 => dropped.unwrap(),
+                404 => {
+                    assert!(matches!(
+                        dropped,
+                        Err(Error::Snowpipe(SnowpipeError::ChannelNotFound))
+                    ));
+                }
+                409 => assert!(matches!(
+                    dropped,
+                    Err(Error::Snowpipe(SnowpipeError::ChannelHasUncommittedRows))
+                )),
+                _ => unreachable!(),
+            }
+            stream.open_channel("DB", "SCHEMA", "TABLE", "CHANNEL", None).await.unwrap();
+            assert_eq!(server.await.unwrap(), vec!["token-0", expected_token]);
+        }
     }
 
     #[test]

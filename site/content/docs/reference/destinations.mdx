@@ -496,7 +496,9 @@ object storage.
 ETL preserves source schema and table spelling when creating DuckLake tables.
 Column names use ASCII lowercase. DuckDB resolves identifiers without regard
 to ASCII case, so a case-only source rename keeps the same native table and
-moves its replay keys to the new source spelling.
+moves its replay keys to the new source spelling. A pending target epoch
+protects relocated replay markers from maintenance until the rename finishes,
+including recovery after a process restart.
 
 Distinct native tables must have distinct `<schema>.<table>` replay keys.
 Names can contain dots when the combined key remains unambiguous. For example,
@@ -522,7 +524,183 @@ renames, and resets that would share their replay state.
 
 This status applies to the managed service, not local or self-hosted use.
 
-Snowflake uses direct Snowpipe Streaming and key-pair authentication.
+Snowflake uses direct Snowpipe Streaming and key-pair authentication. ETL stores
+inserts, updates and deletes as CDC records. For tables meeting the requirements
+below, ETL creates a companion view exposing current state. The raw table remains
+available as event history.
+
+### Partial updates and materialization
+
+Snowflake supports complete rows and partial updates. With a supported primary
+key and `REPLICA IDENTITY DEFAULT`, Postgres can omit unchanged large values
+stored using TOAST. ETL records which columns were omitted so a query can carry
+forward their last supplied values. With `REPLICA IDENTITY FULL`, ETL writes
+complete update rows.
+
+#### Choosing replica identity and a query
+
+Choose based on how much data changes and how often you query current state:
+
+| Source setting | Stored updates | Query choice and trade-off |
+| --- | --- | --- |
+| `REPLICA IDENTITY DEFAULT` with a supported primary key | Complete rows and partial updates when Postgres omits unchanged TOAST values. | Use the materialization query. Omitting large unchanged values reduces the payload sent to Snowflake, while resolving individual columns requires more query work. |
+| `REPLICA IDENTITY FULL` with a stable primary key | Complete update rows, including unchanged values. | For a history of complete insert/update records, use a latest-event-per-key query. It avoids per-column value resolution, at the cost of sending more source data and repeatedly writing unchanged values. The materialization query also works. |
+
+For tables with large values that change infrequently, start with DEFAULT and
+the materialization query, subject to the requirements below. If rows are small
+or current state is queried frequently, evaluate FULL with latest-event
+selection. Measure ingestion and query costs together using representative
+history; reduced payload size alone does not establish a lower total bill.
+Query cost also depends on [warehouse size and running time](https://docs.snowflake.com/en/user-guide/cost-understanding-compute#virtual-warehouse-credit-usage).
+
+A latest-event-per-key query selects the event with the greatest
+`_cdc_sequence_number` for each primary key, then excludes keys whose selected
+event is a delete. Use it only when all relevant insert/update history is
+complete and the key and history requirements below hold. For mixed or partial
+history, use the materialization query: taking just the latest event would treat omitted
+values as NULL. Changing replica identity to FULL does not fill in earlier
+partial records.
+
+#### Missing values and materialization
+
+Each CDC record includes `_cdc_missing_columns ARRAY`. An omitted value is stored
+as a NULL placeholder with its PostgreSQL attribute number (`pg_attribute.attnum`)
+in this array. These IDs remain stable across renames; dropping a column does
+not make its ID available for reuse within the same table. They are not row
+indexes or Snowflake column positions. An explicitly supplied
+SQL NULL has no entry; it replaces the previous value. Complete records have an
+empty array. Changed large values and initial copy rows must fit the compressed
+request limit.
+
+Query the automatically created `<physical_table>_CURRENT` view:
+
+```sql
+select * from PUBLIC_ORDERS_CURRENT;
+```
+
+This ordinary view runs the materialization query when read. It does not store
+results or run a background refresh, and it requires a Snowflake warehouse.
+ETL updates its definition after supported schema changes. No PostgreSQL access,
+ETL binary, or manual query generation is needed.
+
+For custom SQL, read the column-ID and primary-key mapping entirely in Snowflake:
+
+```sql
+select column_name,
+       try_parse_json(comment):column_id::integer as column_id,
+       try_parse_json(comment):primary_key_position::integer as primary_key_position
+from ETL_DB.information_schema.columns
+where table_schema = 'PUBLIC'
+  and table_name = 'PUBLIC_ORDERS_CURRENT'
+  and try_parse_json(comment):column_id is not null
+order by ordinal_position;
+```
+
+Replace the example database, schema, and view identifiers. Source-column comments
+contain JSON with `column_id` and nullable `primary_key_position`. Diagnostic
+columns have descriptive comments instead. Use `GET_DDL('VIEW',
+'ETL_DB.PUBLIC.PUBLIC_ORDERS_CURRENT')` to inspect the generated SQL. Refresh
+customer-owned SQL after DDL; Snowflake column positions cannot replace these IDs.
+The Rust `etl_destinations::snowflake::materialization_query` API is also available
+as a query-generation helper.
+
+The query carries forward omitted values, preserves explicit NULLs and respects
+delete/reinsert boundaries. It returns `_cdc_anchored`,
+`_cdc_unresolved_columns`, and `_cdc_last_sequence` alongside source columns.
+An unanchored row or unresolved columns indicates incomplete history; these
+flags cannot detect arbitrary publication gaps or removed intermediate events.
+
+The materialization query scans retained history for insert/delete boundaries, then resolves
+values from each key's latest complete record and later partial updates. This
+limits per-column work when complete records are available, but the initial
+history scan remains. Retain the stored events; this query does not make history
+pruning safe.
+
+#### Requirements for materializing CDC history
+
+- A stable, nondeferrable primary key with every component replicated. Supported
+  key types are `smallint`, `integer`, `bigint`, `oid`, `boolean`, `text`,
+  `varchar`, PostgreSQL `"char"`, `char(n)`, `name`, `uuid`, `bytea`, `numeric`,
+  `date`, `timestamp`, and `timestamptz`. Other key types need separate validation.
+- Stable key values and representation. Column renames and drops are supported;
+  ETL refreshes the companion view after applying DDL. Regenerate customer-owned
+  materialization queries against the updated mapping.
+  The materialization query reserves names beginning with `_cdc_`. The writer
+  reserves its three physical CDC column names.
+- Complete, uninterrupted publication coverage with unchanged actions, column
+  lists and membership, and no row filters, including while stopped.
+- A coherent initial snapshot and all accepted history from that generation.
+  Do not prune, manually edit or combine generations.
+
+Partial updates enforce the supported key structure and reject a delivered key
+change. Complete-row ingestion accepts a broader set of source schemas and
+schema changes. Successfully storing an event does not establish that its
+history meets the requirements for materializing CDC history. Publication changes are an
+operator responsibility; ETL cannot detect events Postgres never emits.
+
+pgoutput announces a changed relation with the next row event; DDL alone does
+not update the destination or its view.
+
+Omission metadata keeps its meaning after a rename or drop, including renaming
+a key without changing its value. `_cdc_unresolved_columns` reports current
+column names. Dropping and re-adding a name creates a new column with a new ID.
+Added columns retain the destination's existing default-value limitations: only
+supported literal defaults populate historical records. This feature does not
+add support for arbitrary defaults or type changes. See
+[Schema changes](/explanation/schema-changes) for the existing DDL behavior.
+
+After incompatible key/schema/publication changes or lost history, request a
+full resync through the supported reset operation: recreate the owned destination
+history from a new coherent snapshot. Recreate the pipeline if per-table resync
+is unavailable. Standalone deployments without reset support should use fresh
+ETL state and a fresh destination schema. A normal restart does not request a
+resync; manual truncation is not a substitute.
+
+### Companion-view permissions and lifecycle
+
+The ETL role needs `CREATE VIEW` on the destination schema and ownership of its
+raw tables and views. For example:
+
+```sql
+grant create view on schema ETL_DB.PUBLIC to role ETL_ROLE;
+```
+
+Grant this before starting or upgrading the replicator. ETL does not change role
+grants automatically. Missing permissions or conflicting objects fail setup or
+startup reconciliation. Consumers need `SELECT` on the view and the usual
+usage privileges for its database, schema, and query warehouse.
+
+ETL owns the `_CURRENT` and `_CURRENT_PENDING` companion names and their comments.
+For physical names longer than 239 characters, the view name is
+`_ETL_<uppercase SHA-256 of the physical name>_CURRENT`; its recovery name adds
+`_PENDING`.
+The second name is an internal recovery object, not a supported query interface.
+Before a drop or rename, the public view becomes temporarily unavailable; it is
+restored after the raw schema and new definition are ready. Add-only changes
+replace the definition without taking the public name offline. Startup restores
+existing ETL-owned public or pending views for tables that completed initial
+synchronization, including idle tables. Tables without an owned view wait for
+initial copy or a source relation to establish eligibility before ETL creates
+their first view. Stored destination schemas do not retain replica identity;
+primary-key columns alone are insufficient. This applies to legacy tables and
+manually removed views too. Tables awaiting a fresh copy and errored tables are
+skipped. Interrupted raw DDL follows the existing schema recovery/resync
+requirements.
+
+Explicit view grants survive definition replacement and same-name resync.
+Do not attach custom policies, tags, or streams to ETL-owned views or change
+their definitions/comments. Create a separate customer-owned view for custom
+behavior. Replacing an ETL view makes streams on it stale. During initial copy
+or resync, the view may expose a snapshot that is still being copied.
+
+Complete-row ingestion for keyless tables, unsupported identities/key types, or
+source names beginning with `_cdc_` remains raw-only and emits a warning. Losing
+eligibility after a view has been created makes it unavailable and fails
+reconciliation before changing the applied raw schema. A restart can restore
+the view against that previous schema; the next source relation rejects the
+unsupported transition again. Fresh pipeline state requires an unused
+destination namespace or deliberate cleanup of old tables and both reserved
+companion names.
 
 ### Source table renames
 
@@ -531,9 +709,11 @@ same PostgreSQL schema. It drains pending writes, retires the old streaming
 channel before freeing its table name, renames the table, applies
 column changes, and reopens ingestion at the previous committed offset. The
 new snapshot is marked applied only after these steps succeed. Renames fail
-before any change when a table or view occupies the mapped target name. Moving
-the source table to another
-schema is unsupported.
+before any change when a table or view occupies the mapped target name. The
+old companion view is retired and a new one is created for the resulting raw
+table name. Explicit grants on that new view must be recreated. A case-only
+rename keeps the mapped raw and companion names. Moving the source table to
+another schema is unsupported.
 
 The destination role needs `OWNERSHIP` on the table and `CREATE TABLE` on its
 schema to rename it. See [Snowflake's rename requirements](https://docs.snowflake.com/en/sql-reference/sql/alter-table#parameters).
@@ -569,6 +749,21 @@ behavior and recovery after an interrupted transition.
   source data or a fresh copy.
 - Validate channel recovery, committed offsets, and account-specific resource
   limits before production use.
+
+### Existing destination tables
+
+For ETL-owned tables using the supported previous CDC format, ETL validates the
+column set and CDC metadata, adds the nullable `_cdc_missing_columns` ARRAY
+column, and validates the result before opening the write channel. Existing
+insert/update records have NULL metadata, interpreted as complete within their
+replicated schema at event time. Historical deletes remain deletion boundaries.
+The upgrade preserves stored history and replication offsets and requires no
+backfill.
+
+The configured Snowflake role must allow the ALTER. Unexpected schemas and
+metadata types remain errors. Customer-owned queries must support partial
+records before consuming them; automatic table upgrades do not update those
+queries. The materialization query requires `_cdc_missing_columns` to exist.
 
 ## Iceberg
 

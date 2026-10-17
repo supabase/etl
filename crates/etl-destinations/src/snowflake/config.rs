@@ -76,6 +76,13 @@ impl Config {
         })
     }
 
+    /// Routes SQL requests to a local HTTP fixture during unit tests.
+    #[cfg(test)]
+    pub(super) fn with_test_server(mut self, url: &str) -> Self {
+        self.account_url = url.to_owned();
+        self
+    }
+
     /// Attach key-pair authentication credentials.
     pub fn with_private_key(
         mut self,

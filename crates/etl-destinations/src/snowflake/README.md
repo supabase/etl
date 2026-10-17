@@ -7,6 +7,127 @@ open-source destination is unrestricted. See the
 and the [`etl-examples` Snowflake section](../../../etl-examples/README.md#snowflake)
 for the runnable example.
 
+## Partial updates and materialization
+
+ETL stores inserts, updates, and deletes as CDC records. Complete rows and
+partial updates use the same destination and table format. With a supported
+primary key and `REPLICA IDENTITY DEFAULT`, Postgres can omit unchanged large
+TOAST values from updates. `REPLICA IDENTITY FULL` supplies complete update rows.
+
+Each record includes `_cdc_operation`, `_cdc_sequence_number`, and `_cdc_missing_columns ARRAY`. An omitted value is stored as a NULL placeholder with its PostgreSQL attribute number (`pg_attribute.attnum`) in the array. These IDs survive column renames and are not reused after a drop within the same source table. They are not row indexes or Snowflake column positions. An explicitly supplied SQL NULL has no entry and replaces the previous value. Complete records have an empty array. Deletes end a row's lifetime; their values are not carried forward into a later insert.
+
+### Querying current state
+
+ETL creates an ordinary `<physical_table>_CURRENT` view for tables meeting the
+materialization requirements below. Query it directly in Snowflake:
+
+```sql
+select * from PUBLIC_ORDERS_CURRENT;
+```
+
+The view returns source columns plus `_cdc_anchored`, `_cdc_unresolved_columns`,
+and `_cdc_last_sequence`. It executes the materialization query when read;
+it does not store results or schedule background refreshes. The raw CDC table
+remains available. Queries require a Snowflake warehouse.
+
+ETL publishes each source column's `column_id` and `primary_key_position` as JSON
+in the view column's comment. Read them through `INFORMATION_SCHEMA.COLUMNS` or
+`DESCRIBE VIEW`; PostgreSQL access and ETL binaries are unnecessary. The view
+SQL is also available through `GET_DDL`. Snowflake column positions are not
+PostgreSQL attribute numbers. For Rust callers,
+`etl_destinations::snowflake::materialization_query` remains a SQL-generation
+helper; the function itself does not execute SQL or manage objects.
+
+The query handles complete, partial, and mixed histories. It scans retained
+history for insert/delete boundaries, then resolves values from each key's
+latest complete record and later partial updates. It preserves explicit NULLs
+and flags unanchored rows or unresolved columns. These diagnostics cannot detect
+arbitrary publication gaps or removed events.
+
+For guaranteed complete insert/update histories, a latest-event-per-key query
+avoids per-column value resolution. DEFAULT can reduce repeated large payloads;
+FULL supplies complete rows suitable for latest-event selection. Changing to
+FULL does not fill in earlier partial records. Evaluate ingestion and query
+costs together for the workload.
+
+Partial updates require a supported nondeferrable primary key with every
+component replicated. Materialization also requires stable key values and
+representation, uninterrupted publication coverage, and all accepted history
+from a coherent initial snapshot. History pruning is unsupported. Incompatible
+key, schema, or publication changes and lost history require a full resync.
+Column renames and drops preserve partial-update semantics. ETL updates the
+companion view using the schema snapshot applied to Snowflake; customer-owned
+queries must be regenerated after DDL.
+`_cdc_unresolved_columns` reports current column names, while stored omission
+metadata contains IDs. A dropped/re-added
+name identifies a new column. Added columns follow the same default-value support
+as complete rows: unsupported defaults and type changes can require a resync.
+Stable IDs do not extend that support. pgoutput announces changed relations with
+the next row event; DDL alone does not update the destination.
+See [Partial updates and materialization](https://supabase.github.io/etl/reference/destinations/#partial-updates-and-materialization)
+for supported key types, query diagnostics, and resync requirements.
+
+### View permissions and lifecycle
+
+The ETL role needs `CREATE VIEW` on the destination schema and must retain
+ownership of its raw tables and companion views. Missing privileges fail setup
+or startup reconciliation. ETL does not grant privileges itself. Grant consumers
+`SELECT` on the companion view and the usual database/schema/warehouse usage.
+
+ETL reserves `<physical_table>_CURRENT` and `<physical_table>_CURRENT_PENDING`.
+For physical names longer than 239 characters, it uses
+`_ETL_<uppercase SHA-256 of the physical name>_CURRENT` and its `_PENDING` name.
+It checks object type and its ownership comment before changing either name.
+For tables requiring a view, foreign objects are errors; raw-only tables leave
+them untouched. Two owned views at the public and pending names are ambiguous
+and cause an error. Do not modify
+these objects or their comments. Create a separate customer-owned view for
+custom projections or access policies. ETL preserves explicit grants using
+`COPY GRANTS`; it does not preserve user-added policies, tags, or change tracking.
+Streams on an ETL view are unsupported because replacement makes them stale.
+
+Before drops or renames, ETL temporarily renames the view to the reserved
+`_CURRENT_PENDING` name. The public name is unavailable until the raw schema is
+applied and the definition is replaced. Add-only changes replace the definition
+without this outage. Startup restores existing ETL-owned public or pending views
+for tables that completed initial synchronization, including idle tables. Tables
+without an owned view wait for initial copy or a source relation before ETL
+creates their first view: stored destination schemas do not retain replica
+identity, and primary-key columns alone cannot establish eligibility. This also
+applies to legacy tables and manually removed views. Tables awaiting a fresh
+copy and errored tables are skipped. Interrupted raw DDL still requires the
+existing recovery/resync procedure.
+
+Same-name resync retains view grants while replacing CDC history. When a source
+rename changes the physical name, ETL removes the old view and creates one beside
+the new raw table; consumer grants and references must be set up for the new name. The view can
+expose a partial snapshot while initial copying is in progress. Query only the
+public name; the pending name is an internal recovery object.
+
+Tables without a supported primary-key identity, or with source names beginning
+with `_cdc_`, retain complete-row ingestion without a companion view and emit a
+warning. A table that loses eligibility after having a view fails reconciliation
+before changing its applied raw schema and leaves that view unavailable. A
+restart can restore the view against the previous applied schema; the next
+source relation rejects the unsupported transition again. Recreating a pipeline
+with fresh ETL state requires an unused destination namespace or deliberate
+removal of the old raw tables and both reserved view names.
+
+### Existing destination tables
+
+For ETL-owned tables using the supported previous CDC format, ETL adds the
+nullable `_cdc_missing_columns` column before opening the write channel.
+Existing insert/update records have NULL metadata, interpreted as complete
+records within their replicated schema at event time. The upgrade preserves
+stored history and replication offsets and requires no backfill.
+
+The configured Snowflake role must allow the ALTER. Unrelated schema mismatches
+remain errors. ETL updates the table format; customer-owned queries must support
+partial records before consuming them. Existing deployments also need the
+`CREATE VIEW` grant before upgrading; ETL creates the first view when initial
+copy or a source relation establishes eligibility. An idle legacy table keeps
+its raw-only behavior until then.
+
 ## Request Packing and Large Rows
 
 Snowpipe Streaming rejects any request body over 4 MiB (4,194,304 bytes,
@@ -138,6 +259,7 @@ GRANT USAGE ON WAREHOUSE COMPUTE_WH TO ROLE etl_test_role;
 GRANT USAGE ON DATABASE ETL_DEV TO ROLE etl_test_role;
 GRANT USAGE ON SCHEMA ETL_DEV.PUBLIC TO ROLE etl_test_role;
 GRANT CREATE TABLE ON SCHEMA ETL_DEV.PUBLIC TO ROLE etl_test_role;
+GRANT CREATE VIEW ON SCHEMA ETL_DEV.PUBLIC TO ROLE etl_test_role;
 GRANT CREATE STAGE ON SCHEMA ETL_DEV.PUBLIC TO ROLE etl_test_role;
 GRANT CREATE PIPE ON SCHEMA ETL_DEV.PUBLIC TO ROLE etl_test_role;
 
@@ -145,6 +267,7 @@ GRANT CREATE PIPE ON SCHEMA ETL_DEV.PUBLIC TO ROLE etl_test_role;
 GRANT USAGE ON DATABASE ETL_BENCH TO ROLE etl_test_role;
 GRANT USAGE ON SCHEMA ETL_BENCH.PUBLIC TO ROLE etl_test_role;
 GRANT CREATE TABLE ON SCHEMA ETL_BENCH.PUBLIC TO ROLE etl_test_role;
+GRANT CREATE VIEW ON SCHEMA ETL_BENCH.PUBLIC TO ROLE etl_test_role;
 GRANT CREATE STAGE ON SCHEMA ETL_BENCH.PUBLIC TO ROLE etl_test_role;
 GRANT CREATE PIPE ON SCHEMA ETL_BENCH.PUBLIC TO ROLE etl_test_role;
 

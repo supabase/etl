@@ -19,7 +19,7 @@ use etl_destinations::snowflake::{
 use rand::random;
 use tokio::time::Duration;
 
-use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
+use crate::snowflake::common::{build_auth, poll_destination_offset, quote, with_table_cleanup};
 
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
@@ -137,7 +137,7 @@ async fn schema_change_batched_operations() {
             .run_sql(&format!(
                 "alter table {} rename to {}",
                 table_name.as_quoted_identifier(),
-                pg_escape::quote_identifier(&renamed_source.name)
+                quote(&renamed_source.name)
             ))
             .await
             .unwrap();

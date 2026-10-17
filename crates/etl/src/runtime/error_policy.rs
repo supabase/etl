@@ -107,6 +107,11 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
         ErrorKind::SourceSnapshotTooOld => {
             "Check replication slot status and database configuration."
         }
+        ErrorKind::DestinationLayoutUnsupported => {
+            "Use a supported Snowflake source and CDC table layout. Resynchronize after \
+             incompatible key, schema, publication, or history changes; restarting alone does not \
+             rebuild the destination history."
+        }
         ErrorKind::DestinationSchemaRewind => {
             "Resynchronize the affected table. The destination schema is ahead of the replayed \
              replication stream, so the replayed schema snapshot cannot be applied safely."
@@ -177,6 +182,7 @@ mod tests {
             (ErrorKind::TaskPanic, RetryDirective::Manual),
             (ErrorKind::TaskCancelled, RetryDirective::Manual),
             (ErrorKind::SourceAuthenticationError, RetryDirective::Manual),
+            (ErrorKind::DestinationLayoutUnsupported, RetryDirective::Manual),
             (ErrorKind::SourceConnectionFailed, RetryDirective::Timed),
             (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
             (ErrorKind::SourceTableCopyLockConflict, RetryDirective::Timed),

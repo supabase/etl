@@ -4,11 +4,16 @@ mod config;
 mod core;
 mod encoding;
 mod error;
+mod materialization;
 mod metrics;
 mod schema;
 mod sql;
 mod sql_client;
 mod streaming;
+mod view;
+
+#[cfg(test)]
+mod test_client;
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
@@ -30,6 +35,7 @@ pub use client::Client;
 pub use config::Config;
 pub use encoding::{CdcMeta, CdcOperation};
 pub use error::{Error, LargestColumn, Result, SnowpipeError};
+pub use materialization::materialization_query;
 pub use sql_client::SqlClient;
 #[cfg(feature = "test-utils")]
 pub use streaming::BuilderFootprint;

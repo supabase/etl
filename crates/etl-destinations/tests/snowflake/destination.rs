@@ -261,18 +261,28 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
 
     with_table_cleanup(&harness.sql, &cleanup_names, || async {
         let mut original_metadata = Vec::new();
+        // Independent tables can commit while the remaining copies are
+        // submitted.
         for ((schema, _), name) in cases.iter().zip(&names) {
             harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
-            write_table_copy_and_wait(
+            let status = invoke_write_table_rows(
                 &harness.destination,
                 schema,
                 vec![TableRow::new(vec![Cell::I32(1), Cell::String("copied".to_owned())])],
             )
-            .await;
+            .await
+            .unwrap();
+            assert_eq!(status, DestinationWriteStatus::Accepted);
             let metadata =
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
             original_metadata.push(metadata);
             assert!(harness.sql.object_exists(name).await.unwrap());
+        }
+
+        for (schema, _) in &cases {
+            let status =
+                invoke_write_table_rows(&harness.destination, schema, vec![]).await.unwrap();
+            assert_eq!(status, DestinationWriteStatus::Durable);
         }
 
         // Case-only collisions with an already-created table use the existing
@@ -301,22 +311,27 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
 
         let restarted =
             Destination::new(Client::new(build_auth(), u64::MAX), harness.store.clone());
-        for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
-            invoke_write_events(
-                &restarted,
-                WriteEventsDurability::RequireDurable,
-                vec![Event::Insert(InsertEvent {
+        // One batch submits every table before waiting for CDC durability.
+        let events = cases
+            .iter()
+            .enumerate()
+            .map(|(index, (schema, _))| {
+                Event::Insert(InsertEvent {
                     commit_lsn: PgLsn::from(10_u64),
-                    tx_ordinal: 1,
+                    tx_ordinal: u64::try_from(index).unwrap() + 1,
                     replicated_table_schema: schema.clone(),
                     table_row: TableRow::new(vec![
                         Cell::I32(2),
                         Cell::String("streamed".to_owned()),
                     ]),
-                })],
-            )
+                })
+            })
+            .collect();
+        let status = invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, events)
             .await
             .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        for ((schema, _), metadata) in cases.iter().zip(&original_metadata) {
             assert_eq!(
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().as_ref(),
                 Some(metadata)
@@ -1022,6 +1037,7 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
                 serde_json::json!("after"),
                 serde_json::json!("insert"),
                 serde_json::json!(post_truncate_offset.to_string()),
+                serde_json::json!("[]"),
             ]]
         );
     })
@@ -1070,10 +1086,16 @@ async fn write_events_delete_key_only() {
         .await;
         assert_eq!(rows.len(), 1, "expected 1 delete row");
 
-        // Column order: id, name, _cdc_operation, _cdc_sequence_number
+        // Source columns precede the operation, sequence, and missing-column
+        // list.
         assert_eq!(&rows[0][0], &serde_json::Value::String("42".into()),);
         assert_eq!(&rows[0][1], &serde_json::Value::Null);
         assert_eq!(&rows[0][2], &serde_json::Value::String("delete".into()),);
+        assert_eq!(rows[0][3].as_str().unwrap(), expected_offset.as_ref());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(rows[0][4].as_str().unwrap()).unwrap(),
+            serde_json::json!([2])
+        );
     })
     .await;
 }
@@ -2471,6 +2493,20 @@ async fn json_null_preservation_and_legacy_defaults() {
         )
         .await
         .is_ok_and(|result| result.is_ok());
+    }
+    for suffix in ["_CURRENT", "_CURRENT_PENDING"] {
+        let view = format!("{sf_table}{suffix}");
+        let quote = crate::snowflake::common::quote;
+        harness
+            .sql
+            .execute_ddl(&format!(
+                "drop view if exists {}.{}.{}",
+                quote(harness.config.database()),
+                quote(harness.config.schema()),
+                quote(&view)
+            ))
+            .await
+            .unwrap();
     }
     let dropped = harness.sql.drop_table(&sf_table).await;
     let absent = harness.sql.object_exists(&sf_table).await.map(|exists| !exists);

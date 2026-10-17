@@ -735,7 +735,8 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
     )
     .await
     .unwrap();
-    // Join table cleanup before checking or resetting the physical tables.
+    // Wait for version cleanup before shutdown can cancel it.
+    restarted.wait_for_background_tasks_for_tests().await.unwrap();
     restarted.shutdown().await.unwrap();
     // Truncate swaps the view to a fresh table without changing metadata.
     assert_eq!(

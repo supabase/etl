@@ -2,6 +2,8 @@ mod auth;
 mod common;
 mod destination;
 mod large_rows;
+mod partial_updates;
 mod pipeline;
 mod sql_client;
 mod stream_client;
+mod views;
