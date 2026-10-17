@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use metrics::counter;
-use tokio::{sync::watch, time::MissedTickBehavior};
+use tokio::{sync::oneshot, time::MissedTickBehavior};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
@@ -29,7 +29,7 @@ pub(crate) struct TableSyncMonitor {
     /// Owned monitor task whose failures must reach the copy owner.
     handle: AbortOnDropHandle<()>,
     /// Invalidation notification; closure also signals task termination.
-    slot_invalidated_rx: watch::Receiver<bool>,
+    slot_invalidated_rx: oneshot::Receiver<()>,
 }
 
 impl TableSyncMonitor {
@@ -40,7 +40,7 @@ impl TableSyncMonitor {
         replication_lag_monitor: ReplicationLagMonitor,
         refresh_interval: Duration,
     ) -> Self {
-        let (slot_invalidated_tx, slot_invalidated_rx) = watch::channel(false);
+        let (slot_invalidated_tx, slot_invalidated_rx) = oneshot::channel();
 
         let handle = AbortOnDropHandle::new(tokio::spawn(async move {
             // The copy owner aborts disposable sampling, including in-flight
@@ -65,7 +65,7 @@ impl TableSyncMonitor {
 
                         // Ignore send errors: if the receiver was already
                         // dropped, the copy has already finished on its own.
-                        let _ = slot_invalidated_tx.send(true);
+                        let _ = slot_invalidated_tx.send(());
 
                         break;
                     }
@@ -78,7 +78,7 @@ impl TableSyncMonitor {
 
                         // A missing slot is just as unusable as an invalidated
                         // slot.
-                        let _ = slot_invalidated_tx.send(true);
+                        let _ = slot_invalidated_tx.send(());
 
                         break;
                     }
@@ -102,9 +102,10 @@ impl TableSyncMonitor {
     /// An error consumes the task result and must terminate the copy attempt;
     /// the caller must not subsequently call [`Self::stop`]. Controlled
     /// shutdown calls [`Self::stop`] instead of waiting for invalidation.
+    /// Pending waits may be cancelled, but completion consumes the notification
+    /// and the caller must not wait again.
     pub(crate) async fn wait_for_slot_invalidated(&mut self) -> EtlResult<()> {
-        // Invalidation is the monitor's only notification.
-        if self.slot_invalidated_rx.changed().await.is_err() {
+        if (&mut self.slot_invalidated_rx).await.is_err() {
             (&mut self.handle).await?;
 
             bail!(ErrorKind::InvalidState, "Table copy slot monitor stopped unexpectedly");
@@ -124,6 +125,8 @@ mod tests {
     use std::time::Duration;
 
     use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
+    use tokio::sync::oneshot;
+    use tokio_util::task::AbortOnDropHandle;
 
     use crate::{
         error::ErrorKind,
@@ -135,13 +138,13 @@ mod tests {
     /// an invalidation notification that can no longer arrive.
     #[tokio::test]
     async fn monitor_panic_interrupts_invalidation_wait() {
-        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let (sender, receiver) = oneshot::channel();
         let handle = tokio::spawn(async move {
             let _sender = sender;
             panic!("Test table copy monitor panic");
         });
         let mut monitor = TableSyncMonitor {
-            handle: tokio_util::task::AbortOnDropHandle::new(handle),
+            handle: AbortOnDropHandle::new(handle),
             slot_invalidated_rx: receiver,
         };
 
