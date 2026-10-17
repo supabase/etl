@@ -223,7 +223,7 @@ A durable store persists the state needed to resume safely after a restart:
 | Table state | Track each table from initial sync through ongoing replication |
 | Persisted replication checkpoint | Resume workers from a safe replay frontier |
 | Table schemas | Decode events against the correct versioned schema |
-| Destination table metadata | Track destination table IDs, applied schema snapshots, and replication masks |
+| Destination table metadata | Track applied schema snapshots and replication masks, from which destinations derive table names |
 
 The built-in `PostgresStore` persists to your Postgres database and runs its
 state-store migrations when it is created. If the pipeline reads from a

@@ -89,23 +89,29 @@ Streams on an ETL view are unsupported because replacement makes them stale.
 Before drops or renames, ETL temporarily renames the view to the reserved
 `_CURRENT_PENDING` name. The public name is unavailable until the raw schema is
 applied and the definition is replaced. Add-only changes replace the definition
-without this outage. Startup reconciles views for tables that completed initial
-synchronization, including idle tables. Tables awaiting a fresh copy and errored
-tables are skipped. Interrupted raw DDL still requires the existing
-recovery/resync procedure.
+without this outage. Startup restores existing ETL-owned public or pending views
+for tables that completed initial synchronization, including idle tables. Tables
+without an owned view wait for initial copy or a source relation before ETL
+creates their first view: stored destination schemas do not retain replica
+identity, and primary-key columns alone cannot establish eligibility. This also
+applies to legacy tables and manually removed views. Tables awaiting a fresh
+copy and errored tables are skipped. Interrupted raw DDL still requires the
+existing recovery/resync procedure.
 
-Same-name resync retains view grants while replacing CDC history. Resync after
-a source rename removes the old view and creates one beside the new raw table;
-consumer grants and references must be set up for the new name. The view can
+Same-name resync retains view grants while replacing CDC history. When a source
+rename changes the physical name, ETL removes the old view and creates one beside
+the new raw table; consumer grants and references must be set up for the new name. The view can
 expose a partial snapshot while initial copying is in progress. Query only the
 public name; the pending name is an internal recovery object.
 
 Tables without a supported primary-key identity, or with source names beginning
 with `_cdc_`, retain complete-row ingestion without a companion view and emit a
 warning. A table that loses eligibility after having a view fails reconciliation
-and leaves that view unavailable. Recreating a pipeline with fresh ETL state
-requires an unused destination namespace or deliberate removal of the old raw
-tables and both reserved view names.
+before changing its applied raw schema and leaves that view unavailable. A
+restart can restore the view against the previous applied schema; the next
+source relation rejects the unsupported transition again. Recreating a pipeline
+with fresh ETL state requires an unused destination namespace or deliberate
+removal of the old raw tables and both reserved view names.
 
 ### Existing destination tables
 
@@ -118,8 +124,9 @@ stored history and replication offsets and requires no backfill.
 The configured Snowflake role must allow the ALTER. Unrelated schema mismatches
 remain errors. ETL updates the table format; customer-owned queries must support
 partial records before consuming them. Existing deployments also need the
-`CREATE VIEW` grant before upgrading; ETL creates views for applied tables at
-startup.
+`CREATE VIEW` grant before upgrading; ETL creates the first view when initial
+copy or a source relation establishes eligibility. An idle legacy table keeps
+its raw-only behavior until then.
 
 ## Request Packing and Large Rows
 

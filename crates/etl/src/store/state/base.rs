@@ -101,10 +101,13 @@ pub trait StateStore: CachedStore {
     /// store.
     ///
     /// This performs a full upsert. For updates, get the current metadata,
-    /// modify the fields you need to change, and store it back.
+    /// modify the fields you need to change, and store it back. The destination
+    /// identifier is persisted only for fallback inspection during the naming
+    /// experiment; it is never loaded into metadata or used to address objects.
     fn store_destination_table_metadata(
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+        destination_table_id: &str,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

@@ -131,11 +131,10 @@ async fn interrupted_truncate_recovery_handles_replay_ordering() {
     // dropped the table, but before the replacement table was created.
     let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     let recreating_metadata = DestinationTableMetadata::new_creating(
-        applied_metadata.table_id().to_owned(),
         applied_metadata.snapshot_id(),
         applied_metadata.replication_mask().clone(),
     );
-    store.store_destination_table_metadata(table_id, recreating_metadata).await.unwrap();
+    store.store_destination_table_metadata(table_id, recreating_metadata, "").await.unwrap();
     client.drop_table_if_exists(namespace, iceberg_table_name.clone()).await.unwrap();
 
     let restarted_destination = IcebergDestination::new(
@@ -175,11 +174,10 @@ async fn interrupted_truncate_recovery_handles_replay_ordering() {
     // preceding row write is available to run table preparation first.
     let applied_metadata = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     let recreating_metadata = DestinationTableMetadata::new_creating(
-        applied_metadata.table_id().to_owned(),
         applied_metadata.snapshot_id(),
         applied_metadata.replication_mask().clone(),
     );
-    store.store_destination_table_metadata(table_id, recreating_metadata).await.unwrap();
+    store.store_destination_table_metadata(table_id, recreating_metadata, "").await.unwrap();
     client.drop_table_if_exists(namespace, iceberg_table_name.clone()).await.unwrap();
 
     let restarted_destination = IcebergDestination::new(

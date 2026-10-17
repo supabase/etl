@@ -61,7 +61,9 @@ pub(crate) struct RetryFailure<E> {
 /// error only when [`ClassifiedError::retryability`] is
 /// [`Retryability::Retryable`]. `stop_early` can end retries sooner, for
 /// example during shutdown or when resending in place is unsafe; it cannot
-/// retry a permanent error. Callers retain delay shaping, logging, and metrics.
+/// retry a permanent error. The condition is checked again after backoff so a
+/// deadline or shutdown cannot authorize a stale retry. Callers retain delay
+/// shaping, logging, and metrics.
 pub(crate) async fn retry_with_backoff<
     T,
     E,
@@ -112,6 +114,9 @@ where
                 });
 
                 tokio::time::sleep(sleep_delay).await;
+                if stop_early(&error) {
+                    return Err(RetryFailure { total_attempts, last_error: error });
+                }
                 base_delay =
                     base_delay.checked_mul(2).unwrap_or(Duration::MAX).min(policy.max_delay);
             }
@@ -126,6 +131,8 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         mpsc,
     };
+
+    use tokio::time::Instant;
 
     use super::*;
 
@@ -285,6 +292,35 @@ mod tests {
         assert_eq!(failure.last_error, retryable(0));
 
         assert_eq!(on_retry_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// A stop condition that becomes true during backoff preserves the last
+    /// failure without sending another request.
+    #[tokio::test(start_paused = true)]
+    async fn retry_with_backoff_rechecks_stop_condition_after_sleep() {
+        let deadline = Instant::now() + Duration::from_millis(1);
+        let mut attempts = 0;
+        let failure = retry_with_backoff(
+            RetryPolicy {
+                max_retries: 3,
+                initial_delay: Duration::from_millis(5),
+                max_delay: Duration::from_millis(20),
+            },
+            |_| Instant::now() >= deadline,
+            |delay| delay,
+            |_attempt: RetryAttempt<'_, TestError>| {},
+            || {
+                let attempt = attempts;
+                attempts += 1;
+                std::future::ready(Err::<(), _>(retryable(attempt)))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(attempts, 1);
+        assert_eq!(failure.total_attempts, 1);
+        assert_eq!(failure.last_error, retryable(0));
     }
 
     /// Applies caller-provided delay shaping before sleeping.

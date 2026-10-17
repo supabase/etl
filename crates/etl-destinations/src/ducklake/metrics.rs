@@ -465,8 +465,8 @@ pub(super) async fn query_table_storage_metrics(
         active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
-        .bind(table_name.schema())
-        .bind(table_name.table())
+        .bind(table_name.schema().to_ascii_lowercase())
+        .bind(table_name.table().to_ascii_lowercase())
         .fetch_one(metadata_pg_pool)
         .await
         .map_err(|source| {
@@ -542,8 +542,8 @@ fn table_storage_metrics_query(metadata_schema: &str) -> String {
              JOIN {metadata_schema}.{ducklake_schema} AS s ON s.schema_id = t.schema_id
              WHERE t.end_snapshot IS NULL
                AND s.end_snapshot IS NULL
-               AND s.schema_name = $1
-               AND t.table_name = $2
+               AND translate(s.schema_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $1
+               AND translate(t.table_name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') = $2
              LIMIT 1
          ),
          data_stats AS (
@@ -662,8 +662,6 @@ mod tests {
         assert!(sql.contains("ducklake_data_file"));
         assert!(sql.contains("ducklake_delete_file"));
         assert!(sql.contains(r#""duck'lake""#));
-        assert!(sql.contains("s.schema_name = $1"));
-        assert!(sql.contains("t.table_name = $2"));
     }
 
     #[test]

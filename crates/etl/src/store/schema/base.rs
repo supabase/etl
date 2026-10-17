@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
-    error::EtlResult,
+    bail,
+    error::{ErrorKind, EtlResult},
     schema::{SnapshotId, TableId, TableSchema},
     store::CachedStore,
 };
@@ -12,6 +13,11 @@ use crate::{
 pub trait SchemaStore: CachedStore {
     /// Returns the newest cached schema at or before the requested snapshot,
     /// or `None` if no version qualifies.
+    ///
+    /// Use this to resolve the schema in effect at a replication boundary,
+    /// such as a checkpoint or connection bootstrap, where no exact version is
+    /// known. Use [`SchemaStore::get_exact_table_schema`] when the snapshot
+    /// identifies a stored version, since this method may return an older one.
     ///
     /// The cache must contain all retained versions to avoid selecting an
     /// outdated schema. Implementations may refresh it when uninitialized or
@@ -24,6 +30,45 @@ pub trait SchemaStore: CachedStore {
         table_id: &TableId,
         snapshot_id: SnapshotId,
     ) -> impl Future<Output = EtlResult<Option<Arc<TableSchema>>>> + Send;
+
+    /// Returns the schema stored at exactly the requested snapshot.
+    ///
+    /// Use this when the snapshot identifies a stored version, such as one
+    /// recorded in destination metadata or announced by a DDL message. Unlike
+    /// [`SchemaStore::get_table_schema`], it never substitutes an older version
+    /// and fails with [`ErrorKind::MissingTableSchema`] when the requested
+    /// version is not stored.
+    fn get_exact_table_schema(
+        &self,
+        table_id: &TableId,
+        snapshot_id: SnapshotId,
+    ) -> impl Future<Output = EtlResult<Arc<TableSchema>>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            match self.get_table_schema(table_id, snapshot_id).await? {
+                Some(table_schema) if table_schema.snapshot_id == snapshot_id => Ok(table_schema),
+                Some(table_schema) => bail!(
+                    ErrorKind::MissingTableSchema,
+                    "Exact table schema snapshot not found",
+                    format!(
+                        "Table {table_id} needs schema snapshot {snapshot_id}, but the newest \
+                         stored snapshot at or before it is {}",
+                        table_schema.snapshot_id
+                    )
+                ),
+                None => bail!(
+                    ErrorKind::MissingTableSchema,
+                    "Exact table schema snapshot not found",
+                    format!(
+                        "Table {table_id} needs schema snapshot {snapshot_id}, but no snapshot at \
+                         or before it is stored"
+                    )
+                ),
+            }
+        }
+    }
 
     /// Returns every retained schema version for every table.
     ///

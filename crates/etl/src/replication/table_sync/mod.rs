@@ -70,21 +70,15 @@ async fn get_existing_replicated_table_schema<S>(
     table_id: TableId,
 ) -> EtlResult<Option<(DestinationTableMetadata, ReplicatedTableSchema)>>
 where
-    S: StateStore + SchemaStore,
+    S: StateStore + SchemaStore + Sync,
 {
     let Some(current_metadata) = store.get_destination_table_metadata(table_id).await? else {
         return Ok(None);
     };
 
-    let Some(table_schema) =
-        store.get_table_schema(&table_id, current_metadata.snapshot_id()).await?
-    else {
-        bail!(
-            ErrorKind::InvalidState,
-            "Destination table metadata found, but no corresponding table schema exists"
-        );
-    };
-
+    // Metadata records the exact snapshot its destination state was built from.
+    let table_schema =
+        store.get_exact_table_schema(&table_id, current_metadata.snapshot_id()).await?;
     let existing_replicated_table_schema =
         ReplicatedTableSchema::from_mask(table_schema, current_metadata.replication_mask().clone());
 
@@ -208,7 +202,6 @@ where
             {
                 warn!(
                     table_id = table_id.0,
-                    destination_table_id = %current_metadata.table_id(),
                     snapshot_id = %current_metadata.snapshot_id(),
                     "dropping pre-existing destination table before table copy"
                 );

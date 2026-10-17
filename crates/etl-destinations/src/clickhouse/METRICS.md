@@ -83,7 +83,7 @@ Both metrics carry a `kind` label with one of:
 
 - `create_table`, `create_view`
 - `drop_table`, `drop_view`, `truncate_table`
-- `add_column`, `drop_column`, `rename_column`
+- `add_column`, `drop_column`, `rename_column`, `rename_table`
 
 ## Probes
 

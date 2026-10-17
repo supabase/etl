@@ -4,7 +4,7 @@ use etl::{
     data::{ArrayCell, Cell, Date},
     event::{Event, EventType},
     pipeline::PipelineId,
-    schema::{ColumnSchema, SnapshotId, TableId, TableSchema},
+    schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
     store::TableStateType,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -339,6 +339,146 @@ async fn relation_message_updates_when_column_is_removed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_is_renamed() {
     run_relation_schema_change(RelationSchemaChange::RenameColumn).await;
+}
+
+/// Table-only renames, case changes, and boundary underscores each publish a
+/// relation before the next row, including when a name is reused by its owner.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_only_renames_preserve_identity_and_relation_barriers() {
+    init_test_tracing();
+    let (database, original_name, table_id, _, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "table_rename_only",
+            &[("value", "text not null")],
+        )
+        .await;
+    let mut current_name = original_name.clone();
+    let mut expected_names = Vec::new();
+    for (index, name) in ["Renamed", "renamed", "_renamed", &original_name.name].iter().enumerate()
+    {
+        let after_name = TableName::new(original_name.schema.clone(), (*name).to_owned());
+        let ready = destination
+            .wait_for_events(vec![EventCondition::TableCount(
+                EventType::Insert,
+                table_id,
+                u64::try_from(index).unwrap() + 1,
+            )])
+            .await;
+
+        database
+            .run_sql(&format!(
+                "alter table {} rename to {}",
+                current_name.as_quoted_identifier(),
+                quote_identifier(&after_name.name),
+            ))
+            .await
+            .unwrap();
+        database.insert_values(after_name.clone(), &["value"], &[&"after rename"]).await.unwrap();
+
+        ready.notified().await;
+
+        expected_names.push(after_name.clone());
+        current_name = after_name;
+    }
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let inserts = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            Event::Insert(insert) => Some((index, insert)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inserts.len(), expected_names.len());
+    for ((index, insert), expected_name) in inserts.into_iter().zip(expected_names) {
+        let Event::Relation(relation) = get_relation_before_index(&events, table_id, index) else {
+            panic!("expected relation event");
+        };
+        assert_eq!(relation.replicated_table_schema.id(), table_id);
+        assert_eq!(relation.replicated_table_schema.name(), &expected_name);
+        assert_eq!(insert.replicated_table_schema.id(), table_id);
+        assert_eq!(insert.replicated_table_schema.name(), &expected_name);
+        assert_eq!(
+            insert.replicated_table_schema.inner().snapshot_id,
+            relation.replicated_table_schema.inner().snapshot_id
+        );
+        assert_eq!(
+            insert.replicated_table_schema.replication_mask(),
+            relation.replicated_table_schema.replication_mask()
+        );
+        assert_eq!(insert.table_row.values()[1], Cell::String("after rename".to_owned()));
+    }
+}
+
+/// Table renames retain the source identity and publish the final
+/// name together with column changes before the following row.
+#[tokio::test(flavor = "multi_thread")]
+async fn relation_message_updates_when_table_is_renamed() {
+    init_test_tracing();
+    let (mut database, before_table_name, table_id, store, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "table_rename",
+            &[("value", "text not null")],
+        )
+        .await;
+    let after_table_name = TableName::new(before_table_name.schema.clone(), "renamed".to_owned());
+
+    let events_ready = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    // Separate rename statements and a compound ALTER share one transaction.
+    // The trigger must retain each endpoint while the row uses the final one.
+    let transaction = database.begin_transaction().await;
+    transaction
+        .run_sql(&format!(
+            "alter table {} rename to renamed",
+            before_table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    let quoted_after_table_name = after_table_name.as_quoted_identifier();
+    for sql in [
+        format!("alter table {quoted_after_table_name} rename column value to payload"),
+        format!(
+            "alter table {quoted_after_table_name} add column extra integer default 7, alter \
+             column payload drop not null"
+        ),
+        format!("insert into {quoted_after_table_name} (payload) values ('after rename')"),
+    ] {
+        transaction.run_sql(&sql).await.unwrap();
+    }
+    transaction.commit_transaction().await;
+
+    events_ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let Event::Relation(relation) = get_relation_before_last_insert(&events, table_id) else {
+        panic!("expected relation event");
+    };
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
+        panic!("expected insert event");
+    };
+    assert_eq!(relation.replicated_table_schema.id(), table_id);
+    assert_eq!(relation.replicated_table_schema.name(), &after_table_name);
+    assert_eq!(insert.replicated_table_schema.name(), &after_table_name);
+    assert_eq!(
+        insert.replicated_table_schema.inner().snapshot_id,
+        relation.replicated_table_schema.inner().snapshot_id
+    );
+    assert_eq!(insert.table_row.values()[1], Cell::String("after rename".to_owned()));
+    assert_eq!(insert.table_row.values()[2], Cell::I32(7));
+    let schemas = store.get_table_schemas().await;
+    let stored = assert_only_schema_snapshot(
+        schemas.get(&table_id).unwrap(),
+        &[("id", Type::INT8), ("payload", Type::TEXT), ("extra", Type::INT4)],
+    );
+    assert_eq!(stored.name, after_table_name);
+    assert!(stored.column_schemas[1].nullable);
 }
 
 #[tokio::test(flavor = "multi_thread")]

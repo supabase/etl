@@ -409,6 +409,7 @@ pub(crate) enum DdlKind {
     AddColumn,
     DropColumn,
     RenameColumn,
+    RenameTable,
     ModifyColumn,
 }
 
@@ -423,6 +424,7 @@ impl DdlKind {
             DdlKind::AddColumn => "add_column",
             DdlKind::DropColumn => "drop_column",
             DdlKind::RenameColumn => "rename_column",
+            DdlKind::RenameTable => "rename_table",
             DdlKind::ModifyColumn => "modify_column",
         }
     }

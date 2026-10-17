@@ -19,29 +19,22 @@ async fn ddl_lifecycle() {
     let table = format!("etl_test_{}", uuid::Uuid::new_v4().simple());
 
     with_table_cleanup(&client, &[&table], || async {
+        assert!(!client.object_exists(&table).await.unwrap());
+
         client
             .create_table_if_not_exists(&table, r#""id" NUMBER(10,0), "name" VARCHAR"#)
             .await
-            .expect("create table failed");
+            .unwrap();
 
-        assert!(
-            client.table_exists(&table).await.expect("table_exists failed"),
-            "table should exist after creation"
-        );
+        assert!(client.object_exists(&table).await.unwrap());
 
-        client.truncate_table(&table, Uuid::new_v4()).await.expect("truncate failed");
+        client.truncate_table(&table, Uuid::new_v4()).await.unwrap();
 
-        assert!(
-            client.table_exists(&table).await.expect("table_exists failed"),
-            "table should still exist after truncate"
-        );
+        assert!(client.object_exists(&table).await.unwrap());
 
-        client.drop_table(&table).await.expect("drop table failed");
+        client.drop_table(&table).await.unwrap();
 
-        assert!(
-            !client.table_exists(&table).await.expect("table_exists failed"),
-            "table should not exist after drop"
-        );
+        assert!(!client.object_exists(&table).await.unwrap());
     })
     .await;
 }
@@ -91,18 +84,6 @@ async fn truncate_request_id_is_idempotent_across_clients() {
         assert!(rows.is_empty());
     })
     .await;
-}
-
-#[tokio::test]
-#[ignore = "requires Snowflake credentials — see etl-destinations/src/snowflake/README.md"]
-async fn table_exists_returns_false_for_nonexistent() {
-    let client = build_sql_client();
-    let table = format!("etl_nonexistent_{}", uuid::Uuid::new_v4().simple());
-
-    assert!(
-        !client.table_exists(&table).await.expect("table_exists failed"),
-        "table that was never created should not exist"
-    );
 }
 
 #[tokio::test]

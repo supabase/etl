@@ -140,15 +140,9 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
     sync_complete.notified().await;
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let physical_table_id = store
-        .get_destination_table_metadata(users_schema.id)
-        .await
-        .unwrap()
-        .expect("destination metadata should exist")
-        .table_id()
-        .to_owned();
+    let table_id = bigquery_database.physical_table_id(&users_schema.name).await.unwrap();
     let metadata = bigquery_database
-        .get_table_metadata_by_id(&physical_table_id)
+        .get_table_metadata_by_id(&table_id)
         .await
         .expect("physical BigQuery table should exist");
     assert_eq!(
@@ -191,7 +185,7 @@ async fn pipeline_creates_partitioned_and_clustered_tables_without_reconfiguring
     pipeline.shutdown_and_wait().await.unwrap();
 
     let metadata = bigquery_database
-        .get_table_metadata_by_id(&physical_table_id)
+        .get_table_metadata_by_id(&table_id)
         .await
         .expect("physical BigQuery table should still exist");
     assert_eq!(
@@ -392,10 +386,10 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let previous_users_metadata =
-        store.get_destination_table_metadata(users_schema.id).await.unwrap().unwrap();
-    let previous_orders_metadata =
-        store.get_destination_table_metadata(orders_schema.id).await.unwrap().unwrap();
+    let previous_users_table_id =
+        bigquery_database.physical_table_id(&users_schema.name).await.unwrap();
+    let previous_orders_table_id =
+        bigquery_database.physical_table_id(&orders_schema.name).await.unwrap();
 
     let users_rows = bigquery_database.query_table(users_schema.name.clone()).await.unwrap();
     assert_eq!(
@@ -446,12 +440,12 @@ async fn table_copy_reset_drops_destination_table_before_recopy() {
     assert!(destination.was_table_dropped_for_copy(users_schema.id).await);
     assert!(!destination.was_table_dropped_for_copy(orders_schema.id).await);
     assert_ne!(
-        store.get_destination_table_metadata(users_schema.id).await.unwrap().unwrap().table_id(),
-        previous_users_metadata.table_id()
+        bigquery_database.physical_table_id(&users_schema.name).await.unwrap(),
+        previous_users_table_id
     );
     assert_eq!(
-        store.get_destination_table_metadata(orders_schema.id).await.unwrap().unwrap().table_id(),
-        previous_orders_metadata.table_id()
+        bigquery_database.physical_table_id(&orders_schema.name).await.unwrap(),
+        previous_orders_table_id
     );
     let users_rows = bigquery_database.query_table(users_schema.name).await.unwrap();
     assert_eq!(
@@ -900,10 +894,8 @@ async fn table_truncate_with_batching() {
 
     let bigquery_database = setup_bigquery_database().await;
 
-    // Simulate an interrupted truncate that already created `test_users_1`
-    // without the table options used by the restarted pipeline. BigQuery cannot
-    // replace it with a different partitioning kind, so recovery creates a
-    // fresh version and cleans up the legacy table after switching the view.
+    // A table that no view selects is never adopted or deleted, even when
+    // its name matches an earlier physical naming form.
     bigquery_database.create_table("test_users_1", &[("age", "integer")]).await;
 
     let store = NotifyingStore::new();
@@ -984,14 +976,10 @@ async fn table_truncate_with_batching() {
 
     pipeline.shutdown_and_wait().await.unwrap();
 
-    let users_metadata = store
-        .get_destination_table_metadata(database_schema.users_schema().id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(users_metadata.table_id().starts_with("test_users_"));
-    assert_ne!(users_metadata.table_id(), "test_users_1");
-    assert!(bigquery_database.get_table_metadata_by_id("test_users_1").await.is_none());
+    let users_table_id =
+        bigquery_database.physical_table_id(&database_schema.users_schema().name).await.unwrap();
+    assert!(users_table_id.starts_with("supabase_etl_"));
+    assert!(bigquery_database.get_table_metadata_by_id("test_users_1").await.is_some());
 
     // We query BigQuery directly to get the data which tests have inserted,
     // expecting that only the rows after truncation are there.
@@ -1815,8 +1803,8 @@ async fn schema_change_add_column_defaults() {
     let destination_metadata =
         store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(destination_metadata.is_applied());
-    let defaults =
-        bigquery_database.query_column_defaults_by_id(destination_metadata.table_id()).await;
+    let physical_table_id = bigquery_database.physical_table_id(&table_name).await.unwrap();
+    let defaults = bigquery_database.query_column_defaults_by_id(&physical_table_id).await;
     assert_eq!(
         defaults
             .iter()
@@ -1952,8 +1940,8 @@ async fn publication_mask_adds_nullable_columns_with_future_only_defaults() {
     let destination_metadata =
         store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(destination_metadata.is_applied());
-    let defaults =
-        bigquery_database.query_column_defaults_by_id(destination_metadata.table_id()).await;
+    let physical_table_id = bigquery_database.physical_table_id(&table_name).await.unwrap();
+    let defaults = bigquery_database.query_column_defaults_by_id(&physical_table_id).await;
     assert_eq!(
         defaults
             .iter()
@@ -2147,8 +2135,8 @@ async fn schema_change_tolerates_nullability_and_default_divergence() {
     let destination_metadata =
         store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(destination_metadata.is_applied());
-    let defaults =
-        bigquery_database.query_column_defaults_by_id(destination_metadata.table_id()).await;
+    let physical_table_id = bigquery_database.physical_table_id(&table_name).await.unwrap();
+    let defaults = bigquery_database.query_column_defaults_by_id(&physical_table_id).await;
     assert_eq!(
         defaults
             .iter()
@@ -2228,11 +2216,17 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     pipeline.start().await.unwrap();
 
-    table_sync_complete_notify.notified().await;
+    let mut completion = Box::pin(pipeline.wait());
+    tokio::select! {
+        () = table_sync_complete_notify.notified() => {}
+
+        result = &mut completion => panic!("pipeline stopped before table synchronization: {result:?}"),
+    }
 
     let initial_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(initial_state.is_applied());
     let initial_snapshot_id = initial_state.snapshot_id();
+    let initial_table_id = bigquery_database.physical_table_id(&table_name).await.unwrap();
 
     // Insert the initial row.
     let events_notify = destination
@@ -2244,7 +2238,11 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
         .await
         .unwrap();
 
-    events_notify.notified().await;
+    tokio::select! {
+        () = events_notify.notified() => {}
+
+        result = &mut completion => panic!("pipeline stopped before the initial row: {result:?}"),
+    }
 
     // PostgreSQL requires each column rename to be a separate statement. With
     // no intervening DML, pgoutput emits no intermediate Relation, so the
@@ -2289,15 +2287,19 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
     // Exercise same-name replacement in one multi-action ALTER TABLE. DDL
     // capture records only its final snapshot, where `age` has a new attnum.
     database
-        .alter_table(
-            table_name.clone(),
-            &[
-                TableModification::DropColumn { name: "age" },
-                TableModification::AddColumn { name: "age", data_type: "text" },
-            ],
-        )
+        .run_sql(&format!(
+            "alter table {} drop column age, add column age text, add constraint age_nonempty \
+             check (age is null or length(age) > 0), set (fillfactor = 80)",
+            table_name.as_quoted_identifier(),
+        ))
         .await
         .unwrap();
+
+    database
+        .run_sql(&format!("alter table {} rename to renamed", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    let table_name = etl::schema::TableName::new(table_name.schema.clone(), "renamed".to_owned());
 
     // Insert row with new schema.
     database
@@ -2309,16 +2311,23 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
         .await
         .unwrap();
 
-    events_notify.notified().await;
+    tokio::select! {
+        () = events_notify.notified() => {}
 
-    pipeline.shutdown_and_wait().await.unwrap();
+        result = &mut completion => panic!("pipeline stopped before the post-rename row: {result:?}"),
+    }
+
+    pipeline.shutdown();
+    completion.await.unwrap();
+    drop(pipeline);
 
     let final_state = store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
     assert!(final_state.is_applied());
+    assert_eq!(bigquery_database.physical_table_id(&table_name).await.unwrap(), initial_table_id);
     // Applying the relation must advance the durable destination schema.
     assert!(final_state.snapshot_id() > initial_snapshot_id);
 
-    let table_schema = bigquery_database.query_table_schema(table_name.clone()).await.unwrap();
+    let table_schema = bigquery_database.get_table_schema_by_id(&initial_table_id).await.unwrap();
     // A successful plan must consume every planner-generated temporary column.
     assert!(
         table_schema

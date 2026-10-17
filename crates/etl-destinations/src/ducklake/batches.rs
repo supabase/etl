@@ -92,6 +92,87 @@ const HELPER_TABLE_DATA_INLINING_ROW_LIMIT: usize = 256;
 /// Replay epoch column shared by ETL helper tables.
 const REPLAY_EPOCH_COLUMN: &str = "replay_epoch";
 
+/// ETL-managed per-table streaming replay progress for steady-state CDC
+/// retries.
+const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
+
+/// Maximum number of times a failed write attempt is retried before giving up.
+const MAX_COMMIT_RETRIES: u32 = 10;
+/// Initial backoff duration before the first retry.
+const INITIAL_RETRY_DELAY_MS: u64 = 50;
+/// Upper bound on backoff duration.
+const MAX_RETRY_DELAY_MS: u64 = 2_000;
+/// Minimum retry delay for transient delete-file visibility failures.
+const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
+
+/// Moves replay proof with a table inside the same DuckLake DDL transaction.
+///
+/// Only the active epoch follows the table. Stale markers under the vacant
+/// target name cannot establish progress for its new owner. A case-only rename
+/// addresses the same native table and can be replayed after commit, so its
+/// completed target markers must survive when no source markers remain.
+pub(super) fn rename_table_replay_state(
+    conn: &duckdb::Connection,
+    before_table_name: &DuckLakeTableName,
+    after_table_name: &DuckLakeTableName,
+    replay_epoch: &str,
+) -> EtlResult<()> {
+    if before_table_name == after_table_name {
+        return Ok(());
+    }
+
+    for table in [APPLIED_BATCHES_TABLE, STREAMING_PROGRESS_TABLE] {
+        let table = format!("{LAKE_CATALOG}.{}", quote_identifier(table));
+        let epoch_filter =
+            format!("coalesce(replay_epoch, {}) = ?", quote_literal(LEGACY_REPLAY_EPOCH));
+        if before_table_name.same_table(after_table_name) {
+            let source_exists = conn
+                .query_row(
+                    &format!(
+                        "select exists (select 1 from {table} where table_name = ? and \
+                         {epoch_filter})"
+                    ),
+                    duckdb::params![before_table_name.id(), replay_epoch],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|source| {
+                    classified_error(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake case-only rename replay state lookup failed",
+                        source,
+                    )
+                })?;
+            if !source_exists {
+                continue;
+            }
+        }
+
+        conn.execute(
+            &format!("delete from {table} where table_name = ? and {epoch_filter}"),
+            duckdb::params![after_table_name.id(), replay_epoch],
+        )
+        .map_err(|source| {
+            classified_error(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake stale rename-target replay state deletion failed",
+                source,
+            )
+        })?;
+        conn.execute(
+            &format!("update {table} set table_name = ? where table_name = ? and {epoch_filter}"),
+            duckdb::params![after_table_name.id(), before_table_name.id(), replay_epoch],
+        )
+        .map_err(|source| {
+            classified_error(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake renamed table replay state update failed",
+                source,
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Formats an optional LSN without using debug output.
 fn format_optional_lsn(lsn: Option<PgLsn>) -> String {
     lsn.map_or_else(|| "none".to_owned(), |lsn| lsn.to_string())
@@ -160,18 +241,6 @@ fn format_update_mutation_error_detail(
          assignment_count: {assignment_count}; has_predicate: {has_predicate}"
     )
 }
-
-/// ETL-managed per-table streaming replay progress for steady-state CDC
-/// retries.
-const STREAMING_PROGRESS_TABLE: &str = "__etl_streaming_progress";
-/// Maximum number of times a failed write attempt is retried before giving up.
-const MAX_COMMIT_RETRIES: u32 = 10;
-/// Initial backoff duration before the first retry.
-const INITIAL_RETRY_DELAY_MS: u64 = 50;
-/// Upper bound on backoff duration.
-const MAX_RETRY_DELAY_MS: u64 = 2_000;
-/// Minimum retry delay for transient delete-file visibility failures.
-const TRANSIENT_DELETE_FILE_RETRY_DELAY_MS: u64 = 5_000;
 
 /// Event-level table mutations that must be applied in order.
 pub(super) enum TableMutation {
@@ -2612,6 +2681,64 @@ mod tests {
             TableName::new("public".to_owned(), "users".to_owned()),
             columns,
         )))
+    }
+
+    /// Replaying a committed case-only rename retains copy and CDC proof.
+    #[test]
+    fn case_only_rename_moves_replay_state_once() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch("attach ':memory:' as lake").unwrap();
+        let before = DuckLakeTableName::new("public", "Orders");
+        let after = DuckLakeTableName::new("public", "orders");
+
+        for table in [APPLIED_BATCHES_TABLE, STREAMING_PROGRESS_TABLE] {
+            conn.execute_batch(&format!(
+                "create table lake.{table} (table_name varchar, replay_epoch varchar, marker \
+                 integer)"
+            ))
+            .unwrap();
+            for (table_name, epoch, marker) in [
+                (before.id(), "active", 7),
+                (after.id(), "active", 1),
+                (before.id(), "historical", 3),
+            ] {
+                conn.execute(
+                    &format!("insert into lake.{table} values (?, ?, ?)"),
+                    duckdb::params![table_name, epoch, marker],
+                )
+                .unwrap();
+            }
+        }
+
+        for _ in 0..2 {
+            rename_table_replay_state(&conn, &before, &after, "active").unwrap();
+
+            for table in [APPLIED_BATCHES_TABLE, STREAMING_PROGRESS_TABLE] {
+                let rows = conn
+                    .prepare(&format!(
+                        "select table_name, replay_epoch, marker from lake.{table} order by \
+                         replay_epoch"
+                    ))
+                    .unwrap()
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i32>(2)?,
+                        ))
+                    })
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                assert_eq!(
+                    rows,
+                    [
+                        (after.id(), "active".to_owned(), 7),
+                        (before.id(), "historical".to_owned(), 3)
+                    ]
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,22 +1,37 @@
 //! Shared helpers for destination schema-transition safety and recovery.
 
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+use std::fmt::Display;
+
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+use etl::schema::ColumnAlteration;
 use etl::{
     destination::DestinationTableMetadata,
     error::{ErrorKind, EtlResult},
     etl_error,
     schema::{ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId},
 };
+#[cfg(any(
+    feature = "bigquery",
+    feature = "clickhouse",
+    feature = "ducklake",
+    feature = "snowflake"
+))]
+use etl::{destination::DestinationTableSchema, schema::TableName, store::SchemaStore};
+#[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
+use tracing::warn;
 
 /// Warns that a destination is intentionally skipping a column type change.
 #[cfg(any(feature = "bigquery", feature = "ducklake", feature = "snowflake"))]
 pub(crate) fn warn_unsupported_column_type_change(
     destination_name: &str,
-    destination_table_id: impl std::fmt::Display,
-    alteration: &etl::schema::ColumnAlteration,
+    destination_table_id: impl Display,
+    alteration: &ColumnAlteration,
 ) {
     let before = alteration.before_column_schema();
     let after = alteration.after_column_schema();
-    tracing::warn!(
+
+    warn!(
         destination_name,
         destination_table_id = %destination_table_id,
         column_name = %before.name,
@@ -82,9 +97,9 @@ pub(crate) fn ensure_relation_schema_transition(
 /// Requires an arriving schema to match the exact endpoint in destination
 /// metadata.
 ///
-/// Caches may avoid remote work after this check, but they cannot replace it:
-/// the durable snapshot ID and replication mask define the only row shape the
-/// current destination table may accept.
+/// The applied snapshot ID and replication mask define the only row shape the
+/// destination table may accept. Metadata can come from an applied cache when
+/// the destination maintains that cache through every lifecycle transition.
 pub(crate) fn ensure_destination_schema_matches_metadata(
     destination_name: &str,
     table_id: TableId,
@@ -111,6 +126,41 @@ pub(crate) fn ensure_destination_schema_matches_metadata(
             metadata.replication_mask(),
         )
     ))
+}
+
+/// Returns the source table names whose destination objects ETL owns.
+///
+/// Destinations derive object names deterministically from source names, and
+/// ETL owns the names derived from every snapshot recorded in metadata: the
+/// current snapshot, and during [`DestinationTableSchema::Applying`] also the
+/// previous one. An interrupted rename can leave the table under either name,
+/// so resets remove the objects under all of them. Duplicate names are
+/// returned once, previous name first.
+#[cfg(any(
+    feature = "bigquery",
+    feature = "clickhouse",
+    feature = "ducklake",
+    feature = "snowflake"
+))]
+pub(crate) async fn owned_source_table_names<S: SchemaStore + Sync>(
+    store: &S,
+    table_id: TableId,
+    metadata: &DestinationTableMetadata,
+) -> EtlResult<Vec<TableName>> {
+    let mut names = Vec::with_capacity(2);
+    if let DestinationTableSchema::Applying { previous_snapshot_id, .. } = metadata.table_schema() {
+        names.push(
+            store.get_exact_table_schema(&table_id, *previous_snapshot_id).await?.name.clone(),
+        );
+    }
+
+    let current_name =
+        store.get_exact_table_schema(&table_id, metadata.snapshot_id()).await?.name.clone();
+    if !names.contains(&current_name) {
+        names.push(current_name);
+    }
+
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -206,16 +256,12 @@ mod tests {
             snapshot_id,
         ));
         let schema = ReplicatedTableSchema::all(table_schema);
-        let metadata = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
-            snapshot_id,
-            schema.replication_mask().clone(),
-        );
+        let metadata =
+            DestinationTableMetadata::new_applied(snapshot_id, schema.replication_mask().clone());
 
         ensure_destination_schema_matches_metadata("Test", table_id, &metadata, &schema).unwrap();
 
         let different_snapshot = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
             test_snapshot_id(300_u64, 300_u64),
             schema.replication_mask().clone(),
         );
@@ -229,7 +275,6 @@ mod tests {
         assert_eq!(snapshot_error.kind(), ErrorKind::DestinationSchemaRewind);
 
         let different_mask = DestinationTableMetadata::new_applied(
-            "users".to_owned(),
             snapshot_id,
             ReplicationMask::from_bytes(vec![0]),
         );

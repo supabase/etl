@@ -16,11 +16,10 @@ use etl_destinations::snowflake::{
     AuthManager, Client, Destination, HttpExchanger, OffsetToken, SqlClient,
     test_utils::{load_test_config, query_rows},
 };
-use etl_postgres::tokio::test_utils::TableModification;
 use rand::random;
 use tokio::time::Duration;
 
-use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
+use crate::snowflake::common::{build_auth, poll_destination_offset, quote, with_table_cleanup};
 
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
@@ -83,7 +82,10 @@ async fn schema_change_batched_operations() {
     );
     let snowflake_table = snowflake_table_name(&table_name);
 
-    with_table_cleanup(&sql, &[&snowflake_table], || async {
+    let renamed_source =
+        TableName::new(table_name.schema.clone(), format!("{}renamed", table_name.name));
+    let renamed_destination = snowflake_table_name(&renamed_source);
+    with_table_cleanup(&sql, &[&snowflake_table, &renamed_destination], || async {
         let store = NotifyingStore::new();
         let pipeline_id: PipelineId = random();
         let client = Client::new(Arc::clone(&auth), pipeline_id);
@@ -122,24 +124,24 @@ async fn schema_change_batched_operations() {
             .await;
 
         database
-            .alter_table(
-                table_name.clone(),
-                &[
-                    TableModification::DropColumn { name: "replaced" },
-                    TableModification::AddColumn { name: "replaced", data_type: "text" },
-                    TableModification::AddColumn {
-                        name: "status",
-                        data_type: "text default 'new'::text",
-                    },
-                    TableModification::AddColumn { name: "score", data_type: "integer default 15" },
-                    TableModification::AddColumn {
-                        name: "active",
-                        data_type: "boolean default true",
-                    },
-                ],
-            )
+            .run_sql(&format!(
+                "alter table {} drop column replaced, add column replaced text, add column status \
+                 text default 'new'::text, add column score integer default 15, add column active \
+                 boolean default true, add constraint score_positive check (score > 0), set \
+                 (fillfactor = 80)",
+                table_name.as_quoted_identifier(),
+            ))
             .await
             .unwrap();
+        database
+            .run_sql(&format!(
+                "alter table {} rename to {}",
+                table_name.as_quoted_identifier(),
+                quote(&renamed_source.name)
+            ))
+            .await
+            .unwrap();
+        let table_name = renamed_source.clone();
         database
             .run_sql(&format!(
                 "insert into {} (name, replaced) values ('Bob', 'new-replaced')",
@@ -192,7 +194,8 @@ async fn schema_change_batched_operations() {
             ],
         ];
         let rows =
-            query_default_rows(&sql, config.database(), config.schema(), &snowflake_table).await;
+            query_default_rows(&sql, config.database(), config.schema(), &renamed_destination)
+                .await;
         assert_eq!(rows, expected);
     })
     .await;

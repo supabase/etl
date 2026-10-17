@@ -1,9 +1,11 @@
 //! Lifecycle of the ordinary view over an ETL-owned Snowflake CDC table.
 //!
-//! The public name is unavailable during schema changes and resync. Renaming
-//! the view aside preserves grants until its definition can be replaced against
-//! an applied schema. Remote names and ownership comments make retries work
-//! without adding a second durable schema state machine.
+//! The public name is unavailable during incompatible schema changes and
+//! resync. Renaming the view aside preserves grants until its definition can be
+//! replaced against an applied schema. Remote names and ownership comments make
+//! retries work without adding a second durable schema state machine.
+//! Eligibility loss is rejected before advancing the applied raw schema, so an
+//! owned view remains proof of eligibility during startup reconciliation.
 
 use etl::{
     pipeline::PipelineId,
@@ -15,7 +17,7 @@ use tracing::warn;
 use crate::snowflake::{
     Error, Result,
     auth::TokenProvider,
-    materialization::view_query,
+    materialization::{validate_schema, view_query},
     sql::{quote_identifier, quote_string_literal},
     sql_client::SqlClient,
 };
@@ -37,8 +39,8 @@ pub(super) struct CompanionView {
 }
 
 impl CompanionView {
-    /// Derives names from recorded destination ownership, never a new source
-    /// name.
+    /// Derives companion names from the raw name resolved by the caller from
+    /// the owned source snapshot.
     pub(super) fn new(pipeline: PipelineId, table_id: TableId, table: &str) -> Self {
         // Snowflake identifiers allow 255 characters. Reserve room for the
         // temporary suffix too; the fallback prefix cannot be a raw table name.
@@ -57,8 +59,60 @@ impl CompanionView {
         }
     }
 
-    /// Restores a view only after the caller has established a usable raw
-    /// schema.
+    /// Rejects loss of materialization eligibility before the caller changes
+    /// the applied raw schema, preserving owned view grants.
+    ///
+    /// Supported schemas require no remote check. Unsupported schemas may
+    /// continue raw-only ingestion when no owned companion view exists.
+    pub(super) async fn check_schema<T: TokenProvider>(
+        &self,
+        sql: &SqlClient<T>,
+        schema: &ReplicatedTableSchema,
+    ) -> Result<bool> {
+        match validate_schema(schema) {
+            Ok(()) => Ok(true),
+            Err(error @ (Error::UnsupportedIdentity(_) | Error::Config(_))) => {
+                if self.existing(sql, false).await?.is_some() {
+                    self.park(sql).await?;
+                    return Err(Error::CompanionViewUnsupported {
+                        name: self.name.clone(),
+                        pending: self.pending.clone(),
+                        source: Box::new(error),
+                    });
+                }
+                warn!(
+                    table_name = %schema.name(),
+                    "snowflake table has no companion view: materialization requires a supported \
+                     primary-key identity and source names outside the _cdc_ prefix"
+                );
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Reconciles a previously owned view using the applied raw schema.
+    ///
+    /// Ownership proves that a source schema previously established view
+    /// eligibility. Without that proof, startup must wait for actual source
+    /// identity metadata instead of inferring it from primary-key columns.
+    pub(super) async fn restore<T: TokenProvider>(
+        &self,
+        sql: &SqlClient<T>,
+        table: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> Result<bool> {
+        if self.existing(sql, false).await?.is_none() {
+            return Ok(false);
+        }
+        self.prepare(sql, table, schema).await?;
+        Ok(true)
+    }
+
+    /// Prepares a view after the caller has established a usable raw schema.
+    ///
+    /// Normal setup supplies actual source identity. Startup restoration may
+    /// instead rely on an existing owned view as proof of eligibility.
     ///
     /// Initial creation is retriable under Creating; later replacements require
     /// Applied metadata. A failed replacement leaves the parked view and grants
@@ -70,26 +124,10 @@ impl CompanionView {
         table: &str,
         schema: &ReplicatedTableSchema,
     ) -> Result<()> {
-        let query = match view_query(table, schema) {
-            Ok(query) => query,
-            Err(error @ (Error::UnsupportedIdentity(_) | Error::Config(_))) => {
-                if self.existing(sql, false).await?.is_some() {
-                    self.park(sql).await?;
-                    return Err(Error::CompanionViewUnsupported {
-                        name: self.name.clone(),
-                        pending: self.pending.clone(),
-                        source: Box::new(error),
-                    });
-                }
-                warn!(
-                    table_name = table,
-                    "snowflake table has no companion view: materialization requires a supported \
-                     primary-key identity and source names outside the _cdc_ prefix"
-                );
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
+        if !self.check_schema(sql, schema).await? {
+            return Ok(());
+        }
+        let query = view_query(table, schema)?;
         let mut columns = schema
             .column_schemas()
             .map(|column| {
@@ -232,9 +270,47 @@ impl CompanionView {
 
 #[cfg(test)]
 mod tests {
-    use etl::schema::{TableId, TableName};
+    use std::sync::Arc;
 
-    use crate::{snowflake::view::CompanionView, table_name::try_stringify_table_name};
+    use etl::schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type};
+
+    use crate::{
+        snowflake::{Config, Error, SqlClient, auth::TokenProvider, view::CompanionView},
+        table_name::try_stringify_table_name,
+    };
+
+    /// Rejects unexpected remote work during schema preflight.
+    struct UnusedTokenProvider;
+
+    impl TokenProvider for UnusedTokenProvider {
+        async fn get_token(&self) -> crate::snowflake::Result<String> {
+            Err(Error::Auth("Remote SQL is not expected".to_owned()))
+        }
+
+        async fn invalidate_token(&self) {}
+    }
+
+    /// Ordinary supported relations do not need a remote ownership lookup.
+    #[tokio::test]
+    async fn supported_schema_preflight_requires_no_remote_work() {
+        let schema = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".into(), "users".into()),
+            vec![ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1)],
+        )));
+        let sql = SqlClient::new(
+            Config::new("example-account", "test-user", "test-db", "test-schema").unwrap(),
+            Arc::new(UnusedTokenProvider),
+            reqwest::Client::new(),
+        );
+
+        assert!(
+            CompanionView::new(1, schema.id(), "PUBLIC_USERS")
+                .check_schema(&sql, &schema)
+                .await
+                .unwrap()
+        );
+    }
 
     #[test]
     fn companion_names_do_not_collide_with_encoded_source_names() {

@@ -1191,6 +1191,17 @@ impl From<SchemaPlanError> for EtlError {
     #[track_caller]
     fn from(err: SchemaPlanError) -> EtlError {
         let (kind, description, detail) = match &err {
+            SchemaPlanError::TableSchemaMoveUnsupported {
+                before_schema_name,
+                after_schema_name,
+            } => (
+                ErrorKind::SourceSchemaError,
+                Cow::Borrowed("Moving tables between PostgreSQL schemas is unsupported"),
+                Cow::Owned(format!(
+                    "Moving a table from schema '{before_schema_name}' to '{after_schema_name}' \
+                     requires resynchronization."
+                )),
+            ),
             SchemaPlanError::DestinationColumnNameCollision {
                 endpoint,
                 column_name_mapping,

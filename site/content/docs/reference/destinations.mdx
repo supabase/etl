@@ -54,18 +54,70 @@ complete policy.
 ## Destination ownership
 
 ETL assumes exclusive ownership of every data-bearing table it creates.
-Destination metadata is the authority for whether initial setup or a schema
-change completed; process-local caches do not replace that state. Once metadata
-is `Applied`, ETL does not recreate a missing table or repair external schema
-changes during ordinary writes or restart. Such changes are unsupported and
-typically cause the destination operation to fail. Use the table
-resynchronization lifecycle when a destination table must be rebuilt.
+Destinations name their objects deterministically from the source table name,
+so destination metadata records only schema snapshots and whether initial
+setup or a schema change completed. ETL owns the destination names derived
+from every snapshot that metadata records: the current snapshot, and while a
+schema change is `Applying`, also the previous one. Destinations may cache the
+completed state. Once metadata is `Applied`, ETL does not recreate a missing
+table or repair external schema changes during ordinary writes or restart.
+Such changes are unsupported and typically cause the destination operation to
+fail.
 
-ETL may rebuild ephemeral client state and derived non-data-bearing objects,
-such as Snowflake streaming channels or BigQuery views. Direct destination
+Resetting a table for a fresh copy removes the objects under every owned name
+that exists, then creates the table again. The active destinations never adopt
+an existing object during fresh creation: if a name is still occupied, they
+fail and ask you to drop that object. During `Applying`, every object reachable
+through either recorded snapshot's destination name is treated as owned for
+reset, including an object now used by another replicated table. Reset
+deliberately cleans up both endpoints of this intermediate state; it does not
+infer which rename steps completed or reconstruct ownership through a sequence
+of renames.
+
+ETL may rebuild ephemeral client state and destination-specific derived
+objects, such as Snowflake streaming channels. Direct destination
 truncation is also outside ETL's lifecycle: later behavior depends on the
 destination's offset and write semantics, and previously replicated rows are
 not restored automatically.
+
+### Upgrading existing pipelines
+
+Existing pipelines that follow the earlier release's supported lifecycle can
+resume with the same configuration, source replication slots, destination
+objects, and persisted checkpoints. No fresh copy is required. BigQuery views
+continue selecting their existing physical tables, and DuckLake preserves the
+spelling of existing replay-state keys, including mixed-case source names.
+CDC ordering and replay formats are unchanged.
+
+Stop each pipeline and wait for its old process to finish draining and exit
+before starting the new image. Other pipelines can continue using earlier
+images: the Postgres metadata schema is unchanged. Avoid overlapping old and
+new workers for the same pipeline, and enable live table renames only after
+that pipeline has upgraded.
+
+If a previous BigQuery DDL operation has an unknown outcome, reconcile its job
+before restarting or resetting tables. See [query completion and recovery](#query-completion-and-recovery).
+
+The `destination_table_id` column remains temporarily as write-only fallback
+information while snapshot-based naming is evaluated. Destination metadata
+writes retain the destination identifier, but startup and metadata loaders do
+not read it. Runtime operations derive names from the recorded snapshots and,
+for BigQuery, discover the physical table through the logical view. The stored
+identifier is for manual inspection; it does not provide automatic recovery or
+rollback guarantees.
+
+Earlier releases did not support live table renames. If a source was renamed
+while running an earlier image, check that its recorded snapshots still name
+the destination objects before upgrading. The new image does not validate the
+fallback identifier. Repair mismatched objects and metadata together, or
+coordinate fresh copies for affected source names. A reset derives names from
+snapshots and cannot discover an old name absent from those snapshots.
+
+A binary-only rollback is not guaranteed after renames or a BigQuery physical
+table swap. Stop the pipeline and verify that destination objects and metadata
+are compatible with the earlier image before restarting it. The retained
+identifier does not describe both endpoints of an interrupted rename or
+resolve an unknown remote DDL outcome.
 
 ## BigQuery
 
@@ -77,39 +129,106 @@ BigQuery uses the BigQuery Storage Write API and BigQuery change data capture
 to maintain destination tables. Use it when you already have a Google Cloud
 project. For a local first pipeline, prefer [ClickHouse](#clickhouse).
 
-### Physical table versions and upgrades
+### Views and physical tables
 
-Query the stable logical view for each replicated table. Initial copy, recopy,
-and source `TRUNCATE` operations create physical tables with fresh random
-version IDs. ETL does not deliberately reuse a deleted physical name:
-streaming writes after same-name recreation can be acknowledged without
-reaching the replacement table. The active logical view and its physical target
-must remain available; older physical tables are no longer needed.
+Query the logical view for each replicated table. Its name is derived from the
+source table name and is the only BigQuery name ETL depends on. The view
+selects a physical table that holds the rows; ETL finds that table by reading
+the view definition. The fallback identifier retained in Postgres is never
+used for discovery.
 
-Cleanup is optimistic: after truncate switches the view and persists the new
-target, ETL attempts background deletion of previously discovered versions.
-Explicit drop/reset also attempts physical cleanup after removing the view.
-Listing or physical deletion failures are logged and can leave unused tables
-behind without blocking replication. A later truncate or reset can try again;
-there is no cleanup queue or periodic collector. Operators can use the table
-IDs in warnings to remove unused tables manually, after checking that they are
-not the current view target or the target recorded in destination metadata.
-Interrupted creation leaves its abandoned table for these same cleanup paths.
-Creation, view changes, and metadata persistence still propagate failures.
+New physical tables are named
+`supabase_etl_<pipeline_id>_<table_oid>_<suffix>`, where the suffix is 25
+lowercase letters and digits encoding a random UUID. ETL never reuses a deleted
+physical name, avoiding stale table and ingestion references while deletion
+and creation propagate through BigQuery. Tables created by earlier releases,
+named `<view>_<version>` with a numeric or random suffix, keep working: ETL
+reads, alters, truncates, and deletes whichever table a view selects. No
+migration or recopy is required to upgrade.
 
-The suffix is an underscore followed by 25 lowercase letters and digits,
-encoding a full UUID without relying on the clock. It adds 26 ASCII bytes to
-the encoded source name. BigQuery permits table names up to [1,024 UTF-8
-bytes](https://docs.cloud.google.com/bigquery/docs/tables#table_naming).
+Target discovery uses [`tables.get`](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/tables/get), which returns the logical view's SQL
+definition without executing it. ETL accepts a GoogleSQL view selecting all
+columns from one fully qualified, backtick-quoted table in the configured
+project and dataset. Keyword case, ASCII whitespace, and a trailing semicolon
+are accepted. Only the backtick and backslash escapes emitted by ETL are
+decoded; other escapes and more complex queries are rejected rather than
+interpreted as a different table name. Legacy numeric and random physical
+suffixes both use the same view definition shape.
 
-Existing numeric versions remain readable and active after an upgrade.
-The next truncate or recopy allocates a random version while preserving the
-logical view name. No metadata database migration or immediate recopy is
-required. Once random IDs have been persisted, downgrading requires a release
-that understands this format; older releases that only parse numeric suffixes
-cannot resume those tables. Do not edit stored IDs to enable a downgrade. If
-rollback to an older deployment must remain possible, deploy support for
-reading both formats in that release before deploying random-ID allocation.
+Query-job [`referencedTables`](https://docs.cloud.google.com/bigquery/docs/reference/rest/v2/Job#JobStatistics2) is not used for discovery. It describes a query's
+dependencies and requires planning that query against its dependencies.
+Reading the stored view definition also works when the physical table is
+already missing. During reset, a discovery failure logs a warning and may
+leave an orphaned physical table; ETL still removes the owned logical view.
+Failure to remove that view prevents the next copy from claiming its name.
+
+BigQuery trusts its per-table applied cache during ordinary writes. A cache
+miss loads destination metadata and reads the view definition once. Every batch
+must match the cached snapshot ID, replication mask, and logical source name.
+The write descriptor is cached separately for that endpoint and copy/CDC mode.
+
+Lifecycle changes serialize per table and invalidate the cache before changing
+BigQuery:
+
+- **Initial setup** rejects an occupied view name, records `Creating`, creates
+  the physical table and the view, and records `Applied`.
+- **Truncate** creates a fresh physical table and atomically replaces the view
+  to select it, so readers always see one complete table: the old one before
+  the replacement and the new one after. Truncate does not change destination
+  metadata. The replaced table is then deleted in the background.
+- **Schema changes** record `Applying`, alter the physical table, and record
+  `Applied` after refreshing the view and ingestion connections.
+- **Reset** drops the views under every owned name and deletes the tables they
+  select.
+
+Physical-table deletion is best effort: a failure is logged and leaves the
+table behind for manual cleanup without blocking replication. Reset must
+successfully drop each logical view before recreating it. ETL deletes only
+tables that a view stops selecting during truncate or reset. A table that no
+view selects, for example after a truncate interrupted between creating the
+new table and replacing the view, is never discovered or deleted
+automatically; find such tables by their
+`supabase_etl_<pipeline_id>_<table_oid>_` prefix.
+
+If a truncate's view replacement is confirmed to fail, the view still selects
+the previous table. ETL does not checkpoint the failed batch: WAL replay must
+retry the truncate before applying later row changes. A timeout, lost response,
+or process crash can leave the replacement's outcome unknown; wait for the
+outstanding job to finish or confirm cancellation before resuming. See
+[Query completion and recovery](#query-completion-and-recovery).
+
+Source table renames change only the logical view. The physical table keeps its
+name. BigQuery requires streaming to stop before a physical rename and can
+require hours before that rename becomes eligible, so ETL does not rename the
+streaming physical table. See BigQuery's [table-rename restrictions](https://docs.cloud.google.com/bigquery/docs/managing-tables#limitations_on_renaming_tables).
+In case-insensitive datasets, case-only source renames can conflict with the
+existing view name. ETL reports the conflict before changing the destination.
+See [Table renames](/explanation/schema-changes/#table-renames) for ordering,
+permissions, collision handling, and interrupted transitions.
+
+Adding a column follows BigQuery's native behavior: existing rows receive
+`NULL` for scalar columns or an empty array for repeated columns. ETL installs
+supported defaults for future inserts; it does not backfill historical rows
+with PostgreSQL's add-time default. Subsequent replicated row updates carry
+the source values, and a full resync rebuilds all rows. See BigQuery's
+[column-addition semantics](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#alter_table_add_column_statement).
+
+### Storage Write connections and retries
+
+ETL uses the default stream, as required by [BigQuery
+CDC](https://docs.cloud.google.com/bigquery/docs/change-data-capture#prerequisites).
+The client reuses a bounded pool of HTTP/2 connections across append RPCs and
+reconnects after recognized stream failures. Every append RPC sends its writer
+schema in the first message. Schema changes invalidate cached descriptors and
+connections before writes resume, following Google's [schema-update
+guidance](https://docs.cloud.google.com/bigquery/docs/write-api-best-practices#handle_schema_updates).
+
+An append retry retains its physical table, encoded rows, and CDC sequence
+numbers. Trace IDs are diagnostic identifiers, not idempotency keys: the default
+stream can deliver a mutation more than once, and CDC primary keys and sequence
+numbers determine the resulting state. ETL checks every response in a split
+append batch; a permanent row or request error prevents local propagation
+retries from hiding that failure.
 
 ### Query completion and recovery
 
@@ -124,18 +243,59 @@ Transient HTTP failures allow up to 20 retries of the same request. Backoff
 starts at one second, doubles to a 32-second cap, and adds up to one second of
 jitter within that cap, following [BigQuery's reliability
 guidance](https://docs.cloud.google.com/bigquery/docs/reliability-intro#retry_failed_api_requests).
-Only BigQuery's explicit retryable failed-job responses permit resubmission
-with a new request ID, with at most four replacement jobs. The shared deadline
-can stop either retry loop sooner. Permanent SQL, permission, and configuration
-errors require correction.
 
-A local timeout does not cancel the remote job. ETL reports an unconfirmed
-outcome and requires manual recovery instead of automatically replaying DDL.
+After an ambiguous error while waiting for completion, ETL checks the same job
+with `jobs.get`. A new request ID is allowed only for an explicit retryable
+failed-job response or a job whose status is `DONE` with a retryable
+`errorResult`. Running jobs, successful jobs, and warnings in `status.errors`
+do not authorize resubmission. There are at most four replacement jobs; the
+shared deadline can stop either retry loop sooner. Permanent SQL, permission,
+and configuration errors require correction.
+
+If the deadline expires after a confirmed retryable job failure, ETL retains
+that failure for the worker's retry policy. It does not turn a known failure
+into an unknown outcome merely because time ran out during backoff.
+
+Once a query completes, failures to retrieve later result pages retry the
+page read without resubmitting the query. If those retries fail, ETL stops
+instead of executing the completed query again.
+
+A timeout after submission does not cancel the remote job. ETL reports an
+unconfirmed outcome after a submission or polling timeout, or exhausted
+request retries, and requires manual recovery instead of automatically
+replaying DDL. Expiry before a query request is sent remains retryable.
 Use the reported request ID, job ID, and location to investigate the outcome
 before retrying or resetting the affected table. View changes and metadata
 writes are separate operations; after an interrupted transition, inspect both
 before deleting any physical table. Storage Write API propagation retries are
 separate from these query retries.
+
+### Recovering a pending BigQuery transition
+
+`Creating` and `Applying` metadata block writes for the affected table.
+Restarting does not complete them; recover by resetting the table for a fresh
+copy.
+
+1. Stop the pipeline. If a BigQuery request timed out, use its reported job ID
+   and location to wait for completion or confirm cancellation before reset.
+   Stopping ETL does not cancel an already-submitted BigQuery job, and a job
+   that completes after reset can recreate an object.
+2. Through the application's state-store integration, reset the affected table
+   to `TableState::Init` using `StateStore::update_table_state`. Leave its
+   destination metadata and schema snapshots intact: they identify the views
+   reset must remove. Enable initial copying when the existing source rows must
+   be rebuilt.
+3. Start the pipeline. Table synchronization drops the views under every owned
+   name, including both names of an interrupted rename, and deletes the tables
+   they select. It then clears the old copy state, creates a fresh physical
+   table and view, and copies from a fresh source snapshot. If reset is
+   interrupted, the retained copy phase and metadata let the next start retry.
+4. If fresh creation reports that the view name is already occupied, drop that
+   object and restart the pipeline.
+
+Do not manually change pending metadata to `Applied` or delete it to bypass the
+error. Doing so skips the copy lifecycle and loses the record of which views
+reset must remove.
 
 ### Table partitioning and clustering
 
@@ -172,11 +332,11 @@ SELECT 'public.events'::regclass::oid AS table_id;
 ```
 
 Replace `public.events` with the table you want to configure. Because the
-configuration follows the source table ID rather than
-its name, renaming the source table does not detach its physical-layout
-settings, and destination metadata can continue pointing it at a different
-physical table. If a table is dropped and recreated, PostgreSQL assigns it a
-new OID, so its configuration must use the new `table_id`.
+configuration follows the source table ID rather than its name, renaming the
+source table does not detach its physical-layout settings. The settings also
+apply when a truncate replaces the physical table. If a table is dropped and
+recreated, PostgreSQL assigns it a new OID, so its configuration must use the
+new `table_id`.
 
 `partition_by` and `cluster_by` are independent. Set either one or both in a
 table entry: omit `cluster_by` for a partitioned-only table, or omit
@@ -333,6 +493,18 @@ This status applies to the managed service, not local or self-hosted use.
 DuckLake writes through DuckDB to a file or PostgreSQL catalog and local or
 object storage.
 
+ETL preserves source schema and table spelling when creating DuckLake tables.
+Column names use ASCII lowercase. DuckDB resolves identifiers without regard
+to ASCII case, so a case-only source rename keeps the same native table and
+moves its replay keys to the new source spelling. A pending target epoch
+protects relocated replay markers from maintenance until the rename finishes,
+including recovery after a process restart.
+
+Distinct native tables must have distinct `<schema>.<table>` replay keys.
+Names can contain dots when the combined key remains unambiguous. For example,
+`"a.b"."c"` and `"a"."b.c"` cannot be replicated together. ETL rejects setup,
+renames, and resets that would share their replay state.
+
 ### Limitations
 
 - Data storage URLs currently support `file`, `s3`, and `gs` schemes.
@@ -340,6 +512,8 @@ object storage.
   storage, and maintenance services they configure.
 - Primary-key sorting requires source tables to have a primary key; other
   sorting modes do not add that requirement.
+- Table-sorting entries match source schema and table names exactly. Update
+  the entry for a renamed source table to retain its configured sorting.
 - DuckLake adds streaming columns as nullable. Supported literal defaults are
   stored as metadata; ETL does not emit `DEFAULT(NULL)` when no source default
   exists, although a catalog client may display an omitted default as `NULL`.
@@ -503,10 +677,15 @@ For physical names longer than 239 characters, the view name is
 The second name is an internal recovery object, not a supported query interface.
 Before a drop or rename, the public view becomes temporarily unavailable; it is
 restored after the raw schema and new definition are ready. Add-only changes
-replace the definition without taking the public name offline. Startup
-reconciles views for tables that completed initial synchronization, including
-idle tables. Tables awaiting a fresh copy and errored tables are skipped.
-Interrupted raw DDL follows the existing schema recovery/resync requirements.
+replace the definition without taking the public name offline. Startup restores
+existing ETL-owned public or pending views for tables that completed initial
+synchronization, including idle tables. Tables without an owned view wait for
+initial copy or a source relation to establish eligibility before ETL creates
+their first view. Stored destination schemas do not retain replica identity;
+primary-key columns alone are insufficient. This applies to legacy tables and
+manually removed views too. Tables awaiting a fresh copy and errored tables are
+skipped. Interrupted raw DDL follows the existing schema recovery/resync
+requirements.
 
 Explicit view grants survive definition replacement and same-name resync.
 Do not attach custom policies, tags, or streams to ETL-owned views or change
@@ -517,33 +696,30 @@ or resync, the view may expose a snapshot that is still being copied.
 Complete-row ingestion for keyless tables, unsupported identities/key types, or
 source names beginning with `_cdc_` remains raw-only and emits a warning. Losing
 eligibility after a view has been created makes it unavailable and fails
-reconciliation. Fresh pipeline state requires an unused destination namespace
-or deliberate cleanup of old tables and both reserved companion names.
+reconciliation before changing the applied raw schema. A restart can restore
+the view against that previous schema; the next source relation rejects the
+unsupported transition again. Fresh pipeline state requires an unused
+destination namespace or deliberate cleanup of old tables and both reserved
+companion names.
 
-### Resynchronizing after a source table rename
+### Source table renames
 
-A source rename preserves the recorded destination table name during streaming.
-Resynchronization drops that recorded table, then creates a fresh destination
-from the current source name. If that name is already occupied, ETL fails the
-copy instead of writing into another table's destination.
+ETL renames the downstream table when a source table is renamed within the
+same PostgreSQL schema. It drains pending writes, retires the old streaming
+channel before freeing its table name, renames the table, applies
+column changes, and reopens ingestion at the previous committed offset. The
+new snapshot is marked applied only after these steps succeed. Renames fail
+before any change when a table or view occupies the mapped target name. The
+old companion view is retired and a new one is created for the resulting raw
+table name. Explicit grants on that new view must be recreated. A case-only
+rename keeps the mapped raw and companion names. Moving the source table to
+another schema is unsupported.
 
-For example, suppose `public.orders` is renamed to `public.ordersold`, and
-`public.ordersnew` is renamed to `public.orders`. The first table still owns
-`PUBLIC_ORDERS`, so resynchronizing the second table fails when it tries to
-create `PUBLIC_ORDERS`.
+The destination role needs `OWNERSHIP` on the table and `CREATE TABLE` on its
+schema to rename it. See [Snowflake's rename requirements](https://docs.snowflake.com/en/sql-reference/sql/alter-table#parameters).
 
-To recover, resynchronize `public.ordersold` first and wait for it to finish.
-Provided `PUBLIC_ORDERSOLD` is available, this rebuilds the first table there
-and frees `PUBLIC_ORDERS`. Then retry resynchronizing `public.orders`.
-Resynchronization deletes previous destination data and CDC history. Existing
-source rows are copied again only when initial copying is enabled. Update any
-queries that depend on the first table's previous destination name. ETL removes
-the old companion view when resync moves to another name. Set up consumer grants
-and references for the new view.
-
-If the existing destination must remain unchanged, use a new pipeline targeting
-an unused destination schema. Do not manually delete or rename a destination
-that another replicated table still uses.
+See [Table renames](/explanation/schema-changes/#table-renames) for destination
+behavior and recovery after an interrupted transition.
 
 ### Limitations
 
@@ -601,6 +777,9 @@ recommended for new deployments.
 - Schema-change DDL is not supported. A newer relation schema is rejected even
   when only a default, nullability, mapped-equivalent type, or publication mask
   changed. Existing tables must match the exact generated Iceberg schema.
+- Initial setup reuses an existing table when its schema matches. Use a
+  namespace reserved for ETL because subsequent writes and resets treat that
+  table as owned.
 - Apache Iceberg supports native schema evolution, but this deprecated ETL
   adapter does not implement it and does not translate PostgreSQL defaults.
 - The destination is deprecated and is not receiving the same product

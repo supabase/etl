@@ -55,8 +55,8 @@ pub(super) fn view_query(table: &str, schema: &ReplicatedTableSchema) -> Result<
     query(&quote_identifier(table), schema)
 }
 
-/// Builds the shared query over an already quoted table reference.
-fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
+/// Checks the schema requirements shared by query generation and view setup.
+pub(super) fn validate_schema(schema: &ReplicatedTableSchema) -> Result<()> {
     validate_primary_key_identity(schema)?;
     if schema.column_schemas().any(|column| column.name.starts_with("_cdc_")) {
         return Err(Error::Config(
@@ -64,6 +64,12 @@ fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
                 .to_owned(),
         ));
     }
+    Ok(())
+}
+
+/// Builds the shared query over an already quoted table reference.
+fn query(table: &str, schema: &ReplicatedTableSchema) -> Result<String> {
+    validate_schema(schema)?;
     let columns =
         schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect::<Vec<_>>();
     let keys = columns

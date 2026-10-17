@@ -275,8 +275,8 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
             assert_eq!(status, DestinationWriteStatus::Accepted);
             let metadata =
                 harness.store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-            assert_eq!(metadata.table_id(), name);
             original_metadata.push(metadata);
+            assert!(harness.sql.object_exists(name).await.unwrap());
         }
 
         for (schema, _) in &cases {
@@ -367,7 +367,7 @@ async fn boundary_underscore_names_survive_destination_lifecycle() {
         assert_eq!(rows, vec![vec![serde_json::json!("after")]]);
 
         drop_table_for_copy(&restarted, schema).await.unwrap();
-        assert!(!harness.sql.table_exists(&names[0]).await.unwrap());
+        assert!(!harness.sql.object_exists(&names[0]).await.unwrap());
         harness.store.prepare_table_state_for_copy(schema.id()).await.unwrap();
         harness.store.store_table_schema(schema.inner().clone()).await.unwrap();
         write_table_copy_and_wait(
@@ -451,7 +451,7 @@ async fn create_table_with_default_expressions() {
         let status = invoke_write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
-        let exists = harness.sql.table_exists(&sf_table).await.unwrap();
+        let exists = harness.sql.object_exists(&sf_table).await.unwrap();
         assert!(exists);
     })
     .await;
@@ -532,7 +532,7 @@ async fn write_table_rows_empty() {
         let status = invoke_write_table_rows(&harness.destination, &schema, vec![]).await.unwrap();
         assert_eq!(status, DestinationWriteStatus::Durable);
 
-        let exists = harness.sql.table_exists(&sf_table).await.unwrap();
+        let exists = harness.sql.object_exists(&sf_table).await.unwrap();
         assert!(exists, "table should have been created even with empty row set");
     })
     .await;
@@ -608,7 +608,7 @@ async fn fresh_generation_rejects_existing_table_without_destination_metadata() 
     .await;
 }
 
-/// Exercises rename-swap reset, collision rejection, and ordered recovery with
+/// Exercises ordered table renames and independent reset with
 /// either cached channels or a fresh client sharing the persisted metadata.
 async fn resync_after_source_name_swap(cold_client: bool) {
     let harness = TestHarness::new();
@@ -655,6 +655,27 @@ async fn resync_after_source_name_swap(cold_client: bool) {
             harness.store.store_table_schema(replacement_renamed.clone()).await.unwrap();
             let archived = ReplicatedTableSchema::all(Arc::new(archived));
             let replacement_renamed = ReplicatedTableSchema::all(Arc::new(replacement_renamed));
+            let before_collision = harness
+                .store
+                .get_destination_table_metadata(replacement_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let error = invoke_write_events(
+                &harness.destination,
+                WriteEventsDurability::RequireDurable,
+                vec![Event::Relation(RelationEvent {
+                    replicated_table_schema: replacement_renamed.clone(),
+                })],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
+            assert_eq!(
+                harness.store.get_destination_table_metadata(replacement_id).await.unwrap(),
+                Some(before_collision)
+            );
+
             invoke_write_events(
                 &harness.destination,
                 WriteEventsDurability::RequireDurable,
@@ -682,12 +703,11 @@ async fn resync_after_source_name_swap(cold_client: bool) {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(metadata.table_id(), replacement_destination);
             assert_eq!(metadata.snapshot_id(), replacement_renamed.inner().snapshot_id);
 
             drop_table_for_copy(destination, &replacement_renamed).await.unwrap();
-            assert!(harness.sql.table_exists(&original_destination).await.unwrap());
-            assert!(!harness.sql.table_exists(&replacement_destination).await.unwrap());
+            assert!(!harness.sql.object_exists(&original_destination).await.unwrap());
+            assert!(!harness.sql.object_exists(&replacement_destination).await.unwrap());
 
             // Match table sync: discard copy state and fetch the current source
             // schema before trying to copy under the new destination name.
@@ -696,24 +716,9 @@ async fn resync_after_source_name_swap(cold_client: bool) {
             replacement_copy.snapshot_id = SnapshotId::initial();
             harness.store.store_table_schema(replacement_copy.clone()).await.unwrap();
             let replacement_copy = ReplicatedTableSchema::all(Arc::new(replacement_copy));
-            let error = invoke_write_table_rows(
-                destination,
-                &replacement_copy,
-                vec![replacement_row.clone()],
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::DestinationTableAlreadyExists);
-            assert!(
-                harness
-                    .store
-                    .get_destination_table_metadata(replacement_id)
-                    .await
-                    .unwrap()
-                    .is_none()
-            );
+            write_table_copy_and_wait(destination, &replacement_copy, vec![replacement_row]).await;
             let original_fqn = format!(
-                "\"{}\".\"{}\".\"{original_destination}\"",
+                "\"{}\".\"{}\".\"{archived_destination}\"",
                 harness.config.database(),
                 harness.config.schema(),
             );
@@ -724,8 +729,8 @@ async fn resync_after_source_name_swap(cold_client: bool) {
                 vec![vec![serde_json::json!("1"), serde_json::json!("kept")]],
             );
 
-            // Follow the recovery guidance: resync the current owner first,
-            // then retry the replacement once the desired name is available.
+            // Reset the other table independently without deleting or
+            // invalidating the replacement now stored under the original name.
             drop_table_for_copy(destination, &archived).await.unwrap();
             harness.store.prepare_table_state_for_copy(original_id).await.unwrap();
             let mut archived_copy = archived.inner().clone();
@@ -733,10 +738,8 @@ async fn resync_after_source_name_swap(cold_client: bool) {
             harness.store.store_table_schema(archived_copy.clone()).await.unwrap();
             let archived_copy = ReplicatedTableSchema::all(Arc::new(archived_copy));
             write_table_copy_and_wait(destination, &archived_copy, vec![original_row]).await;
-            assert!(!harness.sql.table_exists(&original_destination).await.unwrap());
-            assert!(harness.sql.table_exists(&archived_destination).await.unwrap());
-
-            write_table_copy_and_wait(destination, &replacement_copy, vec![replacement_row]).await;
+            assert!(harness.sql.object_exists(&original_destination).await.unwrap());
+            assert!(harness.sql.object_exists(&archived_destination).await.unwrap());
             etl::destination::Destination::shutdown(destination).await.unwrap();
             for (table_id, table_name, expected_id, expected_name) in [
                 (original_id, archived_destination.as_str(), "1", "kept"),
@@ -755,7 +758,7 @@ async fn resync_after_source_name_swap(cold_client: bool) {
                 );
                 let metadata =
                     harness.store.get_destination_table_metadata(table_id).await.unwrap().unwrap();
-                assert_eq!(metadata.table_id(), table_name);
+                assert!(metadata.is_applied());
             }
         },
     )
@@ -774,6 +777,96 @@ async fn resync_after_source_name_swap_with_cached_channels() {
 #[ignore = "requires Snowflake credentials"]
 async fn resync_after_source_name_swap_with_cold_client() {
     resync_after_source_name_swap(true).await;
+}
+
+/// A case-only source rename reuses the physical table and channel. Pending
+/// metadata from that transition must not prevent a safe copy reset.
+#[tokio::test]
+#[ignore = "requires Snowflake credentials"]
+async fn case_only_table_rename_preserves_rows_and_allows_pending_reset() {
+    let harness = TestHarness::new();
+    let name = format!("orders{}", uuid::Uuid::new_v4().simple());
+    let table_id = snowflake_table_name("public", &name);
+    with_table_cleanup(&harness.sql, &[&table_id], || async {
+        let before = make_table_schema(2210, "public", &name);
+        let after = TableSchema::with_snapshot_id(
+            before.id,
+            TableName::new("public".to_owned(), name.to_uppercase()),
+            before.column_schemas.clone(),
+            test_snapshot_id(100, 100),
+        );
+        harness.store.store_table_schema(before.clone()).await.unwrap();
+        harness.store.store_table_schema(after.clone()).await.unwrap();
+        let before = ReplicatedTableSchema::all(Arc::new(before));
+        let after = ReplicatedTableSchema::all(Arc::new(after));
+        write_table_copy_and_wait(
+            &harness.destination,
+            &before,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::String("kept".to_owned())])],
+        )
+        .await;
+        let initial =
+            harness.store.get_destination_table_metadata(before.id()).await.unwrap().unwrap();
+
+        invoke_write_events(
+            &harness.destination,
+            WriteEventsDurability::RequireDurable,
+            vec![
+                Event::Relation(RelationEvent { replicated_table_schema: after.clone() }),
+                Event::Insert(InsertEvent {
+                    commit_lsn: PgLsn::from(101),
+                    tx_ordinal: 0,
+                    replicated_table_schema: after.clone(),
+                    table_row: TableRow::new(vec![
+                        Cell::I32(2),
+                        Cell::String("renamed".to_owned()),
+                    ]),
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+        harness.destination.shutdown().await.unwrap();
+
+        let applied =
+            harness.store.get_destination_table_metadata(after.id()).await.unwrap().unwrap();
+        assert!(applied.is_applied());
+        assert_eq!(applied.snapshot_id(), after.inner().snapshot_id);
+        let fqn = format!(
+            "\"{}\".\"{}\".\"{table_id}\"",
+            harness.config.database(),
+            harness.config.schema()
+        );
+        assert_eq!(
+            query_rows(
+                &harness.sql,
+                &format!("select \"id\", \"name\" from {fqn} order by \"id\"")
+            )
+            .await
+            .unwrap(),
+            vec![vec![json!("1"), json!("kept")], vec![json!("2"), json!("renamed")]]
+        );
+
+        let pending = initial
+            .with_schema_change(after.inner().snapshot_id, after.replication_mask().clone())
+            .unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(after.id(), pending.clone(), "")
+            .await
+            .unwrap();
+        let restarted = Destination::new(Client::new(build_auth(), 1), harness.store.clone());
+
+        drop_table_for_copy(&restarted, &after).await.unwrap();
+
+        assert!(!harness.sql.object_exists(&table_id).await.unwrap());
+        assert_eq!(
+            harness.store.get_destination_table_metadata(after.id()).await.unwrap(),
+            Some(pending)
+        );
+        restarted.shutdown().await.unwrap();
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -1142,11 +1235,14 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1314,11 +1410,14 @@ async fn schema_evolution_add_column_defaults() {
         assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1631,11 +1730,14 @@ async fn schema_evolution_applies_ordered_name_reuse_plan() {
         assert!(committed.is_some());
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1773,11 +1875,14 @@ async fn schema_evolution_drop_column() {
         assert!(committed.is_some(), "initial data should commit before DDL");
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             initial_replicated.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         invoke_write_events(
             &harness.destination,
@@ -1941,11 +2046,14 @@ async fn schema_evolution_interleaved_ddl_dml() {
         assert!(committed.is_some(), "initial data should commit before DDL");
 
         let initial_metadata = DestinationTableMetadata::new_applied(
-            sf_table.clone(),
             SnapshotId::initial(),
             replicated_v1.replication_mask().clone(),
         );
-        harness.store.store_destination_table_metadata(table_id, initial_metadata).await.unwrap();
+        harness
+            .store
+            .store_destination_table_metadata(table_id, initial_metadata, "")
+            .await
+            .unwrap();
 
         // Phase 1: Insert(v1) + ADD COLUMN
         invoke_write_events(
@@ -2176,10 +2284,10 @@ async fn json_null_preservation_and_legacy_defaults() {
             .store_destination_table_metadata(
                 schema.id(),
                 DestinationTableMetadata::new_applied(
-                    sf_table.clone(),
                     SnapshotId::initial(),
                     schema.replication_mask().clone(),
                 ),
+                "",
             )
             .await
             .unwrap();
@@ -2401,7 +2509,7 @@ async fn json_null_preservation_and_legacy_defaults() {
             .unwrap();
     }
     let dropped = harness.sql.drop_table(&sf_table).await;
-    let absent = harness.sql.table_exists(&sf_table).await.map(|exists| !exists);
+    let absent = harness.sql.object_exists(&sf_table).await.map(|exists| !exists);
     assert!(shutdown_ok);
     assert!(dropped.is_ok());
     assert!(absent.unwrap());
