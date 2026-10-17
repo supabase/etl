@@ -38,12 +38,11 @@ impl OutOfBandSourcePool {
     /// Creates a new lazy out-of-band source pool.
     pub(crate) fn new(
         connection_config: &PgConnectionConfig,
-        table_sync_monitor_refresh_interval: Duration,
+        lag_refresh_interval: Duration,
     ) -> Self {
         let connect_options = connection_config.with_db(Some(&OUT_OF_BAND_OPTIONS));
-        let idle_timeout = table_sync_monitor_refresh_interval
-            .saturating_add(IDLE_TIMEOUT_REFRESH_PADDING)
-            .max(MIN_IDLE_TIMEOUT);
+        let idle_timeout =
+            lag_refresh_interval.saturating_add(IDLE_TIMEOUT_REFRESH_PADDING).max(MIN_IDLE_TIMEOUT);
         let pool = PgPoolOptions::new()
             .min_connections(0)
             .max_connections(MAX_POOL_CONNECTIONS)

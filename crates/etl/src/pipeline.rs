@@ -7,7 +7,8 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_config::shared::{
-    validate_copy_concurrency, validate_source_tls_config, validate_table_error_retry_delay_ms,
+    validate_copy_concurrency, validate_refresh_intervals, validate_source_tls_config,
+    validate_table_error_retry_delay_ms,
 };
 use etl_postgres::slots::EtlReplicationSlot;
 use tokio::sync::{Mutex, Semaphore};
@@ -158,9 +159,14 @@ where
             |err| etl_error!(ErrorKind::ConfigError, "Invalid table error retry delay", source: err),
         )?;
 
-        if self.config.table_sync_monitor_refresh_interval_ms == 0 {
-            bail!(ErrorKind::ConfigError, "Replication monitor refresh interval must be positive");
-        }
+        validate_refresh_intervals(
+            self.config.memory_refresh_interval_ms,
+            self.config.table_sync_monitor_refresh_interval_ms,
+            self.config.replication_lag_refresh_interval_ms,
+        )
+        .map_err(
+            |err| etl_error!(ErrorKind::ConfigError, "Invalid refresh interval", source: err),
+        )?;
 
         info!(
             publication_name = %self.config.publication_name,
@@ -210,7 +216,7 @@ where
         let replication_lag_monitor = ReplicationLagMonitor::new(
             self.config.id,
             &self.config.pg_connection,
-            Duration::from_millis(self.config.table_sync_monitor_refresh_interval_ms),
+            Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
         );
 
         let replication_lag_sampler_task =
