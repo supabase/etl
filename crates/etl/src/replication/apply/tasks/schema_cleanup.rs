@@ -16,6 +16,7 @@ use crate::{
     replication::WorkerType,
     schema::{SnapshotId, TableId},
     store::SchemaStore,
+    task::spawn_best_effort_task,
 };
 
 /// Immutable retention boundary for one asynchronous table schema cleanup.
@@ -115,6 +116,10 @@ async fn run_schema_cleanup<S>(
 
 /// Starts the worker that serially prunes requested table schema versions.
 ///
+/// Operation errors skip that request; panics stop cleanup for this invocation.
+/// Both are logged without stopping replication. Closing the queue lets the
+/// worker drain accepted requests and finish normally.
+///
 /// Each queue entry contains one table identifier and one frozen retention
 /// boundary. Buffering accommodates bursts of relation messages. Queueing is
 /// non-blocking, so excess candidates remain pending in the apply loop and are
@@ -127,11 +132,10 @@ where
     S: SchemaStore + Send + 'static,
 {
     let (schema_cleanup_tx, schema_cleanup_rx) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
-    let task = AbortOnDropHandle::new(tokio::spawn(run_schema_cleanup(
-        schema_store,
-        worker_type,
-        schema_cleanup_rx,
-    )));
+    let task = spawn_best_effort_task(
+        "schema cleanup",
+        run_schema_cleanup(schema_store, worker_type, schema_cleanup_rx),
+    );
     (schema_cleanup_tx, task)
 }
 

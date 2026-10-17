@@ -36,7 +36,9 @@
 //! and already-owned batches continue to drain. Resume is deliberately based on
 //! the same full-domain measurement. If measured usage keeps that domain above
 //! the resume threshold, the pipeline stays paused rather than probing with
-//! more source data and risking an OOM kill.
+//! more source data and risking an OOM kill. If the sampling task exits,
+//! emergency backpressure is released and memory gauges become unavailable.
+//! Batch governance retains the last sampled capacity until the pipeline exits.
 
 use std::{
     pin::Pin,
@@ -56,10 +58,13 @@ use tokio_stream::wrappers::WatchStream;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::trace;
 
-use crate::observability::{
-    DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
-    ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
-    ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
+use crate::{
+    observability::{
+        DIRECTION_LABEL, ETL_MEMORY_BACKPRESSURE_ACTIVATION_DURATION_SECONDS,
+        ETL_MEMORY_BACKPRESSURE_ACTIVE, ETL_MEMORY_BACKPRESSURE_TRANSITIONS_TOTAL,
+        ETL_MEMORY_TOTAL_BYTES, ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL,
+    },
+    task::spawn_best_effort_task,
 };
 
 /// Identifies the memory domain represented by a [`MemorySnapshot`].
@@ -250,11 +255,30 @@ struct BackpressureMonitor {
 ///
 /// A separately owned periodic task publishes memory snapshots and updates the
 /// backpressure signal. Consumers can share these readings without retaining
-/// the task handle.
+/// the task handle. If sampling stops, emergency backpressure is released and
+/// gauges become unavailable; batch governance keeps the last sampled capacity.
 #[derive(Debug, Clone)]
 pub(crate) struct MemoryMonitor {
     /// Shared sampler state and optional emergency backpressure controller.
     inner: Arc<MemoryMonitorInner>,
+}
+
+/// Releases paused consumers and invalidates gauges when sampling stops.
+#[derive(Debug)]
+struct MemoryMonitorLifetime {
+    /// Shared readings whose sampling task is exiting.
+    monitor: MemoryMonitor,
+}
+
+impl Drop for MemoryMonitorLifetime {
+    fn drop(&mut self) {
+        self.monitor.set_backpressure_active(false);
+        emit_backpressure_active_metric(false);
+
+        let source = self.monitor.current_snapshot().source.as_str();
+        gauge!(ETL_MEMORY_USED_BYTES, MEMORY_SOURCE_LABEL => source).set(-1.0);
+        gauge!(ETL_MEMORY_TOTAL_BYTES, MEMORY_SOURCE_LABEL => source).set(-1.0);
+    }
 }
 
 impl MemoryMonitor {
@@ -304,9 +328,11 @@ impl MemoryMonitor {
 
         // Shared readings do not own the task, so retaining them creates no
         // cycle.
-        let this_clone = this.clone();
+        let lifetime = MemoryMonitorLifetime { monitor: this.clone() };
         let mut currently_backpressure_active = this.is_backpressure_active();
-        let refresh_task = AbortOnDropHandle::new(tokio::spawn(async move {
+        let memory_monitor_task = spawn_best_effort_task("memory monitor", async move {
+            let lifetime_guard = lifetime;
+            let monitor = &lifetime_guard.monitor;
             let refresh_interval = Duration::from_millis(memory_refresh_interval_ms);
 
             let mut ticker = tokio::time::interval(refresh_interval);
@@ -316,13 +342,13 @@ impl MemoryMonitor {
 
             loop {
                 ticker.tick().await;
-                let previous_snapshot = this_clone.current_snapshot();
+                let previous_snapshot = monitor.current_snapshot();
                 let refresh =
                     MemorySnapshot::refresh(&mut system, current_pid, Some(previous_snapshot));
                 let snapshot = refresh.snapshot;
-                this_clone.publish_refresh(refresh);
+                monitor.publish_refresh(refresh);
 
-                if let Some(backpressure) = this_clone.inner.backpressure.as_ref() {
+                if let Some(backpressure) = monitor.inner.backpressure.as_ref() {
                     let used_percent = snapshot.used_percent();
                     let next_backpressure_active = compute_next_backpressure_active(
                         currently_backpressure_active,
@@ -358,7 +384,7 @@ impl MemoryMonitor {
                     }
 
                     currently_backpressure_active = next_backpressure_active;
-                    this_clone.set_backpressure_active(next_backpressure_active);
+                    monitor.set_backpressure_active(next_backpressure_active);
                 } else {
                     trace!(
                         used_memory_bytes = snapshot.used,
@@ -368,8 +394,9 @@ impl MemoryMonitor {
                     );
                 }
             }
-        }));
-        (this, refresh_task)
+        });
+
+        (this, memory_monitor_task)
     }
 
     /// Returns `true` when memory pressure currently activates backpressure.
@@ -653,6 +680,43 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         assert_eq!(reader.capacity_revision(), revision);
         assert_eq!(Arc::strong_count(&reader.inner), 1);
+    }
+
+    /// A sampler panic or early abort releases paused readers and clears gauges
+    /// while preserving the last capacity for batch sizing.
+    #[tokio::test]
+    async fn sampler_exit_releases_backpressure_and_invalidates_metrics() {
+        let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
+
+        // A zero interval panics inside the task before its first sample.
+        // The other case aborts before the task is first polled.
+        for interval_ms in [0, 100] {
+            let (monitor, task) =
+                MemoryMonitor::spawn(Some(MemoryBackpressureConfig::default()), interval_ms);
+            let capacity = monitor.capacity_snapshot();
+            monitor.set_backpressure_active(true);
+            let mut subscription = monitor.subscribe().unwrap();
+
+            if interval_ms != 0 {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                task.await.unwrap();
+            }
+
+            assert!(!monitor.is_backpressure_active());
+            assert!(!subscription.current_backpressure_active());
+            assert_eq!(futures::StreamExt::next(&mut subscription).await, Some(false));
+            assert_eq!(monitor.capacity_snapshot().total_memory_bytes, capacity.total_memory_bytes);
+            assert_eq!(monitor.capacity_revision(), capacity.revision);
+
+            let rendered = metrics.render();
+            for metric in [ETL_MEMORY_USED_BYTES, ETL_MEMORY_TOTAL_BYTES] {
+                assert!(rendered.lines().any(|line| {
+                    line.starts_with(&format!("{metric}{{")) && line.ends_with(" -1")
+                }));
+            }
+        }
     }
 
     /// One captured gauge assignment.
