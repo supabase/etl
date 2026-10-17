@@ -1,3 +1,8 @@
+//! Slot-invalidation monitoring for an in-flight initial copy.
+//!
+//! Query failures are logged and retried. An unusable slot or unexpected task
+//! termination interrupts the copy attempt through its owner's error policy.
+
 use std::time::Duration;
 
 use metrics::counter;
@@ -6,6 +11,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::warn;
 
 use crate::{
+    bail,
     error::{ErrorKind, EtlResult},
     observability::ETL_SLOT_INVALIDATIONS_TOTAL,
     postgres::client::SlotState,
@@ -20,7 +26,9 @@ use crate::{
 /// caller can abort the copy instead of continuing against an unusable slot.
 #[derive(Debug)]
 pub(crate) struct TableSyncMonitor {
+    /// Owned monitor task whose failures must reach the copy owner.
     handle: AbortOnDropHandle<()>,
+    /// Invalidation notification; closure also signals task termination.
     slot_invalidated_rx: watch::Receiver<bool>,
 }
 
@@ -90,20 +98,19 @@ impl TableSyncMonitor {
 
     /// Resolves once the monitored replication slot is observed invalidated.
     ///
-    /// Never resolves otherwise, including when the monitor task itself ends
-    /// without ever observing an invalidation (e.g. from shutdown), so callers
-    /// should race this against other completion conditions rather than
-    /// awaiting it alone.
-    pub(crate) async fn wait_for_slot_invalidated(&mut self) {
-        loop {
-            if self.slot_invalidated_rx.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
+    /// Reports unexpected monitor termination with its original task error.
+    /// An error consumes the task result and must terminate the copy attempt;
+    /// the caller must not subsequently call [`Self::stop`]. Controlled
+    /// shutdown calls [`Self::stop`] instead of waiting for invalidation.
+    pub(crate) async fn wait_for_slot_invalidated(&mut self) -> EtlResult<()> {
+        // Invalidation is the monitor's only notification.
+        if self.slot_invalidated_rx.changed().await.is_err() {
+            (&mut self.handle).await?;
 
-            if *self.slot_invalidated_rx.borrow() {
-                return;
-            }
+            bail!(ErrorKind::InvalidState, "Table copy slot monitor stopped unexpectedly");
         }
+
+        Ok(())
     }
 
     /// Stops the monitor task, waiting for it to finish.
@@ -119,9 +126,33 @@ mod tests {
     use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
 
     use crate::{
+        error::ErrorKind,
         replication::{ReplicationLagMonitor, table_sync::monitor::TableSyncMonitor},
         schema::TableId,
     };
+
+    /// A failed monitor wakes its copy owner instead of leaving it waiting on
+    /// an invalidation notification that can no longer arrive.
+    #[tokio::test]
+    async fn monitor_panic_interrupts_invalidation_wait() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            let _sender = sender;
+            panic!("Test table copy monitor panic");
+        });
+        let mut monitor = TableSyncMonitor {
+            handle: tokio_util::task::AbortOnDropHandle::new(handle),
+            slot_invalidated_rx: receiver,
+        };
+
+        let error =
+            tokio::time::timeout(Duration::from_secs(1), monitor.wait_for_slot_invalidated())
+                .await
+                .unwrap()
+                .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::TaskPanic);
+    }
 
     /// Owner shutdown interrupts sampling blocked on a database handshake.
     #[tokio::test]

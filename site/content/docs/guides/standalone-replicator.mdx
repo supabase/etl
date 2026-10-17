@@ -180,11 +180,22 @@ Initialization errors return immediately.
 
 Once running, the pipeline stops intake and drains pending apply work under
 existing retry and durability rules. Interrupted initial copies restart from a
-fresh snapshot. Workers finish before destination cleanup and background tasks
-are joined. Enabled probes report stopping while liveness remains healthy.
+fresh snapshot. The pipeline joins the apply worker, then table-sync workers,
+then shuts down the destination. Lag and memory sampling remain alive through
+this sequence and are stopped and joined afterward. Enabled probes report
+stopping while liveness remains healthy.
 
-Requested task cancellations are silently accepted. Panics, task errors, and
-unexpected cancellations return immediately, requesting abort of remaining
+Lag and memory monitors are optional: a monitor panic is logged without
+stopping replication. If lag sampling stops, lag becomes unavailable. If memory
+sampling stops, memory gauges become unavailable and emergency memory
+backpressure is released; batch sizing retains the last sampled capacity.
+A failed PostgreSQL lag query marks lag unavailable and retries. Background
+schema pruning is also best-effort; if it fails, obsolete schema versions may
+be retained. PostgreSQL feedback remains required: sender failure stops the
+current replication attempt and follows the worker's retry policy.
+
+Requested task cancellations are silently accepted. Worker panics, task errors,
+and unexpected cancellations return immediately, requesting abort of remaining
 owned tasks without awaiting further cleanup. This does not roll back writes
 or guarantee that native work has stopped. Recovery uses persisted checkpoints;
 uncheckpointed work may be replayed even after a successful exit.
@@ -261,8 +272,9 @@ WAL on a primary and replayed WAL on a standby.
 Labels identify `pipeline_id`, `worker_type` (`apply` or `table_sync`), and
 `replication_path` (`copy` or `cdc`). Table-sync copy and CDC lag are separate
 maxima, so initial-copy backlog is distinct from catchup in the apply loop.
-Copy exposes only replication lag, measured from its fixed snapshot boundary;
-copying rows does not consume that WAL backlog.
+Copy exposes only replication lag, held at its fixed snapshot boundary through
+final durability and the wait to start CDC. Copying rows does not consume that
+WAL backlog.
 
 These are WAL address distances, not payload sizes or elapsed latency. Unknown
 values are **-1**; filter them out rather than treating them as zero. Query

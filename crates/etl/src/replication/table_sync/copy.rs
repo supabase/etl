@@ -343,10 +343,13 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             // and join before releasing the parent snapshot transaction.
             _ = shutdown_token.cancelled() => {
                 stop_table_copy_tasks(&mut tasks, monitor).await?;
+
                 return Ok(TableCopyResult::Shutdown);
             }
 
-            _ = monitor.wait_for_slot_invalidated() => {
+            result = monitor.wait_for_slot_invalidated() => {
+                result?;
+
                 info!(
                     table_id = table_id.0,
                     slot_name,
@@ -365,6 +368,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
                         slot_name, table_id.0
                     )
                 );
+
                 return Err(error);
             }
 

@@ -378,6 +378,14 @@ impl FeedbackHandle {
             },
         )
     }
+
+    /// Waits until the sender exits and can no longer accept feedback.
+    ///
+    /// Channel closure also wakes idle or backpressured apply loops, which may
+    /// not otherwise attempt another status update. This wait is cancel-safe.
+    pub(crate) async fn closed(&self) {
+        self.requests_tx.closed().await;
+    }
 }
 
 #[cfg(test)]

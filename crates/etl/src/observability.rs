@@ -349,14 +349,14 @@ pub(crate) fn register_metrics() {
             ETL_MEMORY_USED_BYTES,
             Unit::Bytes,
             "Current memory usage in bytes for the selected system or cgroup memory domain, \
-             labeled by source."
+             labeled by source; -1 when sampling has stopped."
         );
 
         describe_gauge!(
             ETL_MEMORY_TOTAL_BYTES,
             Unit::Bytes,
             "Current memory capacity in bytes for the selected system or cgroup memory domain, \
-             labeled by source."
+             labeled by source; -1 when sampling has stopped."
         );
 
         describe_gauge!(
@@ -377,14 +377,14 @@ pub(crate) fn register_metrics() {
             Unit::Bytes,
             "Replication lag in WAL bytes from the durable source head to safe progress, by \
              worker_type and replication_path (copy or cdc). Copy uses its fixed snapshot \
-             boundary. Unknown or inactive measurements are -1. Not payload bytes or elapsed time."
+             boundary. Unavailable measurements are -1. Not payload bytes or elapsed time."
         );
         describe_gauge!(
             ETL_REPLICATION_RECEIVE_WAL_LAG_BYTES,
             Unit::Bytes,
             "Receive lag in WAL bytes from the durable source head to consumed CDC progress, by \
              worker_type and replication_path=cdc. Includes decoding, transport, and intake \
-             backpressure. Unknown or inactive measurements are -1. Not emitted during copy."
+             backpressure. Unavailable measurements are -1. Not emitted during copy."
         );
     });
 }

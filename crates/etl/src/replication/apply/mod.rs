@@ -1068,7 +1068,7 @@ where
     ///
     /// After that preflight, this keeps the priority order explicit:
     /// 1. Shutdown requests.
-    /// 2. PostgreSQL connection lifecycle updates.
+    /// 2. PostgreSQL connection or feedback-sender failure.
     /// 3. Pending destination flush results.
     /// 4. Memory-pressure batch flushing.
     /// 5. Batch flush deadline expiry.
@@ -1078,9 +1078,8 @@ where
     /// sending while any handler below is awaiting work. Incoming PostgreSQL
     /// keepalives drive idle durability settlement; while intake is
     /// backpressured, both settlement and publication of fresh progress wait
-    /// for intake to resume. A failed feedback sender is detected by the next
-    /// keepalive response enqueue or a source connection failure; it does not
-    /// interrupt an in-flight handler.
+    /// for intake to resume. Feedback channel closure wakes the iteration
+    /// even when intake is paused; it does not interrupt an in-flight handler.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may
@@ -1121,6 +1120,10 @@ where
             changed = connection_updates_rx.changed() => {
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
+
+            // Feedback is required for a live replication connection, even
+            // when source intake is paused by memory backpressure.
+            result = self.tasks.wait_for_feedback_failure() => result?,
 
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a
@@ -1169,7 +1172,7 @@ where
     /// intake.
     ///
     /// Priority order:
-    /// 1. PostgreSQL connection lifecycle updates.
+    /// 1. PostgreSQL connection or feedback-sender failure.
     /// 2. Pending destination flush results.
     /// 3. Memory-pressure batch flushing.
     /// 4. Batch flush deadline expiry.
@@ -1203,6 +1206,10 @@ where
             changed = connection_updates_rx.changed() => {
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
+
+            // Feedback is required for a live replication connection, even
+            // when source intake is paused by memory backpressure.
+            result = self.tasks.wait_for_feedback_failure() => result?,
 
             // PRIORITY 2: Handle the pending destination write result.
             apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {

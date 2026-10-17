@@ -31,6 +31,7 @@ use crate::{
     postgres::{OutOfBandSourcePool, client::SlotState},
     replication::WorkerType,
     schema::TableId,
+    task::spawn_best_effort_task,
 };
 
 /// Upper bound on a best-effort metrics query, including pool acquisition.
@@ -140,12 +141,12 @@ struct WorkerSample {
 
 /// Marks lag unavailable when the owned sampler exits or is aborted.
 #[derive(Debug)]
-struct MetricsLifetime {
+struct ReplicationLagSamplerLifetime {
     /// Pipeline whose series must no longer claim live measurements.
     pipeline_id: u64,
 }
 
-impl Drop for MetricsLifetime {
+impl Drop for ReplicationLagSamplerLifetime {
     fn drop(&mut self) {
         let pipeline_id = self.pipeline_id.to_string();
 
@@ -208,7 +209,7 @@ impl ReplicationLagMonitor {
 
     /// Holds the snapshot boundary through copy, durability, and catchup wait.
     ///
-    /// Copying rows does not consume WAL. Received lag is therefore unavailable
+    /// Copying rows does not consume WAL. Receive lag is therefore unavailable
     /// until this worker starts CDC.
     pub(crate) fn register_copy(
         &self,
@@ -227,12 +228,12 @@ impl ReplicationLagMonitor {
     }
 
     /// Starts the single best-effort sampler owned by the pipeline.
-    pub(crate) fn spawn_lag_metrics_task(&self) -> AbortOnDropHandle<()> {
+    pub(crate) fn spawn_replication_lag_metrics_task(&self) -> AbortOnDropHandle<()> {
         let monitor = self.clone();
-        let lifetime = MetricsLifetime { pipeline_id: self.pipeline_id };
+        let lifetime = ReplicationLagSamplerLifetime { pipeline_id: self.pipeline_id };
 
-        AbortOnDropHandle::new(tokio::spawn(async move {
-            let _lifetime = lifetime;
+        spawn_best_effort_task("replication lag sampler", async move {
+            let _lifetime_guard = lifetime;
             let mut interval = tokio::time::interval(monitor.refresh_interval);
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -240,27 +241,23 @@ impl ReplicationLagMonitor {
                 interval.tick().await;
 
                 let workers = monitor.snapshot();
-                let sample = tokio::time::timeout(
+                let sample = match tokio::time::timeout(
                     SAMPLE_TIMEOUT,
                     monitor.source_pool.sample_pipeline_lag(monitor.pipeline_id),
                 )
-                .await;
+                .await
+                {
+                    Ok(sample) => sample,
+                    Err(error) => Err(etl_error!(
+                        ErrorKind::SourceConnectionFailed,
+                        "Source lag sample timed out",
+                        source: error
+                    )),
+                };
 
                 match sample {
-                    Ok(Ok(source)) => monitor.emit(&workers, Some(&source)),
-                    result => {
-                        let error = match result {
-                            Ok(Err(error)) => error,
-                            Err(error) => etl_error!(
-                                ErrorKind::SourceConnectionFailed,
-                                "Source lag sample timed out",
-                                source: error
-                            ),
-                            Ok(Ok(_)) => unreachable!(
-                                "Successful samples are handled in the preceding branch"
-                            ),
-                        };
-
+                    Ok(source) => monitor.emit(&workers, Some(&source)),
+                    Err(error) => {
                         warn!(
                             error = %error,
                             "replication lag sampler failed to poll source database"
@@ -270,7 +267,7 @@ impl ReplicationLagMonitor {
                     }
                 }
             }
-        }))
+        })
     }
 
     /// Installs a new attempt, superseding any previous registration.
@@ -455,7 +452,7 @@ mod tests {
         );
         let registration = monitor.register_cdc(WorkerType::Apply, 100.into());
 
-        let task = monitor.spawn_lag_metrics_task();
+        let task = monitor.spawn_replication_lag_metrics_task();
         let (_connection, _) =
             tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.unwrap().unwrap();
 
@@ -514,6 +511,38 @@ mod tests {
 
         assert_eq!(read(crate::observability::ETL_REPLICATION_RECEIVE_WAL_LAG_BYTES), -1.0);
         assert_eq!(read(crate::observability::ETL_REPLICATION_WAL_LAG_BYTES), -1.0);
+    }
+
+    /// A sampler panic completes without failing its owner and invalidates all
+    /// lag series instead of leaving the previous values frozen.
+    #[tokio::test]
+    async fn sampler_panic_invalidates_metrics_without_failing_owner() {
+        let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
+        let mut monitor = test_monitor();
+        // Fail before sampling PostgreSQL, independently of source
+        // availability.
+        monitor.refresh_interval = Duration::ZERO;
+        let names = [
+            crate::observability::ETL_REPLICATION_WAL_LAG_BYTES,
+            crate::observability::ETL_REPLICATION_RECEIVE_WAL_LAG_BYTES,
+        ];
+        for name in names {
+            metrics::gauge!(name,
+                crate::observability::PIPELINE_ID_LABEL => "1",
+                crate::observability::WORKER_TYPE_LABEL => "apply",
+                crate::observability::REPLICATION_PATH_LABEL => "cdc")
+            .set(123.0);
+        }
+
+        monitor.spawn_replication_lag_metrics_task().await.unwrap();
+
+        let rendered = metrics.render();
+        for name in names {
+            let series: Vec<_> =
+                rendered.lines().filter(|line| line.starts_with(&format!("{name}{{"))).collect();
+            assert!(!series.is_empty());
+            assert!(series.iter().all(|line| line.ends_with(" -1")));
+        }
     }
 
     /// Copy and CDC paths retain separate maxima and recycle the old copy

@@ -18,7 +18,7 @@ use crate::{
     bail,
     config::PipelineConfig,
     destination::PipelineDestination,
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlResult},
     etl_error,
     observability::register_metrics,
     postgres::{client::PgReplicationClient, migrations},
@@ -48,7 +48,7 @@ struct PipelineTasks {
     /// Sampler owned independently of the readings shared with workers.
     memory_monitor_task: AbortOnDropHandle<()>,
     /// Single source sampler shared by copy and CDC worker registrations.
-    replication_lag_task: AbortOnDropHandle<()>,
+    replication_lag_sampler_task: AbortOnDropHandle<()>,
 }
 
 /// Internal state tracking for pipeline lifecycle.
@@ -213,7 +213,8 @@ where
             Duration::from_millis(self.config.table_sync_monitor_refresh_interval_ms),
         );
 
-        let replication_lag_task = replication_lag_monitor.spawn_lag_metrics_task();
+        let replication_lag_sampler_task =
+            replication_lag_monitor.spawn_replication_lag_metrics_task();
 
         // Start memory monitoring only after fallible startup work completes.
         // From this point onward, the monitor is owned by the started pipeline
@@ -242,7 +243,7 @@ where
                 apply_worker,
                 pool,
                 memory_monitor_task,
-                replication_lag_task,
+                replication_lag_sampler_task,
             })),
         };
 
@@ -255,23 +256,27 @@ where
     /// startup, only one waiter can take ownership of its tasks. This method
     /// borrows the pipeline so its owner can request shutdown while waiting.
     ///
-    /// Joins apply and table sync workers, shuts down the destination, then
-    /// stops memory sampling. Requested aborts are silently accepted; panics,
-    /// task errors, and unexpected cancellations return immediately. On failure
-    /// or cancellation of this future, remaining owned handles request abort
-    /// on drop without awaiting further cleanup. Destination-owned resources,
-    /// including ownership cycles, may still require explicit teardown.
+    /// Joins apply and table sync workers and shuts down the destination while
+    /// samplers remain alive, then stops and joins the samplers. Optional
+    /// sampler failures are logged without stopping replication. Worker and
+    /// destination failures propagate without further cleanup. On
+    /// failure or cancellation of this future, remaining owned handles
+    /// request abort on drop without awaiting further cleanup.
+    /// Destination-owned resources, including ownership cycles, may still
+    /// require explicit teardown.
     pub async fn wait(&self) -> EtlResult<()> {
         let PipelineState::Started { tasks } = &self.state else {
             warn!("pipeline was not started, skipping wait");
+
             return Ok(());
         };
 
+        // We get all pipeline tasks that we will wait on.
         let Some(PipelineTasks {
             apply_worker,
             pool,
             memory_monitor_task,
-            mut replication_lag_task,
+            replication_lag_sampler_task,
         }) = tasks.lock().await.take()
         else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
@@ -281,33 +286,30 @@ where
         // waiter skips the successful teardown sequence.
         let _shutdown_guard = self.shutdown_token.clone().drop_guard();
 
-        // Sampling remains alive through draining, but a sampler panic or
-        // unexpected exit must not remain hidden behind a running worker.
-        tokio::select! {
-            result = async {
-                debug!("waiting for apply worker to complete");
-                // The apply worker can create table-sync tasks until it exits.
-                apply_worker.wait().await?;
-                self.shutdown();
+        debug!("waiting for apply worker to complete");
 
-                debug!("waiting for table sync workers to complete");
-                pool.wait_all().await?;
+        apply_worker.wait().await?;
+        self.shutdown();
 
-                debug!("waiting for destination shutdown to complete");
-                self.destination.shutdown().await
-            } => result?,
+        debug!("waiting for table sync workers to complete");
 
-            result = &mut replication_lag_task => {
-                result.map_err(EtlError::from)?;
-                bail!(ErrorKind::InvalidState, "Replication lag sampler stopped unexpectedly");
+        pool.wait_all().await?;
+
+        debug!("waiting for destination shutdown to complete");
+
+        self.destination.shutdown().await?;
+
+        // Optional monitors must not turn successful replication into failure.
+        for (task_name, task) in [
+            ("replication lag sampler", replication_lag_sampler_task),
+            ("memory monitor", memory_monitor_task),
+        ] {
+            debug!(task_name, "stopping optional background task");
+
+            if let Err(error) = abort_and_join(task).await {
+                warn!(task_name, error = %error, "failed to join optional background task");
             }
         }
-
-        debug!("waiting for memory monitor to complete");
-
-        // Consumers need fresh readings until workers and destination drain.
-        abort_and_join(replication_lag_task).await?;
-        abort_and_join(memory_monitor_task).await?;
 
         Ok(())
     }
