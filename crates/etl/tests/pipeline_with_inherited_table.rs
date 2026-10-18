@@ -4,12 +4,16 @@
 use etl::{
     data::{Cell, TableRow, UpdatedTableRow},
     event::{Event, EventType},
+    postgres::client::PgReplicationClient,
     schema::TableId,
     store::TableStateType,
     test_utils::{
-        database::spawn_source_database, event::EventCondition,
-        memory_destination::MemoryDestination, notifying_store::NotifyingStore,
-        pipeline::PipelineBuilder, test_destination_wrapper::TestDestinationWrapper,
+        database::spawn_source_database,
+        event::EventCondition,
+        memory_destination::MemoryDestination,
+        notifying_store::NotifyingStore,
+        pipeline::{PipelineBuilder, test_slot_name},
+        test_destination_wrapper::TestDestinationWrapper,
     },
 };
 use etl_postgres::{below_version, version::POSTGRES_15};
@@ -219,4 +223,36 @@ async fn parent_only_publication_excludes_inherited_child() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filtered_parent_only_publication_excludes_inherited_child_in_parallel() {
     assert_inheritance_copy_scope(true, true, 4, Some("id > 0")).await;
+}
+
+/// An inheritance child does not inherit its parent's primary-key constraint,
+/// so ETL must describe it without a key rather than borrowing the parent's.
+#[tokio::test(flavor = "multi_thread")]
+async fn inheritance_child_without_local_primary_key_has_no_identity() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create table test.keyed_parent (id integer primary key, value text not null);
+             create table test.keyless_child () inherits (test.keyed_parent);",
+        )
+        .await
+        .unwrap();
+
+    let parent_id: TableId =
+        client.query_one("select 'test.keyed_parent'::regclass::oid", &[]).await.unwrap().get(0);
+    let child_id: TableId =
+        client.query_one("select 'test.keyless_child'::regclass::oid", &[]).await.unwrap().get(0);
+
+    let mut replication_client =
+        PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("inheritance_identity");
+    let (transaction, _) =
+        replication_client.create_table_copy_slot(&slot_name, child_id, false).await.unwrap();
+    let (parent_schema, _) = transaction.get_table_schema_with_identity(parent_id).await.unwrap();
+    let (child_schema, _) = transaction.get_table_schema_with_identity(child_id).await.unwrap();
+
+    assert!(parent_schema.has_primary_keys());
+    assert!(!child_schema.has_primary_keys());
 }

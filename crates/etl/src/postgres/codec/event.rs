@@ -1542,6 +1542,29 @@ mod tests {
     }
 
     #[test]
+    fn build_identity_for_default_without_primary_key_is_empty() {
+        let table_schema = TableSchema::new(
+            TableId::new(42),
+            TableName::new("public".to_owned(), "test".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false),
+                ColumnSchema::new("email".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        );
+        let replication_mask = ReplicationMask::from_bytes(vec![1, 1]);
+        let identity = IdentityMessage {
+            primary_key_attnums: Vec::new(),
+            primary_key_condeferrable: false,
+            relreplident: "d".to_owned(),
+            replica_identity_index_attnums: Vec::new(),
+        };
+
+        let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
+
+        assert_eq!(identity_mask.as_slice(), &[0, 0]);
+    }
+
+    #[test]
     fn convert_tuple_to_row_rejects_missing_non_nullable_columns_for_full_rows() {
         let column_schemas = [
             ColumnSchema::new("id".to_owned(), Type::INT8, -1, 1, false).with_primary_key(1),
