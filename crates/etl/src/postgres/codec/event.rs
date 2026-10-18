@@ -1631,6 +1631,34 @@ mod tests {
     }
 
     #[test]
+    fn normalize_key_tuple_to_row_rejects_a_schema_without_identity_columns() {
+        // This is the failure behind #1118. A keyless partitioned root
+        // published with `publish_via_partition_root` yields an empty identity
+        // mask, while PostgreSQL enforces the leaf's replica identity, accepts
+        // the update, and emits a key image against the root. There is no
+        // column to map that image onto.
+        let table_schema = Arc::new(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "part_root".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false),
+                ColumnSchema::new("value".to_owned(), Type::TEXT, -1, 2, false),
+            ],
+        ));
+        let replicated_table_schema = ReplicatedTableSchema::from_masks(
+            Arc::clone(&table_schema),
+            ReplicatedTableSchema::all(Arc::clone(&table_schema)).replication_mask().clone(),
+            crate::schema::IdentityMask::from_bytes(vec![0, 0]),
+        );
+        let tuple_data =
+            [TupleData::Text(b"1".to_vec().into()), TupleData::Text(b"after".to_vec().into())];
+
+        let error = normalize_key_tuple_to_row(&replicated_table_schema, &tuple_data).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ConversionError);
+    }
+
+    #[test]
     fn normalize_key_tuple_to_row_accepts_full_width_tuple_and_filters_identity_columns() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
