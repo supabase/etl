@@ -58,7 +58,7 @@ use crate::{
     },
     pipeline::PipelineId,
     postgres::{
-        OutOfBandSourcePool, ReplicationMessageStream,
+        ReplicationMessageStream,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
@@ -71,9 +71,8 @@ use crate::{
         },
     },
     replication::{
-        PreviousRelationMasks, TableDecodingState, WorkerType,
-        apply::tasks::{ApplyLoopTasks, ReplicationLagMetrics},
-        state::TableState,
+        PreviousRelationMasks, ReplicationLagMetrics, ReplicationLagMonitor, TableDecodingState,
+        WorkerType, apply::tasks::ApplyLoopTasks, state::TableState,
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
@@ -176,8 +175,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) store: S,
     /// Destination where replicated data is written.
     pub(crate) destination: D,
-    /// Shared pool for out-of-band source database queries.
-    pub(crate) out_of_band_source_pool: OutOfBandSourcePool,
+    /// Shared source sampler and copy/CDC progress registrations.
+    pub(crate) replication_lag_monitor: ReplicationLagMonitor,
     /// Cancellation token for graceful termination.
     pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -622,11 +621,8 @@ impl ApplyLoopState {
 
     /// Snapshots apply-loop progress into the replication lag metrics.
     fn update_replication_lag_metrics_from_progress(&self) {
-        self.replication_lag_metrics.update_progress(
-            self.replication_progress.last_received_lsn(),
-            self.replication_progress.last_flush_lsn(),
-            self.checkpoint_lsn(),
-        );
+        self.replication_lag_metrics
+            .update_progress(self.replication_progress.last_received_lsn(), self.checkpoint_lsn());
     }
 
     /// Returns the last received LSN that should be reported as written to the
@@ -879,7 +875,7 @@ where
         replication_client: &PgReplicationClient,
         schema_store: S,
         destination: D,
-        out_of_band_source_pool: OutOfBandSourcePool,
+        replication_lag_monitor: ReplicationLagMonitor,
         worker_context: WorkerContext<S, D>,
         shutdown_token: CancellationToken,
         memory_monitor: MemoryMonitor,
@@ -945,7 +941,7 @@ where
         let bootstrap_snapshot_id = SnapshotId::before_lsn(start_lsn);
 
         let replication_progress = ReplicationProgress::new(start_lsn);
-        let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
+        let replication_lag_metrics = replication_lag_monitor.register_cdc(worker_type, start_lsn);
 
         let activity_registration =
             ActivityRegistration::register(ActivityKind::WalApply { wal_sender_timeout });
@@ -955,14 +951,9 @@ where
         let (feedback_handle, feedback_sender_future) = feedback
             .expect("A keep-alive deadline must create a feedback handle and sender future");
 
-        let table_sync_monitor_refresh_interval =
-            Duration::from_millis(config.table_sync_monitor_refresh_interval_ms);
         let tasks = ApplyLoopTasks::start(
             schema_store.clone(),
-            out_of_band_source_pool,
-            replication_lag_metrics.clone(),
             worker_type,
-            table_sync_monitor_refresh_interval,
             feedback_handle,
             feedback_sender_future,
         );
@@ -1121,7 +1112,7 @@ where
     ///
     /// After that preflight, this keeps the priority order explicit:
     /// 1. Shutdown requests.
-    /// 2. PostgreSQL connection lifecycle updates.
+    /// 2. PostgreSQL connection or feedback-sender failure.
     /// 3. Pending destination flush results.
     /// 4. Memory-pressure batch flushing.
     /// 5. Batch flush deadline expiry.
@@ -1131,9 +1122,8 @@ where
     /// sending while any handler below is awaiting work. Incoming PostgreSQL
     /// keepalives drive idle durability settlement; while intake is
     /// backpressured, both settlement and publication of fresh progress wait
-    /// for intake to resume. A failed feedback sender is detected by the next
-    /// keepalive response enqueue or a source connection failure; it does not
-    /// interrupt an in-flight handler.
+    /// for intake to resume. Feedback channel closure wakes the iteration
+    /// even when intake is paused; it does not interrupt an in-flight handler.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may
@@ -1174,6 +1164,10 @@ where
             changed = connection_updates_rx.changed() => {
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
+
+            // Feedback is required for a live replication connection, even
+            // when source intake is paused by memory backpressure.
+            result = self.tasks.wait_for_feedback_failure() => result?,
 
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a
@@ -1222,7 +1216,7 @@ where
     /// intake.
     ///
     /// Priority order:
-    /// 1. PostgreSQL connection lifecycle updates.
+    /// 1. PostgreSQL connection or feedback-sender failure.
     /// 2. Pending destination flush results.
     /// 3. Memory-pressure batch flushing.
     /// 4. Batch flush deadline expiry.
@@ -1256,6 +1250,10 @@ where
             changed = connection_updates_rx.changed() => {
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
+
+            // Feedback is required for a live replication connection, even
+            // when source intake is paused by memory backpressure.
+            result = self.tasks.wait_for_feedback_failure() => result?,
 
             // PRIORITY 2: Handle the pending destination write result.
             apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
@@ -2034,10 +2032,8 @@ where
                 // current WAL end; the monotonic updates intentionally ignore
                 // the zero-valued envelopes.
                 let start_lsn = PgLsn::from(message.wal_start());
-                self.state.update_last_received_lsn(start_lsn);
-
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.update_last_received_lsn(end_lsn);
+                self.state.update_last_received_lsn(start_lsn.max(end_lsn));
 
                 debug!(
                     %start_lsn,
@@ -4188,7 +4184,7 @@ mod apply_worker {
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
-            ctx.out_of_band_source_pool.clone(),
+            ctx.replication_lag_monitor.clone(),
             ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
@@ -4426,11 +4422,10 @@ mod tests {
         etl_error,
         event::Event,
         replication::{
-            TableDecodingState,
+            ReplicationLagMetrics, TableDecodingState,
             apply::{
                 ApplyLoop, ApplyLoopResult, ApplyLoopState, EventBatch, ExitIntent,
                 ReplicationProgress, schema_cleanup_retention_snapshot_id,
-                tasks::ReplicationLagMetrics,
             },
             state::{StoredTableDecodingState, TableState},
         },
@@ -4698,7 +4693,7 @@ mod tests {
         ApplyLoopState::new(
             activity_registration.handle(),
             ReplicationProgress::new(lsn.into()),
-            ReplicationLagMetrics::new(lsn.into()),
+            ReplicationLagMetrics::create(lsn.into(), false),
             SnapshotId::initial(),
         )
     }

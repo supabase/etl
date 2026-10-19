@@ -105,7 +105,12 @@ and operating guidance.
 
 ### Pipeline
 
-The **central orchestrator** that manages the entire replication process. It spawns workers, coordinates state transitions, and handles shutdown.
+The **central orchestrator** manages the entire replication process. It spawns
+workers, coordinates state transitions, and handles shutdown. During controlled
+shutdown, it joins the apply worker before table-sync workers, then shuts down
+the destination. Lag and memory samplers remain alive through destination
+cleanup. See [Shutdown](/guides/standalone-replicator/#shutdown) for failure and
+recovery behavior.
 
 ### Destination
 

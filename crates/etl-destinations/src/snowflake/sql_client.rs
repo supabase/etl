@@ -37,7 +37,8 @@ const USER_AGENT: &str = "supabase-etl/0.1.0";
 
 /// Executes DDL and metadata operations against Snowflake's SQL REST API.
 ///
-/// All DDL runs on Snowflake's Cloud Services layer (no warehouse required).
+/// Metadata-only DDL does not require a warehouse. Statements that query data,
+/// including `CREATE TABLE ... AS SELECT`, require an active warehouse.
 pub struct SqlClient<T> {
     config: Config,
     http: Client,
@@ -68,6 +69,20 @@ pub(crate) struct StatementResponse {
     result_set_meta_data: Option<ResultSetMetadata>,
 }
 
+#[cfg(test)]
+impl StatementResponse {
+    /// Returns column nullability for live query contract tests.
+    pub(crate) fn column_nullability(&self) -> Vec<(&str, Option<bool>)> {
+        self.result_set_meta_data
+            .as_ref()
+            .unwrap()
+            .row_type
+            .iter()
+            .map(|column| (column.name.as_str(), column.nullable))
+            .collect()
+    }
+}
+
 /// Column metadata returned with a Snowflake SQL result set.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,6 +100,10 @@ struct ResultSetMetadata {
 struct ResultColumnMetadata {
     /// Column name supplied by Snowflake.
     name: String,
+    /// Query result nullability, retained only for provider contract tests.
+    #[cfg(test)]
+    #[serde(default)]
+    nullable: Option<bool>,
 }
 
 impl<T: TokenProvider> SqlClient<T> {
@@ -92,7 +111,7 @@ impl<T: TokenProvider> SqlClient<T> {
         Self { config: config.without_credentials(), http, auth }
     }
 
-    /// Execute a DDL statement (runs on Cloud Services, no warehouse required).
+    /// Executes a DDL statement, discarding its result rows.
     ///
     /// Generates one request ID for this invocation so Snowflake can reconcile
     /// transport retries. A later invocation gets a new ID: recovery across
@@ -134,6 +153,7 @@ impl<T: TokenProvider> SqlClient<T> {
         let response = self.execute_statement(&show_columns).await?;
         let columns = parse_show_columns(&response)?;
         validate_column_names(table_name, expected_column_names, &columns)?;
+        validate_cdc_metadata(&response, &columns)?;
         let defaults = json_columns_with_defaults(&response, json_column_names)?;
         if defaults.is_empty() {
             return Ok(());
@@ -151,12 +171,48 @@ impl<T: TokenProvider> SqlClient<T> {
         let response = self.execute_statement(&show_columns).await?;
         let columns = parse_show_columns(&response)?;
         validate_column_names(table_name, expected_column_names, &columns)?;
+        validate_cdc_metadata(&response, &columns)?;
         if !json_columns_with_defaults(&response, json_column_names)?.is_empty() {
             return Err(Error::Config(format!(
                 "Snowflake table '{table_name}' still has defaults on JSON columns after migration"
             )));
         }
         Ok(())
+    }
+
+    /// Upgrades only the known legacy CDC format before opening a channel.
+    ///
+    /// Authoritative destination metadata must establish ownership first.
+    /// Repeating the additive DDL is safe after an unknown outcome. External
+    /// removal of previously written masks is unsupported and indistinguishable
+    /// from a legacy table without independent durable format evidence.
+    pub(super) async fn upgrade_legacy_table(
+        &self,
+        table_name: &str,
+        columns: &[etl::schema::ColumnSchema],
+    ) -> Result<()> {
+        use crate::snowflake::schema::{
+            CDC_MISSING_COLUMNS_COLUMN, CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN,
+        };
+
+        let fqn = self.fully_qualified_name(table_name);
+        let response = self.execute_statement(&format!("SHOW COLUMNS IN TABLE {fqn}")).await?;
+        let actual = parse_show_columns(&response)?;
+        let expected = columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .chain([CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN])
+            .collect::<Vec<_>>();
+        validate_column_names(table_name, &expected, &actual)?;
+        validate_cdc_metadata(&response, &actual)?;
+        // TODO: Remove after table migration coverage and the
+        // supported self-hosted upgrade path no longer require legacy
+        // format upgrades.
+        self.execute_ddl(&format!(
+            "ALTER TABLE {fqn} ADD COLUMN IF NOT EXISTS {} ARRAY",
+            quote_identifier(CDC_MISSING_COLUMNS_COLUMN),
+        ))
+        .await
     }
 
     /// Remove all rows from a table without dropping it.
@@ -185,6 +241,42 @@ impl<T: TokenProvider> SqlClient<T> {
         let resp = self.execute_statement(&sql).await?;
         let table_names = parse_show_table_names(&resp)?;
         Ok(table_names.contains(&table_name))
+    }
+
+    /// Lists exact object kinds and comments for companion-view ownership
+    /// checks.
+    pub(super) async fn objects_starting_with(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let response = self
+            .execute_statement(&format!(
+                "show objects in schema {}.{} starts with {}",
+                quote_identifier(&self.config.database),
+                quote_identifier(&self.config.schema),
+                quote_string_literal(prefix),
+            ))
+            .await?;
+        let names = parse_named_show_column(&response, "SHOW OBJECTS", "name")?;
+        let kinds = parse_named_show_column(&response, "SHOW OBJECTS", "kind")?;
+        let comments = parse_named_show_values(&response, "SHOW OBJECTS", "comment")?;
+        names
+            .into_iter()
+            .zip(kinds)
+            .zip(comments)
+            .map(|((name, kind), comment)| {
+                let comment = match comment {
+                    serde_json::Value::Null => "",
+                    serde_json::Value::String(value) => value,
+                    _ => {
+                        return Err(Error::Config(
+                            "Snowflake object comment is not a string".to_owned(),
+                        ));
+                    }
+                };
+                Ok((name.to_owned(), kind.to_owned(), comment.to_owned()))
+            })
+            .collect()
     }
 
     /// Add a nullable column to an existing table.
@@ -227,7 +319,7 @@ impl<T: TokenProvider> SqlClient<T> {
         self.execute_ddl(&format!("ALTER TABLE {fqn} RENAME COLUMN {old} TO {new}")).await
     }
 
-    fn fully_qualified_name(&self, name: &str) -> String {
+    pub(super) fn fully_qualified_name(&self, name: &str) -> String {
         format!(
             "{}.{}.{}",
             quote_identifier(&self.config.database),
@@ -561,6 +653,39 @@ fn parse_show_table_names(response: &StatementResponse) -> Result<Vec<&str>> {
     parse_named_show_column(response, "SHOW TERSE TABLES", "name")
 }
 
+/// Validates the CDC fields using the existing SHOW response.
+fn validate_cdc_metadata(response: &StatementResponse, names: &[&str]) -> Result<()> {
+    use crate::snowflake::schema::{
+        CDC_MISSING_COLUMNS_COLUMN, CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN,
+    };
+
+    let types = parse_named_show_column(response, "SHOW COLUMNS", "data_type")?;
+    let defaults = parse_named_show_values(response, "SHOW COLUMNS", "default")?;
+    // Names, types, and defaults come from the same SHOW rows in the same
+    // order.
+    for ((name, typ), default) in names.iter().zip(types).zip(defaults) {
+        let expected = match *name {
+            CDC_OPERATION_COLUMN | CDC_SEQUENCE_COLUMN => "TEXT",
+            CDC_MISSING_COLUMNS_COLUMN => "ARRAY",
+            _ => continue,
+        };
+        let metadata: serde_json::Value = serde_json::from_str(typ).map_err(|_| {
+            Error::UnsupportedLayout(format!("Column '{name}' has malformed type metadata"))
+        })?;
+        if metadata.get("type").and_then(serde_json::Value::as_str) != Some(expected)
+            || metadata.get("nullable").and_then(serde_json::Value::as_bool)
+                != Some(*name == CDC_MISSING_COLUMNS_COLUMN)
+            || (*name == CDC_MISSING_COLUMNS_COLUMN
+                && !(default.is_null() || default.as_str() == Some("")))
+        {
+            return Err(Error::UnsupportedLayout(format!(
+                "Column '{name}' does not match the CDC contract"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validates exact column names without relying on column order.
 fn validate_column_names(
     table_name: &str,
@@ -625,7 +750,7 @@ mod tests {
                 num_rows: Some(row_count),
                 row_type: column_names
                     .iter()
-                    .map(|name| ResultColumnMetadata { name: (*name).to_owned() })
+                    .map(|name| ResultColumnMetadata { name: (*name).to_owned(), nullable: None })
                     .collect(),
             }),
         }
@@ -820,5 +945,62 @@ mod tests {
                 ("retry".to_owned(), "true".to_owned()),
             ]
         );
+    }
+    #[test]
+    fn cdc_metadata_is_paired_by_actual_show_row_and_requires_exact_contract() {
+        let response = |mask_type: &str, nullable: bool, default: serde_json::Value| {
+            statement_response(
+                &["default", "data_type", "column_name"],
+                vec![
+                    vec![
+                        default,
+                        serde_json::json!({"type": mask_type, "nullable": nullable})
+                            .to_string()
+                            .into(),
+                        "_cdc_missing_columns".into(),
+                    ],
+                    vec![
+                        serde_json::Value::Null,
+                        serde_json::json!({"type": "TEXT", "nullable": false}).to_string().into(),
+                        "_cdc_sequence_number".into(),
+                    ],
+                    vec![
+                        serde_json::Value::Null,
+                        serde_json::json!({"type": "FIXED", "nullable": true}).to_string().into(),
+                        "id".into(),
+                    ],
+                    vec![
+                        "".into(),
+                        serde_json::json!({"type": "TEXT", "nullable": false}).to_string().into(),
+                        "_cdc_operation".into(),
+                    ],
+                ],
+            )
+        };
+        for default in [serde_json::Value::Null, "".into()] {
+            let response = response("ARRAY", true, default);
+            let names = parse_show_columns(&response).unwrap();
+            validate_cdc_metadata(&response, &names).unwrap();
+        }
+        for (typ, nullable, default) in
+            [("TEXT", true, ""), ("ARRAY", false, ""), ("ARRAY", true, "ARRAY_CONSTRUCT()")]
+        {
+            let response = response(typ, nullable, default.into());
+            let names = parse_show_columns(&response).unwrap();
+            assert!(matches!(
+                validate_cdc_metadata(&response, &names),
+                Err(Error::UnsupportedLayout(_))
+            ));
+        }
+        let malformed = response("ARRAY", false, "".into());
+        let mut malformed = malformed;
+        malformed.data.as_mut().unwrap()[0][1] = "{invalid".into();
+        assert!(
+            validate_cdc_metadata(&malformed, &parse_show_columns(&malformed).unwrap()).is_err()
+        );
+        let mut response = response("ARRAY", true, "".into());
+        response.data.as_mut().unwrap()[1][1] =
+            serde_json::json!({"type": "TEXT", "nullable": true}).to_string().into();
+        assert!(validate_cdc_metadata(&response, &parse_show_columns(&response).unwrap()).is_err());
     }
 }

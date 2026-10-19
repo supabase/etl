@@ -175,6 +175,8 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         max_copy_connections_per_table: 2,
         memory_refresh_interval_ms: 100,
         table_sync_monitor_refresh_interval_ms: 10000,
+        replication_lag_refresh_interval_ms:
+            PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
         settle_durable_interval_ms: None,
         memory_backpressure: Some(MemoryBackpressureConfig::default()),
         table_sync_copy: TableSyncCopyConfig::default(),
