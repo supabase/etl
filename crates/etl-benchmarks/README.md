@@ -328,9 +328,9 @@ docker compose -f scripts/docker/docker-compose.yaml up -d clickhouse
 
 The defaults in `.env.example` (`BENCH_CLICKHOUSE_URL=http://localhost:8123`,
 `BENCH_CLICKHOUSE_USER=etl`, `BENCH_CLICKHOUSE_PASSWORD=etl`,
-`BENCH_CLICKHOUSE_DATABASE=default`) match the compose service. Override them
-to point at any other ClickHouse 23.5 or newer (required by the default
-`ReplacingMergeTree` engine).
+`BENCH_CLICKHOUSE_DATABASE=default`) match the compose service, so local runs
+write to `default_<pipeline_id>` databases. Override them to point at any other
+ClickHouse 23.5 or newer (required by the default `ReplacingMergeTree` engine).
 
 Run the benchmark:
 
@@ -345,8 +345,12 @@ Required environment variables (or their `--clickhouse-*` CLI equivalents):
 
 - `BENCH_CLICKHOUSE_URL`: ClickHouse HTTP URL.
 - `BENCH_CLICKHOUSE_USER`: ClickHouse user.
-- `BENCH_CLICKHOUSE_DATABASE`: target database. Must already exist; the
-  destination creates tables but not databases.
+- `BENCH_CLICKHOUSE_DATABASE`: database name prefix. Each run creates a new
+  `<prefix>_<pipeline_id>` database and drops it when the run cleans up, so the
+  prefix database itself need not exist. The prefix must start with an ASCII
+  letter or underscore and contain only ASCII letters, digits, and
+  underscores. The user needs `CREATE DATABASE` and `DROP DATABASE`
+  privileges.
 
 Optional:
 
