@@ -836,10 +836,11 @@ impl From<tokio_postgres::Error> for EtlError {
                     }
 
                     // Syntax and access errors (42xxx)
-                    SqlState::SYNTAX_ERROR
-                    | SqlState::SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION
-                    | SqlState::INSUFFICIENT_PRIVILEGE => {
+                    SqlState::SYNTAX_ERROR | SqlState::SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION => {
                         (ErrorKind::SourceQueryFailed, "PostgreSQL syntax or access error")
+                    }
+                    SqlState::INSUFFICIENT_PRIVILEGE => {
+                        (ErrorKind::PermissionDenied, "PostgreSQL permission denied")
                     }
 
                     // Resource errors (53xxx)
@@ -1119,12 +1120,19 @@ impl From<ParseTimeError> for EtlError {
 
 /// Converts [`sqlx::Error`] to [`EtlError`] with the appropriate error kind.
 ///
-/// Maps database errors to [`ErrorKind::SourceQueryFailed`], I/O errors to
+/// Maps missing privileges to [`ErrorKind::PermissionDenied`], other database
+/// errors to [`ErrorKind::SourceQueryFailed`], I/O errors to
 /// [`ErrorKind::IoError`], and connection pool errors to
 /// [`ErrorKind::SourceConnectionFailed`].
 impl From<sqlx::Error> for EtlError {
     fn from(err: sqlx::Error) -> EtlError {
         let kind = match &err {
+            sqlx::Error::Database(error)
+                if error.code().as_deref()
+                    == Some(tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE.code()) =>
+            {
+                ErrorKind::PermissionDenied
+            }
             sqlx::Error::Database(_) => ErrorKind::SourceQueryFailed,
             sqlx::Error::Io(_) => ErrorKind::IoError,
             sqlx::Error::PoolClosed | sqlx::Error::PoolTimedOut => {
