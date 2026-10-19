@@ -10,14 +10,16 @@ use etl::{
     store::{MemoryStore, PostgresStore},
     test_utils::memory_destination::MemoryDestination,
 };
-use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
+use etl_postgres::{
+    test_utils::{local_tls_config_from_env, test_database_port_from_env},
+    tokio::test_utils::PgDatabase,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
 const DEFAULT_DATABASE_HOST: &str = "localhost";
-const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
@@ -34,10 +36,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
         hostaddr: None,
-        port: std::env::var("TESTS_DATABASE_PORT")
-            .unwrap_or(DEFAULT_DATABASE_PORT.into())
-            .parse()
-            .expect("TESTS_DATABASE_PORT must be a valid port number"),
+        port: test_database_port_from_env(),
         name: Uuid::new_v4().to_string(),
         username: std::env::var("TESTS_DATABASE_USERNAME")
             .unwrap_or(DEFAULT_DATABASE_USERNAME.into()),

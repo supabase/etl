@@ -4368,7 +4368,10 @@ mod tests {
         store::{MemoryStore, SchemaStore},
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
-    use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
+    use etl_postgres::{
+        test_utils::{local_tls_config_from_env, test_database_port_from_env},
+        tokio::test_utils::PgDatabase,
+    };
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
     use tokio_postgres::Client;
@@ -5277,10 +5280,7 @@ mod tests {
         PgConnectionConfig {
             host: env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
             hostaddr: None,
-            port: env::var("TESTS_DATABASE_PORT")
-                .expect("TESTS_DATABASE_PORT must be set")
-                .parse()
-                .expect("TESTS_DATABASE_PORT must be a valid port number"),
+            port: test_database_port_from_env(),
             name: database_name,
             username: env::var("TESTS_DATABASE_USERNAME")
                 .expect("TESTS_DATABASE_USERNAME must be set"),
@@ -5293,10 +5293,7 @@ mod tests {
     async fn create_catalog_database() -> (PgDatabase<Client>, Url) {
         let database_name = Uuid::new_v4().to_string();
         let host = env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set");
-        let port = env::var("TESTS_DATABASE_PORT")
-            .expect("TESTS_DATABASE_PORT must be set")
-            .parse()
-            .expect("TESTS_DATABASE_PORT must be a valid port number");
+        let port = test_database_port_from_env();
         let username =
             env::var("TESTS_DATABASE_USERNAME").expect("TESTS_DATABASE_USERNAME must be set");
         let password = env::var("TESTS_DATABASE_PASSWORD").ok();
