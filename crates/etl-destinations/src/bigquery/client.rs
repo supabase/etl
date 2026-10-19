@@ -573,10 +573,11 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
             // library handles recognized transient cases before this mapping.
             Code::Unknown => (ErrorKind::DestinationError, "BigQuery unknown error"),
 
-            Code::PermissionDenied => (ErrorKind::DestinationError, "BigQuery permission denied"),
+            // The credentials were accepted but lack an IAM grant.
+            Code::PermissionDenied => (ErrorKind::PermissionDenied, "BigQuery permission denied"),
 
             Code::Unauthenticated => {
-                (ErrorKind::DestinationError, "BigQuery authentication failed")
+                (ErrorKind::DestinationAuthenticationError, "BigQuery authentication failed")
             }
 
             Code::InvalidArgument => (ErrorKind::DestinationError, "BigQuery invalid argument"),
@@ -1783,6 +1784,21 @@ mod tests {
         assert_eq!(unavailable.retryability(), Retryability::Retryable);
         assert_eq!(rejected.kind(), ErrorKind::DestinationError);
         assert_eq!(rejected.retryability(), Retryability::Permanent);
+    }
+
+    /// Rejected credentials and missing IAM grants stop for an operator, each
+    /// with its own guidance.
+    #[test]
+    fn bigquery_access_statuses_convert_to_access_errors() {
+        for (status, kind) in [
+            (tonic::Status::permission_denied("denied"), ErrorKind::PermissionDenied),
+            (tonic::Status::unauthenticated("expired"), ErrorKind::DestinationAuthenticationError),
+        ] {
+            let error = bq_error_to_etl_error(BQError::from(status));
+
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.retryability(), Retryability::Permanent);
+        }
     }
 
     #[test]
