@@ -309,9 +309,12 @@ jobs:
           tool: cargo-fuzz@0.13.2
       - name: Replay committed corpus
         # Runs every committed seed once without mutation, so a failure is a
-        # deterministic regression in this change. Build for the runner's
+        # deterministic regression in this change. The fuzz workspace has no
+        # committed lockfile, so seed it from the root Cargo.lock to replay
+        # against the shipped dependency versions. Build for the runner's
         # real host triple; see fuzz.yml.
         run: |
+          cp Cargo.lock fuzz/Cargo.lock
           host="$(rustc +nightly-2026-04-15 --print host-tuple)"
           targets="$(cargo +nightly-2026-04-15 fuzz list)"
           if [[ -z "$targets" ]]; then
