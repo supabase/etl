@@ -27,6 +27,7 @@ use etl::{
     event::EventPosition,
     schema::ReplicatedTableSchema,
 };
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
 use parking_lot::Mutex;
@@ -41,10 +42,11 @@ use crate::{
         DUCKLAKE_COLUMN_NAME_MAPPING, DuckLakeTableName, LAKE_CATALOG,
         client::{
             DuckLakeBlockingOperationContext, DuckLakeConnectionManager, format_query_error_detail,
-            is_ducklake_shutdown_requested_error, retryable_until_classified, run_duckdb_blocking,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_blocking_with_context,
         },
         core::{DuckLakeWriteGuard, is_create_table_conflict},
+        duckdb_error::{DuckDbErrorType, duckdb_error_retryability, duckdb_error_type},
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_copy_rows, prepare_rows,
             table_row_to_sql_literal_ref,
@@ -109,28 +111,53 @@ fn format_optional_event_position(event_position: Option<EventPosition>) -> Stri
     event_position.map_or_else(|| "none".to_owned(), format_event_position)
 }
 
-/// Returns whether one DuckDB error is the standard interrupted query error.
-fn is_duckdb_interrupt_error(error: &duckdb::Error) -> bool {
-    error.to_string().contains("INTERRUPT Error: Interrupted")
+/// Sanitized DuckDB query failure for statements that may contain row values.
+///
+/// Keeps the DuckDB exception type and its classification, which carry no row
+/// values, and drops the message.
+#[derive(Debug)]
+struct DuckDbSensitiveQueryError {
+    error_type: Option<DuckDbErrorType>,
+    retryability: Retryability,
 }
 
-/// Sanitized DuckDB query failure for statements that may contain row values.
-#[derive(Debug)]
-struct DuckDbSensitiveQueryError;
+impl DuckDbSensitiveQueryError {
+    /// Sanitizes one failed DuckDB call.
+    fn new(error: &duckdb::Error) -> Self {
+        Self {
+            error_type: duckdb_error_type(error),
+            retryability: duckdb_error_retryability(error),
+        }
+    }
+
+    /// Returns whether DuckDB interrupted the query.
+    fn is_interrupt(&self) -> bool {
+        self.error_type == Some(DuckDbErrorType::Interrupt)
+    }
+}
 
 impl fmt::Display for DuckDbSensitiveQueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DuckDB query failed; error message omitted because it may contain row values")
+        match self.error_type {
+            Some(error_type) => write!(
+                f,
+                "DuckDB query failed with a {error_type:?} error; error message omitted because \
+                 it may contain row values"
+            ),
+            None => write!(
+                f,
+                "DuckDB query failed; error message omitted because it may contain row values"
+            ),
+        }
     }
 }
 
 impl error::Error for DuckDbSensitiveQueryError {}
 
-/// Stands in for a DuckDB error, which DuckLake cannot yet classify, so it is
-/// permanent like other DuckDB errors.
+/// Classified like the DuckDB error it replaces.
 impl ClassifiedError for DuckDbSensitiveQueryError {
     fn retryability(&self) -> Retryability {
-        Retryability::Permanent
+        self.retryability
     }
 }
 
@@ -471,7 +498,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake CREATE TABLE failed",
                     format_query_error_detail(&ddl),
-                    error,
+                    RedactedDuckDbError::from(error),
                 ));
             }
         }
@@ -487,7 +514,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake set_option failed",
                 format_query_error_detail(&set_option_sql),
-                err,
+                RedactedDuckDbError::from(err),
             )
         })?;
 
@@ -540,7 +567,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake CREATE TABLE failed",
                     format_query_error_detail(&ddl),
-                    err,
+                    RedactedDuckDbError::from(err),
                 ));
             }
         }
@@ -556,7 +583,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake set_option failed",
                 format_query_error_detail(&set_option_sql),
-                error,
+                RedactedDuckDbError::from(error),
             )
         })?;
 
@@ -583,7 +610,7 @@ fn ensure_helper_table_replay_epoch_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table migration failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
 
@@ -607,7 +634,7 @@ fn helper_table_has_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table schema lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
     let mut rows = statement.query([]).map_err(|source| {
@@ -615,7 +642,7 @@ fn helper_table_has_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table schema lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
 
@@ -624,7 +651,7 @@ fn helper_table_has_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table schema row fetch failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })
 }
@@ -681,7 +708,6 @@ pub(super) async fn apply_table_batches_with_retry(
                     Ok(())
                 })
                 .await
-                .map_err(retryable_until_classified)
             }
         },
     )
@@ -772,7 +798,6 @@ pub(super) async fn apply_table_batch_with_retry(
                     Ok(())
                 })
                 .await
-                .map_err(retryable_until_classified)
             }
         },
     )
@@ -958,7 +983,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query prepare failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     let mut rows = statement.query([]).map_err(|err| {
@@ -966,7 +991,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
 
@@ -975,7 +1000,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress row fetch failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?
     else {
@@ -987,7 +1012,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress commit lsn read failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     let last_tx_ordinal: u64 = row.get(1).map_err(|err| {
@@ -995,7 +1020,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress tx ordinal read failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
 
@@ -1658,7 +1683,7 @@ fn applied_batch_marker_id_exists(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query prepare failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     let mut rows = statement.query([]).map_err(|err| {
@@ -1666,7 +1691,7 @@ fn applied_batch_marker_id_exists(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
 
@@ -1675,7 +1700,7 @@ fn applied_batch_marker_id_exists(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query row fetch failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })
 }
@@ -1724,7 +1749,7 @@ fn insert_applied_batch_marker_fields(
             ErrorKind::DestinationQueryFailed,
             "DuckLake batch marker insert failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     Ok(())
@@ -1758,7 +1783,7 @@ fn update_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress update failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     Ok(())
@@ -1812,6 +1837,7 @@ impl ReusableStagingTable {
 
         let staging_table = quote_identifier(&self.staging_name);
         if let Err(error) = conn.execute_batch(&format!("drop table if exists {staging_table}")) {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error drop table staging");
         }
     }
@@ -1845,6 +1871,7 @@ impl ReusableStagingTable {
              select {column_list} from {target_table} limit 0;"
         ))
         .map_err(|error| {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error creating temporary table");
 
             classified_error(
@@ -1866,6 +1893,7 @@ impl ReusableStagingTable {
             "insert into {target_table} ({column_list}) select {column_list} from {staging_table};"
         );
         conn.execute_batch(&sql).map_err(|error| {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error inserting rows");
             classified_error_with_detail(
                 ErrorKind::DestinationQueryFailed,
@@ -1886,6 +1914,7 @@ impl ReusableStagingTable {
         let staging_table = quote_identifier(&self.staging_name);
         let sql = format!("truncate table {staging_table};");
         conn.execute_batch(&sql).map_err(|error| {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error clear staging");
             classified_error(
                 ErrorKind::DestinationQueryFailed,
@@ -1901,6 +1930,7 @@ impl ReusableStagingTable {
         match prepared_rows {
             PreparedRows::Appender(all_values) => {
                 let mut appender = conn.appender(&self.staging_name).map_err(|error| {
+                    let error = RedactedDuckDbError::from(error);
                     tracing::error!(error = %error, "error appender");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1911,6 +1941,7 @@ impl ReusableStagingTable {
                 for values in all_values {
                     appender.append_row(duckdb::appender_params_from_iter(values)).map_err(
                         |err| {
+                            let err = RedactedDuckDbError::from(err);
                             tracing::error!(error = %err, "error append row");
                             classified_error(
                                 ErrorKind::DestinationQueryFailed,
@@ -1921,6 +1952,7 @@ impl ReusableStagingTable {
                     )?;
                 }
                 appender.flush().map_err(|err| {
+                    let err = RedactedDuckDbError::from(err);
                     tracing::error!(error = %err, "error flush");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1931,6 +1963,7 @@ impl ReusableStagingTable {
             }
             PreparedRows::ArrowRecordBatch(record_batch) => {
                 let mut appender = conn.appender(&self.staging_name).map_err(|error| {
+                    let error = RedactedDuckDbError::from(error);
                     tracing::error!(error = %error, "error appender");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1939,6 +1972,7 @@ impl ReusableStagingTable {
                     )
                 })?;
                 appender.append_record_batch(record_batch.clone()).map_err(|err| {
+                    let err = RedactedDuckDbError::from(err);
                     tracing::error!(error = %err, "error append record batch");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1947,6 +1981,7 @@ impl ReusableStagingTable {
                     )
                 })?;
                 appender.flush().map_err(|err| {
+                    let err = RedactedDuckDbError::from(err);
                     tracing::error!(error = %err, "error flush");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -2054,7 +2089,7 @@ impl DuckLakeCopyAccumulator {
             classified_error(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake buffered copy BEGIN TRANSACTION failed",
-                error,
+                RedactedDuckDbError::from(error),
             )
         })?;
 
@@ -2092,6 +2127,7 @@ impl DuckLakeCopyAccumulator {
 
         if let Err(error) = result {
             if let Err(rollback_error) = conn.execute_batch("rollback") {
+                let rollback_error = RedactedDuckDbError::from(rollback_error);
                 tracing::error!(error = %rollback_error, "error rollback buffered copy");
             }
             return Err(error);
@@ -2105,7 +2141,7 @@ impl DuckLakeCopyAccumulator {
             classified_error(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake buffered copy COMMIT failed",
-                error,
+                RedactedDuckDbError::from(error),
             )
         })?;
 
@@ -2148,6 +2184,7 @@ fn apply_table_batch(
     let batch_started = Instant::now();
 
     conn.execute_batch("BEGIN TRANSACTION").map_err(|error| {
+        let error = RedactedDuckDbError::from(error);
         tracing::error!(error = %error, "error transaction");
         classified_error(
             ErrorKind::DestinationQueryFailed,
@@ -2187,6 +2224,7 @@ fn apply_table_batch(
     match result {
         Ok(()) => {
             conn.execute_batch("COMMIT").map_err(|error| {
+                let error = RedactedDuckDbError::from(error);
                 tracing::error!(error = %error, "error commit");
                 reusable_staging_table.cleanup(conn);
                 classified_error(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", error)
@@ -2224,6 +2262,7 @@ fn apply_table_batch(
             let rollback = conn.execute_batch("ROLLBACK");
             reusable_staging_table.cleanup(conn);
             if let Err(err) = rollback {
+                let err = RedactedDuckDbError::from(err);
                 tracing::error!(error = %err, "error rollback");
             }
 
@@ -2240,6 +2279,7 @@ fn apply_truncate_batch_action(
     let target_table = qualified_lake_table_name(table_name);
     let sql = format!("TRUNCATE TABLE {target_table};");
     conn.execute_batch(&sql).map_err(|error| {
+        let error = RedactedDuckDbError::from(error);
         tracing::error!(error = %error, "error truncating table");
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
@@ -2327,9 +2367,9 @@ fn apply_delete_mutation(
 
         let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
         conn.execute_batch(&sql_query).map_err(|error| {
-            let duckdb_interrupted = is_duckdb_interrupt_error(&error);
+            let error = DuckDbSensitiveQueryError::new(&error);
             tracing::error!(
-                error = %DuckDbSensitiveQueryError,
+                error = %error,
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
                 batch_kind = batch.batch_kind.as_str(),
@@ -2342,7 +2382,7 @@ fn apply_delete_mutation(
                 delete_chunk_index = chunk_index,
                 delete_chunk_count = chunk_count,
                 delete_chunk_predicate_count = chunk.len(),
-                duckdb_interrupted,
+                duckdb_interrupted = error.is_interrupt(),
                 ducklake_interrupt_reason = operation_context.interrupt_reason_label(),
                 ducklake_operation_id = operation_context.operation_id(),
                 ducklake_operation_kind = operation_context.operation_kind(),
@@ -2359,7 +2399,7 @@ fn apply_delete_mutation(
                     chunk_count,
                     chunk.len(),
                 ),
-                DuckDbSensitiveQueryError,
+                error,
             )
         })?;
     }
@@ -2381,8 +2421,9 @@ fn apply_update_mutation(
     let set_clause = assignments.join(", ");
     let target_table = qualified_lake_table_name(table_name);
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
-    conn.execute_batch(&sql_query).map_err(|_err| {
-        tracing::error!(error = %DuckDbSensitiveQueryError, "error updating rows");
+    conn.execute_batch(&sql_query).map_err(|error| {
+        let error = DuckDbSensitiveQueryError::new(&error);
+        tracing::error!(error = %error, "error updating rows");
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
@@ -2391,7 +2432,7 @@ fn apply_update_mutation(
                 assignments.len(),
                 !predicate.is_empty(),
             ),
-            DuckDbSensitiveQueryError,
+            error,
         )
     })?;
 
@@ -2469,6 +2510,7 @@ fn insert_rows_into_staging_with_sql(
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
         conn.execute_batch(&format!("INSERT INTO {staging_table} VALUES {};", chunk.join(", ")))
             .map_err(|err| {
+                let err = RedactedDuckDbError::from(err);
                 tracing::error!(error = %err, "error insert_rows_into_staging_with_sql");
                 classified_error(
                     ErrorKind::DestinationQueryFailed,
@@ -2520,7 +2562,8 @@ pub fn ducklake_staging_table_creations_for_tests(table_name: &str) -> usize {
     STAGING_TABLE_CREATIONS_BY_TABLE.lock().get(table_name).copied().unwrap_or_default()
 }
 
-/// Injects a synthetic failure after commit so retries must rely on the correct
+/// Injects a synthetic retryable failure after commit, like a connection lost
+/// before the commit was acknowledged, so retries must rely on the correct
 /// marker path.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_committed_batch_for_tests(
@@ -2547,7 +2590,8 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &DuckLakeTableName
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake test hook injected post-commit failure"
-        ));
+        )
+        .with_retryability(Retryability::Retryable));
     }
 
     Ok(())
@@ -2563,7 +2607,8 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &DuckLakeTableName) 
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake test hook injected copy post-commit failure"
-        ));
+        )
+        .with_retryability(Retryability::Retryable));
     }
 
     Ok(())
@@ -2647,6 +2692,8 @@ mod tests {
         }
     }
 
+    /// Asserts that a failed query against a missing catalog keeps its DuckDB
+    /// type and classification but not the row values in its statement.
     fn assert_query_failure_omits_sensitive_value(
         error: &etl::error::EtlError,
         description: &'static str,
@@ -2654,11 +2701,16 @@ mod tests {
     ) {
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(error.description(), Some(description));
+        assert_eq!(error.retryability(), Retryability::Permanent);
         assert!(!error.to_string().contains(sensitive_value));
         assert!(!error.detail().is_some_and(|detail| detail.contains(sensitive_value)));
-        let source = error.source().expect("expected sanitized source");
+        let source = error.source().unwrap();
         assert!(!source.to_string().contains(sensitive_value));
-        assert!(source.to_string().contains("omitted because it may contain row values"));
+        assert_eq!(
+            source.to_string(),
+            "DuckDB query failed with a Binder error; error message omitted because it may \
+             contain row values"
+        );
     }
 
     #[test]

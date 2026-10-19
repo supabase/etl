@@ -26,3 +26,187 @@ filter = "binary_id(etl-destinations::main) & test(/^bigquery::destination::/)"
 test-group = "bigquery-destination"
 # Start remote work before short unit tests so their execution can overlap.
 priority = 10
+
+# `cargo xtask nextest` runs the shared-pg tests in one invocation with this
+# profile and one test thread per Postgres cluster. Leaving the serial group
+# lets each free thread take the next test, and the test connects to the
+# cluster at its NEXTEST_TEST_GLOBAL_SLOT, so no two running tests share one.
+[profile.pg-sharded]
+
+# The longest tests (about 30 seconds each) start first so none of them begins
+# near the end of the run while the other clusters sit idle.
+[[profile.pg-sharded.overrides]]
+filter = "binary_id(etl::main) & (test(=pipeline_with_faulty_destination::apply_disconnect_at_randomized_positions_converges_without_loss) | test(=pipeline_dirty_restart::postgres_store_dirty_restart_at_randomized_positions_converges_without_recopy) | test(=replication::apply_slot_creation_exempts_lock_timeout) | test(=replication_copy_locks::copy_slot_bounds_writer_ddl_deadlock) | test(=replication::slot_creation_restores_lock_timeout_after_errors))"
+priority = 50
+
+[[profile.pg-sharded.overrides]]
+filter = "all()"
+test-group = "@global"
+
+# Spread similar tests across the run. Ties in priority run in name order, so
+# without this every thread reaches the DuckLake tests, then the ClickHouse
+# tests, at the same time, and they slow each other down: each DuckDB instance
+# uses every core, and all ClickHouse tests share one server. Bucketing by test
+# name length mod 40 mixes families like a shuffle, keeps the order the same on
+# every run, and places new tests without listing them. The priority-50
+# override above still wins for the slowest tests.
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{0}$/)"
+priority = -20
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{1}$/)"
+priority = -19
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{2}$/)"
+priority = -18
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{3}$/)"
+priority = -17
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{4}$/)"
+priority = -16
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{5}$/)"
+priority = -15
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{6}$/)"
+priority = -14
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{7}$/)"
+priority = -13
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{8}$/)"
+priority = -12
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{9}$/)"
+priority = -11
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{10}$/)"
+priority = -10
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{11}$/)"
+priority = -9
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{12}$/)"
+priority = -8
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{13}$/)"
+priority = -7
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{14}$/)"
+priority = -6
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{15}$/)"
+priority = -5
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{16}$/)"
+priority = -4
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{17}$/)"
+priority = -3
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{18}$/)"
+priority = -2
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{19}$/)"
+priority = -1
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{20}$/)"
+priority = 0
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{21}$/)"
+priority = 1
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{22}$/)"
+priority = 2
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{23}$/)"
+priority = 3
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{24}$/)"
+priority = 4
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{25}$/)"
+priority = 5
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{26}$/)"
+priority = 6
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{27}$/)"
+priority = 7
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{28}$/)"
+priority = 8
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{29}$/)"
+priority = 9
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{30}$/)"
+priority = 10
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{31}$/)"
+priority = 11
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{32}$/)"
+priority = 12
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{33}$/)"
+priority = 13
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{34}$/)"
+priority = 14
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{35}$/)"
+priority = 15
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{36}$/)"
+priority = 16
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{37}$/)"
+priority = 17
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{38}$/)"
+priority = 18
+
+[[profile.pg-sharded.overrides]]
+filter = "test(/^(?:.{40})*.{39}$/)"
+priority = 19
