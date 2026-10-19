@@ -588,15 +588,6 @@ impl ClassifiedError for r2d2::Error {
     }
 }
 
-/// DuckLake cannot yet tell transient DuckDB errors from permanent ones, so it
-/// treats them as permanent. Call sites that retry any failure override this
-/// with [`retryable_until_classified`].
-impl ClassifiedError for duckdb::Error {
-    fn retryability(&self) -> Retryability {
-        Retryability::Permanent
-    }
-}
-
 /// DuckLake reads its Postgres catalog through sqlx and cannot yet tell
 /// transient catalog errors from permanent ones, so it treats them as
 /// permanent.
@@ -1003,7 +994,7 @@ pub(super) async fn drain_duckdb_blocking_operations(
 #[inline]
 pub(super) fn duckdb_blocking_timeout_error(timeout: Duration, stage: &'static str) -> EtlError {
     etl_error!(
-        ErrorKind::DestinationQueryFailed,
+        ErrorKind::DestinationTimeout,
         "DuckLake blocking operation timed out",
         format!(
             "Operation kind={}, stage={stage}, timeout_ms={}",
@@ -1022,21 +1013,6 @@ pub(super) fn ducklake_shutdown_requested_error() -> EtlError {
 pub(super) fn is_ducklake_shutdown_requested_error(error: &EtlError) -> bool {
     error.kind() == ErrorKind::DestinationConnectionFailed
         && error.description() == Some(DUCKLAKE_SHUTDOWN_REQUESTED)
-}
-
-/// Marks a DuckLake failure retryable, whatever caused it.
-///
-/// DuckLake cannot yet classify DuckDB errors, so the writes, copies, and
-/// inlining changes it retries on any failure stay retryable through this
-/// function: locally first, then by the pipeline once local retries run out. A
-/// shutdown request keeps its own classification. Replace callers with a DuckDB
-/// error classifier.
-pub(super) fn retryable_until_classified(error: EtlError) -> EtlError {
-    if is_ducklake_shutdown_requested_error(&error) {
-        return error;
-    }
-
-    error.with_retryability(Retryability::Retryable)
 }
 
 fn abort_stuck_duckdb_blocking_operation(timeout: Duration, abort_grace: Duration) -> ! {
@@ -1301,26 +1277,9 @@ mod tests {
         }
     }
 
-    /// DuckDB errors are permanent until DuckLake can classify them, except
-    /// where DuckLake retries any failure, and connection setup errors are
-    /// retryable. A shutdown request keeps its own classification.
+    /// Connection setup errors and blocking deadlines are retryable.
     #[test]
     fn ducklake_errors_classify_retryability() {
-        let duckdb_error = duckdb::Connection::open_in_memory()
-            .unwrap()
-            .execute_batch("select * from missing_table")
-            .unwrap_err();
-        let failed_query = classified_error(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake query failed",
-            duckdb_error,
-        );
-        assert_eq!(failed_query.retryability(), Retryability::Permanent);
-        assert_eq!(
-            retryable_until_classified(failed_query).retryability(),
-            Retryability::Retryable
-        );
-
         let failed_setup = classified_error(
             ErrorKind::DestinationConnectionFailed,
             "Setup failed",
@@ -1328,9 +1287,8 @@ mod tests {
         );
         assert_eq!(failed_setup.retryability(), Retryability::Retryable);
 
-        let shutdown =
-            ducklake_shutdown_requested_error().with_retryability(Retryability::Permanent);
-        assert_eq!(retryable_until_classified(shutdown).retryability(), Retryability::Permanent);
+        let timeout = duckdb_blocking_timeout_error(Duration::from_secs(1), "query_execution");
+        assert_eq!(timeout.retryability(), Retryability::Retryable);
     }
 
     #[tokio::test]
@@ -1560,7 +1518,7 @@ mod tests {
         .await
         .expect_err("expected blocking timeout");
 
-        assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+        assert_eq!(error.kind(), ErrorKind::DestinationTimeout);
         assert_eq!(error.description(), Some("DuckLake blocking operation timed out"));
         // This timeout budget covers pool checkout and query execution. Under
         // full-suite load the deadline can expire before the blocking operation

@@ -14,7 +14,7 @@ use etl::{
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     event::{Event, EventPosition},
     schema::{
@@ -61,7 +61,7 @@ use crate::{
             DuckLakeBlockingGuard, DuckLakeConnectionManager, DuckLakeDedicatedConnection,
             DuckLakeInterruptRegistry, build_warm_ducklake_pool, drain_duckdb_blocking_operations,
             ducklake_shutdown_requested_error, format_query_error_detail,
-            is_ducklake_shutdown_requested_error, retryable_until_classified, run_duckdb_blocking,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_dedicated_blocking_with_context,
         },
         config::{
@@ -1489,9 +1489,10 @@ fn missing_replicated_columns_ducklake(
         .collect()
 }
 
-/// Classifies a COPY inlining transition failure for the runtime retry policy.
+/// Wraps a COPY inlining transition failure with its table context.
 ///
-/// The failure is retryable whatever caused it, except a shutdown request.
+/// The failure keeps the classification of its cause. A shutdown request is
+/// returned unchanged so callers still recognize it.
 fn classify_copy_data_inlining_error(
     table_name: &DuckLakeTableName,
     row_limit: u64,
@@ -1501,12 +1502,12 @@ fn classify_copy_data_inlining_error(
         return error;
     }
 
-    retryable_until_classified(classified_error_with_detail(
+    classified_error_with_detail(
         ErrorKind::DestinationQueryFailed,
         "DuckLake COPY data inlining configuration failed",
         format!("table={table_name}, row_limit={row_limit}"),
         error,
-    ))
+    )
 }
 
 impl<S> DuckLakeDestination<S>
@@ -2644,13 +2645,16 @@ where
 
     /// Builds the sticky error returned after a buffered copy attempt fails.
     ///
-    /// The error is retryable because restarting the table copy recovers.
+    /// The error is retryable whatever failed the copy, because restarting
+    /// the table copy discards the invalidated buffer. The original failure
+    /// was already returned with its own classification.
     fn invalidated_copy_buffer_error(table_name: &DuckLakeTableName) -> etl::error::EtlError {
-        retryable_until_classified(etl_error!(
+        etl_error!(
             ErrorKind::DestinationError,
             "DuckLake buffered table copy was invalidated",
             format!("table={table_name}; restart the table-copy attempt")
-        ))
+        )
+        .with_retryability(Retryability::Retryable)
     }
 
     /// Handles relation metadata, applying the schema diff and advancing
@@ -4376,13 +4380,26 @@ mod tests {
     }
 
     #[test]
-    fn copy_data_inlining_errors_are_retryable_except_during_shutdown() {
+    fn copy_data_inlining_errors_keep_their_cause_classification() {
         let table_name = DuckLakeTableName::new("public", "users");
-        let query_error =
-            etl_error!(ErrorKind::DestinationQueryFailed, "Synthetic DuckLake inlining failure");
+        let timeout = crate::ducklake::client::duckdb_blocking_timeout_error(
+            Duration::from_secs(1),
+            "query_execution",
+        );
+        let rejected = classified_error(
+            ErrorKind::DestinationQueryFailed,
+            "Synthetic DuckLake inlining failure",
+            duckdb::Connection::open_in_memory()
+                .unwrap()
+                .execute_batch("call missing_procedure()")
+                .unwrap_err(),
+        );
 
-        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, query_error);
-        assert_eq!(error.retryability(), etl::error::Retryability::Retryable);
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, timeout);
+        assert_eq!(error.retryability(), Retryability::Retryable);
+
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, rejected);
+        assert_eq!(error.retryability(), Retryability::Permanent);
 
         let shutdown_error = crate::ducklake::client::ducklake_shutdown_requested_error();
         let error = classify_copy_data_inlining_error(&table_name, 1_000_000, shutdown_error);

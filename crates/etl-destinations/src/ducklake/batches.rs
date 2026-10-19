@@ -41,10 +41,11 @@ use crate::{
         DUCKLAKE_COLUMN_NAME_MAPPING, DuckLakeTableName, LAKE_CATALOG,
         client::{
             DuckLakeBlockingOperationContext, DuckLakeConnectionManager, format_query_error_detail,
-            is_ducklake_shutdown_requested_error, retryable_until_classified, run_duckdb_blocking,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_blocking_with_context,
         },
         core::{DuckLakeWriteGuard, is_create_table_conflict},
+        duckdb_error::{DuckDbErrorType, duckdb_error_type},
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_copy_rows, prepare_rows,
             table_row_to_sql_literal_ref,
@@ -109,28 +110,50 @@ fn format_optional_event_position(event_position: Option<EventPosition>) -> Stri
     event_position.map_or_else(|| "none".to_owned(), format_event_position)
 }
 
-/// Returns whether one DuckDB error is the standard interrupted query error.
-fn is_duckdb_interrupt_error(error: &duckdb::Error) -> bool {
-    error.to_string().contains("INTERRUPT Error: Interrupted")
+/// Sanitized DuckDB query failure for statements that may contain row values.
+///
+/// Keeps the DuckDB exception type and its classification, which carry no row
+/// values, and drops the message.
+#[derive(Debug)]
+struct DuckDbSensitiveQueryError {
+    error_type: Option<DuckDbErrorType>,
+    retryability: Retryability,
 }
 
-/// Sanitized DuckDB query failure for statements that may contain row values.
-#[derive(Debug)]
-struct DuckDbSensitiveQueryError;
+impl DuckDbSensitiveQueryError {
+    /// Sanitizes one failed DuckDB call.
+    fn new(error: &duckdb::Error) -> Self {
+        Self { error_type: duckdb_error_type(error), retryability: error.retryability() }
+    }
+
+    /// Returns whether DuckDB interrupted the query.
+    fn is_interrupt(&self) -> bool {
+        self.error_type == Some(DuckDbErrorType::Interrupt)
+    }
+}
 
 impl fmt::Display for DuckDbSensitiveQueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DuckDB query failed; error message omitted because it may contain row values")
+        match self.error_type {
+            Some(error_type) => write!(
+                f,
+                "DuckDB query failed with a {error_type:?} error; error message omitted because \
+                 it may contain row values"
+            ),
+            None => write!(
+                f,
+                "DuckDB query failed; error message omitted because it may contain row values"
+            ),
+        }
     }
 }
 
 impl error::Error for DuckDbSensitiveQueryError {}
 
-/// Stands in for a DuckDB error, which DuckLake cannot yet classify, so it is
-/// permanent like other DuckDB errors.
+/// Classified like the DuckDB error it replaces.
 impl ClassifiedError for DuckDbSensitiveQueryError {
     fn retryability(&self) -> Retryability {
-        Retryability::Permanent
+        self.retryability
     }
 }
 
@@ -681,7 +704,6 @@ pub(super) async fn apply_table_batches_with_retry(
                     Ok(())
                 })
                 .await
-                .map_err(retryable_until_classified)
             }
         },
     )
@@ -772,7 +794,6 @@ pub(super) async fn apply_table_batch_with_retry(
                     Ok(())
                 })
                 .await
-                .map_err(retryable_until_classified)
             }
         },
     )
@@ -2327,9 +2348,9 @@ fn apply_delete_mutation(
 
         let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
         conn.execute_batch(&sql_query).map_err(|error| {
-            let duckdb_interrupted = is_duckdb_interrupt_error(&error);
+            let error = DuckDbSensitiveQueryError::new(&error);
             tracing::error!(
-                error = %DuckDbSensitiveQueryError,
+                error = %error,
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
                 batch_kind = batch.batch_kind.as_str(),
@@ -2342,7 +2363,7 @@ fn apply_delete_mutation(
                 delete_chunk_index = chunk_index,
                 delete_chunk_count = chunk_count,
                 delete_chunk_predicate_count = chunk.len(),
-                duckdb_interrupted,
+                duckdb_interrupted = error.is_interrupt(),
                 ducklake_interrupt_reason = operation_context.interrupt_reason_label(),
                 ducklake_operation_id = operation_context.operation_id(),
                 ducklake_operation_kind = operation_context.operation_kind(),
@@ -2359,7 +2380,7 @@ fn apply_delete_mutation(
                     chunk_count,
                     chunk.len(),
                 ),
-                DuckDbSensitiveQueryError,
+                error,
             )
         })?;
     }
@@ -2381,8 +2402,9 @@ fn apply_update_mutation(
     let set_clause = assignments.join(", ");
     let target_table = qualified_lake_table_name(table_name);
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
-    conn.execute_batch(&sql_query).map_err(|_err| {
-        tracing::error!(error = %DuckDbSensitiveQueryError, "error updating rows");
+    conn.execute_batch(&sql_query).map_err(|error| {
+        let error = DuckDbSensitiveQueryError::new(&error);
+        tracing::error!(error = %error, "error updating rows");
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
@@ -2391,7 +2413,7 @@ fn apply_update_mutation(
                 assignments.len(),
                 !predicate.is_empty(),
             ),
-            DuckDbSensitiveQueryError,
+            error,
         )
     })?;
 
@@ -2520,7 +2542,8 @@ pub fn ducklake_staging_table_creations_for_tests(table_name: &str) -> usize {
     STAGING_TABLE_CREATIONS_BY_TABLE.lock().get(table_name).copied().unwrap_or_default()
 }
 
-/// Injects a synthetic failure after commit so retries must rely on the correct
+/// Injects a synthetic retryable failure after commit, like a connection lost
+/// before the commit was acknowledged, so retries must rely on the correct
 /// marker path.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_committed_batch_for_tests(
@@ -2547,7 +2570,8 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &DuckLakeTableName
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake test hook injected post-commit failure"
-        ));
+        )
+        .with_retryability(Retryability::Retryable));
     }
 
     Ok(())
@@ -2563,7 +2587,8 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &DuckLakeTableName) 
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake test hook injected copy post-commit failure"
-        ));
+        )
+        .with_retryability(Retryability::Retryable));
     }
 
     Ok(())
@@ -2647,6 +2672,8 @@ mod tests {
         }
     }
 
+    /// Asserts that a failed query against a missing catalog keeps its DuckDB
+    /// type and classification but not the row values in its statement.
     fn assert_query_failure_omits_sensitive_value(
         error: &etl::error::EtlError,
         description: &'static str,
@@ -2654,11 +2681,16 @@ mod tests {
     ) {
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(error.description(), Some(description));
+        assert_eq!(error.retryability(), Retryability::Permanent);
         assert!(!error.to_string().contains(sensitive_value));
         assert!(!error.detail().is_some_and(|detail| detail.contains(sensitive_value)));
-        let source = error.source().expect("expected sanitized source");
+        let source = error.source().unwrap();
         assert!(!source.to_string().contains(sensitive_value));
-        assert!(source.to_string().contains("omitted because it may contain row values"));
+        assert_eq!(
+            source.to_string(),
+            "DuckDB query failed with a Binder error; error message omitted because it may \
+             contain row values"
+        );
     }
 
     #[test]
