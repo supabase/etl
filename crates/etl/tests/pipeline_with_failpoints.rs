@@ -2795,10 +2795,10 @@ async fn apply_retry_replays_dispatched_write_without_checkpointing() {
     test.wait_for_flush(commit_lsn).await;
     test.pipeline.shutdown_and_wait().await.unwrap();
 
-    assert_eq!(
-        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-        Some(commit_lsn)
-    );
+    // The replay must checkpoint its own commit. Later WAL on the source
+    // cluster can legitimately move the checkpoint further before shutdown.
+    let final_checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert!(final_checkpoint >= Some(commit_lsn), "{final_checkpoint:?} < {commit_lsn:?}");
 }
 
 /// A failed catchup attempt recopies from a fresh snapshot even when its
