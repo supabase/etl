@@ -22,6 +22,13 @@ const SHARED_PG_FILTER: &str =
      (binary_id(etl-destinations::main) & test(/^clickhouse::pipeline/)) | \
      (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))";
 
+/// Nextest profile that runs [`SHARED_PG_FILTER`] tests concurrently, one per
+/// Postgres cluster.
+///
+/// It must exist in `.config/nextest.toml` and move those tests out of the
+/// serial `shared-pg` group.
+const PG_SHARDED_PROFILE: &str = "pg-sharded";
+
 /// Test execution mode.
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum Mode {
@@ -31,7 +38,8 @@ pub(crate) enum Mode {
     LlvmCov,
 }
 
-/// Arguments for running isolated test lanes, optionally from a shared build.
+/// Arguments for running the test suite against several Postgres clusters,
+/// optionally from a shared build.
 #[derive(Args)]
 pub(crate) struct NextestArgs {
     /// Whether to collect coverage.
@@ -112,25 +120,21 @@ impl NextestArgs {
 
         let archive_target = archive.as_ref().map(|directory| directory.path().join("target"));
 
-        let mut lanes: Vec<Lane> = Vec::with_capacity(1 + self.shards as usize);
-
-        // Every compatibility job runs the full suite, including destinations.
-        lanes.push(Lane {
-            name: "non-pg".to_owned(),
-            filter: format!("not ({SHARED_PG_FILTER})"),
-            partition: None,
-            pg_port: None,
-        });
-
-        // Round-robin slices balance test counts across dedicated clusters.
-        for shard in 1..=self.shards {
-            lanes.push(Lane {
-                name: format!("pg-{shard}"),
+        let lanes = [
+            // Every compatibility job runs the full suite, including destinations.
+            Lane {
+                name: "non-pg".to_owned(),
+                filter: format!("not ({SHARED_PG_FILTER})"),
+                pg_clusters: None,
+            },
+            // One queue for all Postgres tests: each free cluster takes the next
+            // test, so long tests cannot pile up on one cluster.
+            Lane {
+                name: "pg".to_owned(),
                 filter: SHARED_PG_FILTER.to_owned(),
-                partition: Some(format!("slice:{shard}/{}", self.shards)),
-                pg_port: Some(self.base_port + shard - 1),
-            });
-        }
+                pg_clusters: Some(PgClusters { first_port: self.base_port, count: self.shards }),
+            },
+        ];
 
         let handles: Vec<_> = lanes
             .into_iter()
@@ -179,21 +183,29 @@ impl NextestArgs {
 /// A test lane: an independent nextest invocation with its own filter and
 /// optional Postgres cluster binding.
 struct Lane {
-    /// Display name used as a prefix in output (e.g. `[pg-1]`).
+    /// Display name used as a prefix in output (e.g. `[pg]`).
     name: String,
     /// Nextest filter expression (`-E`) selecting which tests this lane runs.
     filter: String,
-    /// Nextest round-robin partition (e.g. `slice:1/3`). `None` for
-    /// unpartitioned lanes.
-    partition: Option<String>,
-    /// Port of the Postgres cluster for this lane. `None` for non-Postgres
-    /// lanes.
-    pg_port: Option<u16>,
+    /// Postgres clusters this lane's tests run against. `None` for
+    /// non-Postgres lanes.
+    pg_clusters: Option<PgClusters>,
+}
+
+/// Consecutive local Postgres clusters shared by one lane's tests.
+#[derive(Clone, Copy)]
+struct PgClusters {
+    /// Port of the first cluster's primary. Cluster `n` listens on
+    /// `first_port + n`, and its read replica on that port plus
+    /// [`READ_REPLICA_PORT_OFFSET`].
+    first_port: u16,
+    /// Number of clusters, which is also the lane's test concurrency.
+    count: u16,
 }
 
 /// Postgres connection defaults, read once from the environment.
 ///
-/// Only the port varies per shard; host, username, and password are shared.
+/// Only the port varies per cluster; host, username, and password are shared.
 /// These are local test defaults for Docker Compose, not real credentials.
 #[derive(Clone)]
 struct PgEnv {
@@ -226,7 +238,7 @@ impl PgEnv {
 fn extract_archive(archive: &Path) -> Result<TempDir> {
     let target = std::env::current_dir()?.join("target");
     std::fs::create_dir_all(&target).context("Failed to create target directory")?;
-    // Each invocation owns its extraction until all shard lanes have joined.
+    // Each invocation owns its extraction until all lanes have joined.
     let destination = tempfile::Builder::new()
         .prefix("nextest-archive-")
         .tempdir_in(target)
@@ -276,7 +288,7 @@ fn nextest_command(mode: Mode, archive_target: Option<&Path>) -> Command {
     cmd
 }
 
-/// Builds one lane's command with its isolated cluster binding.
+/// Builds one lane's command with its Postgres cluster binding.
 fn lane_command(
     lane: &Lane,
     mode: Mode,
@@ -288,15 +300,21 @@ fn lane_command(
     cmd.arg("--no-fail-fast");
     cmd.args(["-E", &lane.filter]);
 
-    if let Some(partition) = &lane.partition {
-        cmd.args(["--partition", partition]);
-    }
-
-    if let Some(port) = lane.pg_port {
+    if let Some(clusters) = lane.pg_clusters {
+        // Environment instead of flags avoids duplicate-flag errors when the
+        // forwarded extra arguments set the same nextest option. Capping
+        // concurrency at the cluster count keeps every test's global slot
+        // below it; tests connect to the cluster at their slot.
+        cmd.env("NEXTEST_PROFILE", PG_SHARDED_PROFILE);
+        cmd.env("NEXTEST_TEST_THREADS", clusters.count.to_string());
+        cmd.env("TESTS_DATABASE_SHARDS", clusters.count.to_string());
         cmd.env("TESTS_DATABASE_HOST", &pg_env.host);
-        cmd.env("TESTS_DATABASE_PORT", port.to_string());
+        cmd.env("TESTS_DATABASE_PORT", clusters.first_port.to_string());
         cmd.env("TESTS_DATABASE_REPLICA_HOST", &pg_env.replica_host);
-        cmd.env("TESTS_DATABASE_REPLICA_PORT", (port + READ_REPLICA_PORT_OFFSET).to_string());
+        cmd.env(
+            "TESTS_DATABASE_REPLICA_PORT",
+            (clusters.first_port + READ_REPLICA_PORT_OFFSET).to_string(),
+        );
         cmd.env("TESTS_DATABASE_USERNAME", &pg_env.username);
         cmd.env("TESTS_DATABASE_PASSWORD", &pg_env.password);
     }
@@ -385,7 +403,8 @@ mod tests {
     use clap::Parser;
 
     use crate::commands::nextest::{
-        Lane, Mode, NextestArgs, PgEnv, SHARED_PG_FILTER, lane_command, nextest_command,
+        Lane, Mode, NextestArgs, PG_SHARDED_PROFILE, PgClusters, PgEnv, SHARED_PG_FILTER,
+        lane_command, nextest_command,
     };
 
     /// Standalone parser for testing task-runner options and passthrough.
@@ -454,47 +473,63 @@ mod tests {
         assert!(!args.contains(&std::ffi::OsStr::new("--no-fail-fast")));
     }
 
-    /// Ordinary, archive, and coverage execution preserve shard isolation.
+    /// Ordinary, archive, and coverage execution give every running Postgres
+    /// test its own cluster and leave other tests unbound.
     #[test]
-    fn lane_commands_bind_each_primary_and_replica() {
+    fn lane_commands_bind_postgres_tests_to_cluster_pool() {
         let pg_env = PgEnv {
             host: "127.0.0.1".to_owned(),
             replica_host: "localhost".to_owned(),
             username: "postgres".to_owned(),
             password: "postgres".to_owned(),
         };
+        let pg_lane = Lane {
+            name: "pg".to_owned(),
+            filter: SHARED_PG_FILTER.to_owned(),
+            pg_clusters: Some(PgClusters { first_port: 5430, count: 4 }),
+        };
+        let non_pg_lane = Lane {
+            name: "non-pg".to_owned(),
+            filter: format!("not ({SHARED_PG_FILTER})"),
+            pg_clusters: None,
+        };
         for (mode, archive) in [
             (Mode::Run, None),
             (Mode::Run, Some(Path::new("target/archive/target"))),
             (Mode::LlvmCov, None),
         ] {
-            for shard in 1..=4 {
-                let lane = Lane {
-                    name: format!("pg-{shard}"),
-                    filter: SHARED_PG_FILTER.to_owned(),
-                    partition: Some(format!("slice:{shard}/4")),
-                    pg_port: Some(5430 + shard - 1),
-                };
-                let command = lane_command(&lane, mode, &[], &pg_env, archive);
-                let env: BTreeMap<_, _> = command.get_envs().collect();
-                for (key, value) in [
-                    ("TESTS_DATABASE_HOST", "127.0.0.1".to_owned()),
-                    ("TESTS_DATABASE_REPLICA_HOST", "localhost".to_owned()),
-                    ("TESTS_DATABASE_PORT", (5430 + shard - 1).to_string()),
-                    ("TESTS_DATABASE_REPLICA_PORT", (6430 + shard - 1).to_string()),
-                ] {
-                    assert_eq!(env[OsStr::new(key)], Some(OsStr::new(&value)));
-                }
-                let args: Vec<_> = command.get_args().collect();
-                assert!(args.windows(2).any(|pair| pair == ["-E", SHARED_PG_FILTER]));
-                assert!(
-                    args.windows(2).any(|pair| {
-                        pair == ["--partition", lane.partition.as_deref().unwrap()]
-                    })
-                );
-                assert!(args.contains(&OsStr::new("--no-fail-fast")));
+            let command = lane_command(&pg_lane, mode, &[], &pg_env, archive);
+            let env: BTreeMap<_, _> = command.get_envs().collect();
+            for (key, value) in [
+                ("NEXTEST_PROFILE", PG_SHARDED_PROFILE),
+                ("NEXTEST_TEST_THREADS", "4"),
+                ("TESTS_DATABASE_SHARDS", "4"),
+                ("TESTS_DATABASE_HOST", "127.0.0.1"),
+                ("TESTS_DATABASE_REPLICA_HOST", "localhost"),
+                ("TESTS_DATABASE_PORT", "5430"),
+                ("TESTS_DATABASE_REPLICA_PORT", "6430"),
+            ] {
+                assert_eq!(env[OsStr::new(key)], Some(OsStr::new(value)));
             }
+            let args: Vec<_> = command.get_args().collect();
+            assert!(args.windows(2).any(|pair| pair == ["-E", SHARED_PG_FILTER]));
+            assert!(args.contains(&OsStr::new("--no-fail-fast")));
+
+            let command = lane_command(&non_pg_lane, mode, &[], &pg_env, archive);
+            assert_eq!(command.get_envs().count(), 0);
         }
+    }
+
+    /// The sharded profile must take Postgres tests out of the serial group,
+    /// or the cluster pool would run one test at a time.
+    #[test]
+    fn sharded_profile_releases_serial_group() {
+        let config: toml::Table = include_str!("../../../../.config/nextest.toml").parse().unwrap();
+        let overrides = config["profile"][PG_SHARDED_PROFILE]["overrides"].as_array().unwrap();
+        assert!(overrides.iter().any(|entry| {
+            entry["filter"].as_str() == Some("all()")
+                && entry.get("test-group").and_then(|group| group.as_str()) == Some("@global")
+        }));
     }
 
     /// Sharding and in-process serialization must classify the same tests.

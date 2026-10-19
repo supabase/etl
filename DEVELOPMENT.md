@@ -172,13 +172,17 @@ Multigres; coverage uses a separate instrumented build. Every Postgres and
 OrioleDB lane runs the full regular suite, including destination tests and
 BigQuery integration tests when credentials are available. Credentialed
 Snowflake tests and Multigres tests run separately. Postgres shards start
-concurrently and must all pass readiness checks before tests run. Nextest
-distributes Postgres-backed tests across those clusters in round-robin slices;
-tests sharing a cluster remain serial. BigQuery destination-only tests use
-isolated datasets and an in-memory store. They run serially in the non-Postgres
-lane, with priority over short unit tests to overlap remote work. BigQuery
-pipeline tests remain on the Postgres shards. This scheduling is the same
-locally and in every compatibility and coverage job. To reuse a local build:
+concurrently and must all pass readiness checks before tests run. All
+Postgres-backed tests run in one nextest invocation with the `pg-sharded`
+profile and one test thread per cluster: each free thread takes the next test,
+and the test connects to the cluster at its `NEXTEST_TEST_GLOBAL_SLOT`, so no
+two running tests share a cluster. The slowest tests start first. A plain
+`cargo nextest run` keeps them serial on one cluster. BigQuery
+destination-only tests use isolated datasets and an in-memory store. They run
+serially in the non-Postgres lane, with priority over short unit tests to
+overlap remote work. BigQuery pipeline tests remain on the Postgres shards.
+This scheduling is the same locally and in every compatibility and coverage
+job. To reuse a local build:
 
 ```bash
 mkdir -p target/ci

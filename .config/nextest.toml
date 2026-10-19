@@ -26,3 +26,19 @@ filter = "binary_id(etl-destinations::main) & test(/^bigquery::destination::/)"
 test-group = "bigquery-destination"
 # Start remote work before short unit tests so their execution can overlap.
 priority = 10
+
+# `cargo xtask nextest` runs the shared-pg tests in one invocation with this
+# profile and one test thread per Postgres cluster. Leaving the serial group
+# lets each free thread take the next test, and the test connects to the
+# cluster at its NEXTEST_TEST_GLOBAL_SLOT, so no two running tests share one.
+[profile.pg-sharded]
+
+# The longest tests (about 30 seconds each) start first so none of them begins
+# near the end of the run while the other clusters sit idle.
+[[profile.pg-sharded.overrides]]
+filter = "binary_id(etl::main) & (test(=pipeline_with_faulty_destination::apply_disconnect_at_randomized_positions_converges_without_loss) | test(=pipeline_dirty_restart::postgres_store_dirty_restart_at_randomized_positions_converges_without_recopy) | test(=replication::apply_slot_creation_exempts_lock_timeout) | test(=replication_copy_locks::copy_slot_bounds_writer_ddl_deadlock) | test(=replication::slot_creation_restores_lock_timeout_after_errors))"
+priority = 50
+
+[[profile.pg-sharded.overrides]]
+filter = "all()"
+test-group = "@global"
