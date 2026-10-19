@@ -35,7 +35,7 @@ use tokio_postgres::{Client, types::Type};
 /// Table every case recreates, so cases never see each other's columns.
 const CASE_TABLE: &str = "test.default_case";
 
-/// Publication covering the test schema, so the DDL trigger emits messages.
+/// Publication covering every table, so the DDL trigger emits messages.
 const PUBLICATION: &str = "default_expression_pub";
 
 /// Logical message prefix the DDL event trigger emits.
@@ -121,7 +121,9 @@ impl Harness {
         let (etl, _) = connect_to_pg_database(&database.config).await;
         etl.batch_execute(&SessionSettings::etl().set_sql()).await.unwrap();
 
-        user.batch_execute(&format!("create publication {PUBLICATION} for tables in schema test"))
+        // `for tables in schema` needs Postgres 15; each test owns a fresh
+        // database, so `for all tables` covers the same recreated case table.
+        user.batch_execute(&format!("create publication {PUBLICATION} for all tables"))
             .await
             .unwrap();
         // Slot names are cluster-wide, and a temporary slot would vanish on the
