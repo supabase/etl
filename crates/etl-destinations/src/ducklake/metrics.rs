@@ -5,6 +5,7 @@ use std::{
 
 use chrono::Utc;
 use etl::error::{ErrorKind, EtlResult};
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use metrics::{Unit, describe_counter, describe_gauge, describe_histogram, gauge, histogram};
 use parking_lot::Mutex;
 use pg_escape::{quote_identifier, quote_literal};
@@ -645,7 +646,7 @@ pub(super) fn resolve_ducklake_metadata_schema_blocking(
             ErrorKind::DestinationQueryFailed,
             "DuckLake metadata schema query failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })
 }

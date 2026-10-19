@@ -2,6 +2,7 @@ mod batches;
 mod client;
 mod config;
 mod core;
+mod duckdb_error;
 mod encoding;
 mod external_maintenance;
 mod inline_size;
