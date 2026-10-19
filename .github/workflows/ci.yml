@@ -284,6 +284,44 @@ jobs:
       - name: Run Multigres tests
         run: target/ci/xtask multigres test --archive-file target/ci/tests.tar.zst
 
+  fuzz-corpus:
+    name: Fuzz corpus replay
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          toolchain: nightly-2026-04-15
+          rustflags: ''
+          cache-key: fuzz-corpus
+          cache-on-failure: false
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-workspaces: |
+            fuzz -> target
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@7a79fe8c3a13344501c80d99cae481c1c9085912 # v2.81.10
+        with:
+          tool: cargo-fuzz@0.13.2
+      - name: Replay committed corpus
+        # Runs every committed seed once without mutation, so a failure is a
+        # deterministic regression in this change. Build for the runner's
+        # real host triple; see fuzz.yml.
+        run: |
+          host="$(rustc +nightly-2026-04-15 --print host-tuple)"
+          targets="$(cargo +nightly-2026-04-15 fuzz list)"
+          if [[ -z "$targets" ]]; then
+            echo '::error::cargo fuzz list found no fuzz targets'
+            exit 1
+          fi
+          for target in $targets; do
+            cargo +nightly-2026-04-15 fuzz run "$target" --target "$host" -- -runs=0
+          done
+
   image:
     name: Image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -311,7 +349,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: always()
-    needs: [format, clippy, tls, snowflake, workflow-lint, test-build, test, coverage, multigres, image]
+    needs: [format, clippy, tls, snowflake, workflow-lint, test-build, test, coverage, multigres, fuzz-corpus, image]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions: {}
