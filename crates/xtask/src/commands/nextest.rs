@@ -38,6 +38,48 @@ pub(crate) enum Mode {
     LlvmCov,
 }
 
+/// Rejects forwarded nextest options that would break the Postgres lane.
+///
+/// The Postgres lane sets its thread count and profile through environment
+/// variables, which forwarded flags override. A thread count above `shards`
+/// gives a test a slot with no cluster, and any other profile puts the
+/// Postgres tests back in the serial `shared-pg` group. Lower thread counts
+/// are safe. Arguments after a bare `--` are test filters and are not checked.
+fn check_forwarded_args(extra: &[String], shards: u16) -> Result<()> {
+    let mut args = extra.iter().take_while(|arg| *arg != "--");
+    while let Some(arg) = args.next() {
+        let arg = arg.as_str();
+        if matches!(arg, "-P" | "--profile")
+            || arg.starts_with("--profile=")
+            || (arg.starts_with("-P") && !arg.starts_with("--"))
+        {
+            bail!(
+                "--profile cannot be forwarded; the Postgres lane uses the {PG_SHARDED_PROFILE} \
+                 profile"
+            );
+        }
+
+        let threads = match arg {
+            "-j" | "--test-threads" | "--jobs" => args.next().map(String::as_str),
+            _ => arg
+                .strip_prefix("--test-threads=")
+                .or_else(|| arg.strip_prefix("--jobs="))
+                .or_else(|| arg.strip_prefix("-j=").or_else(|| arg.strip_prefix("-j")))
+                .filter(|value| !value.is_empty()),
+        };
+        if let Some(threads) = threads
+            && !threads.parse::<u16>().is_ok_and(|threads| (1..=shards).contains(&threads))
+        {
+            bail!(
+                "--test-threads {threads} cannot be forwarded; use a value from 1 to --shards \
+                 ({shards}) or raise --shards"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Arguments for running the test suite against several Postgres clusters,
 /// optionally from a shared build.
 #[derive(Args)]
@@ -79,6 +121,8 @@ impl NextestArgs {
         {
             bail!("--base-port + --shards + read replica port offset exceeds the valid port range");
         }
+
+        check_forwarded_args(&self.extra, self.shards)?;
 
         let pg_env = PgEnv::from_env();
 
@@ -404,7 +448,7 @@ mod tests {
 
     use crate::commands::nextest::{
         Lane, Mode, NextestArgs, PG_SHARDED_PROFILE, PgClusters, PgEnv, SHARED_PG_FILTER,
-        lane_command, nextest_command,
+        check_forwarded_args, lane_command, nextest_command,
     };
 
     /// Standalone parser for testing task-runner options and passthrough.
@@ -434,6 +478,44 @@ mod tests {
         assert_eq!(cli.args.archive_file.as_deref(), Some(Path::new("tests.tar.zst")));
         assert_eq!(cli.args.shards, 2);
         assert_eq!(cli.args.extra, ["--test-threads", "1"]);
+    }
+
+    /// Forwarded thread counts up to the shard count leave every test a
+    /// cluster; higher or non-numeric counts and other profiles are rejected.
+    #[test]
+    fn forwarded_args_keep_postgres_lane_sharded() {
+        let accepted: &[&[&str]] = &[
+            &[],
+            &["--test-threads", "1"],
+            &["-j4"],
+            &["-j=4"],
+            &["--jobs=2"],
+            &["--build-jobs", "16"],
+            &["-E", "test(foo)", "--no-capture"],
+            &["--", "-j", "99", "--profile", "x"],
+        ];
+        for args in accepted {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            assert!(check_forwarded_args(&args, 4).is_ok(), "{args:?}");
+        }
+
+        let rejected: &[&[&str]] = &[
+            &["-j", "5"],
+            &["--test-threads=8"],
+            &["-j8"],
+            &["-j=0"],
+            &["--jobs", "num-cpus"],
+            &["-j", "-1"],
+            &["-P", "ci"],
+            &["-Pci"],
+            &["--profile", "default"],
+            &["--profile=default"],
+            &["--no-capture", "--test-threads", "16", "--", "filter"],
+        ];
+        for args in rejected {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            assert!(check_forwarded_args(&args, 4).is_err(), "{args:?}");
+        }
     }
 
     /// An ordinary archive cannot silently produce an uninstrumented coverage
