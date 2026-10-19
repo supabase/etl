@@ -1,7 +1,7 @@
 use std::{collections::HashSet, error::Error, time::Duration};
 
 use etl::{
-    error::ErrorKind,
+    error::{ErrorKind, EtlError},
     postgres::{
         ReplicationMessageStream,
         client::{CtidPartition, PgReplicationClient, SlotState},
@@ -17,6 +17,7 @@ use etl::{
 use etl_config::shared::IntoConnectOptions;
 use etl_postgres::{
     below_version,
+    source::connect_to_source_database,
     tokio::{
         test_utils::{TableModification, id_column_schema},
         tls::MakeRustlsConnect,
@@ -850,6 +851,34 @@ async fn slot_creation_restores_lock_timeout_after_errors() {
     assert_eq!(error.kind(), ErrorKind::SourceLockTimeout);
     database.run_sql("rollback").await.unwrap();
     assert!(!client.publication_exists("missing").await.unwrap());
+}
+
+/// A missing source privilege reports `PermissionDenied` through both source
+/// clients, while other access-class errors keep their query kind.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_privilege_errors_report_permission_denied() {
+    init_test_tracing();
+    let database = spawn_source_database().await;
+    let pool = connect_to_source_database(&database.config, 0, 1, None).await.unwrap();
+
+    for (sql, kind) in [
+        (
+            "do $$ begin raise exception 'source access failed' using errcode = \
+             'insufficient_privilege'; end $$",
+            ErrorKind::PermissionDenied,
+        ),
+        (
+            "do $$ begin raise exception 'source access failed' using errcode = \
+             'syntax_error_or_access_rule_violation'; end $$",
+            ErrorKind::SourceQueryFailed,
+        ),
+    ] {
+        let tokio_error = EtlError::from(database.run_sql(sql).await.unwrap_err());
+        let sqlx_error = EtlError::from(sqlx::raw_sql(sql).execute(&pool).await.unwrap_err());
+
+        assert_eq!(tokio_error.kind(), kind, "{sql}");
+        assert_eq!(sqlx_error.kind(), kind, "{sql}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

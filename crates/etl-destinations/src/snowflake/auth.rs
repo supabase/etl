@@ -24,6 +24,7 @@ use reqwest::StatusCode;
 use secrecy::ExposeSecret as _;
 use sha2::Digest as _;
 use tokio::{sync::Mutex, time::Instant};
+use tracing::warn;
 
 use crate::snowflake::{
     Config, Error, Result,
@@ -64,6 +65,29 @@ pub trait TokenProvider: Send + Sync {
     /// Invalidate any cached token, forcing a fresh exchange on the next
     /// [`get_token`](Self::get_token) call.
     fn invalidate_token(&self) -> impl Future<Output = ()> + Send;
+}
+
+/// Sends a request with the cached token and returns Snowflake's response.
+///
+/// When Snowflake answers 401, the token is invalidated and the request is
+/// sent once more with a fresh token. A second 401 is returned to the caller,
+/// so a bad credential stops for an operator instead of retrying.
+pub(crate) async fn send_with_token_refresh<T: TokenProvider>(
+    auth: &T,
+    request: impl Fn(&str) -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response> {
+    let mut refreshed = false;
+    loop {
+        let token = auth.get_token().await?;
+        let response = request(&token).send().await.map_err(Error::HttpTransport)?;
+        if response.status() != StatusCode::UNAUTHORIZED || refreshed {
+            return Ok(response);
+        }
+
+        warn!("snowflake rejected the token, invalidating it");
+        auth.invalidate_token().await;
+        refreshed = true;
+    }
 }
 
 /// Production implementation that calls Snowflake's OAuth endpoint over HTTP.

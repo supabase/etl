@@ -159,7 +159,9 @@ ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
 `TESTS_BIGQUERY_SA_KEY_PATH`.
 
 Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
-Parser fuzz targets live in `fuzz/`.
+Parser fuzz targets live in `fuzz/`. The nightly `Fuzz` workflow fuzzes each
+target for two minutes, and every CI run replays the committed `fuzz/corpus/`
+seeds once.
 
 Use cargo-nextest 0.9.148 or newer; CI pins 0.9.148. The repository requires
 this version to include the [capture-pipe inheritance fix](https://github.com/nextest-rs/nextest/pull/3553)

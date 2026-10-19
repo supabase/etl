@@ -1353,7 +1353,7 @@ mod tests {
             if truncate {
                 // SQL deliberately fails; the post-truncate row must never be
                 // sent.
-                assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationError);
+                assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationAuthenticationError);
             } else {
                 assert_eq!(result.unwrap(), DestinationWriteStatus::Accepted);
                 let status =
