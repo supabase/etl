@@ -139,6 +139,14 @@ pub(crate) fn parse_cell_from_postgres_text(typ: &Type, str: &str) -> EtlResult<
         Type::OID_ARRAY => {
             parse_cell_from_postgres_text_array(str, |str| Ok(Some(str.parse()?)), ArrayCell::U32)
         }
+        // `box` is the only built-in type whose array elements are separated by
+        // `;` instead of `,`, because its text output itself contains commas.
+        Type::BOX_ARRAY => parse_cell_from_postgres_text_array_with_delimiter(
+            str,
+            ';',
+            |str| Ok(Some(str.to_owned())),
+            ArrayCell::String,
+        ),
         // [`Cell`] is only the internal Rust value representation. The source Postgres type is
         // still available from the corresponding [`ColumnSchema`], so values that do not need a
         // specialized Rust type preserve their Postgres text output here.
@@ -223,7 +231,25 @@ fn strip_array_dimensions_prefix(input: &str) -> EtlResult<&str> {
 /// and distinguishes between null values and the string "null".
 /// Multidimensional values are rejected because [`ArrayCell`] is
 /// one-dimensional.
-fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, mut parse: P, m: M) -> EtlResult<Cell>
+fn parse_cell_from_postgres_text_array<P, M, T>(str: &str, parse: P, m: M) -> EtlResult<Cell>
+where
+    P: FnMut(&str) -> EtlResult<Option<T>>,
+    M: FnOnce(Vec<Option<T>>) -> ArrayCell,
+{
+    parse_cell_from_postgres_text_array_with_delimiter(str, ',', parse, m)
+}
+
+/// Parses Postgres array literal syntax whose elements are separated by
+/// `delimiter`.
+///
+/// Postgres separates array elements with the element type's
+/// `pg_type.typdelim`, which is `,` for every built-in type except `box`.
+fn parse_cell_from_postgres_text_array_with_delimiter<P, M, T>(
+    str: &str,
+    delimiter: char,
+    mut parse: P,
+    m: M,
+) -> EtlResult<Cell>
 where
     P: FnMut(&str) -> EtlResult<Option<T>>,
     M: FnOnce(Vec<Option<T>>) -> ArrayCell,
@@ -270,7 +296,7 @@ where
                             "Multidimensional array input is not supported"
                         );
                     }
-                    ',' if !in_quotes => {
+                    c if c == delimiter && !in_quotes => {
                         break;
                     }
                     c => {
@@ -907,6 +933,21 @@ mod tests {
                 Some("127.0.0.1".to_owned()),
                 None,
                 Some("192.168.0.1".to_owned()),
+            ]))
+        );
+    }
+
+    #[test]
+    fn parse_box_array_splits_on_semicolon_delimiter() {
+        let cell =
+            parse_cell_from_postgres_text(&Type::BOX_ARRAY, "{(1,1),(0,0);NULL;(3,3),(2,2)}")
+                .unwrap();
+        assert_eq!(
+            cell,
+            Cell::Array(ArrayCell::String(vec![
+                Some("(1,1),(0,0)".to_owned()),
+                None,
+                Some("(3,3),(2,2)".to_owned()),
             ]))
         );
     }
