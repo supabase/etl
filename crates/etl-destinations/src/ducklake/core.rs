@@ -5298,7 +5298,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("1.5.3").join(platform_dir);
+            let extension_dir = root.join("1.5.6").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
@@ -5356,11 +5356,12 @@ mod tests {
         let catalog_attach_target =
             catalog_conninfo_from_url(catalog).expect("invalid catalog url");
         conn.execute_batch(&format!(
-            "{} ATTACH {} AS {} (DATA_PATH {});",
+            "{} ATTACH {} AS {} (DATA_PATH {}, metadata_catalog {});",
             ducklake_load_sql(),
             quote_literal(&format!("ducklake:{catalog_attach_target}")),
             quote_identifier(LAKE_CATALOG),
             quote_literal(data.as_str()),
+            quote_literal(&format!("__ducklake_metadata_{LAKE_CATALOG}")),
         ))
         .expect("failed to attach DuckLake catalog");
         conn
