@@ -7,7 +7,7 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use etl_config::shared::{
-    Validate, validate_copy_concurrency, validate_source_tls_config,
+    Validate, validate_copy_concurrency, validate_refresh_intervals, validate_source_tls_config,
     validate_table_error_retry_delay_ms,
 };
 use etl_postgres::slots::EtlReplicationSlot;
@@ -22,8 +22,8 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::register_metrics,
-    postgres::{OutOfBandSourcePool, client::PgReplicationClient, migrations},
-    replication::state::TableState,
+    postgres::{client::PgReplicationClient, migrations},
+    replication::{ReplicationLagMonitor, state::TableState},
     runtime::{ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool},
     schema::TableId,
     store::PipelineStore,
@@ -48,6 +48,8 @@ struct PipelineTasks {
     pool: Arc<TableSyncWorkerPool>,
     /// Sampler owned independently of the readings shared with workers.
     memory_monitor_task: AbortOnDropHandle<()>,
+    /// Single source sampler shared by copy and CDC worker registrations.
+    replication_lag_sampler_task: AbortOnDropHandle<()>,
 }
 
 /// Internal state tracking for pipeline lifecycle.
@@ -133,9 +135,9 @@ where
     /// store cache, creates the table synchronization worker pool, and starts
     /// the apply worker for processing replication stream events.
     ///
-    /// Invalid copy concurrency, an unsupported retry delay, invalid slot
-    /// options, or a blank trust bundle with source TLS enabled returns
-    /// [`ErrorKind::ConfigError`] before any startup work.
+    /// Invalid copy concurrency, an unsupported retry delay, a zero monitor
+    /// interval, invalid slot options, or a blank trust bundle with source TLS
+    /// enabled returns [`ErrorKind::ConfigError`] before any startup work.
     /// After this method succeeds, subsequent calls return
     /// [`ErrorKind::InvalidState`] without performing any startup work.
     pub async fn start(&mut self) -> EtlResult<()> {
@@ -159,6 +161,15 @@ where
         self.config.replication_slot.validate().map_err(|err| {
             etl_error!(ErrorKind::ConfigError, "Invalid replication slot configuration", source: err)
         })?;
+
+        validate_refresh_intervals(
+            self.config.memory_refresh_interval_ms,
+            self.config.table_sync_monitor_refresh_interval_ms,
+            self.config.replication_lag_refresh_interval_ms,
+        )
+        .map_err(
+            |err| etl_error!(ErrorKind::ConfigError, "Invalid refresh interval", source: err),
+        )?;
 
         info!(
             publication_name = %self.config.publication_name,
@@ -203,12 +214,16 @@ where
         let table_sync_worker_permits =
             Arc::new(Semaphore::new(self.config.max_table_sync_workers as usize));
 
-        // We create a shared lazy pool for low-frequency, out-of-band source
-        // database queries that should not use the replication connection.
-        let out_of_band_source_pool = OutOfBandSourcePool::new(
+        // Share one lazy source SQL pool and one sampler across all copy and
+        // CDC workers without using their replication connections.
+        let replication_lag_monitor = ReplicationLagMonitor::new(
+            self.config.id,
             &self.config.pg_connection,
-            Duration::from_millis(self.config.table_sync_monitor_refresh_interval_ms),
+            Duration::from_millis(self.config.replication_lag_refresh_interval_ms),
         );
+
+        let replication_lag_sampler_task =
+            replication_lag_monitor.spawn_replication_lag_metrics_task();
 
         // Start memory monitoring only after fallible startup work completes.
         // From this point onward, the monitor is owned by the started pipeline
@@ -225,7 +240,7 @@ where
             Arc::clone(&pool),
             self.store.clone(),
             self.destination.clone(),
-            out_of_band_source_pool,
+            replication_lag_monitor,
             self.shutdown_token.clone(),
             table_sync_worker_permits,
             memory_monitor,
@@ -233,7 +248,12 @@ where
         .spawn();
 
         self.state = PipelineState::Started {
-            tasks: Mutex::new(Some(PipelineTasks { apply_worker, pool, memory_monitor_task })),
+            tasks: Mutex::new(Some(PipelineTasks {
+                apply_worker,
+                pool,
+                memory_monitor_task,
+                replication_lag_sampler_task,
+            })),
         };
 
         Ok(())
@@ -245,20 +265,28 @@ where
     /// startup, only one waiter can take ownership of its tasks. This method
     /// borrows the pipeline so its owner can request shutdown while waiting.
     ///
-    /// Joins apply and table sync workers, shuts down the destination, then
-    /// stops memory sampling. Requested aborts are silently accepted; panics,
-    /// task errors, and unexpected cancellations return immediately. On failure
-    /// or cancellation of this future, remaining owned handles request abort
-    /// on drop without awaiting further cleanup. Destination-owned resources,
-    /// including ownership cycles, may still require explicit teardown.
+    /// Joins apply and table sync workers and shuts down the destination while
+    /// samplers remain alive, then stops and joins the samplers. Optional
+    /// sampler failures are logged without stopping replication. Worker and
+    /// destination failures propagate without further cleanup. On
+    /// failure or cancellation of this future, remaining owned handles
+    /// request abort on drop without awaiting further cleanup.
+    /// Destination-owned resources, including ownership cycles, may still
+    /// require explicit teardown.
     pub async fn wait(&self) -> EtlResult<()> {
         let PipelineState::Started { tasks } = &self.state else {
             warn!("pipeline was not started, skipping wait");
+
             return Ok(());
         };
 
-        let Some(PipelineTasks { apply_worker, pool, memory_monitor_task }) =
-            tasks.lock().await.take()
+        // We get all pipeline tasks that we will wait on.
+        let Some(PipelineTasks {
+            apply_worker,
+            pool,
+            memory_monitor_task,
+            replication_lag_sampler_task,
+        }) = tasks.lock().await.take()
         else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
         };
@@ -269,7 +297,6 @@ where
 
         debug!("waiting for apply worker to complete");
 
-        // The apply worker may spawn table sync workers until it exits.
         apply_worker.wait().await?;
         self.shutdown();
 
@@ -281,10 +308,17 @@ where
 
         self.destination.shutdown().await?;
 
-        debug!("waiting for memory monitor to complete");
+        // Optional monitors must not turn successful replication into failure.
+        for (task_name, task) in [
+            ("replication lag sampler", replication_lag_sampler_task),
+            ("memory monitor", memory_monitor_task),
+        ] {
+            debug!(task_name, "stopping optional background task");
 
-        // Consumers need fresh readings until workers and destination drain.
-        abort_and_join(memory_monitor_task).await?;
+            if let Err(error) = abort_and_join(task).await {
+                warn!(task_name, error = %error, "failed to join optional background task");
+            }
+        }
 
         Ok(())
     }
@@ -292,9 +326,10 @@ where
     /// Initiates graceful shutdown of the pipeline.
     ///
     /// Cancels the shared shutdown token. Apply loops stop new intake and
-    /// drain pending destination writes; initial sync workers interrupt their
-    /// copy waits and stop. The request is retained even if no workers have
-    /// started yet. Repeated requests are harmless.
+    /// drain pending destination writes, or abandon them for replay when
+    /// [`PipelineConfig::drain_on_shutdown`] is disabled; initial sync workers
+    /// interrupt their copy waits and stop. The request is retained even if no
+    /// workers have started yet. Repeated requests are harmless.
     ///
     /// This method returns immediately without waiting for workers to stop.
     ///

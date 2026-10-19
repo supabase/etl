@@ -1,10 +1,13 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use etl::{
     pipeline::PipelineId,
     schema::{
-        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, SchemaOperation,
-        SchemaPlan, TableId,
+        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
+        SchemaOperation, SchemaPlan, TableId,
     },
 };
 use metrics::{counter, gauge, histogram};
@@ -34,6 +37,7 @@ use crate::{
             DEFAULT_COMMIT_WAIT_TIMEOUT, OffsetToken, PendingDurabilityTarget, RestStreamClient,
             RowBatch, StreamClient,
         },
+        view::CompanionView,
     },
 };
 
@@ -74,6 +78,10 @@ pub(super) struct DetachedTableForCopy<C> {
     channel: Option<Arc<Mutex<ChannelHandle<C>>>>,
     /// Snowflake table name to drop after retiring local state.
     table_name: String,
+    /// Whether durable destination metadata establishes ownership.
+    owned: bool,
+    /// Preserve grants only when the fresh copy will reuse the same raw name.
+    preserve_view: bool,
 }
 
 /// Maximum accepted Snowflake row batches before forcing a durability wait.
@@ -260,6 +268,8 @@ pub struct Client<T, C = RestStreamClient<T>> {
     schema: String,
     pipeline_id: PipelineId,
     channels: ChannelMap<C>,
+    /// Tables whose companion view has been reconciled in this process.
+    prepared_views: Arc<RwLock<HashSet<TableId>>>,
     /// Stable lifecycle gates retained across channel removal and recreation.
     table_gates: Arc<Mutex<HashMap<TableId, Arc<Mutex<()>>>>>,
     pending_durability: Arc<Mutex<PendingDurabilityState>>,
@@ -274,6 +284,7 @@ impl<T: TokenProvider, C: StreamClient> Clone for Client<T, C> {
             schema: self.schema.clone(),
             pipeline_id: self.pipeline_id,
             channels: Arc::clone(&self.channels),
+            prepared_views: Arc::clone(&self.prepared_views),
             table_gates: Arc::clone(&self.table_gates),
             pending_durability: Arc::clone(&self.pending_durability),
         }
@@ -391,6 +402,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             schema,
             pipeline_id,
             channels: Arc::new(RwLock::new(HashMap::new())),
+            prepared_views: Arc::new(RwLock::new(HashSet::new())),
             table_gates: Arc::new(Mutex::new(HashMap::new())),
             pending_durability: Arc::new(Mutex::new(PendingDurabilityState::default())),
         }
@@ -399,6 +411,40 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// Returns whether this process already has an open channel for `table_id`.
     pub(super) async fn has_channel(&self, table_id: TableId) -> bool {
         self.channels.read().await.contains_key(&table_id)
+    }
+
+    /// Returns whether channel and view setup both completed in this process.
+    pub(super) async fn is_table_ready(&self, table_id: TableId) -> bool {
+        self.has_channel(table_id).await && self.prepared_views.read().await.contains(&table_id)
+    }
+
+    /// Reconciles the companion view while the caller owns the table lifecycle.
+    pub(super) async fn prepare_view(
+        &self,
+        table: &TableLifecycleGuard,
+        name: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> Result<()> {
+        if self.prepared_views.read().await.contains(&table.table_id) {
+            return Ok(());
+        }
+        CompanionView::new(self.pipeline_id, table.table_id, name)
+            .prepare(&self.sql_client, name, schema)
+            .await?;
+        self.prepared_views.write().await.insert(table.table_id);
+        Ok(())
+    }
+
+    /// Forces reconciliation after an applied schema change without hiding a
+    /// compatible view.
+    pub(super) async fn invalidate_view(&self, table: &TableLifecycleGuard) {
+        self.prepared_views.write().await.remove(&table.table_id);
+    }
+
+    /// Invalidates cached readiness before making the public view unavailable.
+    pub(super) async fn park_view(&self, table: &TableLifecycleGuard, name: &str) -> Result<()> {
+        self.prepared_views.write().await.remove(&table.table_id);
+        CompanionView::new(self.pipeline_id, table.table_id, name).park(&self.sql_client).await
     }
 
     /// Checks whether a table exists in the configured Snowflake namespace.
@@ -450,7 +496,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             let column_defs = schema::build_column_defs(columns);
             self.sql_client.create_table_if_not_exists(table_name, &column_defs).await?;
         }
-        self.validate_table(table_name, columns).await?;
+        self.prepare_existing_schema(table_name, columns).await?;
 
         // Obtain table channel.
         let mut handle = ChannelHandle::new(
@@ -467,16 +513,46 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(())
     }
 
+    /// Validates or upgrades an owned raw table without opening a streaming
+    /// channel, including during idle-table view recovery.
+    pub(super) async fn prepare_existing_schema(
+        &self,
+        table_name: &str,
+        columns: &[ColumnSchema],
+    ) -> Result<()> {
+        schema::validate_no_cdc_collisions(columns)?;
+        // TODO: Remove this fallback and SqlClient::upgrade_legacy_table
+        // once all legacy destination tables (including inactive pipelines) are
+        // migrated and supported self-hosted upgrades no longer need it. New
+        // tables already include the mask; retain strict validation after
+        // removal.
+        match self.validate_table(table_name, columns).await {
+            Err(Error::MissingTableColumn { column_name, .. })
+                if column_name == schema::CDC_MISSING_COLUMNS_COLUMN =>
+            {
+                self.sql_client.upgrade_legacy_table(table_name, columns).await?;
+                self.validate_table(table_name, columns).await?;
+            }
+            result => result?,
+        }
+
+        Ok(())
+    }
+
     /// Validates a table and removes conflicting JSON defaults before opening
     /// or reopening its streaming channel.
     ///
-    /// Physical validation intentionally runs only at channel lifecycle
-    /// boundaries, not during ordinary writes.
+    /// Physical validation runs during setup and recovery, not during ordinary
+    /// writes.
     async fn validate_table(&self, table_name: &str, columns: &[ColumnSchema]) -> Result<()> {
         let expected_column_names = columns
             .iter()
             .map(|column| column.name.as_str())
-            .chain([schema::CDC_OPERATION_COLUMN, schema::CDC_SEQUENCE_COLUMN])
+            .chain([
+                schema::CDC_OPERATION_COLUMN,
+                schema::CDC_SEQUENCE_COLUMN,
+                schema::CDC_MISSING_COLUMNS_COLUMN,
+            ])
             .collect::<Vec<_>>();
         let json_column_names = columns
             .iter()
@@ -674,6 +750,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         &self,
         table_id: TableId,
         table_name: &str,
+        owned: bool,
+        preserve_view: bool,
     ) -> Result<DetachedTableForCopy<C>> {
         // Event tasks must be drained before taking this gate, since they may
         // need it to finish opening a channel. Never wait on it under a
@@ -683,9 +761,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         pending.discard(table_id)?;
 
         let channel = self.channels.write().await.remove(&table_id);
+        self.invalidate_view(&table).await;
         pending.observe_metrics();
 
-        Ok(DetachedTableForCopy { table, channel, table_name: table_name.to_owned() })
+        Ok(DetachedTableForCopy {
+            table,
+            channel,
+            table_name: table_name.to_owned(),
+            owned,
+            preserve_view,
+        })
     }
 
     /// Drops the remote channel and table for previously detached local state.
@@ -693,7 +778,18 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         &self,
         detached: DetachedTableForCopy<C>,
     ) -> Result<()> {
-        let DetachedTableForCopy { table, channel, table_name } = detached;
+        let DetachedTableForCopy { table, channel, table_name, owned, preserve_view } = detached;
+
+        if owned {
+            if preserve_view {
+                self.park_view(&table, &table_name).await?;
+            } else {
+                self.invalidate_view(&table).await;
+                CompanionView::new(self.pipeline_id, table.table_id, &table_name)
+                    .remove(&self.sql_client)
+                    .await?;
+            }
+        }
 
         let drop_channel_result = if let Some(channel) = channel {
             let mut guard = channel.lock().await;
@@ -1110,6 +1206,8 @@ mod tests {
             );
             channel.open().await.unwrap();
             client.channels.write().await.insert(schema.id(), Arc::new(Mutex::new(channel)));
+            // This transport-only fixture starts after remote setup completed.
+            client.prepared_views.write().await.insert(schema.id());
             schemas.push(schema);
         }
         (Destination::new(client, store), stream, schemas)
@@ -1183,9 +1281,13 @@ mod tests {
                     let mut row = json!({
                         "id": 1, "_cdc_operation": operation,
                         "_cdc_sequence_number": OffsetToken::new(10.into(), ordinal).to_string(),
+                        "_cdc_missing_columns": [],
                     });
                     if phase != 2 {
                         row["name"] = json!(if phase == 0 { "initial" } else { "updated" });
+                    } else {
+                        row["name"] = json!(null);
+                        row["_cdc_missing_columns"] = json!([2]);
                     }
                     row
                 })
@@ -1251,7 +1353,7 @@ mod tests {
             if truncate {
                 // SQL deliberately fails; the post-truncate row must never be
                 // sent.
-                assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationError);
+                assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationAuthenticationError);
             } else {
                 assert_eq!(result.unwrap(), DestinationWriteStatus::Accepted);
                 let status =
@@ -1497,7 +1599,7 @@ mod tests {
         let table_id = TableId::new(1);
         let mut setup = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
         assert!(poll_once(setup.as_mut()).is_pending());
-        let mut reset = Box::pin(client.detach_table_for_copy(table_id, "TABLE"));
+        let mut reset = Box::pin(client.detach_table_for_copy(table_id, "TABLE", false, false));
         assert!(poll_once(reset.as_mut()).is_pending());
 
         drop(setup);
@@ -1527,6 +1629,7 @@ mod tests {
             table_name.to_owned(),
         )));
         client.channels.write().await.insert(table_id, channel);
+        client.prepared_views.write().await.insert(table_id);
         client
             .pending_durability
             .lock()
@@ -1534,11 +1637,13 @@ mod tests {
             .record(table_id, accepted_batch(10, 1, 2, 20))
             .unwrap();
 
-        let detached = client.detach_table_for_copy(table_id, table_name).await.unwrap();
+        let detached =
+            client.detach_table_for_copy(table_id, table_name, false, false).await.unwrap();
 
         assert!(detached.channel.is_some());
         assert_eq!(detached.table_name, table_name);
         assert!(!client.channels.read().await.contains_key(&table_id));
+        assert!(!client.prepared_views.read().await.contains(&table_id));
         let pending = client.pending_durability.lock().await;
         assert!(pending.is_empty());
         assert_eq!(pending.row_batches, 0);

@@ -100,18 +100,22 @@ pub struct PipelineBuilder<S, D> {
     invalidated_slot_behavior: InvalidatedSlotBehavior,
     /// Maximum worker connections per table during initial copy.
     max_copy_connections_per_table: u16,
-    /// The time between memory refreshes of the memory monitor. Default: 0.2.
+    /// Milliseconds between memory samples. Defaults to 100 milliseconds.
     memory_refresh_interval_ms: u64,
+    /// Milliseconds between copy-slot checks. Defaults to 10,000 milliseconds.
+    table_sync_monitor_refresh_interval_ms: u64,
+    /// Milliseconds between lag samples. Defaults to 10,000 milliseconds.
+    replication_lag_refresh_interval_ms: u64,
+    /// Minimum age of an accepted write before an idle keepalive may force
+    /// durability. Defaults to `None`, allowing any eligible keepalive.
+    settle_durable_interval_ms: Option<u64>,
     /// Memory-based backpressure configuration. Default: enabled with defaults.
     memory_backpressure: MemoryBackpressureConfig,
-    /// The time between periodic table sync monitor checks. Default:
-    /// [`PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS`].
-    table_sync_monitor_refresh_interval_ms: u64,
-    /// Minimum age of an accepted write before an idle keepalive may force
-    /// durability. `None` allows any keepalive to force durability.
-    settle_durable_interval_ms: Option<u64>,
     /// Logical replication slot configuration.
     replication_slot: ReplicationSlotConfig,
+    /// Whether shutdown drains buffered apply work. Default:
+    /// [`PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN`].
+    drain_on_shutdown: bool,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -163,15 +167,25 @@ where
             invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
             max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
             memory_refresh_interval_ms: 100,
+            table_sync_monitor_refresh_interval_ms:
+                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+            replication_lag_refresh_interval_ms:
+                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            settle_durable_interval_ms: None,
             memory_backpressure: MemoryBackpressureConfig {
                 activate_threshold: 0.95,
                 resume_threshold: 0.85,
             },
-            table_sync_monitor_refresh_interval_ms:
-                PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
-            settle_durable_interval_ms: None,
             replication_slot: ReplicationSlotConfig::default(),
+            drain_on_shutdown: PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN,
         }
+    }
+
+    /// Sets whether shutdown drains buffered apply work before the apply loop
+    /// exits, or abandons it for replay on the next start.
+    pub fn with_drain_on_shutdown(mut self, drain_on_shutdown: bool) -> Self {
+        self.drain_on_shutdown = drain_on_shutdown;
+        self
     }
 
     /// Sets whether PostgreSQL failover support is enabled for replication
@@ -229,11 +243,15 @@ where
         self
     }
 
-    /// Sets the time between periodic table sync monitor checks, such as
-    /// reporting replication lag and checking replication slot validity during
-    /// table copy.
+    /// Sets the milliseconds between copy-slot validity checks.
     pub fn with_table_sync_monitor_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
         self.table_sync_monitor_refresh_interval_ms = interval_ms;
+        self
+    }
+
+    /// Sets the milliseconds between pipeline-wide lag samples.
+    pub fn with_replication_lag_refresh_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.replication_lag_refresh_interval_ms = interval_ms;
         self
     }
 
@@ -268,9 +286,11 @@ where
             max_copy_connections_per_table: self.max_copy_connections_per_table,
             memory_refresh_interval_ms: self.memory_refresh_interval_ms,
             table_sync_monitor_refresh_interval_ms: self.table_sync_monitor_refresh_interval_ms,
-            memory_backpressure: Some(self.memory_backpressure),
+            replication_lag_refresh_interval_ms: self.replication_lag_refresh_interval_ms,
             settle_durable_interval_ms: self.settle_durable_interval_ms,
+            memory_backpressure: Some(self.memory_backpressure),
             run_source_migrations: true,
+            drain_on_shutdown: self.drain_on_shutdown,
         };
 
         Pipeline::new(config, self.store, self.destination)

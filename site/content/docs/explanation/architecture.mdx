@@ -105,7 +105,12 @@ and operating guidance.
 
 ### Pipeline
 
-The **central orchestrator** that manages the entire replication process. It spawns workers, coordinates state transitions, and handles shutdown.
+The **central orchestrator** manages the entire replication process. It spawns
+workers, coordinates state transitions, and handles shutdown. During controlled
+shutdown, it joins the apply worker before table-sync workers, then shuts down
+the destination. Lag and memory samplers remain alive through destination
+cleanup. See [Shutdown](/guides/standalone-replicator/#shutdown) for failure and
+recovery behavior.
 
 ### Destination
 
@@ -142,7 +147,7 @@ before ETL saves the corresponding checkpoint. Destinations can use idempotent
 writes or deduplication to keep replay from changing the final result.
 ETL also limits replay through:
 
-- **Controlled shutdown**: The pipeline stops intake, drains apply work, and joins tasks. Interrupted initial copies restart from a fresh snapshot. Failures return immediately and request abort of remaining owned tasks; persisted checkpoints still govern recovery
+- **Controlled shutdown**: The pipeline stops intake, drains apply work (or abandons it for replay when `drain_on_shutdown` is disabled), and joins tasks. Interrupted initial copies restart from a fresh snapshot. Failures return immediately and request abort of remaining owned tasks; persisted checkpoints still govern recovery
 - **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
 
 ### Handling Duplicates

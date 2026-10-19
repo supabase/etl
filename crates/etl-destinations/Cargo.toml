@@ -34,7 +34,6 @@ ducklake = [
     "dep:pg_escape",
     "dep:r2d2",
     "dep:rand",
-    "dep:regex",
     "dep:serde",
     "dep:serde_json",
     "dep:sqlx",
@@ -83,6 +82,7 @@ clickhouse = [
     "dep:uuid",
 ]
 snowflake = [
+    "dep:futures",
     "dep:base64",
     "dep:bytes",
     "dep:jsonwebtoken",
@@ -114,7 +114,7 @@ base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 chrono = { workspace = true, features = ["serde"] }
 clickhouse = { workspace = true, optional = true, features = ["inserter", "lz4", "rustls-tls"] }
-duckdb = { workspace = true, optional = true, features = ["appender-arrow", "bundled", "json", "parquet", "r2d2"] }
+duckdb = { workspace = true, optional = true, features = ["appender-arrow", "bundled", "json", "parquet", "r2d2", "rust_decimal"] }
 etl = { workspace = true }
 etl-config = { workspace = true }
 etl-maintenance = { workspace = true, optional = true }
@@ -135,7 +135,6 @@ pkcs8 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
-regex = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
 rustls = { workspace = true, optional = true, features = ["aws-lc-rs"] }
 secrecy = { workspace = true, optional = true }

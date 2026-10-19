@@ -296,9 +296,10 @@ const VARHDRSZ: i32 = 4;
 
 /// Decoded precision and scale from a Postgres `NUMERIC(p, s)` type modifier.
 ///
-/// Postgres encodes the modifier as `((p << 16) | (s & 0xffff)) + VARHDRSZ`.
-/// Unconstrained `NUMERIC` columns use the sentinel modifier value `-1` and
-/// produce `None` from [`numeric_modifiers`].
+/// Postgres encodes the modifier as `((p << 16) | (s & 0x7ff)) + VARHDRSZ`, so
+/// the scale is an 11-bit two's-complement field. Modifiers below `VARHDRSZ`
+/// (in practice `-1`) mark unconstrained `NUMERIC` columns and produce `None`
+/// from [`numeric_modifiers`].
 ///
 /// `p` (precision) ranges from 1 to 1000 and `s` (scale) ranges from -1000 to
 /// 1000. Negative scales are permitted since Postgres 15.
@@ -315,20 +316,22 @@ pub struct NumericModifiers {
 /// Decodes a Postgres `atttypmod` value for a `NUMERIC` column into its
 /// precision and scale components.
 ///
-/// Returns `None` when `modifier` is `-1`, which Postgres uses for
+/// Returns `None` when `modifier` is below `VARHDRSZ`, which Postgres uses for
 /// unconstrained `NUMERIC` columns that have no explicit precision or scale.
 ///
-/// Postgres reference: `src/backend/utils/adt/numeric.c`, `numerictypmodin` /
-/// `numerictypmodout`.
+/// Postgres reference: `src/backend/utils/adt/numeric.c`,
+/// `is_valid_numeric_typmod`, `numeric_typmod_precision` and
+/// `numeric_typmod_scale`.
 pub fn numeric_modifiers(modifier: TypeModifier) -> Option<NumericModifiers> {
-    if modifier == -1 {
+    if modifier < VARHDRSZ {
         return None;
     }
 
     let tmp = modifier - VARHDRSZ;
-    let p = ((tmp >> 16) & 0xFFFF) as i16;
-    // Reinterpret the lower 16 bits as signed to recover negative scales.
-    let s = (tmp & 0xFFFF) as i16;
+    let p = ((tmp >> 16) & 0xffff) as i16;
+    // The scale occupies only the low 11 bits; flipping and subtracting the
+    // sign bit sign-extends it, exactly like `numeric_typmod_scale`.
+    let s = (((tmp & 0x7ff) ^ 1024) - 1024) as i16;
 
     Some(NumericModifiers { p, s })
 }
@@ -346,7 +349,11 @@ pub struct ColumnSchema {
     pub typ: Type,
     /// Type-specific modifier value (e.g., length for varchar).
     pub modifier: TypeModifier,
-    /// The 1-based ordinal position of the column in the table.
+    /// The PostgreSQL attribute number (`pg_attribute.attnum`) in DDL-aware
+    /// schemas. Stable across renames; dropped columns leave gaps and their
+    /// numbers are not reused within the same table. This is not an index
+    /// into a row. Legacy snapshots migrated from positional metadata
+    /// instead retain their original 1-based column order.
     pub ordinal_position: i32,
     /// The 1-based ordinal position of this column in the primary key, or None
     /// if not a primary key.
@@ -658,70 +665,50 @@ mod tests {
         assert_eq!(schema.default_expression.as_deref(), Some("'new'::text"));
     }
 
+    /// Encodes `numeric(precision, scale)` exactly like Postgres 15+.
+    ///
+    /// Copied from `make_numeric_typmod` in `src/backend/utils/adt/numeric.c`
+    /// so the decoder is checked against Postgres's encoding, not its own
+    /// inverse.
+    fn make_numeric_typmod(precision: i32, scale: i32) -> i32 {
+        ((precision << 16) | (scale & 0x7ff)) + VARHDRSZ
+    }
+
     #[test]
     fn numeric_modifiers_unconstrained() {
         assert_eq!(numeric_modifiers(-1), None);
     }
 
     #[test]
-    fn numeric_modifiers_precision_and_positive_scale() {
-        // NUMERIC(10, 2): typmod = ((10 << 16) | 2) + 4 = 655366
-        let m = numeric_modifiers(655366).unwrap();
-        assert_eq!(m.p, 10);
-        assert_eq!(m.s, 2);
+    fn numeric_modifiers_decodes_postgres_atttypmod() {
+        // `pg_attribute.atttypmod` values read from a Postgres 18 server for
+        // the declared column types, so this pins the real on-disk encoding.
+        let cases = [
+            (655366, 10, 2),
+            (329730, 5, -2),
+            (133121, 2, -3),
+            (65537004, 1000, 1000),
+            (65537052, 1000, -1000),
+        ];
+
+        for (typmod, p, s) in cases {
+            assert_eq!(numeric_modifiers(typmod), Some(NumericModifiers { p, s }), "{typmod}");
+        }
     }
 
     #[test]
-    fn numeric_modifiers_zero_scale() {
-        // NUMERIC(38, 0): typmod = ((38 << 16) | 0) + 4 = 2490372
-        let m = numeric_modifiers(2490372).unwrap();
-        assert_eq!(m.p, 38);
-        assert_eq!(m.s, 0);
-    }
-
-    #[test]
-    fn numeric_modifiers_max_precision_and_scale() {
-        // NUMERIC(1000, 1000): typmod = ((1000 << 16) | 1000) + 4
-        let typmod = ((1000i32 << 16) | 1000) + VARHDRSZ;
-        let m = numeric_modifiers(typmod).unwrap();
-        assert_eq!(m.p, 1000);
-        assert_eq!(m.s, 1000);
-    }
-
-    #[test]
-    fn numeric_modifiers_negative_scale() {
-        // NUMERIC(2, -3): typmod = ((2 << 16) | (-3i16 as u16 as i32)) + 4
-        let typmod = ((2i32 << 16) | i32::from(-3i16 as u16)) + VARHDRSZ;
-        let m = numeric_modifiers(typmod).unwrap();
-        assert_eq!(m.p, 2);
-        assert_eq!(m.s, -3);
-    }
-
-    #[test]
-    fn numeric_modifiers_min_negative_scale() {
-        // NUMERIC(1000, -1000)
-        let typmod = ((1000i32 << 16) | i32::from(-1000i16 as u16)) + VARHDRSZ;
-        let m = numeric_modifiers(typmod).unwrap();
-        assert_eq!(m.p, 1000);
-        assert_eq!(m.s, -1000);
-    }
-
-    #[test]
-    fn numeric_modifiers_scale_exceeds_precision() {
-        // NUMERIC(3, 5): valid in Postgres, stores values like 0.00999
-        let typmod = ((3i32 << 16) | 5) + VARHDRSZ;
-        let m = numeric_modifiers(typmod).unwrap();
-        assert_eq!(m.p, 3);
-        assert_eq!(m.s, 5);
-    }
-
-    #[test]
-    fn numeric_modifiers_minimal() {
-        // NUMERIC(1, 0)
-        #[expect(clippy::identity_op)]
-        let typmod = ((1i32 << 16) | 0) + VARHDRSZ;
-        let m = numeric_modifiers(typmod).unwrap();
-        assert_eq!(m.p, 1);
-        assert_eq!(m.s, 0);
+    fn numeric_modifiers_inverts_postgres_encoding_for_every_valid_typmod() {
+        // The domain is only about two million pairs, so check all of them
+        // instead of sampling.
+        for p in 1i16..=1000 {
+            for s in -1000i16..=1000 {
+                let typmod = make_numeric_typmod(i32::from(p), i32::from(s));
+                assert_eq!(
+                    numeric_modifiers(typmod),
+                    Some(NumericModifiers { p, s }),
+                    "numeric({p}, {s}) typmod {typmod}"
+                );
+            }
+        }
     }
 }
