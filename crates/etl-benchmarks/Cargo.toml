@@ -19,7 +19,7 @@ required-features = ["snowflake"]
 [features]
 default = []
 bigquery = ["dep:etl-destinations", "etl-destinations/bigquery"]
-clickhouse = ["dep:etl-destinations", "etl-destinations/clickhouse"]
+clickhouse = ["dep:clickhouse", "dep:etl-destinations", "etl-destinations/clickhouse"]
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
 snowflake = [
     "dep:etl-destinations",
@@ -30,6 +30,7 @@ snowflake = [
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true, features = ["default", "std", "derive"] }
+clickhouse = { workspace = true, optional = true }
 etl = { workspace = true, features = ["test-utils", "tls-rustls-ring"] }
 etl-config = { workspace = true }
 etl-destinations = { workspace = true, optional = true, features = ["tls-rustls-ring"] }
