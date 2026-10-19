@@ -1519,7 +1519,15 @@ mod tests {
         }
 
         if wait_past_deadline {
-            tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+            // Observe the watchdog's deadline branch before sending the next
+            // signal; elapsed wall time alone does not establish this order.
+            tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, async {
+                while !watchdog.timed_out() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
         }
 
         for signal in after_deadline {
@@ -2128,11 +2136,15 @@ mod tests {
         let mut watchdog = DuckDbQueryWatchdog::spawn(Instant::now() + WATCHDOG_DEADLINE);
         let watchdog_task = watchdog.async_task_handle().expect("failed to extract watchdog task");
         let (observer_started_tx, observer_started_rx) = oneshot::channel();
-        let started_at = std::time::Instant::now();
+        let observer_handle = Arc::clone(&delayed_handle);
         let observer_task = tokio::spawn(async move {
             observer_started_tx.send(()).expect("observer start receiver should be open");
-            tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
-            std::time::Instant::now()
+            // The observer must wait for the native call to start. An elapsed
+            // timer can fire before the watchdog gets scheduled under load.
+            while !observer_handle.started() {
+                tokio::task::yield_now().await;
+            }
+            observer_handle.completed()
         });
 
         observer_started_rx.await.expect("observer should start");
@@ -2142,15 +2154,12 @@ mod tests {
             .await
             .expect("watchdog should not deadlock on a single worker runtime")
             .expect("watchdog task should not panic");
-        let observer_finished_at = observer_task.await.expect("observer task should not panic");
+        let interrupt_completed_when_observed = observer_task.await.unwrap();
 
         assert!(watchdog.timed_out());
         assert_eq!(delayed_handle.calls(), 1);
         assert!(delayed_handle.completed());
-        assert!(
-            observer_finished_at.duration_since(started_at) >= interrupt_delay,
-            "single worker runtime should not poll other async tasks while interrupt() blocks"
-        );
+        assert!(interrupt_completed_when_observed);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

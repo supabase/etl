@@ -6,8 +6,8 @@ use std::{
 use etl::{
     pipeline::PipelineId,
     schema::{
-        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
-        SchemaOperation, SchemaPlan, TableId,
+        ColumnAlterationKind, ColumnOperation, ColumnPresenceChangeReason, ColumnSchema,
+        ReplicatedTableSchema, SchemaPlan, TableId,
     },
 };
 use metrics::{counter, gauge, histogram};
@@ -24,6 +24,7 @@ use crate::{
         Config, Error, Result, SnowpipeError,
         auth::{AuthManager, HttpExchanger, TokenProvider},
         config::{HTTP_CONNECT_TIMEOUT, HTTP_REQUEST_TIMEOUT},
+        materialization,
         metrics::{
             ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_FAILURES_TOTAL,
             ETL_SNOWFLAKE_STREAMING_DURABILITY_WAIT_SECONDS, ETL_SNOWFLAKE_STREAMING_PENDING_BYTES,
@@ -60,10 +61,10 @@ pub(super) struct TableLifecycleGuard {
 /// With event admission blocked, [`Client::detach_table_for_copy`] runs inside
 /// the reset-preparation timeout: it discards the table's pending streaming
 /// target, removes its cached channel, and carries any removed channel together
-/// with its table name in this value.
+/// with the owned table names in this value.
 ///
 /// [`Client::drop_detached_table_for_copy`] consumes the value outside that
-/// timeout to drop the Snowpipe channel and Snowflake table. This split keeps
+/// timeout to drop the Snowpipe channels and Snowflake tables. This split keeps
 /// local draining and lock acquisition bounded without cancelling a remote drop
 /// whose outcome would then be unknown. The table lifecycle guard remains held
 /// through both phases, preventing setup from publishing a stale channel.
@@ -76,12 +77,11 @@ pub(super) struct DetachedTableForCopy<C> {
     table: TableLifecycleGuard,
     /// Previously cached channel handle, when one existed in this process.
     channel: Option<Arc<Mutex<ChannelHandle<C>>>>,
-    /// Snowflake table name to drop after retiring local state.
-    table_name: String,
-    /// Whether durable destination metadata establishes ownership.
-    owned: bool,
-    /// Preserve grants only when the fresh copy will reuse the same raw name.
-    preserve_view: bool,
+    /// Owned Snowflake table names to drop after retiring local state.
+    table_names: Vec<String>,
+    /// Raw name reused by the fresh copy, when its source name is supported.
+    /// Its companion view retains grants.
+    preserve_view_for: Option<String>,
 }
 
 /// Maximum accepted Snowflake row batches before forcing a durability wait.
@@ -99,6 +99,14 @@ const TRUNCATE_ATTEMPT_NAMESPACE: Uuid = Uuid::from_u128(0x4b929faf_9687_4544_a3
 
 /// Version tag for the truncate-attempt identity encoding.
 const TRUNCATE_ATTEMPT_IDENTITY_VERSION: &[u8] = b"supabase-etl/snowflake/truncate-attempt/v1";
+
+/// Treats an already absent remote channel as successfully dropped.
+fn ignore_missing_channel(result: Result<()>) -> Result<()> {
+    match result {
+        Ok(()) | Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
 
 /// Stable identity for one physical Snowflake truncate attempt.
 #[derive(Clone, Copy)]
@@ -413,6 +421,12 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.channels.read().await.contains_key(&table_id)
     }
 
+    /// Checks whether a table or view occupies `name` in the configured
+    /// Snowflake namespace.
+    pub(super) async fn object_exists(&self, name: &str) -> Result<bool> {
+        self.sql_client.object_exists(name).await
+    }
+
     /// Returns whether channel and view setup both completed in this process.
     pub(super) async fn is_table_ready(&self, table_id: TableId) -> bool {
         self.has_channel(table_id).await && self.prepared_views.read().await.contains(&table_id)
@@ -435,6 +449,45 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         Ok(())
     }
 
+    /// Restores only a previously owned view at startup. Without a view,
+    /// eligibility must wait for a source schema carrying the actual identity.
+    pub(super) async fn restore_view(
+        &self,
+        table: &TableLifecycleGuard,
+        name: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> Result<()> {
+        if CompanionView::new(self.pipeline_id, table.table_id, name)
+            .restore(&self.sql_client, name, schema)
+            .await?
+        {
+            self.prepared_views.write().await.insert(table.table_id);
+        }
+        Ok(())
+    }
+
+    /// Rejects loss of an existing view's eligibility before advancing the raw
+    /// schema, including when a relation changes only replica identity.
+    pub(super) async fn check_view_schema(
+        &self,
+        table_id: TableId,
+        name: &str,
+        schema: &ReplicatedTableSchema,
+    ) -> Result<()> {
+        if materialization::validate_schema(schema).is_ok() {
+            return Ok(());
+        }
+
+        let table = self.lock_table(table_id).await;
+        let result = CompanionView::new(self.pipeline_id, table_id, name)
+            .check_schema(&self.sql_client, schema)
+            .await;
+        if result.is_err() {
+            self.invalidate_view(&table).await;
+        }
+        result.map(|_| ())
+    }
+
     /// Forces reconciliation after an applied schema change without hiding a
     /// compatible view.
     pub(super) async fn invalidate_view(&self, table: &TableLifecycleGuard) {
@@ -447,9 +500,10 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         CompanionView::new(self.pipeline_id, table.table_id, name).park(&self.sql_client).await
     }
 
-    /// Checks whether a table exists in the configured Snowflake namespace.
-    pub(super) async fn table_exists(&self, table_name: &str) -> Result<bool> {
-        self.sql_client.table_exists(table_name).await
+    /// Removes a companion view when a rename or reset retires its raw name.
+    pub(super) async fn remove_view(&self, table: &TableLifecycleGuard, name: &str) -> Result<()> {
+        self.invalidate_view(table).await;
+        CompanionView::new(self.pipeline_id, table.table_id, name).remove(&self.sql_client).await
     }
 
     /// Locks one table's setup/reset lifecycle without retaining the registry.
@@ -564,21 +618,42 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             .await
     }
 
-    /// Translates a validated schema plan into Snowflake DDL in the supplied
-    /// order.
+    /// Retires the drained channel, then renames its physical table.
+    ///
+    /// Retire while the old name is still owned: after renaming, another
+    /// source can reuse both the table name and its derived channel name.
+    /// The retained committed offset seeds the channel opened by
+    /// [`Self::refresh_table`] after column DDL finishes.
+    pub async fn rename_table(
+        &self,
+        table_id: TableId,
+        before_table_name: &str,
+        after_table_name: &str,
+    ) -> Result<()> {
+        self.wait_for_pending_durability().await?;
+        let channel = self.get_channel(table_id).await?;
+        let mut channel = channel.lock().await;
+        channel.retire_for_table_rename().await?;
+        self.sql_client.rename_table(before_table_name, after_table_name).await
+    }
+
+    /// Executes the plan's ordered column operations against the resolved
+    /// table.
+    ///
+    /// The caller handles any table rename before calling this method.
     pub async fn apply_schema_plan(&self, table_name: &str, plan: &SchemaPlan) -> Result<()> {
-        if plan.is_empty() {
+        if plan.ordered_column_operations().is_empty() {
             return Ok(());
         }
 
         // Translate the shared plan without revalidating names or regrouping
         // operations.
-        for operation in plan.ordered_operations() {
+        for operation in plan.ordered_column_operations() {
             match operation {
-                SchemaOperation::DropColumn { before_column_schema, reason: _ } => {
+                ColumnOperation::DropColumn { before_column_schema, reason: _ } => {
                     self.sql_client.drop_column(table_name, &before_column_schema.name).await?;
                 }
-                SchemaOperation::AddColumn { after_column_schema, reason } => {
+                ColumnOperation::AddColumn { after_column_schema, reason } => {
                     if !after_column_schema.nullable {
                         warn!(
                             table_name,
@@ -613,7 +688,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
                         )
                         .await?;
                 }
-                SchemaOperation::AlterColumn { alteration } => {
+                ColumnOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
                     match alteration.kind() {
@@ -680,6 +755,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
 
         Ok(())
     }
+
     /// Applies a source truncate to Snowflake and positions the table's
     /// Snowpipe channel at `truncate_offset`.
     ///
@@ -749,9 +825,8 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     pub(super) async fn detach_table_for_copy(
         &self,
         table_id: TableId,
-        table_name: &str,
-        owned: bool,
-        preserve_view: bool,
+        table_names: Vec<String>,
+        preserve_view_for: Option<String>,
     ) -> Result<DetachedTableForCopy<C>> {
         // Event tasks must be drained before taking this gate, since they may
         // need it to finish opening a channel. Never wait on it under a
@@ -764,55 +839,86 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.invalidate_view(&table).await;
         pending.observe_metrics();
 
-        Ok(DetachedTableForCopy {
-            table,
-            channel,
-            table_name: table_name.to_owned(),
-            owned,
-            preserve_view,
-        })
+        Ok(DetachedTableForCopy { table, channel, table_names, preserve_view_for })
     }
 
-    /// Drops the remote channel and table for previously detached local state.
+    /// Drops the remote channels and tables for previously detached local
+    /// state.
+    ///
+    /// An interrupted rename can leave the table under any owned name, so
+    /// every existing owned table has its channel retired before it is
+    /// dropped. Names without a table are skipped.
     pub(super) async fn drop_detached_table_for_copy(
         &self,
         detached: DetachedTableForCopy<C>,
     ) -> Result<()> {
-        let DetachedTableForCopy { table, channel, table_name, owned, preserve_view } = detached;
+        let DetachedTableForCopy { table, channel, table_names, preserve_view_for } = detached;
 
-        if owned {
-            if preserve_view {
-                self.park_view(&table, &table_name).await?;
+        for table_name in &table_names {
+            if preserve_view_for.as_ref() == Some(table_name) {
+                self.park_view(&table, table_name).await?;
             } else {
-                self.invalidate_view(&table).await;
-                CompanionView::new(self.pipeline_id, table.table_id, &table_name)
-                    .remove(&self.sql_client)
-                    .await?;
+                self.remove_view(&table, table_name).await?;
             }
         }
 
-        let drop_channel_result = if let Some(channel) = channel {
+        let mut cached_table_name = None;
+        if let Some(channel) = channel {
             let mut guard = channel.lock().await;
-            guard.drop_channel().await
+            cached_table_name = Some(guard.table_name().to_owned());
+            ignore_missing_channel(guard.drop_channel().await)?;
+        }
+
+        for table_name in &table_names {
+            if cached_table_name.as_ref() != Some(table_name)
+                && self.sql_client.object_exists(table_name).await?
+            {
+                let mut handle = ChannelHandle::new(
+                    Arc::clone(&self.stream_client),
+                    self.pipeline_id,
+                    self.database.clone(),
+                    self.schema.clone(),
+                    table_name.clone(),
+                );
+                ignore_missing_channel(handle.drop_channel().await)?;
+            }
+            self.sql_client.drop_table(table_name).await?;
+        }
+        drop(table);
+
+        Ok(())
+    }
+
+    /// Reopens ingestion under the target name while preserving the confirmed
+    /// replay frontier. A failed open leaves the previous handle intact.
+    async fn refresh_channel_target(
+        &self,
+        channel: &mut ChannelHandle<C>,
+        table_name: &str,
+    ) -> Result<()> {
+        if channel.table_name() == table_name {
+            channel.open().await?;
         } else {
-            let mut handle = ChannelHandle::new(
+            // The new table-derived channel must retain the committed replay
+            // frontier. Opening it without the old offset could duplicate CDC
+            // records when the apply checkpoint is replayed after a restart.
+            let offset = channel.committed_offset().cloned();
+            let mut renamed = ChannelHandle::new(
                 Arc::clone(&self.stream_client),
                 self.pipeline_id,
                 self.database.clone(),
                 self.schema.clone(),
-                table_name.clone(),
+                table_name.to_owned(),
             );
-            handle.drop_channel().await
-        };
-        match drop_channel_result {
-            Ok(()) => {}
-            Err(Error::Snowpipe(SnowpipeError::ChannelNotFound)) => {}
-            Err(error) => return Err(error),
+            if let Some(offset) = offset {
+                renamed.open_at(&offset).await?;
+            } else {
+                renamed.open().await?;
+            }
+            *channel = renamed;
         }
 
-        let result = self.sql_client.drop_table(&table_name).await;
-        drop(table);
-        result
+        Ok(())
     }
 
     /// Validates and refreshes the table's ingestion state after a schema
@@ -821,14 +927,18 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     /// Channels are reopened after ALTER TABLE so Snowpipe picks up the new
     /// column list.
     ///
-    /// Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-classic-recommendation>
-    pub async fn refresh_table(&self, table_id: &TableId, columns: &[ColumnSchema]) -> Result<()> {
+    /// Ref: <https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-rest-api#open-a-named-channel>
+    pub async fn refresh_table(
+        &self,
+        table_id: &TableId,
+        table_name: &str,
+        columns: &[ColumnSchema],
+    ) -> Result<()> {
         self.wait_for_pending_durability().await?;
         let channel = self.get_channel(*table_id).await?;
         let mut channel = channel.lock().await;
-        let table_name = channel.table_name().to_owned();
-        self.validate_table(&table_name, columns).await?;
-        channel.open().await.map(|_| ())
+        self.validate_table(table_name, columns).await?;
+        self.refresh_channel_target(&mut channel, table_name).await
     }
 
     /// Sends one table-copy request and retains its pending durability target.
@@ -970,7 +1080,7 @@ mod tests {
         schema::{
             IdentityMask, ReplicatedTableSchema, ReplicationMask, TableName, TableSchema, Type,
         },
-        store::StateStore,
+        store::{SchemaStore, StateStore},
         test_utils::{destination::write_events, notifying_store::NotifyingStore},
     };
     use serde_json::{Value, json};
@@ -1058,6 +1168,14 @@ mod tests {
         statuses: std::sync::Mutex<HashMap<String, ChannelStatusResponse>>,
         /// Rejects every append before recording any accepted rows.
         fail_append: bool,
+        /// Rejects opening a particular rename target.
+        fail_open_for: Option<String>,
+        /// Remote channel identities retired in transport order.
+        dropped_channels: std::sync::Mutex<Vec<(String, String)>>,
+        /// Rejects channel retirement before SQL can rename the table.
+        fail_drop: bool,
+        /// Reports that a retired remote channel was already absent.
+        missing_drop: bool,
         /// Counts attempted appends, including failures.
         append_attempts: AtomicUsize,
     }
@@ -1075,6 +1193,9 @@ mod tests {
             channel: &str,
             offset_token: Option<&OffsetToken>,
         ) -> Result<OpenChannelResponse> {
+            if self.fail_open_for.as_deref() == Some(table) {
+                return Err(Error::Channel("Synthetic rename channel failure.".to_owned()));
+            }
             let mut statuses = self.statuses.lock().unwrap();
             let status =
                 statuses.entry(table.to_owned()).or_insert_with(|| ChannelStatusResponse {
@@ -1102,10 +1223,18 @@ mod tests {
             &self,
             _database: &str,
             _schema: &str,
-            _table: &str,
-            _channel: &str,
+            table: &str,
+            channel: &str,
         ) -> Result<()> {
-            unreachable!("destination tests do not drop channels")
+            self.dropped_channels.lock().unwrap().push((table.to_owned(), channel.to_owned()));
+            if self.fail_drop {
+                return Err(Error::Channel("Synthetic channel retirement failure.".to_owned()));
+            }
+            self.statuses.lock().unwrap().remove(table);
+            if self.missing_drop {
+                return Err(Error::Snowpipe(SnowpipeError::ChannelNotFound));
+            }
+            Ok(())
         }
 
         async fn insert_rows(
@@ -1192,11 +1321,11 @@ mod tests {
                 IdentityMask::from_bytes(vec![1, 0]),
             );
             let metadata = DestinationTableMetadata::new_applied(
-                name.clone(),
                 schema.inner().snapshot_id,
                 schema.replication_mask().clone(),
             );
-            store.store_destination_table_metadata(schema.id(), metadata).await.unwrap();
+            store.store_table_schema(table.as_ref().clone()).await.unwrap();
+            store.store_destination_table_metadata(schema.id(), metadata, "").await.unwrap();
             let mut channel = ChannelHandle::new(
                 Arc::clone(&stream),
                 client.pipeline_id,
@@ -1371,6 +1500,111 @@ mod tests {
                 assert_eq!(requests[1].rows.len(), 1);
                 assert_eq!(requests[1].start, OffsetToken::new(10.into(), 2));
             }
+        }
+    }
+
+    /// A renamed table's new channel inherits the confirmed delivery frontier
+    /// after retirement, including when the old remote channel is absent.
+    /// Failure to open it retains the local delivery proof for diagnosis.
+    #[tokio::test]
+    async fn rename_channel_preserves_committed_offset_and_failed_open_keeps_old_target() {
+        for (fail_open, missing_drop) in [(false, false), (true, false), (false, true)] {
+            let stream = Arc::new(RecordingStreamClient {
+                fail_open_for: fail_open.then(|| "RENAMED".to_owned()),
+                missing_drop,
+                ..Default::default()
+            });
+            let config =
+                Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+            let sql = SqlClient::new(config, Arc::new(UnusedTokenProvider), reqwest::Client::new());
+            let client = Client::with_clients(
+                sql,
+                Arc::clone(&stream),
+                "db".to_owned(),
+                "schema".to_owned(),
+                1,
+            );
+            let mut channel = ChannelHandle::new(
+                Arc::clone(&stream),
+                1,
+                "db".to_owned(),
+                "schema".to_owned(),
+                "ORIGINAL".to_owned(),
+            );
+            let offset = OffsetToken::new(10_u64.into(), 3);
+            channel.open_at(&offset).await.unwrap();
+
+            channel.retire_for_table_rename().await.unwrap();
+
+            let result = client.refresh_channel_target(&mut channel, "RENAMED").await;
+            if fail_open {
+                assert!(result.is_err());
+                assert_eq!(channel.table_name(), "ORIGINAL");
+                assert!(!stream.statuses.lock().unwrap().contains_key("RENAMED"));
+            } else {
+                result.unwrap();
+                assert_eq!(channel.table_name(), "RENAMED");
+                assert_eq!(
+                    stream.statuses.lock().unwrap()["RENAMED"].offset_token,
+                    Some(offset.clone())
+                );
+            }
+            assert_eq!(channel.committed_offset(), Some(&offset));
+            assert_eq!(
+                *stream.dropped_channels.lock().unwrap(),
+                [("ORIGINAL".to_owned(), "supabase_etl_1_schema_ORIGINAL_ch0".to_owned())]
+            );
+            assert!(!stream.statuses.lock().unwrap().contains_key("ORIGINAL"));
+        }
+    }
+
+    /// SQL must not free the old table name until its channel is retired.
+    /// A retirement failure prevents SQL and preserves the committed offset.
+    #[tokio::test]
+    async fn table_rename_retires_channel_before_sql_and_preserves_offset_on_failure() {
+        for fail_drop in [false, true] {
+            let auth = Arc::new(PendingTokenProvider::default());
+            let stream = Arc::new(RecordingStreamClient { fail_drop, ..Default::default() });
+            let config =
+                Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+            let sql = SqlClient::new(config, Arc::clone(&auth), reqwest::Client::new());
+            let client = Client::with_clients(
+                sql,
+                Arc::clone(&stream),
+                "db".to_owned(),
+                "schema".to_owned(),
+                1,
+            );
+            let table_id = TableId::new(1);
+            let offset = OffsetToken::new(10_u64.into(), 3);
+            let mut channel = ChannelHandle::new(
+                Arc::clone(&stream),
+                1,
+                "db".to_owned(),
+                "schema".to_owned(),
+                "ORIGINAL".to_owned(),
+            );
+            channel.open_at(&offset).await.unwrap();
+            client.channels.write().await.insert(table_id, Arc::new(Mutex::new(channel)));
+
+            let mut rename = Box::pin(client.rename_table(table_id, "ORIGINAL", "RENAMED"));
+            let result = poll_once(rename.as_mut());
+
+            if fail_drop {
+                assert!(matches!(result, Poll::Ready(Err(Error::Channel(_)))));
+            } else {
+                assert!(result.is_pending());
+            }
+            drop(rename);
+            assert_eq!(auth.calls.load(Ordering::SeqCst), usize::from(!fail_drop));
+            assert_eq!(
+                *stream.dropped_channels.lock().unwrap(),
+                [("ORIGINAL".to_owned(), "supabase_etl_1_schema_ORIGINAL_ch0".to_owned())]
+            );
+            assert_eq!(
+                client.get_channel(table_id).await.unwrap().lock().await.committed_offset(),
+                Some(&offset)
+            );
         }
     }
 
@@ -1599,7 +1833,11 @@ mod tests {
         let table_id = TableId::new(1);
         let mut setup = Box::pin(client.prepare_existing_table(table_id, "TABLE", &[]));
         assert!(poll_once(setup.as_mut()).is_pending());
-        let mut reset = Box::pin(client.detach_table_for_copy(table_id, "TABLE", false, false));
+        let mut reset = Box::pin(client.detach_table_for_copy(
+            table_id,
+            vec!["TABLE".to_owned()],
+            Some("TABLE".to_owned()),
+        ));
         assert!(poll_once(reset.as_mut()).is_pending());
 
         drop(setup);
@@ -1637,11 +1875,17 @@ mod tests {
             .record(table_id, accepted_batch(10, 1, 2, 20))
             .unwrap();
 
-        let detached =
-            client.detach_table_for_copy(table_id, table_name, false, false).await.unwrap();
+        let detached = client
+            .detach_table_for_copy(
+                table_id,
+                vec![table_name.to_owned()],
+                Some(table_name.to_owned()),
+            )
+            .await
+            .unwrap();
 
         assert!(detached.channel.is_some());
-        assert_eq!(detached.table_name, table_name);
+        assert_eq!(detached.table_names, [table_name]);
         assert!(!client.channels.read().await.contains_key(&table_id));
         assert!(!client.prepared_views.read().await.contains(&table_id));
         let pending = client.pending_durability.lock().await;

@@ -271,12 +271,6 @@ where
             )?
             .as_micros() as i64;
 
-        // We will send the `flush_lsn` as `apply_lsn` since in our case, we
-        // don't distinguish between them as Postgres does. The reason is that
-        // `apply_lsn` is used to mark when an LSN is both durable and visible,
-        // but from ETL's perspective we are fine with just it being durable,
-        // which is marked via the `flush_lsn`.
-        //
         // This outgoing request flag is separate from `force`. For a primary
         // keepalive, `force` mirrors PostgreSQL's incoming reply-request flag.
         // Background periodic updates are forced and request a reply.
@@ -291,6 +285,11 @@ where
         message.put_u8(STANDBY_STATUS_UPDATE_TAG);
         message.put_u64(write_lsn.into());
         message.put_u64(flush_lsn.into());
+        // ETL tracks destination durability without a separate apply/visibility
+        // frontier, so report `flush_lsn` as `apply_lsn` too. Reported apply
+        // progress, including `remote_apply` waits if ETL is configured as a
+        // synchronous standby, therefore means durable delivery without
+        // guaranteeing immediate query visibility at the destination.
         message.put_u64(flush_lsn.into());
         message.put_i64(ts);
         message.put_u8(request_reply);

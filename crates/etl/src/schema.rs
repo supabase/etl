@@ -659,8 +659,8 @@ impl ReplicatedTableSchema {
 
     /// Computes the diff between this schema (old) and another schema (new).
     ///
-    /// Only consider replicated columns. Uses ordinal positions to track
-    /// columns:
+    /// Records exact qualified table-name changes and considers only replicated
+    /// columns for column changes. Uses ordinal positions to track columns:
     /// - Columns in the same position with different names are renamed.
     /// - Type or type-modifier changes in the same position are retained for
     ///   fail-closed planning.
@@ -786,7 +786,12 @@ impl ReplicatedTableSchema {
             ColumnAddition { after_column_schema: (**column).clone(), reason }
         }));
 
-        SchemaDiff::from_column_changes(added_columns, dropped_columns, altered_columns)
+        SchemaDiff {
+            table_name_change: TableNameChange::between(self.name(), after_schema.name()),
+            added_columns,
+            dropped_columns,
+            altered_columns,
+        }
     }
 
     /// Computes the exact endpoint diff and plans it for a destination.
@@ -794,10 +799,13 @@ impl ReplicatedTableSchema {
     /// This is the preferred entrypoint whenever both replicated endpoint
     /// schemas are available. Diffing remains independent of destination
     /// identifier behavior and retains exact PostgreSQL names. Planning maps
-    /// both endpoint namespaces, validates them, and maps every emitted
-    /// operation before ordering it in the destination namespace. Consumers of
-    /// [`SchemaPlan::ordered_operations`] must therefore execute those names as
-    /// provided rather than mapping them again.
+    /// both column namespaces, validates them, and maps emitted column
+    /// operations before ordering them in the destination namespace. Consumers
+    /// of [`SchemaPlan::ordered_column_operations`] execute those column names
+    /// as provided. The diff also exposes any table-name change through
+    /// [`SchemaDiff::table_name_change`]. Destinations handle that change
+    /// first, then execute the column sequence against the resulting actual
+    /// table name.
     ///
     /// `column_name_mapping` is assumed to describe both the currently applied
     /// destination schema and the destination semantics used during execution.
@@ -1121,13 +1129,13 @@ impl ColumnAlteration {
     }
 }
 
-/// One ordered operation in a destination schema transition.
+/// One ordered column operation in a destination schema transition.
 ///
 /// Destinations preserve this order and decide whether each alteration is
 /// supported. Built-in destinations that execute schema plans currently warn
 /// and skip unsupported type alterations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SchemaOperation {
+pub enum ColumnOperation {
     /// Drop a column that is absent from the after endpoint schema.
     DropColumn {
         /// The state expected immediately before the column is removed.
@@ -1149,7 +1157,37 @@ pub enum SchemaOperation {
     },
 }
 
-/// Represents differences between two schema versions.
+/// A change between the exact qualified source table names at two endpoints.
+///
+/// Destination naming rules may map these names to the same object. Planning
+/// rejects moves between PostgreSQL schemas, even though diffing records them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableNameChange {
+    /// The name at the before endpoint.
+    before_name: TableName,
+    /// The name at the after endpoint.
+    after_name: TableName,
+}
+
+impl TableNameChange {
+    /// Records different endpoint names without applying destination mapping.
+    fn between(before_name: &TableName, after_name: &TableName) -> Option<Self> {
+        (before_name != after_name)
+            .then(|| Self { before_name: before_name.clone(), after_name: after_name.clone() })
+    }
+
+    /// Returns the exact source name before the change.
+    pub fn before_name(&self) -> &TableName {
+        &self.before_name
+    }
+
+    /// Returns the exact source name after the change.
+    pub fn after_name(&self) -> &TableName {
+        &self.after_name
+    }
+}
+
+/// Represents table-name and column differences between two schema versions.
 ///
 /// This type contains only exact facts from the PostgreSQL endpoint snapshots.
 /// It does not apply destination identifier semantics or contain generated
@@ -1160,6 +1198,8 @@ pub enum SchemaOperation {
 /// skip their execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaDiff {
+    /// The qualified source table-name change, if any.
+    table_name_change: Option<TableNameChange>,
     /// Columns that need to be added to the destination.
     pub added_columns: Vec<ColumnAddition>,
     /// Columns that need to be dropped from the destination.
@@ -1169,14 +1209,15 @@ pub struct SchemaDiff {
 }
 
 impl SchemaDiff {
-    /// Builds a diff from explicit physical table-schema operations.
+    /// Builds a column-only diff from explicit physical table-schema changes.
     ///
     /// Prefer [`ReplicatedTableSchema::diff`] when both endpoint schemas are
     /// available so additions and removals can be distinguished from
     /// replication-mask changes. Additions and removals supplied here are
     /// classified as [`ColumnPresenceChangeReason::TableSchema`]. The caller is
     /// responsible for supplying endpoint facts produced by the same rules as
-    /// [`ReplicatedTableSchema::diff`].
+    /// [`ReplicatedTableSchema::diff`]. This constructor records no table-name
+    /// change; use the endpoint diff when table names are available.
     pub fn new(
         added_columns: Vec<ColumnSchema>,
         dropped_columns: Vec<ColumnSchema>,
@@ -1197,17 +1238,16 @@ impl SchemaDiff {
             })
             .collect();
 
-        Self { added_columns, dropped_columns, altered_columns }
+        Self { table_name_change: None, added_columns, dropped_columns, altered_columns }
     }
 
-    /// Builds a diff whose add and drop reasons were derived from both full
-    /// table-schema endpoints.
-    fn from_column_changes(
-        added_columns: Vec<ColumnAddition>,
-        dropped_columns: Vec<ColumnRemoval>,
-        altered_columns: Vec<ColumnMetadataChange>,
-    ) -> Self {
-        Self { added_columns, dropped_columns, altered_columns }
+    /// Returns the exact source table-name change, if any.
+    ///
+    /// This is separate from [`SchemaPlan::ordered_column_operations`]. A
+    /// destination resolves its actual target name and handles any rename
+    /// before executing those operations on the resulting table.
+    pub fn table_name_change(&self) -> Option<&TableNameChange> {
+        self.table_name_change.as_ref()
     }
 
     /// Plans an explicit diff when complete replicated schemas are unavailable.
@@ -1226,8 +1266,9 @@ impl SchemaDiff {
     ///
     /// # Errors
     ///
-    /// Returns [`SchemaPlanError`] if either endpoint maps two source columns
-    /// to the same destination name or rename ordering cannot make progress.
+    /// Returns [`SchemaPlanError`] for a PostgreSQL schema move, if either
+    /// endpoint maps two source columns to the same destination name, or if
+    /// column rename ordering cannot make progress.
     pub fn plan_for_column_names(
         self,
         before_column_names: Vec<String>,
@@ -1242,9 +1283,10 @@ impl SchemaDiff {
         )
     }
 
-    /// Returns `true` if there are no schema changes.
+    /// Returns `true` if neither the table name nor the columns changed.
     pub fn is_empty(&self) -> bool {
-        self.added_columns.is_empty()
+        self.table_name_change.is_none()
+            && self.added_columns.is_empty()
             && self.dropped_columns.is_empty()
             && self.altered_columns.is_empty()
     }
@@ -1271,6 +1313,13 @@ impl fmt::Display for SchemaEndpoint {
 /// Errors produced while validating or ordering a destination schema plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchemaPlanError {
+    /// Moving tables between PostgreSQL schemas is unsupported.
+    TableSchemaMoveUnsupported {
+        /// The schema at the before endpoint.
+        before_schema_name: String,
+        /// The schema at the after endpoint.
+        after_schema_name: String,
+    },
     /// Two exact source names occupy the same destination namespace entry.
     DestinationColumnNameCollision {
         /// The endpoint containing the collision.
@@ -1299,6 +1348,11 @@ pub enum SchemaPlanError {
 impl fmt::Display for SchemaPlanError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TableSchemaMoveUnsupported { before_schema_name, after_schema_name } => write!(
+                f,
+                "Moving a table from PostgreSQL schema '{before_schema_name}' to \
+                 '{after_schema_name}' is unsupported; resynchronize the table"
+            ),
             Self::DestinationColumnNameCollision {
                 endpoint,
                 column_name_mapping,
@@ -1324,20 +1378,20 @@ impl fmt::Display for SchemaPlanError {
 
 impl std::error::Error for SchemaPlanError {}
 
-/// A destination-validated schema transition with physical operations in safe
-/// order.
+/// A destination-validated schema transition with ordered column operations.
 ///
 /// The exact endpoint facts remain available through [`SchemaPlan::diff`]. The
 /// generated operation sequence uses mapped destination names and may contain
 /// temporary renames used to break cycles in that destination namespace. Its
 /// operations are ready for destination execution and must not be mapped a
-/// second time.
+/// second time. Table-name changes remain separate endpoint facts in the diff;
+/// the destination resolves and applies them before the column sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaPlan {
     /// The exact source endpoint difference.
     diff: SchemaDiff,
     /// Operations in destination-safe execution order.
-    ordered_operations: Vec<SchemaOperation>,
+    ordered_column_operations: Vec<ColumnOperation>,
     /// Destination identifier rules used to produce the operation sequence.
     column_name_mapping: ColumnNameMapping,
 }
@@ -1365,6 +1419,15 @@ impl SchemaPlan {
         after_column_names: Vec<String>,
         column_name_mapping: ColumnNameMapping,
     ) -> Result<Self, SchemaPlanError> {
+        if let Some(change) = diff.table_name_change()
+            && change.before_name().schema != change.after_name().schema
+        {
+            return Err(SchemaPlanError::TableSchemaMoveUnsupported {
+                before_schema_name: change.before_name().schema.clone(),
+                after_schema_name: change.after_name().schema.clone(),
+            });
+        }
+
         // Map the endpoint names first so validation and ordering model the
         // same physical namespace in which the DDL will execute.
         let namespaces = SchemaPlanNamespaces::from_column_names(
@@ -1375,10 +1438,10 @@ impl SchemaPlan {
 
         // The diff keeps exact source names. The operation planner maps each
         // column as it emits the destination-executable sequence.
-        let ordered_operations =
-            SchemaOperationPlanner::new(namespaces, column_name_mapping).plan(&diff)?;
+        let ordered_column_operations =
+            ColumnOperationPlanner::new(namespaces, column_name_mapping).plan(&diff)?;
 
-        Ok(Self { diff, ordered_operations, column_name_mapping })
+        Ok(Self { diff, ordered_column_operations, column_name_mapping })
     }
 
     /// Returns the exact endpoint diff represented by this plan.
@@ -1386,30 +1449,37 @@ impl SchemaPlan {
         &self.diff
     }
 
-    /// Returns `true` if the plan contains no operations.
+    /// Returns `true` if there is no table-name change or executable column
+    /// work.
+    ///
+    /// Destination mapping may eliminate column operations present in the raw
+    /// diff. Table names retain exact source spelling; the destination decides
+    /// whether their change requires a physical rename.
     pub fn is_empty(&self) -> bool {
-        self.ordered_operations.is_empty()
+        self.diff.table_name_change().is_none() && self.ordered_column_operations.is_empty()
     }
 
-    /// Returns the only destination-executable schema operations.
+    /// Returns the destination-executable column operations.
     ///
     /// Every column name is already mapped for the destination. The mapping
     /// must match the one used to create the currently applied schema.
+    /// Table renames are handled separately by the destination before this
+    /// column-only sequence executes against the resulting actual table name.
     ///
     /// Drops precede renames, followed by additions and type, nullability, and
     /// default alterations. A default alteration's before and after expressions
     /// identify whether the destination must remove, set, or replace a default.
     /// Destinations must preserve this exact order and must not independently
     /// apply the classified diff fields.
-    pub fn ordered_operations(&self) -> &[SchemaOperation] {
-        &self.ordered_operations
+    pub fn ordered_column_operations(&self) -> &[ColumnOperation] {
+        &self.ordered_column_operations
     }
 
-    /// Returns whether the plan contains a rename cycle.
+    /// Returns whether the column sequence contains a rename cycle.
     ///
     /// Each cycle requires one planner-generated rename in addition to its
     /// endpoint renames.
-    pub fn has_rename_cycles(&self) -> bool {
+    pub fn has_column_rename_cycles(&self) -> bool {
         let endpoint_rename_count = self
             .diff
             .altered_columns
@@ -1423,10 +1493,10 @@ impl SchemaPlan {
             })
             .count();
         let planned_rename_count = self
-            .ordered_operations
+            .ordered_column_operations
             .iter()
             .filter(|operation| {
-                matches!(operation, SchemaOperation::AlterColumn { alteration }
+                matches!(operation, ColumnOperation::AlterColumn { alteration }
                     if alteration.kind() == ColumnAlterationKind::Rename)
             })
             .count();
@@ -1509,9 +1579,9 @@ struct PendingRename {
 }
 
 /// Maps and orders a validated diff into destination-executable phases.
-struct SchemaOperationPlanner {
+struct ColumnOperationPlanner {
     /// Operations accumulated in execution order.
-    operations: Vec<SchemaOperation>,
+    operations: Vec<ColumnOperation>,
     /// Names occupied at the current point in the operation sequence.
     occupied_destination_names: HashSet<String>,
     /// Endpoint and generated names unavailable for temporary renames.
@@ -1520,7 +1590,7 @@ struct SchemaOperationPlanner {
     column_name_mapping: ColumnNameMapping,
 }
 
-impl SchemaOperationPlanner {
+impl ColumnOperationPlanner {
     /// Creates a planner from already validated endpoint namespaces.
     fn new(namespaces: SchemaPlanNamespaces, column_name_mapping: ColumnNameMapping) -> Self {
         Self {
@@ -1531,8 +1601,8 @@ impl SchemaOperationPlanner {
         }
     }
 
-    /// Maps operations while building the four required physical phases.
-    fn plan(mut self, diff: &SchemaDiff) -> Result<Vec<SchemaOperation>, SchemaPlanError> {
+    /// Maps operations while ordering column schema changes.
+    fn plan(mut self, diff: &SchemaDiff) -> Result<Vec<ColumnOperation>, SchemaPlanError> {
         self.plan_drops(&diff.dropped_columns);
         self.plan_renames(&diff.altered_columns)?;
         self.plan_additions(&diff.added_columns);
@@ -1548,7 +1618,7 @@ impl SchemaOperationPlanner {
                 self.column_name_mapping.map_column_schema(&change.before_column_schema);
             self.occupied_destination_names.remove(&before_column_schema.name);
             self.operations
-                .push(SchemaOperation::DropColumn { before_column_schema, reason: change.reason });
+                .push(ColumnOperation::DropColumn { before_column_schema, reason: change.reason });
         }
     }
 
@@ -1677,7 +1747,7 @@ impl SchemaOperationPlanner {
     /// Phase 3: emits additions after every reusable name is available.
     fn plan_additions(&mut self, added_columns: &[ColumnAddition]) {
         for change in added_columns {
-            self.operations.push(SchemaOperation::AddColumn {
+            self.operations.push(ColumnOperation::AddColumn {
                 after_column_schema: self
                     .column_name_mapping
                     .map_column_schema(&change.after_column_schema),
@@ -1746,7 +1816,7 @@ impl SchemaOperationPlanner {
         kind: ColumnAlterationKind,
     ) {
         let alteration = ColumnAlteration::new(before_column_schema, after_column_schema, kind);
-        self.operations.push(SchemaOperation::AlterColumn { alteration });
+        self.operations.push(ColumnOperation::AlterColumn { alteration });
     }
 }
 
@@ -1889,16 +1959,16 @@ mod tests {
     }
 
     fn operation_names(plan: &SchemaPlan) -> Vec<String> {
-        plan.ordered_operations()
+        plan.ordered_column_operations()
             .iter()
             .map(|operation| match operation {
-                SchemaOperation::DropColumn { before_column_schema, .. } => {
+                ColumnOperation::DropColumn { before_column_schema, .. } => {
                     format!("drop:{}", before_column_schema.name)
                 }
-                SchemaOperation::AddColumn { after_column_schema, .. } => {
+                ColumnOperation::AddColumn { after_column_schema, .. } => {
                     format!("add:{}", after_column_schema.name)
                 }
-                SchemaOperation::AlterColumn { alteration } => {
+                ColumnOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
                     match alteration.kind() {
@@ -1946,9 +2016,9 @@ mod tests {
             .map(|column| (column.name, column.ordinal_position))
             .collect();
 
-        for operation in plan.ordered_operations() {
+        for operation in plan.ordered_column_operations() {
             match operation {
-                SchemaOperation::DropColumn { before_column_schema, .. } => {
+                ColumnOperation::DropColumn { before_column_schema, .. } => {
                     assert_eq!(
                         columns_by_ordinal.remove(&before_column_schema.ordinal_position),
                         Some(before_column_schema.clone())
@@ -1958,7 +2028,7 @@ mod tests {
                         Some(before_column_schema.ordinal_position)
                     );
                 }
-                SchemaOperation::AddColumn { after_column_schema, .. } => {
+                ColumnOperation::AddColumn { after_column_schema, .. } => {
                     assert_eq!(
                         columns_by_ordinal.insert(
                             after_column_schema.ordinal_position,
@@ -1974,7 +2044,7 @@ mod tests {
                         None
                     );
                 }
-                SchemaOperation::AlterColumn { alteration } => {
+                ColumnOperation::AlterColumn { alteration } => {
                     let before = alteration.before_column_schema();
                     let after = alteration.after_column_schema();
                     assert_eq!(columns_by_ordinal.get(&before.ordinal_position), Some(before));
@@ -1999,6 +2069,106 @@ mod tests {
             .map(|column| (column.ordinal_position, column))
             .collect();
         assert_eq!(columns_by_ordinal, expected);
+    }
+
+    #[test]
+    fn schema_plan_separates_table_name_change_from_ordered_column_operations() {
+        let before = create_replicated_schema(vec![text_column("value", 1)]);
+        for name in [
+            TableName::new("public".to_owned(), "renamed".to_owned()),
+            TableName::new("public".to_owned(), "Renamed".to_owned()),
+        ] {
+            let after = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+                before.id(),
+                name.clone(),
+                vec![text_column("payload", 1), text_column("extra", 2)],
+            )));
+            let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
+            assert!(!plan.is_empty());
+            assert!(!plan.diff().is_empty());
+            assert_eq!(plan.diff(), &before.diff(&after));
+            let change = plan.diff().table_name_change().unwrap();
+            assert_eq!(change.before_name(), before.name());
+            assert_eq!(change.after_name(), &name);
+            assert!(!plan.has_column_rename_cycles());
+            assert_eq!(
+                before
+                    .diff(&after)
+                    .plan_for_column_names(
+                        vec!["value".to_owned()],
+                        vec!["payload".to_owned(), "extra".to_owned()],
+                        ColumnNameMapping::Identity,
+                    )
+                    .unwrap(),
+                plan
+            );
+            assert_eq!(
+                operation_names(&plan),
+                vec!["rename:value->payload".to_owned(), "add:extra".to_owned()]
+            );
+            assert_operations_converge(&before, &after);
+        }
+    }
+
+    #[test]
+    fn table_only_rename_has_empty_column_plan() {
+        let before = create_replicated_schema(vec![text_column("VALUE", 1)]);
+        let after = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            before.id(),
+            TableName::new("public".to_owned(), "Test_Table".to_owned()),
+            before.inner().column_schemas.clone(),
+        )));
+        for mapping in [
+            ColumnNameMapping::Identity,
+            ColumnNameMapping::AsciiLowercase,
+            ColumnNameMapping::UnicodeLowercase,
+        ] {
+            let plan = plan_schema_change(&before, &after, mapping);
+            assert!(!plan.is_empty());
+            assert!(!plan.diff().is_empty());
+            assert!(plan.ordered_column_operations().is_empty());
+            assert!(!plan.has_column_rename_cycles());
+            let change = plan.diff().table_name_change().unwrap();
+            assert_eq!(change.before_name(), before.name());
+            assert_eq!(change.after_name(), after.name());
+            assert_operations_converge_with_mapping(&before, &after, mapping);
+
+            let unchanged = plan_schema_change(&before, &before, mapping);
+            assert!(unchanged.is_empty());
+            assert!(unchanged.diff().is_empty());
+            assert!(unchanged.diff().table_name_change().is_none());
+        }
+    }
+
+    #[test]
+    fn schema_plan_rejects_schema_moves_before_planning_column_changes() {
+        let before = create_replicated_schema(vec![text_column("value", 1)]);
+        let after = ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+            before.id(),
+            TableName::new("archive".to_owned(), "renamed".to_owned()),
+            vec![text_column("payload", 1)],
+        )));
+        assert_eq!(
+            before.plan_schema_change(&after, ColumnNameMapping::Identity).unwrap_err(),
+            SchemaPlanError::TableSchemaMoveUnsupported {
+                before_schema_name: "public".to_owned(),
+                after_schema_name: "archive".to_owned(),
+            }
+        );
+        let diff = before.diff(&after);
+        assert_eq!(diff.table_name_change().unwrap().after_name(), after.name());
+        assert_eq!(
+            diff.plan_for_column_names(
+                vec!["value".to_owned()],
+                vec!["payload".to_owned()],
+                ColumnNameMapping::Identity,
+            )
+            .unwrap_err(),
+            SchemaPlanError::TableSchemaMoveUnsupported {
+                before_schema_name: "public".to_owned(),
+                after_schema_name: "archive".to_owned(),
+            }
+        );
     }
 
     fn permutations(values: &mut [String], start: usize, output: &mut Vec<Vec<String>>) {
@@ -2196,8 +2366,8 @@ mod tests {
             without_age
                 .plan_schema_change(&with_age, ColumnNameMapping::Identity)
                 .unwrap()
-                .ordered_operations(),
-            &[SchemaOperation::AddColumn {
+                .ordered_column_operations(),
+            &[ColumnOperation::AddColumn {
                 after_column_schema: create_test_table_schema().column_schemas[2].clone(),
                 reason: ColumnPresenceChangeReason::ReplicationMask,
             }]
@@ -2212,8 +2382,8 @@ mod tests {
             with_age
                 .plan_schema_change(&without_age, ColumnNameMapping::Identity)
                 .unwrap()
-                .ordered_operations(),
-            &[SchemaOperation::DropColumn {
+                .ordered_column_operations(),
+            &[ColumnOperation::DropColumn {
                 before_column_schema: create_test_table_schema().column_schemas[2].clone(),
                 reason: ColumnPresenceChangeReason::ReplicationMask,
             }]
@@ -2295,7 +2465,8 @@ mod tests {
                 plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
 
             assert_eq!(operation_names(&plan), ["modify-default:status"]);
-            let [SchemaOperation::AlterColumn { alteration }] = plan.ordered_operations() else {
+            let [ColumnOperation::AlterColumn { alteration }] = plan.ordered_column_operations()
+            else {
                 panic!("expected one default alteration");
             };
             assert_eq!(alteration.kind(), ColumnAlterationKind::Default);
@@ -2428,10 +2599,10 @@ mod tests {
 
         let plan = plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
         let alterations: Vec<_> = plan
-            .ordered_operations()
+            .ordered_column_operations()
             .iter()
             .map(|operation| {
-                let SchemaOperation::AlterColumn { alteration } = operation else {
+                let ColumnOperation::AlterColumn { alteration } = operation else {
                     panic!("expected only column alterations");
                 };
                 alteration
@@ -2645,7 +2816,7 @@ mod tests {
 
         let plan = plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
 
-        assert!(plan.has_rename_cycles());
+        assert!(plan.has_column_rename_cycles());
         assert_eq!(
             operation_names(&plan),
             [
@@ -2682,7 +2853,7 @@ mod tests {
 
         let plan = plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
 
-        assert!(plan.has_rename_cycles());
+        assert!(plan.has_column_rename_cycles());
         assert_eq!(operation_names(&plan), expected);
         assert_operations_converge(&before_schema, &after_schema);
     }
@@ -2868,8 +3039,9 @@ mod tests {
                 .plan_schema_change(&after_schema, ColumnNameMapping::AsciiLowercase)
                 .unwrap();
             assert!(plan.diff().altered_columns[0].name_changed());
+            assert!(plan.diff().table_name_change().is_none());
             assert!(plan.is_empty());
-            assert!(plan.ordered_operations().is_empty());
+            assert!(plan.ordered_column_operations().is_empty());
             assert_operations_converge_with_mapping(
                 &before_schema,
                 &after_schema,
@@ -2896,9 +3068,9 @@ mod tests {
         assert!(change.nullability_changed());
         assert!(change.default_changed());
         let [
-            SchemaOperation::AlterColumn { alteration: nullability },
-            SchemaOperation::AlterColumn { alteration: default },
-        ] = plan.ordered_operations()
+            ColumnOperation::AlterColumn { alteration: nullability },
+            ColumnOperation::AlterColumn { alteration: default },
+        ] = plan.ordered_column_operations()
         else {
             panic!("expected nullability and default alterations");
         };
@@ -3045,22 +3217,22 @@ mod tests {
         let plan = plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
 
         let [
-            SchemaOperation::DropColumn {
+            ColumnOperation::DropColumn {
                 before_column_schema: blocking_drop,
                 reason: ColumnPresenceChangeReason::TableSchema,
             },
-            SchemaOperation::DropColumn {
+            ColumnOperation::DropColumn {
                 before_column_schema: unrelated_drop,
                 reason: ColumnPresenceChangeReason::TableSchema,
             },
-            SchemaOperation::AlterColumn { alteration: rename },
-            SchemaOperation::AddColumn {
+            ColumnOperation::AlterColumn { alteration: rename },
+            ColumnOperation::AddColumn {
                 after_column_schema: addition,
                 reason: ColumnPresenceChangeReason::TableSchema,
             },
-            SchemaOperation::AlterColumn { alteration: nullability },
-            SchemaOperation::AlterColumn { alteration: default },
-        ] = plan.ordered_operations()
+            ColumnOperation::AlterColumn { alteration: nullability },
+            ColumnOperation::AlterColumn { alteration: default },
+        ] = plan.ordered_column_operations()
         else {
             panic!("expected the ordered structural and metadata operations");
         };
@@ -3092,12 +3264,12 @@ mod tests {
         let plan = plan_schema_change(&before_schema, &after_schema, ColumnNameMapping::Identity);
 
         let [
-            SchemaOperation::AlterColumn { alteration: temporary_rename },
-            SchemaOperation::AlterColumn { alteration: second_rename },
-            SchemaOperation::AlterColumn { alteration: after_rename },
-            SchemaOperation::AlterColumn { alteration: nullability },
-            SchemaOperation::AlterColumn { alteration: default },
-        ] = plan.ordered_operations()
+            ColumnOperation::AlterColumn { alteration: temporary_rename },
+            ColumnOperation::AlterColumn { alteration: second_rename },
+            ColumnOperation::AlterColumn { alteration: after_rename },
+            ColumnOperation::AlterColumn { alteration: nullability },
+            ColumnOperation::AlterColumn { alteration: default },
+        ] = plan.ordered_column_operations()
         else {
             panic!("expected the rename cycle followed by metadata alterations");
         };

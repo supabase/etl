@@ -186,6 +186,7 @@ impl StateStore for MemoryStore {
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+        _destination_table_id: &str,
     ) -> EtlResult<()> {
         let mut inner = self.inner.lock().await;
         Arc::make_mut(&mut inner.destination_tables_metadata).insert(table_id, metadata);

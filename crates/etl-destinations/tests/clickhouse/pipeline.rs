@@ -2722,15 +2722,21 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     database
-        .alter_table(
-            table_name.clone(),
-            &[
-                TableModification::DropColumn { name: "age" },
-                TableModification::AddColumn { name: "age", data_type: "text" },
-            ],
-        )
+        .run_sql(&format!(
+            "alter table {} drop column age, add column age text, add constraint age_nonempty \
+             check (age is null or length(age) > 0), set (fillfactor = 80)",
+            table_name.as_quoted_identifier(),
+        ))
         .await
         .unwrap();
+
+    database
+        .run_sql(&format!("alter table {} rename to renamed", table_name.as_quoted_identifier()))
+        .await
+        .unwrap();
+    let table_name = etl::schema::TableName::new(table_name.schema.clone(), "renamed".to_owned());
+
+    let clickhouse_table_name = "test_renamed";
 
     database
         .run_sql(&format!(
@@ -2749,7 +2755,7 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db.query(&query).await;
     let current_view_rows = if matches!(engine, ClickHouseEngine::ReplacingMergeTree) {
         let rows: Vec<CombinedSchemaChangeRow> = clickhouse_db
-            .query("select id, status, name, age from \"test_schema__multi__current\" order by id")
+            .query("select id, status, name, age from \"test_renamed__current\" order by id")
             .await;
         Some(rows)
     } else {
@@ -2918,7 +2924,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
         applied_snapshot_id > initial_snapshot_id,
         "snapshot_id should increase after schema change"
     );
-    let clickhouse_table_name = applied_metadata.table_id().to_owned();
+    let clickhouse_table_name = "test_schema__stale__replay";
 
     // --- WHEN: a fresh destination on the same store replays the old relation
     // ---
@@ -2934,11 +2940,11 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     let err = result.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
 
-    let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
+    let columns = clickhouse_db.column_names(clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "email column must survive the stale replay");
 
     let query =
-        current_state_query(engine, &clickhouse_table_name, "id, name, email", &["id"], "id");
+        current_state_query(engine, clickhouse_table_name, "id, name, email", &["id"], "id");
     let rows: Vec<StaleReplayRow> = clickhouse_db.query(&query).await;
     assert_eq!(rows.len(), 2, "expected Alice + Bob");
     assert_eq!(rows[0].id, 1);

@@ -42,8 +42,6 @@ fn parse_snapshot_ids(
 pub struct StoredDestinationTableMetadataRow {
     /// Source table identifier.
     pub table_id: TableId,
-    /// Destination-specific table identifier.
-    pub destination_table_id: String,
     /// Current schema snapshot applied at the destination.
     pub snapshot_id: SnapshotId,
     /// Column replication mask stored as raw bytes.
@@ -61,6 +59,13 @@ pub struct StoredDestinationTableMetadataRow {
 /// Inserts or updates the complete metadata for a table at a destination. Uses
 /// upsert semantics: if a row exists for (pipeline_id, table_id), all fields
 /// are updated.
+///
+/// Every write inserts or overwrites `destination_table_id` with the supplied
+/// identifier. Retaining it preserves compatibility and information for manual
+/// inspection while built-in destinations resolve targets from snapshots and
+/// view definitions. Metadata loaders deliberately never select this column.
+/// It can be stale after interrupted DDL; it is not an ownership proof, a
+/// history of identifiers, or a record of both transition endpoints.
 #[expect(clippy::too_many_arguments)]
 pub async fn store_destination_table_metadata<'c, E>(
     executor: E,
@@ -119,7 +124,7 @@ where
 {
     let rows = sqlx::query(
         r#"
-        select table_id, destination_table_id, snapshot_id,
+        select table_id, snapshot_id,
                replication_mask, previous_snapshot_id, previous_replication_mask, schema_status
         from etl.destination_tables_metadata
         where pipeline_id = $1
@@ -142,7 +147,6 @@ where
             table_id,
             StoredDestinationTableMetadataRow {
                 table_id,
-                destination_table_id: row.get("destination_table_id"),
                 snapshot_id,
                 replication_mask: row.get("replication_mask"),
                 previous_snapshot_id,
@@ -166,7 +170,7 @@ where
 {
     let row = sqlx::query(
         r#"
-        select table_id, destination_table_id, snapshot_id,
+        select table_id, snapshot_id,
                replication_mask, previous_snapshot_id, previous_replication_mask, schema_status
         from etl.destination_tables_metadata
         where pipeline_id = $1 and table_id = $2
@@ -187,7 +191,6 @@ where
 
             Ok(Some(StoredDestinationTableMetadataRow {
                 table_id: TableId::new(table_id.0),
-                destination_table_id: r.get("destination_table_id"),
                 snapshot_id,
                 replication_mask: r.get("replication_mask"),
                 previous_snapshot_id,

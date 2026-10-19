@@ -287,17 +287,12 @@ impl PostgresStore {
                     pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Creating,
                     None,
                     None,
-                ) => DestinationTableMetadata::new_creating(
-                    row.destination_table_id,
-                    row.snapshot_id,
-                    target_mask,
-                ),
+                ) => DestinationTableMetadata::new_creating(row.snapshot_id, target_mask),
                 (
                     pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applying,
                     Some(previous_snapshot_id),
                     Some(previous_replication_mask),
                 ) => DestinationTableMetadata::new_applied(
-                    row.destination_table_id,
                     previous_snapshot_id,
                     ReplicationMask::from_bytes(previous_replication_mask),
                 )
@@ -306,19 +301,14 @@ impl PostgresStore {
                     pg_destination_table_metadata::StoredDestinationTableSchemaStatus::Applied,
                     None,
                     None,
-                ) => DestinationTableMetadata::new_applied(
-                    row.destination_table_id,
-                    row.snapshot_id,
-                    target_mask,
-                ),
+                ) => DestinationTableMetadata::new_applied(row.snapshot_id, target_mask),
                 (schema_status, previous_snapshot_id, previous_replication_mask) => {
                     return Err(etl_error!(
                         ErrorKind::InvalidState,
                         "Destination table metadata has an invalid schema endpoint",
                         format!(
-                            "table '{}' has schema status '{schema_status:?}', previous snapshot \
-                             present: {}, previous replication mask present: {}",
-                            row.destination_table_id,
+                            "Table {table_id} has schema status '{schema_status:?}', previous \
+                             snapshot present: {}, previous replication mask present: {}",
                             previous_snapshot_id.is_some(),
                             previous_replication_mask.is_some()
                         )
@@ -562,17 +552,17 @@ impl StateStore for PostgresStore {
     }
 
     /// Stores complete destination table metadata in both database and cache.
+    ///
+    /// The supplied destination identifier is written only to the database for
+    /// compatibility and manual inspection; it is excluded from the cache.
     async fn store_destination_table_metadata(
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+        destination_table_id: &str,
     ) -> EtlResult<()> {
         let mut inner = self.lock_cache().await?;
-        debug!(
-            %table_id,
-            destination_table_id = %metadata.table_id(),
-            "storing destination table metadata"
-        );
+        debug!(%table_id, "storing destination table metadata");
 
         let (previous_snapshot_id, previous_replication_mask, schema_status) =
             match metadata.table_schema() {
@@ -604,7 +594,7 @@ impl StateStore for PostgresStore {
             tx.executor(),
             self.pipeline_id as i64,
             table_id,
-            metadata.table_id(),
+            destination_table_id,
             metadata.snapshot_id(),
             metadata.replication_mask().as_slice(),
             previous_snapshot_id,

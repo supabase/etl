@@ -94,6 +94,43 @@ pub(super) async fn read_table_replay_epoch(
     Ok(replay_epoch)
 }
 
+/// Protects the target's replay markers before a native table rename commits.
+///
+/// Maintenance skips names with a pending epoch, including a previously used
+/// target whose committed epoch belongs to an older table lifetime. Retrying
+/// keeps the captured epoch even if the freed source name has since been
+/// reused. The caller promotes the returned epoch only after the DuckLake
+/// commit.
+pub(super) async fn begin_table_rename_replay_epoch_transition(
+    pool: &PgPool,
+    metadata_schema: &str,
+    before_table_name: &DuckLakeTableName,
+    after_table_name: &DuckLakeTableName,
+) -> EtlResult<String> {
+    let replay_epoch = read_table_replay_epoch(pool, metadata_schema, before_table_name).await?;
+    let table = replay_epochs_table_name(metadata_schema);
+    let sql = format!(
+        "insert into {table} as epochs (table_name, replay_epoch, pending_replay_epoch) values \
+         ($1, $2, $3) on conflict (table_name) do update set pending_replay_epoch = \
+         coalesce(epochs.pending_replay_epoch, excluded.pending_replay_epoch), updated_at = now() \
+         returning pending_replay_epoch"
+    );
+    sqlx::query_scalar(AssertSqlSafe(sql))
+        .bind(after_table_name.id())
+        .bind(LEGACY_REPLAY_EPOCH)
+        .bind(&replay_epoch)
+        .fetch_one(pool)
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake renamed table replay epoch transition failed to begin",
+                format!("table={after_table_name}"),
+                source,
+            )
+        })
+}
+
 /// Starts or resumes a replay epoch transition and returns its pending value.
 pub(super) async fn begin_table_replay_epoch_transition(
     pool: &PgPool,
@@ -135,7 +172,7 @@ pub(super) async fn begin_table_replay_epoch_transition(
     Ok(pending_replay_epoch)
 }
 
-/// Promotes a pending replay epoch after its DuckLake reset commits.
+/// Promotes a pending replay epoch after its DuckLake reset or rename commits.
 pub(super) async fn complete_table_replay_epoch_transition(
     pool: &PgPool,
     metadata_schema: &str,

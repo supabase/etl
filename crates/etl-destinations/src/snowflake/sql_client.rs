@@ -122,6 +122,18 @@ impl<T: TokenProvider> SqlClient<T> {
         Ok(())
     }
 
+    /// Renames a table without replacing an existing destination object.
+    pub(super) async fn rename_table(
+        &self,
+        before_table_name: &str,
+        after_table_name: &str,
+    ) -> Result<()> {
+        let before_table_name = self.fully_qualified_name(before_table_name);
+        let after_table_name = self.fully_qualified_name(after_table_name);
+        self.execute_ddl(&format!("alter table {before_table_name} rename to {after_table_name}"))
+            .await
+    }
+
     /// Create a table with the given columns and provider-driven evolution
     /// disabled.
     pub async fn create_table_if_not_exists(
@@ -232,15 +244,19 @@ impl<T: TokenProvider> SqlClient<T> {
         self.execute_ddl(&format!("DROP TABLE IF EXISTS {fqn}")).await
     }
 
-    /// Check whether a table exists in the configured database and schema.
-    pub async fn table_exists(&self, table_name: &str) -> Result<bool> {
+    /// Checks whether a table or view occupies `name` in the configured
+    /// database and schema.
+    ///
+    /// Tables and views share one Snowflake namespace, so either blocks table
+    /// creation and renames.
+    pub async fn object_exists(&self, name: &str) -> Result<bool> {
         let db = quote_identifier(&self.config.database);
         let schema = quote_identifier(&self.config.schema);
-        let name_prefix = quote_string_literal(table_name);
-        let sql = format!("SHOW TERSE TABLES IN SCHEMA {db}.{schema} STARTS WITH {name_prefix}");
+        let name_prefix = quote_string_literal(name);
+        let sql = format!("SHOW TERSE OBJECTS IN SCHEMA {db}.{schema} STARTS WITH {name_prefix}");
         let resp = self.execute_statement(&sql).await?;
-        let table_names = parse_show_table_names(&resp)?;
-        Ok(table_names.contains(&table_name))
+        let object_names = parse_show_object_names(&resp)?;
+        Ok(object_names.contains(&name))
     }
 
     /// Lists exact object kinds and comments for companion-view ownership
@@ -648,9 +664,9 @@ fn parse_show_columns(response: &StatementResponse) -> Result<Vec<&str>> {
     parse_named_show_column(response, "SHOW COLUMNS", "column_name")
 }
 
-/// Parse exact table identifiers from `SHOW TERSE TABLES`.
-fn parse_show_table_names(response: &StatementResponse) -> Result<Vec<&str>> {
-    parse_named_show_column(response, "SHOW TERSE TABLES", "name")
+/// Parse exact table and view identifiers from `SHOW TERSE OBJECTS`.
+fn parse_show_object_names(response: &StatementResponse) -> Result<Vec<&str>> {
+    parse_named_show_column(response, "SHOW TERSE OBJECTS", "name")
 }
 
 /// Validates the CDC fields using the existing SHOW response.
@@ -825,23 +841,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_show_table_names_by_result_metadata_name() {
+    fn parses_show_object_names_by_result_metadata_name() {
         let response = statement_response(
             &["name", "created_on"],
             vec![vec![serde_json::Value::String("EVENTS".to_owned()), serde_json::Value::Null]],
         );
 
-        let table_names =
-            parse_show_table_names(&response).expect("SHOW TERSE TABLES should parse");
+        let object_names = parse_show_object_names(&response).unwrap();
 
-        assert_eq!(table_names, vec!["EVENTS"]);
+        assert_eq!(object_names, vec!["EVENTS"]);
     }
 
     #[test]
-    fn malformed_show_table_metadata_is_a_structural_sql_error() {
+    fn malformed_show_object_metadata_is_a_structural_sql_error() {
         let response = statement_response(&["created_on"], vec![vec![serde_json::Value::Null]]);
 
-        let error = parse_show_table_names(&response).expect_err("name metadata is required");
+        let error = parse_show_object_names(&response).unwrap_err();
 
         assert!(matches!(
             error,
@@ -849,7 +864,7 @@ mod tests {
                 statement_handle: Some(handle),
                 message,
             } if handle == "test-statement"
-                && message == "SHOW TERSE TABLES result metadata omitted column 'name'"
+                && message == "SHOW TERSE OBJECTS result metadata omitted column 'name'"
         ));
     }
 

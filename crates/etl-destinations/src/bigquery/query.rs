@@ -5,18 +5,18 @@
 //! deadline. The SQL callers must never interpret HTTP acceptance as
 //! completion.
 
-use std::{error::Error as _, future::Future};
+use std::{error::Error as _, fmt, future::Future};
 
 use etl::{
-    error::{ErrorKind, EtlError, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
 };
 use gcp_bigquery_client::{
     Client,
     error::BQError,
     model::{
-        get_query_results_parameters::GetQueryResultsParameters, job_reference::JobReference,
-        query_request::QueryRequest, query_response::QueryResponse,
+        error_proto::ErrorProto, get_query_results_parameters::GetQueryResultsParameters,
+        job_reference::JobReference, query_request::QueryRequest, query_response::QueryResponse,
     },
 };
 use rand::random_range;
@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::{
     bigquery::client::bq_error_to_etl_error,
-    retry::{RetryPolicy, retry_with_backoff},
+    retry::{ClassifiedError, RetryPolicy, classified_error_with_detail, retry_with_backoff},
 };
 
 /// Total budget for query submission, transient retries, and completion.
@@ -80,6 +80,49 @@ const QUERY_JOB_RETRY_POLICY: RetryPolicy = RetryPolicy {
 const FAILED_BIGQUERY_QUERY_JOB_REASONS: &[&str] =
     &["jobBackendError", "jobInternalError", "jobRateLimitExceeded"];
 
+/// A failure read from a completed job's authoritative `status.errorResult`.
+#[derive(Debug)]
+struct QueryJobFailure {
+    /// Original structured failure, retained without logging its message.
+    error: ErrorProto,
+}
+
+impl fmt::Display for QueryJobFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "BigQuery query job failed ({})",
+            self.error.reason.as_deref().unwrap_or("unknown")
+        )
+    }
+}
+
+impl std::error::Error for QueryJobFailure {}
+
+impl ClassifiedError for QueryJobFailure {
+    fn retryability(&self) -> Retryability {
+        self.error.retryability()
+    }
+}
+
+/// Proves that this attempt expired before starting a query request.
+#[derive(Debug)]
+struct QueryNotSubmitted;
+
+impl fmt::Display for QueryNotSubmitted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Local deadline elapsed before query submission")
+    }
+}
+
+impl std::error::Error for QueryNotSubmitted {}
+
+impl ClassifiedError for QueryNotSubmitted {
+    fn retryability(&self) -> Retryability {
+        Retryability::Retryable
+    }
+}
+
 /// Adds up to one second of jitter without shortening Google's base delay.
 fn query_retry_delay(delay: Duration) -> Duration {
     let jitter = Duration::from_millis(random_range(0..=1000));
@@ -99,13 +142,21 @@ fn query_retry_requires_new_request_id(error: &BQError) -> bool {
     })
 }
 
+/// Distinguishes terminal job failures from failures to retrieve their status.
+fn query_error_confirms_failed_job(error: &EtlError) -> bool {
+    error.source().is_some_and(|source| {
+        source.is::<QueryJobFailure>()
+            || source.downcast_ref::<BQError>().is_some_and(query_retry_requires_new_request_id)
+    })
+}
+
 /// Generates an idempotency key accepted by BigQuery request-ID fields.
 fn generate_bigquery_request_id() -> String {
     Uuid::new_v4().simple().to_string()
 }
 
 /// Logs a transient BigQuery query retry.
-fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
+fn log_query_retry<E: fmt::Display>(attempt: crate::retry::RetryAttempt<'_, E>) {
     warn!(
         retry_index = attempt.retry_index,
         max_retries = attempt.max_retries,
@@ -113,6 +164,35 @@ fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
         error = %attempt.error,
         "retrying transient bigquery query error"
     );
+}
+
+/// Keeps ambiguous request failures from authorizing a new worker-owned job.
+fn unconfirmed_query_error(
+    error: EtlError,
+    request_id: &str,
+    reference: Option<&JobReference>,
+) -> EtlError {
+    if error.retryability() == Retryability::Permanent
+        || query_error_confirms_failed_job(&error)
+        || error.source().is_some_and(<dyn std::error::Error>::is::<QueryNotSubmitted>)
+    {
+        return error;
+    }
+
+    let job_id = reference.and_then(|reference| reference.job_id.as_deref()).unwrap_or("unknown");
+    let location =
+        reference.and_then(|reference| reference.location.as_deref()).unwrap_or("unknown");
+    classified_error_with_detail(
+        ErrorKind::DestinationQueryFailed,
+        "BigQuery query outcome was not confirmed",
+        format!(
+            "Request retries were exhausted; request_id={request_id}, job_id={job_id}, \
+             location={location}. The remote job may still be running. Verify its outcome before \
+             manually retrying."
+        ),
+        error,
+    )
+    .with_retryability(Retryability::Permanent)
 }
 
 /// Reports an ambiguous query outcome without authorizing automatic replay.
@@ -168,9 +248,11 @@ where
             )
         })?;
 
-    let mut response = timeout_at(deadline, async {
+    let mut query_completed = response.job_complete == Some(true);
+    let result = timeout_at(deadline, async {
         while response.job_complete != Some(true) {
             response = poll(reference.clone(), None).await?;
+            query_completed = response.job_complete == Some(true);
             if response.job_complete != Some(true) {
                 sleep(QUERY_POLL_INTERVAL).await;
             }
@@ -179,7 +261,22 @@ where
         // INFORMATION_SCHEMA listings must include every obsolete version,
         // even when BigQuery splits the result across multiple pages.
         while let Some(page_token) = response.page_token.take().filter(|token| !token.is_empty()) {
-            let page = poll(reference.clone(), Some(page_token)).await?;
+            let page = poll(reference.clone(), Some(page_token)).await.map_err(|error| {
+                // The query already completed. A page-read failure must not
+                // permit reexecuting its mutations as a replacement job.
+                classified_error_with_detail(
+                    ErrorKind::DestinationQueryFailed,
+                    "BigQuery query result-page retrieval failed",
+                    format!(
+                        "Query completed; request_id={request_id}, job_id={}, location={}. \
+                         Retrieve results from this job before retrying the operation.",
+                        reference.job_id.as_deref().unwrap_or("unknown"),
+                        reference.location.as_deref().unwrap_or("unknown")
+                    ),
+                    error,
+                )
+                .with_retryability(Retryability::Permanent)
+            })?;
             if page.job_complete != Some(true) {
                 return Err(etl_error!(
                     ErrorKind::DestinationQueryFailed,
@@ -193,11 +290,81 @@ where
 
         Ok(response)
     })
-    .await
-    .map_err(|_| query_timeout_error(request_id, Some(&reference)))??;
+    .await;
+    let mut response = result
+        .map_err(|_| {
+            if query_completed {
+                etl_error!(
+                    ErrorKind::DestinationQueryFailed,
+                    "BigQuery query result-page retrieval timed out",
+                    format!(
+                        "Query completed; request_id={request_id}, job_id={}, location={}. \
+                         Retrieve results from this job before retrying the operation.",
+                        reference.job_id.as_deref().unwrap_or("unknown"),
+                        reference.location.as_deref().unwrap_or("unknown")
+                    )
+                )
+            } else {
+                query_timeout_error(request_id, Some(&reference))
+            }
+        })?
+        .map_err(|error| unconfirmed_query_error(error, request_id, Some(&reference)))?;
 
     response.job_reference = Some(reference);
     Ok(response)
+}
+
+/// Reconciles ambiguous result-polling errors against the same job's status.
+///
+/// Unlike `getQueryResults`, `jobs.get` separates request errors from terminal
+/// job errors. Only a completed job's `errorResult` permits a replacement job.
+/// See <https://github.com/googleapis/python-bigquery/blob/main/google/cloud/bigquery/job/query.py>.
+async fn query_results_attempt(
+    client: &Client,
+    project_id: &str,
+    job_id: &str,
+    parameters: GetQueryResultsParameters,
+) -> EtlResult<QueryResponse> {
+    let location = parameters.location.clone();
+    let first_page = parameters.page_token.is_none();
+    let error = match client.job().get_query_results(project_id, job_id, parameters).await {
+        Ok(response) => return Ok(QueryResponse::from(response)),
+        Err(error) => error,
+    };
+
+    if first_page
+        && error.retryability() == Retryability::Retryable
+        && !query_retry_requires_new_request_id(&error)
+    {
+        let job = client.job().get_job(project_id, job_id, location.as_deref()).await.map_err(
+            |error| {
+                // A status-request error cannot establish that the job failed,
+                // even if its response uses a retryable failed-job reason.
+                classified_error_with_detail(
+                    ErrorKind::DestinationQueryFailed,
+                    "BigQuery job status request failed",
+                    format!(
+                        "job_id={job_id}, location={}",
+                        location.as_deref().unwrap_or("unknown")
+                    ),
+                    bq_error_to_etl_error(error),
+                )
+            },
+        )?;
+        if let Some(status) = job.status
+            && status.state.as_deref() == Some("DONE")
+            && let Some(error) = status.error_result
+        {
+            return Err(classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "BigQuery query job failed",
+                format!("job_id={job_id}, location={}", location.as_deref().unwrap_or("unknown")),
+                QueryJobFailure { error },
+            ));
+        }
+    }
+
+    Err(bq_error_to_etl_error(error))
 }
 
 /// Submits and completes one job, retrying requests with stable identities.
@@ -211,7 +378,12 @@ async fn execute_query_attempt(
     // Tokio can poll an immediately-ready future before observing expiry.
     // Never start another remote job after the shared budget has elapsed.
     if Instant::now() >= deadline {
-        return Err(query_timeout_error(request_id, None));
+        return Err(classified_error_with_detail(
+            ErrorKind::DestinationTimeout,
+            "BigQuery query was not submitted before its deadline",
+            format!("request_id={request_id}. No query request was sent by this attempt."),
+            QueryNotSubmitted,
+        ));
     }
 
     let response = timeout_at(
@@ -244,11 +416,12 @@ async fn execute_query_attempt(
 
         retry_with_backoff(
             QUERY_REQUEST_RETRY_POLICY,
-            query_retry_requires_new_request_id,
+            query_error_confirms_failed_job,
             query_retry_delay,
             log_query_retry,
             || {
-                client.job().get_query_results(
+                query_results_attempt(
+                    client,
                     project_id,
                     job_id,
                     GetQueryResultsParameters {
@@ -262,16 +435,17 @@ async fn execute_query_attempt(
             },
         )
         .await
-        .map(QueryResponse::from)
-        .map_err(|failure| bq_error_to_etl_error(failure.last_error))
+        .map_err(|failure| failure.last_error)
     })
     .await
 }
 
 /// Retries confirmed failed jobs while retaining one overall deadline.
 ///
-/// Only documented terminal job failures permit a fresh request ID, whether
-/// reported by submission or polling. Request-level retries stay inside `run`.
+/// Only explicit failed-job responses or `jobs.get` terminal failures permit
+/// a fresh request ID. Request-level retries stay inside `run`.
+/// Exhausted request retries leave the outcome unknown and must not authorize
+/// a worker retry with a fresh job that could race the original DDL.
 async fn retry_query_jobs<F, Fut>(mut request: QueryRequest, mut run: F) -> EtlResult<QueryResponse>
 where
     F: FnMut(QueryRequest, Instant) -> Fut,
@@ -283,12 +457,7 @@ where
 
     retry_with_backoff(
         QUERY_JOB_RETRY_POLICY,
-        |error: &EtlError| {
-            !error
-                .source()
-                .and_then(|source| source.downcast_ref::<BQError>())
-                .is_some_and(query_retry_requires_new_request_id)
-        },
+        |error: &EtlError| !query_error_confirms_failed_job(error) || Instant::now() >= deadline,
         |delay| query_retry_delay(delay).min(deadline.saturating_duration_since(Instant::now())),
         |attempt| {
             warn!(
@@ -309,7 +478,13 @@ where
         },
     )
     .await
-    .map_err(|failure| failure.last_error)
+    .map_err(|failure| {
+        unconfirmed_query_error(
+            failure.last_error,
+            request.request_id.as_deref().unwrap_or("unknown"),
+            None,
+        )
+    })
 }
 
 /// Submits a query, waits for completion, and collects every result page.
@@ -329,122 +504,37 @@ pub(super) async fn execute_query(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        error::Error as _,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-    };
+    use std::{error::Error as _, sync::Arc};
 
     use etl::{
         error::{ErrorKind, Retryability},
         etl_error,
     };
     use gcp_bigquery_client::{
-        Client,
-        auth::Authenticator,
         client_builder::ClientBuilder,
         error::{BQError, NestedResponseError, ResponseError},
         model::{
+            error_proto::ErrorProto,
             job_reference::JobReference,
             query_request::QueryRequest,
             query_response::{QueryResponse, ResultSet},
         },
     };
     use serde_json::{Value, json};
-    use tokio::{
-        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-        net::TcpListener,
-        time::{Duration, Instant, timeout},
-    };
-    use tokio_util::task::AbortOnDropHandle;
+    use tokio::time::{Duration, Instant, timeout};
 
     use crate::{
         bigquery::{
             client::bq_error_to_etl_error,
             query::{
-                QUERY_MAX_RETRY_DELAY, QUERY_TIMEOUT, QUERY_WAIT_TIMEOUT_MS, complete_query,
-                execute_query, execute_query_attempt, query_retry_delay,
+                QUERY_MAX_RETRY_DELAY, QUERY_TIMEOUT, QUERY_WAIT_TIMEOUT_MS, QueryJobFailure,
+                complete_query, execute_query, execute_query_attempt, query_retry_delay,
                 query_retry_requires_new_request_id, retry_query_jobs,
             },
+            test_client::{TestAuthenticator, http_fixture},
         },
         retry::ClassifiedError,
     };
-
-    /// Counts request authentication and supplies an inert fixture token.
-    #[derive(Clone, Default)]
-    struct TestAuthenticator(Arc<AtomicUsize>);
-
-    #[async_trait::async_trait]
-    impl Authenticator for TestAuthenticator {
-        async fn access_token(&self) -> Result<String, BQError> {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            Ok("placeholder-token".to_owned())
-        }
-    }
-
-    /// Serves a finite response script and captures requests through the real
-    /// BigQuery SDK, including JSON bodies and result-page parameters.
-    async fn query_http_fixture(
-        responses: Vec<(u16, Value)>,
-    ) -> (Client, AbortOnDropHandle<Vec<(String, Value)>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-
-        let server = AbortOnDropHandle::new(tokio::spawn(async move {
-            let mut requests = Vec::new();
-
-            for (status, body) in responses {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut lines = BufReader::new(stream).lines();
-                let request_line = lines.next_line().await.unwrap().unwrap();
-                let mut content_length = 0;
-
-                loop {
-                    let header = lines.next_line().await.unwrap().unwrap();
-                    if header.is_empty() {
-                        break;
-                    }
-
-                    if let Some((name, value)) = header.split_once(':')
-                        && name.eq_ignore_ascii_case("content-length")
-                    {
-                        content_length = value.trim().parse().unwrap();
-                    }
-                }
-
-                let mut reader = lines.into_inner();
-                let mut bytes = vec![0; content_length];
-                reader.read_exact(&mut bytes).await.unwrap();
-
-                let request_body = if bytes.is_empty() {
-                    Value::Null
-                } else {
-                    serde_json::from_slice(&bytes).unwrap()
-                };
-                requests.push((request_line, request_body));
-
-                let body = body.to_string();
-                let response = format!(
-                    "HTTP/1.1 {status} Fixture\r\ncontent-type: \
-                     application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                reader.get_mut().write_all(response.as_bytes()).await.unwrap();
-            }
-
-            requests
-        }));
-
-        let client = ClientBuilder::new()
-            .with_v2_base_url(base_url)
-            .build_from_authenticator(Arc::new(TestAuthenticator::default()))
-            .await
-            .unwrap();
-
-        (client, server)
-    }
 
     /// Verifies the composed executor preserves request identity across
     /// transient errors, replaces failed jobs, and retries the same result
@@ -462,16 +552,18 @@ mod tests {
                 "jobReference": {"jobId": job_id, "location": "europe-west1"}
             })
         };
-        let (client, server) = query_http_fixture(vec![
+        let (client, server) = http_fixture(vec![
             (503, error(503, "backendError")),
             (200, pending("first_job")),
             (400, error(400, "jobRateLimitExceeded")),
             (200, pending("replacement_job")),
             (503, error(503, "backendError")),
+            (200, json!({"status": {"state": "RUNNING"}})),
             (
                 200,
                 json!({
                     "jobComplete": true,
+                    "errors": [{"reason": "warning", "message": "Nonfatal query warning"}],
                     "schema": {"fields": [{"name": "value", "type": "INTEGER"}]},
                     "rows": [{"f": [{"v": "1"}]}], "pageToken": "next-page"
                 }),
@@ -490,16 +582,17 @@ mod tests {
                 .unwrap()
                 .unwrap();
         let requests = server.await.unwrap();
-        assert_eq!(requests.len(), 8);
+        assert_eq!(requests.len(), 9);
         assert_eq!(requests[0].1, requests[1].1);
         assert_eq!(requests[1].1["requestId"], "caller-request-id");
         assert_ne!(requests[1].1["requestId"], requests[3].1["requestId"]);
         assert!(requests[2].0.contains("/queries/first_job?"));
         assert!(requests[4].0.contains("/queries/replacement_job?"));
-        assert_eq!(requests[4], requests[5]);
-        assert_eq!(requests[6], requests[7]);
-        assert!(requests[6].0.contains("pageToken=next-page"));
-        for index in [2, 4, 5, 6, 7] {
+        assert!(requests[5].0.contains("/jobs/replacement_job?location=europe-west1"));
+        assert_eq!(requests[4], requests[6]);
+        assert_eq!(requests[7], requests[8]);
+        assert!(requests[7].0.contains("pageToken=next-page"));
+        for index in [2, 4, 6, 7, 8] {
             assert!(requests[index].0.contains("location=europe-west1"));
             assert!(requests[index].0.contains("maxResults=1"));
             assert!(requests[index].0.contains("timeoutMs=10000"));
@@ -511,6 +604,149 @@ mod tests {
             assert_eq!(rows.get_i64(0).unwrap(), Some(expected));
         }
         assert!(!rows.next_row());
+    }
+
+    /// Reconciliation retries execution only for a confirmed, retryable job
+    /// failure, even when the status request itself fails.
+    #[tokio::test]
+    async fn query_http_reconciles_ambiguous_polling_errors() {
+        for (status_code, status_response, next_method) in [
+            (200, json!({"status": {"state": "RUNNING"}}), Some("GET")),
+            (200, json!({"status": {"state": "DONE"}}), Some("GET")),
+            (200, json!({}), Some("GET")),
+            (
+                200,
+                json!({"status": {"state": "DONE", "errors": [{"reason": "backendError"}]}}),
+                Some("GET"),
+            ),
+            (
+                200,
+                json!({"status": {"state": "RUNNING", "errorResult": {"reason": "backendError"}}}),
+                Some("GET"),
+            ),
+            (
+                200,
+                json!({"status": {"state": "DONE", "errorResult": {"reason": "backendError"}}}),
+                Some("POST"),
+            ),
+            (
+                200,
+                json!({"status": {"state": "DONE", "errorResult": {"reason": "invalidQuery"}}}),
+                None,
+            ),
+            (
+                503,
+                json!({"error": {"code": 503, "message": "Status unavailable",
+                    "errors": [{"reason": "backendError"}]}}),
+                Some("GET"),
+            ),
+            (
+                400,
+                json!({"error": {"code": 400, "message": "Status request failed",
+                    "errors": [{"reason": "jobBackendError"}]}}),
+                Some("GET"),
+            ),
+        ] {
+            let mut responses = vec![
+                (
+                    200,
+                    json!({
+                        "jobComplete": false,
+                        "jobReference": {"jobId": "original_job", "location": "europe-west1"}
+                    }),
+                ),
+                (
+                    503,
+                    json!({"error": {"code": 503, "message": "Polling unavailable",
+                        "errors": [{"reason": "backendError"}]}}),
+                ),
+                (status_code, status_response),
+            ];
+            if next_method.is_some() {
+                responses.push((200, json!({"jobComplete": true})));
+            }
+            let (client, server) = http_fixture(responses).await;
+
+            let result = timeout(
+                Duration::from_secs(10),
+                execute_query(&client, "test-project", QueryRequest::new("select 1")),
+            )
+            .await
+            .unwrap();
+
+            let requests = server.await.unwrap();
+            assert!(requests[2].0.contains("/jobs/original_job?location=europe-west1"));
+            if let Some(method) = next_method {
+                result.unwrap();
+                assert_eq!(requests.len(), 4);
+                assert!(requests[3].0.starts_with(method));
+                if method == "POST" {
+                    assert_ne!(requests[0].1["requestId"], requests[3].1["requestId"]);
+                } else {
+                    assert_eq!(requests[1], requests[3]);
+                }
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(requests.len(), 3);
+                assert_eq!(error.retryability(), Retryability::Permanent);
+                assert!(error.detail().unwrap().contains("job_id=original_job"));
+                let source = error.source().unwrap().downcast_ref::<QueryJobFailure>().unwrap();
+                assert_eq!(source.error.reason.as_deref(), Some("invalidQuery"));
+            }
+        }
+    }
+
+    /// A failed result-page read cannot resubmit an already completed query.
+    #[tokio::test]
+    async fn query_http_pagination_failure_does_not_replace_completed_job() {
+        let (client, server) = http_fixture(vec![
+            (
+                200,
+                json!({"jobComplete": true, "pageToken": "next-page",
+                    "jobReference": {"jobId": "completed_job", "location": "europe-west1"}}),
+            ),
+            (
+                400,
+                json!({"error": {"code": 400, "message": "Page retrieval failed",
+                    "errors": [{"reason": "jobBackendError"}]}}),
+            ),
+        ])
+        .await;
+
+        let error = timeout(
+            Duration::from_secs(10),
+            execute_query(
+                &client,
+                "test-project",
+                QueryRequest::new("call test_dataset.refresh_data()"),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(error.retryability(), Retryability::Permanent);
+        assert!(error.detail().unwrap().contains("Query completed"));
+        assert!(error.detail().unwrap().contains("job_id=completed_job"));
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].0.contains("pageToken=next-page"));
+    }
+
+    /// Provider messages can contain source values and must not reach logs.
+    #[test]
+    fn query_job_failure_display_omits_provider_message() {
+        let failure = QueryJobFailure {
+            error: ErrorProto {
+                reason: Some("invalidQuery".to_owned()),
+                message: Some("example source value".to_owned()),
+                ..Default::default()
+            },
+        };
+
+        let message = failure.to_string();
+        assert!(message.contains("invalidQuery"));
+        assert!(!message.contains("example source value"));
     }
 
     /// Invalid requests and rejected queries stop without replay; dry runs
@@ -530,7 +766,7 @@ mod tests {
         .await
         .unwrap();
         assert!(result.is_err());
-        assert_eq!(auth.0.load(Ordering::Relaxed), 1);
+        assert_eq!(auth.calls(), 1);
 
         for dry_run in [false, true] {
             let response = if dry_run {
@@ -544,7 +780,7 @@ mod tests {
                     }}),
                 )
             };
-            let (client, server) = query_http_fixture(vec![response]).await;
+            let (client, server) = http_fixture(vec![response]).await;
             let mut request = QueryRequest::new("select 1");
             request.dry_run = Some(dry_run);
 
@@ -562,8 +798,9 @@ mod tests {
         }
     }
 
-    /// Expiry must be checked before polling an operation that could send DDL.
-    #[tokio::test]
+    /// Expiry before submission never sends DDL and remains safe for a worker
+    /// retry, including through the outer job-retry classification.
+    #[tokio::test(start_paused = true)]
     async fn expired_query_budget_does_not_submit_a_job() {
         let auth = TestAuthenticator::default();
         let client = ClientBuilder::new()
@@ -571,16 +808,21 @@ mod tests {
             .build_from_authenticator(Arc::new(auth.clone()))
             .await
             .unwrap();
-        let error = execute_query_attempt(
-            &client,
-            "test-project",
-            QueryRequest::new("select 1"),
-            Instant::now(),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
-        assert_eq!(auth.0.load(Ordering::Relaxed), 0);
+        let client_ref = &client;
+        let error =
+            retry_query_jobs(QueryRequest::new("select 1"), |request, deadline| async move {
+                tokio::time::advance(QUERY_TIMEOUT).await;
+                execute_query_attempt(client_ref, "test-project", request, deadline).await
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DestinationTimeout);
+        assert_eq!(error.retryability(), Retryability::Retryable);
+        assert_eq!(
+            error.description(),
+            Some("BigQuery query was not submitted before its deadline")
+        );
+        assert_eq!(auth.calls(), 0);
     }
 
     /// Accepted DDL must not become durable until the same job completes.
@@ -669,6 +911,36 @@ mod tests {
         assert!(!rows.next_row());
     }
 
+    /// A page-read timeout must retain the known successful execution outcome.
+    #[tokio::test(start_paused = true)]
+    async fn completed_query_page_deadline_preserves_known_outcome() {
+        let response = QueryResponse {
+            job_complete: Some(true),
+            page_token: Some("next-page".to_owned()),
+            job_reference: Some(JobReference {
+                job_id: Some("completed_job".to_owned()),
+                location: Some("europe-west1".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let error = complete_query(
+            response,
+            Instant::now() + Duration::from_secs(5),
+            "test-request",
+            |_, _| std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.retryability(), Retryability::Permanent);
+        let detail = error.detail().unwrap();
+        assert!(detail.contains("Query completed"));
+        assert!(detail.contains("job_id=completed_job"));
+        assert!(detail.contains("location=europe-west1"));
+    }
+
     /// Malformed pending responses cannot be mistaken for successful empty DDL.
     #[tokio::test]
     async fn incomplete_query_without_job_identity_fails() {
@@ -697,25 +969,38 @@ mod tests {
     /// Polling failure must reach the caller rather than publishing readiness.
     #[tokio::test]
     async fn incomplete_query_propagates_polling_failure() {
-        let response = QueryResponse {
-            job_complete: Some(false),
-            job_reference: Some(JobReference {
-                job_id: Some("pending_job".to_owned()),
+        for retryability in [Retryability::Permanent, Retryability::Retryable] {
+            let response = QueryResponse {
+                job_complete: Some(false),
+                job_reference: Some(JobReference {
+                    job_id: Some("pending_job".to_owned()),
+                    location: Some("europe-west1".to_owned()),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let error = complete_query(
-            response,
-            Instant::now() + QUERY_TIMEOUT,
-            "test-request",
-            |_, _| async {
-                Err(etl_error!(ErrorKind::DestinationQueryFailed, "Injected query failure"))
-            },
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+            };
+            let error = complete_query(
+                response,
+                Instant::now() + QUERY_TIMEOUT,
+                "test-request",
+                |_, _| async move {
+                    Err(etl_error!(ErrorKind::DestinationQueryFailed, "Injected query failure")
+                        .with_retryability(retryability))
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+            assert_eq!(error.retryability(), Retryability::Permanent);
+            if retryability == Retryability::Retryable {
+                let detail = error.detail().unwrap();
+                assert!(detail.contains("request_id=test-request"));
+                assert!(detail.contains("job_id=pending_job"));
+                assert!(detail.contains("location=europe-west1"));
+                assert!(error.source().unwrap().is::<etl::error::EtlError>());
+            }
+        }
     }
 
     /// Pending responses and stalled requests share one non-renewable budget.
@@ -849,12 +1134,12 @@ mod tests {
     /// DDL.
     #[tokio::test(start_paused = true)]
     async fn query_job_retries_preserve_deadline_and_rotate_only_failed_jobs() {
-        for (reason, failures, expected_attempts) in [
-            ("jobBackendError", 1, 2),
-            ("jobInternalError", 1, 2),
-            ("jobRateLimitExceeded", 10, 5),
-            ("invalidQuery", 1, 1),
-            ("backendError", 1, 1),
+        for (reason, failures, expected_attempts, expected_retryability) in [
+            ("jobBackendError", 1, 2, Retryability::Retryable),
+            ("jobInternalError", 1, 2, Retryability::Retryable),
+            ("jobRateLimitExceeded", 10, 5, Retryability::Retryable),
+            ("invalidQuery", 1, 1, Retryability::Permanent),
+            ("backendError", 1, 1, Retryability::Permanent),
         ] {
             let mut request = QueryRequest::new("select 1");
             request.request_id = Some("caller-request-id".to_owned());
@@ -885,6 +1170,32 @@ mod tests {
                 assert!(pair[1].bytes().all(|byte| byte.is_ascii_hexdigit()));
             }
             assert_eq!(result.is_ok(), failures < expected_attempts, "{reason}");
+            if let Err(error) = result {
+                assert_eq!(error.retryability(), expected_retryability, "{reason}");
+            }
+        }
+    }
+
+    /// Expiry before or during backoff preserves a confirmed failure instead
+    /// of allocating a new request whose outcome would be reported unknown.
+    #[tokio::test(start_paused = true)]
+    async fn query_job_retry_deadline_preserves_confirmed_failure() {
+        for remaining in [Duration::ZERO, Duration::from_millis(1)] {
+            let mut request_ids = Vec::new();
+            let error = retry_query_jobs(QueryRequest::new("select 1"), |request, deadline| {
+                request_ids.push(request.request_id.unwrap());
+                async move {
+                    tokio::time::sleep_until(deadline - remaining).await;
+                    Err(bq_error_to_etl_error(query_response_error(400, "jobBackendError")))
+                }
+            })
+            .await
+            .unwrap_err();
+
+            assert_eq!(request_ids.len(), 1);
+            assert_eq!(error.retryability(), Retryability::Retryable);
+            assert_eq!(error.description(), Some("BigQuery response error"));
+            assert!(error.source().unwrap().is::<BQError>());
         }
     }
 

@@ -102,9 +102,17 @@ pub trait StateStore: CachedStore {
     ///
     /// This performs a full upsert. For updates, get the current metadata,
     /// modify the fields you need to change, and store it back.
+    ///
+    /// [`crate::store::PostgresStore`] also inserts or overwrites
+    /// `destination_table_id` for compatibility and manual inspection.
+    /// [`crate::store::MemoryStore`] ignores that argument. The identifier is
+    /// excluded from cached metadata and runtime target resolution or recovery.
+    /// It can be stale after interrupted DDL and does not prove ownership or
+    /// retain both endpoints of a transition.
     fn store_destination_table_metadata(
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+        destination_table_id: &str,
     ) -> impl Future<Output = EtlResult<()>> + Send;
 }

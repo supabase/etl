@@ -308,6 +308,7 @@ impl StateStore for CustomStore {
         &self,
         table_id: TableId,
         metadata: DestinationTableMetadata,
+        _destination_table_id: &str,
     ) -> EtlResult<()> {
         let mut tables = self.tables.lock().await;
         tables.entry(table_id).or_default().destination_metadata = Some(metadata);

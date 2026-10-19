@@ -5,7 +5,12 @@
 
 use std::{error::Error as _, fmt, future::Future, path::Path, str::FromStr, time::Duration};
 
-use etl::{error::EtlError, pipeline::PipelineId, schema::TableName, store::DestinationStore};
+use etl::{
+    error::{EtlError, EtlResult},
+    pipeline::PipelineId,
+    schema::TableName,
+    store::DestinationStore,
+};
 use gcp_bigquery_client::{
     Client,
     client_builder::ClientBuilder,
@@ -19,8 +24,11 @@ use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{BigQueryDestination, query::execute_query, table_name_to_bigquery_table_id},
+    bigquery::{
+        BigQueryDestination, BigQueryTableId, query::execute_query, sql::parse_view_query_table_id,
+    },
     retry::{RetryPolicy, retry_with_backoff},
+    table_name::try_stringify_table_name,
 };
 
 /// Maximum number of times we re-run a verification query.
@@ -163,6 +171,14 @@ pub fn random_dataset_id() -> String {
     format!("etl_tests_{uuid}")
 }
 
+/// Returns the logical BigQuery view ID for a source table.
+///
+/// Uses the shared destination naming logic so live assertions address the
+/// same logical views as production writes.
+pub fn table_name_to_bigquery_view_id(table_name: &TableName) -> EtlResult<BigQueryTableId> {
+    try_stringify_table_name(table_name)
+}
+
 /// BigQuery database connection for testing.
 ///
 /// Provides a wrapper around the BigQuery client with automatic dataset cleanup
@@ -203,6 +219,15 @@ impl BigQueryDatabase {
         })
         .await
         .unwrap_or_else(|error| panic!("Failed to create BigQuery dataset: {error}"));
+    }
+
+    /// Sets table and view names to use case-insensitive dataset lookup.
+    pub async fn set_case_insensitive_names(&self) {
+        let sql = format!(
+            "alter schema `{}.{}` set options (is_case_insensitive = true)",
+            self.project_id, self.dataset_id,
+        );
+        execute_query(&self.client, &self.project_id, QueryRequest::new(sql)).await.unwrap();
     }
 
     /// Drops the dataset and all its contents.
@@ -255,10 +280,10 @@ impl BigQueryDatabase {
     /// to assert that a table is empty; this method treats absence as
     /// not-yet-visible.
     pub async fn query_table(&self, table_name: TableName) -> Option<Vec<TableRow>> {
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
-        let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
+        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
+        let view_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, view_id);
 
-        let query = format!("select * from {full_table_path}");
+        let query = format!("select * from {view_path}");
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
@@ -281,7 +306,7 @@ impl BigQueryDatabase {
             if attempts_remaining.is_multiple_of(10) {
                 let reason = if not_found { "table not found" } else { "no rows" };
                 eprintln!(
-                    "bigquery table query for {full_table_path}: {reason}, retrying \
+                    "bigquery table query for {view_path}: {reason}, retrying \
                      ({attempts_remaining} attempts left)"
                 );
             }
@@ -300,10 +325,10 @@ impl BigQueryDatabase {
     /// applied. Use this to assert that deletes emptied a table;
     /// [`BigQueryDatabase::query_table`] waits for data instead.
     pub async fn wait_for_no_rows(&self, table_name: TableName) -> bool {
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
-        let full_table_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, table_id);
+        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
+        let view_path = format!("`{}.{}.{}`", self.project_id, self.dataset_id, view_id);
 
-        let query = format!("select * from {full_table_path}");
+        let query = format!("select * from {view_path}");
         let mut attempts_remaining = BIGQUERY_NO_ROWS_MAX_ATTEMPTS;
 
         loop {
@@ -335,21 +360,33 @@ impl BigQueryDatabase {
         }
     }
 
-    /// Queries the schema (column metadata) for a table.
+    /// Returns the physical table that a source table's logical view selects.
     ///
-    /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    /// Matches both legacy numeric versions and random physical versions.
+    /// Returns `None` when the view does not exist.
+    pub async fn physical_table_id(&self, table_name: &TableName) -> Option<String> {
+        let view_id = table_name_to_bigquery_view_id(table_name).unwrap();
+        let view_query = self.get_table_metadata_by_id(&view_id).await?.view.unwrap().query;
+
+        Some(
+            parse_view_query_table_id(&view_query, &self.project_id, &self.dataset_id)
+                .unwrap_or_else(|| panic!("Unexpected BigQuery view definition: {view_query}")),
+        )
+    }
+
+    /// Queries the schema (column metadata) of the physical table behind a
+    /// logical view.
+    ///
+    /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS,
+    /// or `None` when the view does not exist.
     pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+        let physical_table_id = self.physical_table_id(&table_name).await?;
 
-        // Include numeric versions retained by upgraded destinations.
         let query = format!(
             "select column_name, data_type, ordinal_position from \
-             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where \
-             regexp_contains(table_name, r'^{table_id}_([0-9]{{1,20}}|[0-9a-z]{{25}})$') order by \
-             ordinal_position"
+             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where table_name = \
+             '{physical_table_id}' order by ordinal_position"
         );
 
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
@@ -378,9 +415,9 @@ impl BigQueryDatabase {
 
     /// Gets the logical view schema from the BigQuery table metadata API.
     pub async fn get_view_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
-        let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
+        let view_id = table_name_to_bigquery_view_id(&table_name).unwrap();
 
-        self.get_table_schema_by_id(&table_id).await
+        self.get_table_schema_by_id(&view_id).await
     }
 
     /// Gets a table or view schema from the BigQuery table metadata API.
@@ -420,6 +457,11 @@ impl BigQueryDatabase {
             .unwrap_or_default();
 
         parse_bigquery_table_rows(rows)
+    }
+
+    /// Executes SQL against the test dataset and waits for the job to finish.
+    pub async fn run_sql(&self, sql: String) {
+        execute_query(&self.client, &self.project_id, QueryRequest::new(sql)).await.unwrap();
     }
 
     /// Manually creates a table in the test dataset using column definitions.

@@ -5,7 +5,8 @@ use etl::{
     destination::{Destination as _, DestinationTableMetadata, WriteEventsDurability},
     event::{Event, RelationEvent},
     schema::{
-        ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema, Type,
+        ColumnSchema, IdentityMask, ReplicatedTableSchema, SnapshotId, TableId, TableName,
+        TableSchema, Type,
     },
     store::{SchemaStore, StateStore, TableState, TableStateLifecycleStore},
     test_utils::{
@@ -55,7 +56,7 @@ async fn companion_view_lifecycle_and_ownership() {
         TableName::new("public".into(), name),
         vec![
             ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1),
-            ColumnSchema::new("payload".into(), Type::TEXT, -1, 3, true),
+            ColumnSchema::new("payload".into(), Type::TEXT, -1, 3, false),
         ],
     );
     let schema = ReplicatedTableSchema::all(Arc::new(original.clone()));
@@ -138,7 +139,10 @@ async fn companion_view_lifecycle_and_ownership() {
             .with_schema_change(renamed.inner().snapshot_id, renamed.replication_mask().clone())
             .unwrap();
         sql.execute_ddl(&format!("alter view {public} rename to {pending}")).await.unwrap();
-        store.store_destination_table_metadata(schema.id(), applying.clone()).await.unwrap();
+        store
+            .store_destination_table_metadata(schema.id(), applying.clone(), &physical)
+            .await
+            .unwrap();
         fresh().startup().await.unwrap();
         assert!(query_rows(&sql, &query).await.is_err());
         assert!(write_table_rows(&fresh(), &renamed, vec![]).await.is_err());
@@ -150,7 +154,10 @@ async fn companion_view_lifecycle_and_ownership() {
         ))
         .await
         .unwrap();
-        store.store_destination_table_metadata(schema.id(), applying.to_applied()).await.unwrap();
+        store
+            .store_destination_table_metadata(schema.id(), applying.to_applied(), &physical)
+            .await
+            .unwrap();
         fresh().startup().await.unwrap();
         assert_eq!(query_rows(&sql, &query).await.unwrap(), expected);
         assert_eq!(
@@ -190,6 +197,36 @@ async fn companion_view_lifecycle_and_ownership() {
         assert!(query_rows(&sql, &format!("select * from {pending}")).await.is_err());
         let grants = query_rows(&sql, &format!("show grants on view {public}")).await.unwrap();
         assert!(grants.iter().any(|row| row[1] == "SELECT" && row[5] == role));
+
+        // Actual identity must be checked even when the snapshot and channel
+        // are unchanged. Startup knows the physical schema, not this mask.
+        let alternative = ReplicatedTableSchema::from_masks(
+            Arc::new(added.inner().clone()),
+            added.replication_mask().clone(),
+            IdentityMask::from_bytes(vec![0, 1, 0]),
+        );
+        let warm = fresh();
+        write_events(
+            &warm,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Relation(RelationEvent { replicated_table_schema: added.clone() })],
+        )
+        .await
+        .unwrap();
+        let error = write_events(
+            &warm,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Relation(RelationEvent { replicated_table_schema: alternative })],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), etl::error::ErrorKind::ConfigError);
+        assert!(query_rows(&sql, &query).await.is_err());
+        fresh().startup().await.unwrap();
+        assert_eq!(
+            store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap().snapshot_id(),
+            added.inner().snapshot_id
+        );
 
         // A parking collision must fail before Applying or raw DDL, preserving
         // both the old view and the foreign object.
@@ -239,8 +276,8 @@ async fn companion_view_lifecycle_and_ownership() {
         fresh().startup().await.unwrap();
 
         // This name is legal for raw CDC, but reserved by the query helper.
-        // Failed restoration must retain Applied raw metadata and the parked
-        // view, and must not be bypassed by an already open channel.
+        // Eligibility loss must retain the previous Applied raw schema and
+        // park the view before DDL, including with an already open channel.
         let mut unsupported_columns = added.inner().column_schemas.clone();
         unsupported_columns[1].name = "_cdc_custom".into();
         let unsupported = ReplicatedTableSchema::all(Arc::new(TableSchema::with_snapshot_id(
@@ -264,9 +301,9 @@ async fn companion_view_lifecycle_and_ownership() {
         );
         let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
         assert!(metadata.is_applied());
-        assert_eq!(metadata.snapshot_id(), unsupported.inner().snapshot_id);
+        assert_eq!(metadata.snapshot_id(), added.inner().snapshot_id);
         assert_eq!(
-            query_rows(&sql, &format!("select \"_cdc_custom\" from {}", fqn(&physical)))
+            query_rows(&sql, &format!("select {} from {}", quote("details\"'"), fqn(&physical)))
                 .await
                 .unwrap(),
             vec![vec![json!("kept")]]
@@ -286,7 +323,13 @@ async fn companion_view_lifecycle_and_ownership() {
             .len(),
             1
         );
-        let error = write_table_rows(&failed, &unsupported, vec![]).await.unwrap_err();
+        let error = write_events(
+            &failed,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Relation(RelationEvent { replicated_table_schema: unsupported.clone() })],
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.kind(), etl::error::ErrorKind::ConfigError);
 
         // Same-name resync keeps the grants parked until the new raw generation
@@ -316,7 +359,9 @@ async fn companion_view_lifecycle_and_ownership() {
         assert!(grants.iter().any(|row| row[1] == "SELECT" && row[5] == role));
 
         // A source rename can be valid in PostgreSQL but unsupported when
-        // naming a new destination. Reopen and reset still use the owned name.
+        // naming a new destination. Reject it before changing the old view;
+        // reopening the applied snapshot and resetting still use the owned
+        // name.
         let source_renamed = ReplicatedTableSchema::all(Arc::new(TableSchema::with_snapshot_id(
             schema.id(),
             TableName::new("public".into(), "renamed\"source".into()),
@@ -324,7 +369,7 @@ async fn companion_view_lifecycle_and_ownership() {
             SnapshotId::new(45_u64.into(), 46_u64.into()),
         )));
         store.store_table_schema(source_renamed.inner().clone()).await.unwrap();
-        write_events(
+        let error = write_events(
             &reset,
             WriteEventsDurability::RequireDurable,
             vec![Event::Relation(RelationEvent {
@@ -332,20 +377,19 @@ async fn companion_view_lifecycle_and_ownership() {
             })],
         )
         .await
-        .unwrap();
+        .unwrap_err();
+        assert_eq!(error.kind(), etl::error::ErrorKind::ValidationError);
         let reopened = fresh();
         write_events(
             &reopened,
             WriteEventsDurability::RequireDurable,
-            vec![Event::Relation(RelationEvent {
-                replicated_table_schema: source_renamed.clone(),
-            })],
+            vec![Event::Relation(RelationEvent { replicated_table_schema: schema.clone() })],
         )
         .await
         .unwrap();
         assert_eq!(query_rows(&sql, &query).await.unwrap(), records);
         drop_table_for_copy(&fresh(), &source_renamed).await.unwrap();
-        assert!(!sql.table_exists(&physical).await.unwrap());
+        assert!(!sql.object_exists(&physical).await.unwrap());
         assert!(query_rows(&sql, &query).await.is_err());
         store.prepare_table_state_for_copy(schema.id()).await.unwrap();
         let error = write_table_rows(&fresh(), &source_renamed, vec![]).await.unwrap_err();
@@ -374,10 +418,10 @@ async fn companion_view_lifecycle_and_ownership() {
             .store_destination_table_metadata(
                 long.id(),
                 DestinationTableMetadata::new_applied(
-                    long_physical.clone(),
                     long.inner().snapshot_id,
                     long.replication_mask().clone(),
                 ),
+                &long_physical,
             )
             .await
             .unwrap();
@@ -410,7 +454,7 @@ async fn companion_view_lifecycle_and_ownership() {
         store.store_table_schema(keyless.inner().clone()).await.unwrap();
         write_table_rows(&reset, &keyless, vec![]).await.unwrap();
         store.update_table_state(keyless.id(), TableState::Ready).await.unwrap();
-        assert!(sql.table_exists(&keyless_physical).await.unwrap());
+        assert!(sql.object_exists(&keyless_physical).await.unwrap());
         assert!(query_rows(&sql, &companion_query(&config, &keyless_physical)).await.is_err());
         // Raw-only tables do not reserve view names. Customer objects at either
         // name must survive startup, source DDL, and a table resync.

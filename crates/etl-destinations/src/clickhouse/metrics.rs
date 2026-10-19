@@ -10,7 +10,7 @@ pub(super) const CDC_REPLICATION_PATH: &str = "cdc";
 
 /// Duration of DDL operations sent to ClickHouse. Labels: `kind`
 /// (`create_table`, `add_column`, `drop_column`, `rename_column`,
-/// `truncate_table`, `drop_table`, `create_view`, `drop_view`).
+/// `rename_table`, `truncate_table`, `drop_table`, `create_view`, `drop_view`).
 pub(super) const ETL_CLICKHOUSE_DDL_DURATION_SECONDS: &str = "etl_clickhouse_ddl_duration_seconds";
 
 /// DDL failures sent to ClickHouse. Labels: `kind` (same set as
