@@ -82,6 +82,10 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
         ErrorKind::DestinationAuthenticationError => {
             "Verify destination credentials and authentication token validity."
         }
+        ErrorKind::PermissionDenied => {
+            "Grant the source database role or destination account the permissions required by the \
+             denied operation."
+        }
         ErrorKind::SourceSchemaError => {
             "Update the Postgres database schema to resolve compatibility issues."
         }
@@ -203,6 +207,20 @@ mod tests {
         let solution = policy.solution().expect("replica identity errors should have a solution");
         assert!(solution.contains("least costly replica identity"));
         assert!(solution.contains("REPLICA IDENTITY FULL only"));
+    }
+
+    /// Missing permissions get their own guidance, distinct from rejected
+    /// credentials and from the generic fallback.
+    #[test]
+    fn permission_denied_has_specific_manual_remediation() {
+        let solution =
+            |kind| build_error_handling_policy(&EtlError::from((kind, "Denied"))).solution();
+
+        let denied = solution(ErrorKind::PermissionDenied);
+
+        assert!(denied.is_some());
+        assert_ne!(denied, solution(ErrorKind::DestinationAuthenticationError));
+        assert_ne!(denied, solution(ErrorKind::Unknown));
     }
 
     /// A classification made where the error happened decides the directive,

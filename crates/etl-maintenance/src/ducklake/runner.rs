@@ -52,7 +52,7 @@ const LEGACY_REPLAY_EPOCH: &str = "__legacy__";
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.6";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
@@ -743,14 +743,16 @@ fn build_setup_plan_with_strategy(
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
 
+    // Name the metadata catalog so schema discovery can access it.
     steps.push(DuckLakeSetupStep {
         label: "attach_catalog",
         sql: format!(
             "ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, \
-             AUTOMATIC_MIGRATION true{metadata_schema_clause});",
+             AUTOMATIC_MIGRATION true, metadata_catalog {}{metadata_schema_clause});",
             quote_literal(&format!("ducklake:{catalog_target}")),
             quote_literal(data_path),
-            ATTACH_DATA_INLINING_ROW_LIMIT
+            ATTACH_DATA_INLINING_ROW_LIMIT,
+            quote_literal(&format!("__ducklake_metadata_{LAKE_CATALOG}")),
         ),
     });
     steps.push(DuckLakeSetupStep {
@@ -3667,6 +3669,7 @@ mod tests {
         assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
         assert!(plan.steps()[2].sql.contains("URL_STYLE 'path'"));
         assert!(plan.steps()[2].sql.contains("USE_SSL true"));
+        assert!(plan.steps()[3].sql.contains("metadata_catalog '__ducklake_metadata_lake'"));
         assert!(plan.steps()[4].sql.contains("'parquet_row_group_size_bytes', '128MiB'"));
         assert!(plan.steps()[4].sql.contains("'parquet_row_group_size', '2500000'"));
     }
