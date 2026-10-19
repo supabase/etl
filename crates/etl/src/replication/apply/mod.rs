@@ -499,6 +499,15 @@ struct ApplyLoopState {
     next_tx_ordinal: u64,
     /// Whether the loop is draining buffered destination work for shutdown.
     draining_for_shutdown: bool,
+    /// Whether shutdown abandoned destination work the destination never
+    /// completed, because draining is disabled.
+    ///
+    /// While set, the loop is not quiescent, so a status update would report
+    /// the last flush LSN and the abandoned events replay on the next start.
+    /// The loop exits right after abandoning and teardown sends no final
+    /// update, so this is a safety net for any later feedback path rather than
+    /// something a current path reads.
+    abandoned_work_for_shutdown: bool,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
     /// Destination write result waiting to advance the last flush LSN.
@@ -546,6 +555,7 @@ impl ApplyLoopState {
             current_tx_events: 0,
             next_tx_ordinal: 0,
             draining_for_shutdown: false,
+            abandoned_work_for_shutdown: false,
             flush_deadline: None,
             pending_flush_result: None,
             exit_intent: None,
@@ -637,10 +647,15 @@ impl ApplyLoopState {
     /// durability at any keepalive. `Some` guarantees at least that window
     /// before a later keepalive can force durability. The loop remains
     /// non-quiescent until that result confirms durability.
+    ///
+    /// Work abandoned at shutdown also keeps the loop non-quiescent: its
+    /// events were received but never confirmed written, so the received LSN
+    /// is not a safe replay frontier.
     fn is_quiescent(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
+            && !self.abandoned_work_for_shutdown
     }
 
     /// Returns whether a keepalive may settle an accepted commit without
@@ -782,6 +797,35 @@ impl ApplyLoopState {
     /// Stops active intake and starts draining buffered shutdown work.
     fn start_draining_for_shutdown(&mut self) {
         self.draining_for_shutdown = true;
+    }
+
+    /// Abandons buffered and in-flight destination work at shutdown and
+    /// returns how many buffered events were discarded.
+    ///
+    /// This is the shutdown path when draining is disabled. The destination
+    /// never received the buffered events, and the pending write result is
+    /// dropped unobserved, so nothing about either may be acknowledged: the
+    /// loop stays non-quiescent, feedback stays at the last flush LSN, and
+    /// PostgreSQL replays the events on the next start. The abandoned work may
+    /// carry the terminal catch-up batch of a table sync, whose `Complete`
+    /// intent is earned only once that batch is durable, so the exit intent is
+    /// pinned to a pause. With nothing unresolved, the state is left untouched.
+    fn abandon_work_for_shutdown(&mut self) -> usize {
+        if !self.has_unresolved_batch_work() {
+            return 0;
+        }
+
+        // The loop is about to exit, so the batch is dropped rather than taken
+        // for reuse.
+        let discarded_events = self.event_batch.len();
+        self.event_batch = EventBatch::empty();
+        self.pending_flush_result = None;
+        self.processing_paused = false;
+        self.reset_flush_deadline();
+        self.exit_intent = Some(ExitIntent::Pause);
+        self.abandoned_work_for_shutdown = true;
+
+        discarded_events
     }
 }
 
@@ -1324,6 +1368,11 @@ where
     /// continues during draining and is stopped at teardown without a final
     /// status update.
     ///
+    /// With [`PipelineConfig::drain_on_shutdown`] disabled, buffered and
+    /// in-flight work is abandoned instead of drained: the loop exits paused
+    /// without waiting for the destination, and the abandoned events are
+    /// replayed after restart.
+    ///
     /// Graceful shutdown cannot interrupt a handler already awaiting work. The
     /// caller remains responsible for enforcing an overall shutdown limit.
     fn handle_shutdown_signal(&mut self) {
@@ -1332,7 +1381,18 @@ where
         // Preserve a stronger completion intent if one was already recorded.
         self.state.record_exit_intent(Some(ExitIntent::Pause));
 
-        if self.state.has_unresolved_batch_work() {
+        let has_unresolved_batch_work = self.state.has_unresolved_batch_work();
+        if has_unresolved_batch_work && !self.config.drain_on_shutdown {
+            let pending_flush_result = self.state.has_pending_flush_result();
+            let discarded_events = self.state.abandon_work_for_shutdown();
+            info!(
+                %worker_type,
+                pending_flush_result,
+                discarded_events,
+                "shutdown signal received, abandoning destination work without draining, \
+                 PostgreSQL replays it on the next start",
+            );
+        } else if has_unresolved_batch_work {
             info!(
                 %worker_type,
                 pending_flush_result = self.state.has_pending_flush_result(),
@@ -4355,8 +4415,8 @@ mod tests {
         activity::{ActivityKind, ActivityRegistration},
         data::SizeHint,
         destination::{
-            ApplyLoopAsyncResultMetadata, DestinationWriteStatus, WriteEventsDurability,
-            WriteEventsResult,
+            ApplyLoopAsyncResultMetadata, DestinationWriteStatus, PendingWriteEventsResult,
+            WriteEventsDurability, WriteEventsResult,
         },
         error::ErrorKind,
         etl_error,
@@ -4364,8 +4424,8 @@ mod tests {
         replication::{
             ReplicationLagMetrics, TableDecodingState,
             apply::{
-                ApplyLoop, ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
-                schema_cleanup_retention_snapshot_id,
+                ApplyLoop, ApplyLoopResult, ApplyLoopState, EventBatch, ExitIntent,
+                ReplicationProgress, schema_cleanup_retention_snapshot_id,
             },
             state::{StoredTableDecodingState, TableState},
         },
@@ -4625,17 +4685,33 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn idle_durability_requires_idle_accepted_work() {
+    fn state_with_progress_at(lsn: u64) -> ApplyLoopState {
         let activity_registration = ActivityRegistration::register(ActivityKind::WalApply {
             wal_sender_timeout: std::time::Duration::from_secs(60),
         });
-        let mut state = ApplyLoopState::new(
+
+        ApplyLoopState::new(
             activity_registration.handle(),
-            ReplicationProgress::new(100.into()),
-            ReplicationLagMetrics::create(100.into(), false),
+            ReplicationProgress::new(lsn.into()),
+            ReplicationLagMetrics::create(lsn.into(), false),
             SnapshotId::initial(),
-        );
+        )
+    }
+
+    fn pending_write_result() -> (WriteEventsResult, PendingWriteEventsResult) {
+        WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: Some(200.into()),
+            durability: WriteEventsDurability::MayDefer,
+            event_count: 1,
+            relation_table_ids: HashSet::new(),
+            streaming_payload_metadata: StreamingPayloadMetadata::default(),
+            dispatched_at: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn idle_durability_requires_idle_accepted_work() {
+        let mut state = state_with_progress_at(100);
 
         // Only accepted work at an idle boundary may start a durability
         // barrier.
@@ -4671,5 +4747,58 @@ mod tests {
 
         state.start_draining_for_shutdown();
         assert!(!state.can_settle_idle_durability());
+    }
+
+    #[test]
+    fn abandoning_work_for_shutdown_pauses_and_keeps_the_flush_checkpoint() {
+        let mut state = state_with_progress_at(100);
+        state.update_last_received_lsn(300.into());
+        let (_result, pending) = pending_write_result();
+        state.pending_flush_result = Some(pending);
+        state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+        state.pause_processing();
+        state.set_flush_deadline_if_needed(std::time::Duration::from_secs(60));
+        // The in-flight write may be the terminal catch-up batch of a table
+        // sync, whose completion was requested at its commit.
+        state.record_exit_intent(Some(ExitIntent::Complete));
+
+        assert_eq!(state.abandon_work_for_shutdown(), 1);
+
+        assert!(!state.has_unresolved_batch_work());
+        assert!(!state.processing_paused);
+        assert!(state.flush_deadline.is_none());
+        // Nothing abandoned became durable, so the sync is not complete.
+        assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Paused)));
+        // Nothing abandoned is confirmed to PostgreSQL: feedback reports the
+        // last flush, not the last received LSN.
+        assert_eq!(state.checkpoint_lsn(), PgLsn::from(100));
+    }
+
+    #[test]
+    fn abandoning_an_in_flight_write_without_a_buffered_batch() {
+        let mut state = state_with_progress_at(100);
+        state.update_last_received_lsn(300.into());
+        let (_result, pending) = pending_write_result();
+        state.pending_flush_result = Some(pending);
+
+        assert_eq!(state.abandon_work_for_shutdown(), 0);
+
+        assert!(!state.has_unresolved_batch_work());
+        assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Paused)));
+        assert_eq!(state.checkpoint_lsn(), PgLsn::from(100));
+    }
+
+    #[test]
+    fn abandoning_nothing_keeps_a_completed_handoff() {
+        let mut state = state_with_progress_at(100);
+        state.update_last_received_lsn(300.into());
+        state.record_exit_intent(Some(ExitIntent::Complete));
+
+        assert_eq!(state.abandon_work_for_shutdown(), 0);
+
+        assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Completed)));
+        // With nothing received but unwritten, the received LSN stays a safe
+        // frontier.
+        assert_eq!(state.checkpoint_lsn(), PgLsn::from(300));
     }
 }

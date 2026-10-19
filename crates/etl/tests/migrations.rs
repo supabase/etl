@@ -182,6 +182,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
         run_source_migrations: true,
+        drain_on_shutdown: true,
     }
 }
 
