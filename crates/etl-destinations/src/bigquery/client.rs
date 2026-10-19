@@ -13,7 +13,7 @@ use etl_config::shared::{
 use gcp_bigquery_client::{
     Client,
     client_builder::ClientBuilder,
-    error::BQError,
+    error::{BQError, ResponseError},
     google::{
         cloud::bigquery::storage::v1::{
             RowError, StorageError, row_error::RowErrorCode, storage_error::StorageErrorCode,
@@ -481,6 +481,13 @@ fn row_error_to_etl_error(err: RowError) -> EtlError {
     )
 }
 
+/// Returns whether any nested error in a BigQuery REST response has `reason`.
+fn has_response_reason(error: &ResponseError, reason: &str) -> bool {
+    error.error.errors.iter().any(|nested_error| {
+        nested_error.get("reason").is_some_and(|nested_reason| nested_reason == reason)
+    })
+}
+
 /// Converts BigQuery errors to ETL errors with appropriate classification.
 ///
 /// Maps BigQuery error types to ETL error kinds for consistent error handling.
@@ -520,6 +527,15 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
         BQError::RequestError(_) => (ErrorKind::DestinationIoError, "BigQuery request failed"),
         BQError::TonicTransportError(_) => {
             (ErrorKind::DestinationIoError, "BigQuery transport error")
+        }
+
+        // Access errors. A 403 can also mean a rate limit or quota, so a
+        // missing grant is identified by its reason.
+        BQError::ResponseError { error } if error.error.code == 401 => {
+            (ErrorKind::DestinationAuthenticationError, "BigQuery authentication failed")
+        }
+        BQError::ResponseError { error } if has_response_reason(error, "accessDenied") => {
+            (ErrorKind::PermissionDenied, "BigQuery access denied")
         }
 
         // Query and data errors
@@ -1520,7 +1536,7 @@ mod tests {
 
     use etl::schema::{TableId, TableName, TableSchema};
     use gcp_bigquery_client::{
-        error::{NestedResponseError, ResponseError},
+        error::NestedResponseError,
         google::cloud::bigquery::storage::v1::{AppendRowsResponse, append_rows_response},
     };
 
@@ -1786,18 +1802,62 @@ mod tests {
         assert_eq!(rejected.retryability(), Retryability::Permanent);
     }
 
-    /// Rejected credentials and missing IAM grants stop for an operator, each
-    /// with its own guidance.
-    #[test]
-    fn bigquery_access_statuses_convert_to_access_errors() {
-        for (status, kind) in [
-            (tonic::Status::permission_denied("denied"), ErrorKind::PermissionDenied),
-            (tonic::Status::unauthenticated("expired"), ErrorKind::DestinationAuthenticationError),
-        ] {
-            let error = bq_error_to_etl_error(BQError::from(status));
+    /// Builds a BigQuery REST error response with one nested `reason`.
+    fn response_error(code: i64, reason: &str) -> BQError {
+        BQError::ResponseError {
+            error: ResponseError {
+                error: NestedResponseError {
+                    code,
+                    errors: vec![[("reason".to_owned(), reason.to_owned())].into_iter().collect()],
+                    message: "Request failed".to_owned(),
+                    status: String::new(),
+                },
+            },
+        }
+    }
 
-            assert_eq!(error.kind(), kind);
-            assert_eq!(error.retryability(), Retryability::Permanent);
+    /// Rejected credentials and missing IAM grants stop for an operator, each
+    /// with its own guidance, from both the gRPC and the REST APIs. A 403 for
+    /// a rate limit or quota is not a missing grant.
+    #[test]
+    fn bigquery_access_errors_convert_to_access_kinds() {
+        for (error, kind, retryability) in [
+            (
+                BQError::from(tonic::Status::permission_denied("denied")),
+                ErrorKind::PermissionDenied,
+                Retryability::Permanent,
+            ),
+            (
+                BQError::from(tonic::Status::unauthenticated("expired")),
+                ErrorKind::DestinationAuthenticationError,
+                Retryability::Permanent,
+            ),
+            (
+                response_error(403, "accessDenied"),
+                ErrorKind::PermissionDenied,
+                Retryability::Permanent,
+            ),
+            (
+                response_error(401, "authError"),
+                ErrorKind::DestinationAuthenticationError,
+                Retryability::Permanent,
+            ),
+            (
+                response_error(403, "quotaExceeded"),
+                ErrorKind::DestinationQueryFailed,
+                Retryability::Permanent,
+            ),
+            (
+                response_error(403, "rateLimitExceeded"),
+                ErrorKind::DestinationQueryFailed,
+                Retryability::Retryable,
+            ),
+        ] {
+            let description = format!("{error:?}");
+            let error = bq_error_to_etl_error(error);
+
+            assert_eq!(error.kind(), kind, "{description}");
+            assert_eq!(error.retryability(), retryability, "{description}");
         }
     }
 
