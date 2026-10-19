@@ -104,7 +104,7 @@ pub enum DestinationType {
 mod tests {
     use clap::ValueEnum;
 
-    use crate::common::DestinationType;
+    use crate::common::{DestinationType, parse_clickhouse_database_prefix};
 
     #[test]
     fn bigquery_destination_uses_bigquery_for_cli() {
@@ -115,6 +115,17 @@ mod tests {
     fn bigquery_destination_uses_snake_case_for_serde() {
         let value = serde_json::to_value(DestinationType::BigQuery).unwrap();
         assert_eq!(value, "big_query");
+    }
+
+    #[test]
+    fn clickhouse_database_prefix_accepts_only_unquoted_identifiers() {
+        for value in ["bench", "_bench", "Bench_2"] {
+            assert_eq!(parse_clickhouse_database_prefix(value).as_deref(), Ok(value));
+        }
+
+        for value in ["", "123", "1bench", "a`b", "x\\x41", "bench-1", "bé", "a b", "bench;drop"] {
+            assert!(parse_clickhouse_database_prefix(value).is_err(), "{value:?}");
+        }
     }
 }
 
@@ -164,6 +175,25 @@ pub struct PipelineTuningArgs {
     pub disable_memory_backpressure: bool,
 }
 
+/// Parses a ClickHouse database prefix for `--clickhouse-database`.
+///
+/// Each run appends `_<pipeline_id>` and uses the result as an unquoted
+/// ClickHouse identifier, so the prefix must start with an ASCII letter or
+/// underscore and contain only ASCII letters, digits, and underscores. An
+/// all-digit name such as `123_456` would parse as a number.
+fn parse_clickhouse_database_prefix(value: &str) -> Result<String, String> {
+    let mut bytes = value.bytes();
+    let starts_like_identifier =
+        bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    if starts_like_identifier && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        Ok(value.to_owned())
+    } else {
+        Err("Must start with an ASCII letter or underscore and contain only ASCII letters, \
+             digits, and underscores"
+            .to_owned())
+    }
+}
+
 /// Destination arguments shared by benchmark commands.
 #[derive(Args, Debug, Clone)]
 pub struct DestinationArgs {
@@ -196,7 +226,9 @@ pub struct DestinationArgs {
     pub clickhouse_password: Option<String>,
     /// ClickHouse database prefix. Each run writes to a new
     /// `<database>_<pipeline_id>` database, dropped when the run cleans up.
-    #[arg(long)]
+    /// Must start with an ASCII letter or underscore and contain only ASCII
+    /// letters, digits, and underscores.
+    #[arg(long, value_parser = parse_clickhouse_database_prefix)]
     pub clickhouse_database: Option<String>,
     /// DuckLake PostgreSQL catalog URL.
     #[arg(long)]
@@ -592,10 +624,7 @@ impl BenchDestination {
 
                 let database = clickhouse_run_database(&database, pipeline_id);
                 clickhouse_root_client(&url, &user, password.as_deref())
-                    .query(&format!(
-                        "CREATE DATABASE IF NOT EXISTS {}",
-                        quote_clickhouse_identifier(&database)
-                    ))
+                    .query(&format!("create database if not exists {database}"))
                     .execute()
                     .await
                     .with_context(|| format!("failed to create ClickHouse database {database}"))?;
@@ -1016,7 +1045,7 @@ pub async fn cleanup_destination(
         let password = destination_args.clickhouse_password.as_deref().filter(|p| !p.is_empty());
         let database = clickhouse_run_database(database, pipeline_id);
         clickhouse_root_client(&url, user, password)
-            .query(&format!("DROP DATABASE IF EXISTS {}", quote_clickhouse_identifier(&database)))
+            .query(&format!("drop database if exists {database}"))
             .execute()
             .await
             .with_context(|| format!("failed to drop ClickHouse database {database}"))?;
@@ -1037,11 +1066,6 @@ fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clic
         Some(password) => client.with_password(password),
         None => client,
     }
-}
-
-#[cfg(feature = "clickhouse")]
-fn quote_clickhouse_identifier(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
 }
 
 /// Writes a machine-readable benchmark report.

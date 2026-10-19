@@ -347,8 +347,10 @@ Required environment variables (or their `--clickhouse-*` CLI equivalents):
 - `BENCH_CLICKHOUSE_USER`: ClickHouse user.
 - `BENCH_CLICKHOUSE_DATABASE`: database name prefix. Each run creates a new
   `<prefix>_<pipeline_id>` database and drops it when the run cleans up, so the
-  prefix database itself need not exist. The user needs `CREATE DATABASE` and
-  `DROP DATABASE` privileges.
+  prefix database itself need not exist. The prefix must start with an ASCII
+  letter or underscore and contain only ASCII letters, digits, and
+  underscores. The user needs `CREATE DATABASE` and `DROP DATABASE`
+  privileges.
 
 Optional:
 
