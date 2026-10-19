@@ -60,9 +60,12 @@ pub struct StoredDestinationTableMetadataRow {
 /// upsert semantics: if a row exists for (pipeline_id, table_id), all fields
 /// are updated.
 ///
-/// Destinations derive table names from snapshots and view definitions. The
-/// destination identifier is retained only for fallback inspection while that
-/// approach is evaluated; metadata loaders never select it.
+/// Every write inserts or overwrites `destination_table_id` with the supplied
+/// identifier. Retaining it preserves compatibility and information for manual
+/// inspection while built-in destinations resolve targets from snapshots and
+/// view definitions. Metadata loaders deliberately never select this column.
+/// It can be stale after interrupted DDL; it is not an ownership proof, a
+/// history of identifiers, or a record of both transition endpoints.
 #[expect(clippy::too_many_arguments)]
 pub async fn store_destination_table_metadata<'c, E>(
     executor: E,

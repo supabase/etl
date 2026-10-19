@@ -68,11 +68,15 @@ impl DestinationTableSchema {
 /// The schema variant contains every field required by its state, making
 /// incomplete recovery metadata unrepresentable in memory.
 ///
-/// Destinations name their objects deterministically from source table names,
-/// so metadata records snapshots rather than destination identifiers. ETL owns
-/// the destination names derived from every snapshot recorded here: the
-/// current snapshot, and during [`DestinationTableSchema::Applying`] also the
-/// previous one. Resetting a table removes the objects under those names.
+/// Built-in destinations resolve object names from source snapshots and, for
+/// BigQuery physical tables, logical view definitions. ETL owns the destination
+/// names derived from every snapshot recorded here: the current snapshot, and
+/// during [`DestinationTableSchema::Applying`] also the previous one. Resetting
+/// a table removes the objects under those names.
+///
+/// Postgres separately retains the last supplied `destination_table_id` for
+/// compatibility and manual inspection. That identifier is not loaded into
+/// this type or used for runtime target resolution or recovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestinationTableMetadata {
     /// The schema state stored for the destination table.

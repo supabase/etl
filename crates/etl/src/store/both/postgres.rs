@@ -552,6 +552,9 @@ impl StateStore for PostgresStore {
     }
 
     /// Stores complete destination table metadata in both database and cache.
+    ///
+    /// The supplied destination identifier is written only to the database for
+    /// compatibility and manual inspection; it is excluded from the cache.
     async fn store_destination_table_metadata(
         &self,
         table_id: TableId,

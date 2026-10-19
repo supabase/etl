@@ -258,11 +258,16 @@ Destination table metadata connects source table IDs to destination state. Its s
 | `get_destination_table_metadata()` | Returns destination table metadata for a source table from cache |
 | `store_destination_table_metadata()` | Saves destination table metadata to both cache and persistent storage |
 
-The metadata write also accepts a destination identifier, which Postgres
-retains only for fallback inspection while snapshot-based naming is evaluated.
-Metadata loaders never select that column, and no identifier is exposed through
-`DestinationTableMetadata`. Destinations resolve their objects from the recorded
-snapshots and, for BigQuery, the logical view definition.
+The metadata write also accepts `destination_table_id`. `PostgresStore` inserts
+or overwrites that column on every metadata write for compatibility and manual
+inspection; `MemoryStore` ignores the argument. Metadata loaders never select
+the column, and the identifier is excluded from cached metadata and
+`DestinationTableMetadata`. Built-in destinations resolve their objects from
+the recorded snapshots and, for BigQuery, the logical view definition.
+
+The retained identifier can be stale after interrupted DDL and does not record
+both transition endpoints. It is not an ownership proof or an automatic
+recovery mechanism.
 
 ### Table States
 

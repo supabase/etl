@@ -556,6 +556,8 @@ where
     /// Creating records ownership of the view name before remote DDL, so a
     /// reset can remove a partial setup. Both objects use create-only DDL so an
     /// occupied name cannot be silently adopted.
+    /// The physical ID is also persisted for manual inspection if setup stops
+    /// before the view is created; runtime discovery still requires the view.
     async fn create_table_for_schema(
         &self,
         schema: &ReplicatedTableSchema,
@@ -1233,8 +1235,10 @@ where
     ///
     /// Creating the new table and atomically replacing the view means readers
     /// always see one complete table: the old one before the replacement, the
-    /// new one after. The schema state stays unchanged; only the write-only
-    /// fallback ID is updated. The old table is then deleted optimistically.
+    /// new one after. The schema state stays unchanged. Postgres's write-only
+    /// `destination_table_id` is updated after replacement, so an interruption
+    /// can leave it pointing to the old table. The view remains authoritative.
+    /// The old table is then deleted optimistically.
     /// An interrupted truncate can leave an unselected table behind; replay
     /// repeats the truncate before any later row.
     async fn process_truncate_for_schemas(
@@ -1278,8 +1282,8 @@ where
                 .await?;
             self.client.create_or_replace_view(&self.dataset_id, &view_id, &table_id).await?;
 
-            // Retain the new physical ID for fallback inspection only. The
-            // view remains authoritative if this metadata write fails.
+            // Retain the new physical ID for compatibility and manual
+            // inspection. The view remains authoritative if this write fails.
             self.state_store
                 .store_destination_table_metadata(source_table_id, metadata.clone(), &table_id)
                 .await?;

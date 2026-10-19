@@ -363,10 +363,14 @@ that barrier; ETL does not coordinate renames across different source tables.
 
 Destination metadata records `Applying` before DDL and `Applied` only after the
 rename, supported column changes, and required ingestion state updates succeed.
-Metadata stores snapshots, not destination names: each destination derives its
-names from the source name in a snapshot. The before endpoint is always the
-previously applied snapshot; the after endpoint is the incoming relation's
-snapshot. Both names refer to the same stable source table OID.
+Runtime metadata records snapshots and replication masks. Each built-in
+destination derives its logical names from the source name in a snapshot;
+BigQuery resolves the physical table through the logical view. The separately
+persisted [`destination_table_id`](/reference/destinations/#upgrading-existing-pipelines)
+is retained for compatibility and manual inspection and is not used to resolve
+either endpoint. The before endpoint is always the previously applied snapshot;
+the after endpoint is the incoming relation's snapshot. Both names refer to the
+same stable source table OID.
 
 These transitions are not atomic with ETL's metadata store. An interrupted
 rename stays `Applying` and blocks ordinary writes; reset the affected table for

@@ -98,13 +98,19 @@ that pipeline has upgraded.
 If a previous BigQuery DDL operation has an unknown outcome, reconcile its job
 before restarting or resetting tables. See [query completion and recovery](#query-completion-and-recovery).
 
-The `destination_table_id` column remains temporarily as write-only fallback
-information while snapshot-based naming is evaluated. Destination metadata
-writes retain the destination identifier, but startup and metadata loaders do
-not read it. Runtime operations derive names from the recorded snapshots and,
-for BigQuery, discover the physical table through the logical view. The stored
-identifier is for manual inspection; it does not provide automatic recovery or
-rollback guarantees.
+The `destination_table_id` column is retained for compatibility and manual
+inspection. Every destination metadata write inserts or overwrites it with the
+supplied identifier; for BigQuery, this is the physical table ID. Keeping the
+column preserves existing information while snapshot-based naming is evaluated.
+It is write-only for this version of ETL: startup and metadata loaders never
+read it, and it is excluded from the runtime `DestinationTableMetadata` type.
+Runtime operations derive names from the recorded snapshots and, for BigQuery,
+discover the physical table through the logical view.
+
+The column records only the last identifier supplied by the destination. It can
+be stale after interrupted DDL and does not retain both endpoints of a rename
+or every physical table created during replacement. It is not proof of
+ownership and provides no automatic recovery or rollback guarantees.
 
 Earlier releases did not support live table renames. If a source was renamed
 while running an earlier image, check that its recorded snapshots still name
@@ -134,8 +140,9 @@ project. For a local first pipeline, prefer [ClickHouse](#clickhouse).
 Query the logical view for each replicated table. Its name is derived from the
 source table name and is the only BigQuery name ETL depends on. The view
 selects a physical table that holds the rows; ETL finds that table by reading
-the view definition. The fallback identifier retained in Postgres is never
-used for discovery.
+the view definition. The physical table ID is still written to
+`destination_table_id` in Postgres for compatibility and manual inspection; it
+is never used for discovery.
 
 New physical tables are named
 `supabase_etl_<pipeline_id>_<table_oid>_<suffix>`, where the suffix is 25
