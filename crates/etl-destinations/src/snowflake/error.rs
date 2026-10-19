@@ -172,10 +172,15 @@ impl Error {
     pub(super) const fn append_failure_type(&self) -> AppendFailureType {
         match self {
             Self::HttpTransport(_) => AppendFailureType::Transport,
+            // A 401 or an expired-token status means Snowflake rejected the
+            // credentials the request carried.
+            Self::Auth(_)
+            | Self::HttpStatus { status: StatusCode::UNAUTHORIZED, .. }
+            | Self::Snowpipe(
+                SnowpipeError::AuthenticationExpired
+                | SnowpipeError::HttpStatus { status: StatusCode::UNAUTHORIZED },
+            ) => AppendFailureType::Authentication,
             Self::HttpStatus { .. } | Self::Sql { .. } => AppendFailureType::Provider,
-            Self::Auth(_) | Self::Snowpipe(SnowpipeError::AuthenticationExpired) => {
-                AppendFailureType::Authentication
-            }
             Self::Snowpipe(
                 SnowpipeError::StaleContinuation
                 | SnowpipeError::ChannelInvalidated
@@ -647,7 +652,8 @@ mod tests {
     }
 
     /// Rejected credentials stop for an operator with the destination
-    /// credentials hint, from both the SQL API and Snowpipe Streaming.
+    /// credentials hint and count as authentication append failures, from
+    /// both the SQL API and Snowpipe Streaming.
     #[test]
     fn authentication_failures_convert_to_authentication_errors() {
         for source in [
@@ -657,17 +663,21 @@ mod tests {
             Error::Snowpipe(SnowpipeError::HttpStatus { status: StatusCode::UNAUTHORIZED }),
         ] {
             let description = format!("{source:?}");
+            assert_eq!(
+                source.append_failure_type(),
+                AppendFailureType::Authentication,
+                "{description}"
+            );
             let error = EtlError::from(source);
 
             assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError, "{description}");
             assert_eq!(error.retryability(), Retryability::Permanent, "{description}");
         }
 
-        // Other client errors keep the generic kind.
-        let forbidden = EtlError::from(Error::HttpStatus {
-            status: StatusCode::FORBIDDEN,
-            body: String::new(),
-        });
+        // Other client errors keep the generic kind and provider label.
+        let forbidden = Error::HttpStatus { status: StatusCode::FORBIDDEN, body: String::new() };
+        assert_eq!(forbidden.append_failure_type(), AppendFailureType::Provider);
+        let forbidden = EtlError::from(forbidden);
         assert_eq!(forbidden.kind(), ErrorKind::DestinationError);
     }
 }
