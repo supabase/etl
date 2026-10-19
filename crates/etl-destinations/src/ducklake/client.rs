@@ -1,10 +1,9 @@
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
 use std::{
-    borrow::Cow,
     error, fmt, process,
     sync::{
-        Arc, LazyLock, Mutex, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::Duration,
@@ -15,8 +14,8 @@ use etl::{
     error::{ErrorKind, EtlError, EtlResult, Retryability},
     etl_error,
 };
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use metrics::histogram;
-use regex::Regex;
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore, oneshot},
     time::Instant,
@@ -39,12 +38,6 @@ use crate::{
 static NEXT_CONNECTION_INIT_ID: AtomicU64 = AtomicU64::new(1);
 /// Monotonic identifier assigned to each timed DuckDB blocking operation.
 static NEXT_DUCKDB_BLOCKING_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
-/// Matches one libpq password field inside a conninfo string.
-static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"password=(?:'([^'\\]|\\.)*'|[^\s,);]+)")
-        .expect("postgres password redaction regex should compile")
-});
-
 /// Timeout applied to foreground DuckLake work and shared-instance refresh.
 pub(super) const FOREGROUND_QUERY_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 /// Stable log and error label for DuckDB blocking operations.
@@ -534,26 +527,20 @@ pub(super) struct DuckLakeConnectionError {
 }
 
 impl DuckLakeConnectionError {
-    /// Creates one setup-phase error and redacts a PostgreSQL catalog password
-    /// when present.
+    /// Creates one setup-phase error with credentials removed.
     fn setup_phase(step: &DuckLakeSetupStep, error: duckdb::Error) -> Self {
-        let error_message = error.to_string();
-        let error_message = if attach_step_uses_postgres_catalog(step) {
-            redact_ducklake_connection_error_message(&error_message)
-        } else {
-            Cow::Owned(error_message)
-        };
-
+        let error = RedactedDuckDbError::from(error);
         Self {
             message: format!(
-                "ducklake duckdb connection setup phase `{}` failed: {error_message}",
+                "ducklake duckdb connection setup phase `{}` failed: {error}",
                 step.label
             ),
         }
     }
 
-    /// Creates one connection validation error.
+    /// Creates one connection validation error with credentials removed.
     fn validation(error: duckdb::Error) -> Self {
+        let error = RedactedDuckDbError::from(error);
         Self { message: format!("DuckLake DuckDB connection validation failed: {error}") }
     }
 
@@ -879,16 +866,6 @@ impl r2d2::ManageConnection for DuckLakeConnectionManager {
 pub(super) fn format_query_error_detail(sql: &str) -> String {
     let compact_sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
     format!("sql: {compact_sql}")
-}
-
-/// Returns whether one setup step attaches a PostgreSQL-backed catalog.
-fn attach_step_uses_postgres_catalog(step: &DuckLakeSetupStep) -> bool {
-    step.label == "attach_catalog" && step.sql.contains("ducklake:postgres:")
-}
-
-/// Redacts PostgreSQL passwords from one DuckDB or r2d2 error message.
-fn redact_ducklake_connection_error_message(message: &str) -> Cow<'_, str> {
-    POSTGRES_PASSWORD_REGEX.replace_all(message, "password='[redacted]'")
 }
 
 /// Builds and warms an r2d2 pool of initialized DuckDB connections while
@@ -1540,7 +1517,7 @@ mod tests {
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake timeout verification query failed",
-                        source,
+                        RedactedDuckDbError::from(source),
                     )
                 })
             },
@@ -1808,25 +1785,6 @@ mod tests {
         state.record(DuckLakeInterruptReason::DestinationShutdown);
 
         assert_eq!(context.interrupt_reason_label(), "destination_shutdown");
-    }
-
-    #[test]
-    fn redact_ducklake_connection_error_message_masks_quoted_password() {
-        let message = "timed out waiting for connection: attach failed: postgres:host='localhost' \
-                       user='ducklake' password='pa\\'ss\\\\word' dbname='catalog'";
-
-        assert_eq!(
-            redact_ducklake_connection_error_message(message),
-            "timed out waiting for connection: attach failed: postgres:host='localhost' \
-             user='ducklake' password='[redacted]' dbname='catalog'"
-        );
-    }
-
-    #[test]
-    fn redact_ducklake_connection_error_message_keeps_non_sensitive_messages() {
-        let message = "timed out waiting for connection: parser error";
-
-        assert_eq!(redact_ducklake_connection_error_message(message), message);
     }
 
     #[test]
@@ -2200,7 +2158,7 @@ mod tests {
                             classified_error(
                                 ErrorKind::DestinationQueryFailed,
                                 "DuckLake interrupt test query failed",
-                                source,
+                                RedactedDuckDbError::from(source),
                             )
                         })?;
                         Ok(())

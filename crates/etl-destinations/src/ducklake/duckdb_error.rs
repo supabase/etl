@@ -5,8 +5,13 @@
 //! the exception type DuckDB records for the failure. DuckDB writes that type
 //! at the start of every error message, as `"<type> Error: <message>"`, so
 //! DuckLake recovers it from there.
+//!
+//! Only [`RedactedDuckDbError`] is classified, so a raw [`duckdb::Error`],
+//! whose message can carry the catalog password, cannot become an error
+//! source.
 
 use etl::error::Retryability;
+use etl_maintenance::ducklake::RedactedDuckDbError;
 
 use crate::retry::ClassifiedError;
 
@@ -240,12 +245,21 @@ pub(super) fn duckdb_error_type(error: &duckdb::Error) -> Option<DuckDbErrorType
     }
 }
 
-/// A DuckDB failure follows its exception type. A failure without a known
-/// type, and every error duckdb-rs raises itself, such as a column conversion
-/// or a misused statement, fails the same way when run again.
-impl ClassifiedError for duckdb::Error {
+/// Returns whether a failed DuckDB call may succeed when run again.
+///
+/// A failure follows its exception type. A failure without a known type, and
+/// every error duckdb-rs raises itself, such as a column conversion or a
+/// misused statement, fails the same way when run again.
+pub(super) fn duckdb_error_retryability(error: &duckdb::Error) -> Retryability {
+    duckdb_error_type(error).map_or(Retryability::Permanent, DuckDbErrorType::retryability)
+}
+
+/// Classified like the DuckDB failure it replaces. Redaction leaves the
+/// exception type at the start of the message.
+impl ClassifiedError for RedactedDuckDbError {
     fn retryability(&self) -> Retryability {
-        duckdb_error_type(self).map_or(Retryability::Permanent, DuckDbErrorType::retryability)
+        DuckDbErrorType::parse(self.message())
+            .map_or(Retryability::Permanent, DuckDbErrorType::retryability)
     }
 }
 
@@ -312,7 +326,12 @@ mod tests {
             ("INTERNAL Error: assertion failed", Retryability::Permanent),
             ("connect error", Retryability::Permanent),
         ] {
-            assert_eq!(duckdb_failure(message).retryability(), expected, "{message}");
+            assert_eq!(duckdb_error_retryability(&duckdb_failure(message)), expected, "{message}");
+            assert_eq!(
+                RedactedDuckDbError::from(duckdb_failure(message)).retryability(),
+                expected,
+                "{message}"
+            );
         }
     }
 
@@ -323,7 +342,8 @@ mod tests {
             duckdb::Error::QueryReturnedNoRows,
             duckdb::Error::InvalidColumnIndex(3),
         ] {
-            assert_eq!(error.retryability(), Retryability::Permanent);
+            assert_eq!(duckdb_error_retryability(&error), Retryability::Permanent);
+            assert_eq!(RedactedDuckDbError::from(error).retryability(), Retryability::Permanent);
         }
     }
 
