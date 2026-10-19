@@ -176,11 +176,13 @@
 //!         max_copy_connections_per_table: PipelineConfig::DEFAULT_MAX_COPY_CONNECTIONS_PER_TABLE,
 //!         memory_refresh_interval_ms: 100,
 //!         table_sync_monitor_refresh_interval_ms: 10_000,
+//!         replication_lag_refresh_interval_ms: 10_000,
 //!         settle_durable_interval_ms: None,
 //!         memory_backpressure: Some(MemoryBackpressureConfig::default()),
 //!         table_sync_copy: TableSyncCopyConfig::default(),
 //!         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
 //!         run_source_migrations: true,
+//!         drain_on_shutdown: true,
 //!     };
 //!
 //!     // Create and start the pipeline

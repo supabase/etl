@@ -133,20 +133,20 @@ for versions, measurement methodology, and configuration differences.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `clickhouse` | ClickHouse | Private alpha |
-| `bigquery` | Google BigQuery | Stable |
-| `ducklake` | DuckLake | Private alpha |
-| `snowflake` | Snowflake | Private alpha |
+| `clickhouse` | ClickHouse | Public alpha |
+| `bigquery` | Google BigQuery | Public alpha |
+| `ducklake` | DuckLake | Public alpha |
+| `snowflake` | Snowflake | Public alpha |
 | `iceberg` | Apache Iceberg | Deprecated |
 
-Private alpha refers to managed-service access and does not restrict local or
-self-hosted use of the open-source destinations.
+Public alpha describes the managed-service release stage. Local and self-hosted
+use of the open-source destinations is unrestricted.
 
 ClickHouse is the fastest way to start locally: `cargo x init` runs it, and
 `cargo x setup replicator` configures it by default. BigQuery is the most
 mature cloud destination. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
-for maturity and limitations, and the
+for release status and limitations, and the
 [`etl-examples` guide](crates/etl-examples/README.md) for runnable examples.
 
 ## Requirements

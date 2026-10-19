@@ -18,7 +18,7 @@ use etl::{
         memory_destination::MemoryDestination,
         notify::{DEFAULT_NOTIFY_TIMEOUT, TimedNotify},
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{PipelineBuilder, create_pipeline},
         property::{block_on, run_expensive_property},
         test_destination_wrapper::TestDestinationWrapper,
         test_schema::{TableSelection, insert_users_data, setup_test_database_schema},
@@ -29,6 +29,11 @@ use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
 use rand::random;
 use tokio_postgres::{Client, types::PgLsn};
+
+/// Returns the current WAL write position of the source.
+async fn current_wal_lsn(client: &Client) -> PgLsn {
+    client.query_one("select pg_current_wal_lsn()", &[]).await.unwrap().get(0)
+}
 
 /// Returns the commit LSNs of recorded insert events for the table, in order.
 fn table_insert_commit_lsns(events: &[Event], table_id: TableId) -> Vec<PgLsn> {
@@ -54,10 +59,9 @@ type RouletteDestination = TestDestinationWrapper<MemoryDestination<NotifyingSto
 enum WriteResponseTiming {
     /// Disconnect after the prefix is acknowledged.
     Unheld,
-    /// Release the in-flight response, then wait for the reconnect.
+    /// Release the in-flight response after disconnect so reconnect can
+    /// proceed.
     ReleaseThenWaitForReconnect,
-    /// Wait for the reconnect, then release the in-flight response.
-    WaitForReconnectThenRelease,
 }
 
 /// One generated walsender roulette schedule.
@@ -76,7 +80,6 @@ fn walsender_roulette_cases() -> impl Strategy<Value = WalsenderRouletteCase> {
     let response_timing = prop_oneof![
         Just(WriteResponseTiming::Unheld),
         Just(WriteResponseTiming::ReleaseThenWaitForReconnect),
-        Just(WriteResponseTiming::WaitForReconnectThenRelease),
     ];
 
     (2usize..=8, response_timing)
@@ -207,9 +210,8 @@ impl<'a> WalsenderRouletteWorkload<'a> {
     ) -> Result<(), TestCaseError> {
         match response_timing {
             WriteResponseTiming::Unheld => self.disconnect_after_delivered_write(user_number).await,
-            WriteResponseTiming::ReleaseThenWaitForReconnect
-            | WriteResponseTiming::WaitForReconnectThenRelease => {
-                self.disconnect_with_held_write(user_number, response_timing).await
+            WriteResponseTiming::ReleaseThenWaitForReconnect => {
+                self.disconnect_with_held_write(user_number).await
             }
         }
     }
@@ -265,7 +267,6 @@ impl<'a> WalsenderRouletteWorkload<'a> {
     async fn disconnect_with_held_write(
         &mut self,
         user_number: usize,
-        response_timing: WriteResponseTiming,
     ) -> Result<(), TestCaseError> {
         let user_id = i64::try_from(user_number).expect("roulette user number should fit in i64");
         let delivered = notify_on_user_insert(self.destination, self.table_id, user_id).await;
@@ -278,22 +279,12 @@ impl<'a> WalsenderRouletteWorkload<'a> {
 
         let old_pid = self.terminate_apply_walsender().await?;
 
-        match response_timing {
-            WriteResponseTiming::ReleaseThenWaitForReconnect => {
-                hold.release_ok();
-                wait_for_notification(&delivered, format!("delivery of held user {user_id}"))
-                    .await?;
-                self.wait_for_reconnect(old_pid).await
-            }
-            WriteResponseTiming::WaitForReconnectThenRelease => {
-                self.wait_for_reconnect(old_pid).await?;
-                hold.release_ok();
-                wait_for_notification(&delivered, format!("delivery of held user {user_id}")).await
-            }
-            WriteResponseTiming::Unheld => {
-                unreachable!("held write disconnect requires a held response timing")
-            }
-        }
+        // The failed apply attempt must observe this response before it can
+        // reconnect and replay the uncheckpointed batch.
+        hold.release_ok();
+
+        wait_for_notification(&delivered, format!("delivery of held user {user_id}")).await?;
+        self.wait_for_reconnect(old_pid).await
     }
 }
 
@@ -863,10 +854,11 @@ async fn shutdown_drains_pending_write_events_before_destination_shutdown() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_loss() {
+async fn shutdown_without_drain_abandons_pending_write_events() {
     init_test_tracing();
 
-    // GIVEN: a streaming pipeline whose next write_events response is held
+    // GIVEN: a streaming pipeline with draining disabled whose next
+    // write_events response is held, and a second row buffered behind it
     let mut database = spawn_source_database().await;
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = database_schema.users_schema().id;
@@ -876,15 +868,15 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     let destination = TestDestinationWrapper::wrap(memory_destination.clone());
 
     let pipeline_id: PipelineId = random();
-    let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
-    let mut pipeline = create_pipeline(
-        &database.config,
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
         pipeline_id,
         database_schema.publication_name(),
         store.clone(),
         destination.clone(),
-    );
+    )
+    .with_drain_on_shutdown(false)
+    .build();
 
     let users_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
 
@@ -895,59 +887,66 @@ async fn apply_disconnect_with_write_held_until_after_reconnect_replays_without_
     let hold = destination.hold_next(FaultyOp::WriteEvents).await;
 
     insert_users_data(&mut database, &database_schema.users_schema().name, 1..=1).await;
+    let first_insert_lsn = current_wal_lsn(database.client.as_ref().unwrap()).await;
 
     hold.wait_reached().await;
 
-    // WHEN: the apply connection dies while the write response is withheld
+    insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
     let client = database.client.as_ref().unwrap();
-    let (flush_lsn_at_kill, active_pid) = replication_slot_state(client, &apply_slot_name).await;
-    let old_pid = active_pid.expect("apply walsender should be active");
-    assert!(terminate_walsender(client, old_pid).await.unwrap());
-    assert!(
-        wait_for_new_walsender(client, &apply_slot_name, old_pid, DEFAULT_NOTIFY_TIMEOUT)
-            .await
-            .unwrap()
-            .is_some()
-    );
+    let second_insert_lsn = current_wal_lsn(client).await;
 
-    // WHEN: the held response is released only after the reconnect
-    let replay_recorded_notify = destination
-        .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
-        .await;
+    // The apply loop reports its last received LSN as written, so this proves
+    // the second row is buffered behind the held write before shutdown.
+    let apply_slot_name: String =
+        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
+        loop {
+            let write_lsn: Option<PgLsn> = client
+                .query_opt(
+                    "select s.write_lsn from pg_stat_replication s join pg_replication_slots r on \
+                     r.active_pid = s.pid where r.slot_name = $1",
+                    &[&apply_slot_name],
+                )
+                .await
+                .unwrap()
+                .and_then(|row| row.get(0));
+            if write_lsn.is_some_and(|write_lsn| write_lsn >= second_insert_lsn) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
 
+    // WHEN: the pipeline shuts down while the write response is withheld
+    let shutdown_task = tokio::spawn(pipeline.shutdown_and_wait());
+
+    // THEN: shutdown reaches destination teardown without waiting on the
+    // response, and only stays blocked there because the wrapper's own
+    // shutdown drains its held task
+    tokio::time::timeout(DEFAULT_NOTIFY_TIMEOUT, async {
+        while !destination.shutdown_called().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!shutdown_task.is_finished());
+
+    // WHEN: the held response is released
     hold.release_ok();
 
-    // THEN: the insert replays because the acknowledgement never reached the
-    // old apply loop.
-    replay_recorded_notify.notified().await;
+    // THEN: shutdown completes, the buffered second row was never dispatched,
+    // and the slot confirms neither row, so both replay on the next start
+    shutdown_task.await.unwrap().unwrap();
 
-    let commit_lsns = table_insert_commit_lsns(&destination.get_events().await, table_id);
-    assert_eq!(commit_lsns.len(), 2);
-    assert_eq!(commit_lsns[0], commit_lsns[1]);
-    let first_commit_lsn = commit_lsns[0];
+    let events = destination.get_events().await;
+    let grouped_events = group_events_by_type_and_table_id(&events);
+    assert_eq!(grouped_events.get(&(EventType::Insert, table_id)).map_or(0, Vec::len), 1);
 
-    // THEN: the persisted checkpoint never advanced past the unacknowledged
-    // write.
-    assert!(flush_lsn_at_kill < first_commit_lsn);
-
-    // THEN: streaming continues without loss after the replay.
-    let second_insert_notify = destination
-        .notify_on_events(move |events| {
-            table_insert_commit_lsns(events, table_id)
-                .last()
-                .is_some_and(|last| *last > first_commit_lsn)
-        })
-        .await;
-
-    insert_users_data(&mut database, &database_schema.users_schema().name, 2..=2).await;
-
-    second_insert_notify.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let final_lsns = table_insert_commit_lsns(&destination.get_events().await, table_id);
-    assert_eq!(final_lsns.iter().filter(|lsn| **lsn == first_commit_lsn).count(), 2);
-    assert_eq!(final_lsns.iter().filter(|lsn| **lsn > first_commit_lsn).count(), 1);
+    let (confirmed_flush_lsn, _) = replication_slot_state(client, &apply_slot_name).await;
+    assert!(confirmed_flush_lsn < first_insert_lsn);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -173,16 +173,14 @@ function rewriteAgentCallouts(markdown: string) {
 
 /** Plain-text labels for `<DestinationStatus>` badges in the agent Markdown export. */
 const destinationStatusLabels: Record<string, string> = {
-  stable: 'Stable',
-  'private-alpha': 'Private alpha',
-  'in-progress': 'In progress',
+  'public-alpha': 'Public alpha',
   deprecated: 'Deprecated',
 };
 
 function rewriteAgentLayout(markdown: string) {
   return markdown
     .replace(
-      /<DestinationStatus status="(stable|private-alpha|in-progress|deprecated)"\s*\/>/g,
+      /<DestinationStatus status="(public-alpha|deprecated)"\s*\/>/g,
       (_match, status: string) => `**Status: ${destinationStatusLabels[status]}**`,
     )
     .replace(/^\s*<div className="fd-(?:steps|step)">\s*$/gm, '')

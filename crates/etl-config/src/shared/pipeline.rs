@@ -346,19 +346,6 @@ pub struct PipelineConfig {
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
-    /// Optional window, in milliseconds, before an idle keepalive may force
-    /// durability of an accepted streaming write.
-    ///
-    /// `None` allows forced durability at any keepalive. `Some` guarantees at
-    /// least this window of time before a later keepalive can force durability.
-    ///
-    /// Terminal table-sync completion forces durability without this wait.
-    /// Shutdown drains buffered and pending writes but does not start a new
-    /// durability barrier for writes that already returned `Accepted`.
-    /// Writes not confirmed durable remain uncheckpointed for replay after
-    /// restart.
-    #[serde(default)]
-    pub settle_durable_interval_ms: Option<u64>,
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
@@ -394,9 +381,37 @@ pub struct PipelineConfig {
     ///
     /// One shared sampler drives dynamic batch targets and emergency
     /// backpressure. Batch hot paths reuse each snapshot instead of reading
-    /// operating-system or cgroup files per row.
+    /// operating-system or cgroup files per row. Must be positive; defaults to
+    /// 100 milliseconds.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
+    /// Milliseconds between replication-slot validity checks during table copy.
+    ///
+    /// Must be positive; defaults to 10,000 milliseconds. Controls how quickly
+    /// an unusable copy slot is detected, independently of lag sampling.
+    #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
+    pub table_sync_monitor_refresh_interval_ms: u64,
+    /// Milliseconds between pipeline-wide replication lag samples.
+    ///
+    /// One sampler measures all apply, table-copy, and table-sync CDC workers.
+    /// Must be positive; defaults to 10,000 milliseconds. Independent of copy
+    /// slot validity checks and Prometheus scraping.
+    #[serde(default = "default_replication_lag_refresh_interval_ms")]
+    pub replication_lag_refresh_interval_ms: u64,
+    /// Optional window, in milliseconds, before an idle keepalive may force
+    /// durability of an accepted streaming write.
+    ///
+    /// Defaults to `None`, allowing forced durability at any keepalive. `Some`
+    /// guarantees at least this window before a later keepalive can force
+    /// durability. This is a minimum age, not a periodic flush timer.
+    ///
+    /// Terminal table-sync completion forces durability without this wait.
+    /// Shutdown drains buffered and pending writes but does not start a new
+    /// durability barrier for writes that already returned `Accepted`.
+    /// Writes not confirmed durable remain uncheckpointed for replay after
+    /// restart.
+    #[serde(default)]
+    pub settle_durable_interval_ms: Option<u64>,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -406,12 +421,6 @@ pub struct PipelineConfig {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
-    /// Number of milliseconds between periodic table sync monitor checks, such
-    /// as reporting replication lag and checking replication slot validity
-    /// during table copy. Also used by the apply worker's periodic replication
-    /// lag sampling.
-    #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
-    pub table_sync_monitor_refresh_interval_ms: u64,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
@@ -426,6 +435,25 @@ pub struct PipelineConfig {
     /// rely on DDL-change propagation can safely run with this disabled.
     #[serde(default = "default_run_source_migrations")]
     pub run_source_migrations: bool,
+    /// Whether shutdown drains buffered apply work before the apply loop
+    /// exits.
+    ///
+    /// Defaults to `true`: a shutdown request stops new intake, then the apply
+    /// loop flushes its buffered batch and waits for the pending destination
+    /// write result under the usual deadlines and error policies, so the best
+    /// durable position is known before the loop exits.
+    ///
+    /// Set to `false` when the destination stops together with the process
+    /// that embeds ETL and cannot complete writes once shutdown is requested.
+    /// The apply loop then discards its buffered batch, stops waiting for the
+    /// pending write result, and exits paused. Nothing that was not already
+    /// durable is checkpointed, so PostgreSQL replays those events on the next
+    /// start. Initial table copies are not affected, and
+    /// `Destination::shutdown` still runs: the abandoned write is the
+    /// destination's to complete or drop, so that hook must not wait for
+    /// it, or the wait only moves there.
+    #[serde(default = "default_drain_on_shutdown")]
+    pub drain_on_shutdown: bool,
 }
 
 impl PipelineConfig {
@@ -460,9 +488,14 @@ impl PipelineConfig {
     /// changes without moving operating-system reads into per-row hot paths.
     pub const DEFAULT_MEMORY_REFRESH_INTERVAL_MS: u64 = 100;
 
-    /// Default interval in milliseconds between periodic replication monitor
-    /// checks.
+    /// Default interval in milliseconds between copy-slot validity checks.
     pub const DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS: u64 = 10_000;
+
+    /// Default for whether shutdown drains buffered apply work.
+    pub const DEFAULT_DRAIN_ON_SHUTDOWN: bool = true;
+
+    /// Default interval in milliseconds between pipeline-wide lag samples.
+    pub const DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS: u64 = 10_000;
 
     /// Returns the Postgres connection configuration for state storage.
     pub fn store_pg_connection(&self) -> &PgConnectionConfig {
@@ -497,8 +530,11 @@ impl Validate for PipelineConfig {
             self.table_error_retry_max_attempts,
             self.max_copy_connections_per_table,
             self.memory_backpressure.as_ref(),
+        )?;
+        validate_refresh_intervals(
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
+            self.replication_lag_refresh_interval_ms,
         )?;
         validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
@@ -550,8 +586,6 @@ fn validate_pipeline_settings(
     table_error_retry_max_attempts: u32,
     max_copy_connections_per_table: u16,
     memory_backpressure: Option<&MemoryBackpressureConfig>,
-    memory_refresh_interval_ms: u64,
-    table_sync_monitor_refresh_interval_ms: u64,
 ) -> Result<(), ValidationError> {
     batch.validate()?;
 
@@ -568,18 +602,26 @@ fn validate_pipeline_settings(
         memory_backpressure.validate()?;
     }
 
-    if memory_refresh_interval_ms == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "memory_refresh_interval_ms".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
-    }
+    Ok(())
+}
 
-    if table_sync_monitor_refresh_interval_ms == 0 {
-        return Err(ValidationError::InvalidFieldValue {
-            field: "table_sync_monitor_refresh_interval_ms".to_owned(),
-            constraint: "must be greater than 0".to_owned(),
-        });
+/// Validates the positive intervals used by periodic pipeline monitors.
+pub fn validate_refresh_intervals(
+    memory_refresh_interval_ms: u64,
+    table_sync_monitor_refresh_interval_ms: u64,
+    replication_lag_refresh_interval_ms: u64,
+) -> Result<(), ValidationError> {
+    for (field, interval_ms) in [
+        ("memory_refresh_interval_ms", memory_refresh_interval_ms),
+        ("table_sync_monitor_refresh_interval_ms", table_sync_monitor_refresh_interval_ms),
+        ("replication_lag_refresh_interval_ms", replication_lag_refresh_interval_ms),
+    ] {
+        if interval_ms == 0 {
+            return Err(ValidationError::InvalidFieldValue {
+                field: field.to_owned(),
+                constraint: "must be greater than 0".to_owned(),
+            });
+        }
     }
 
     Ok(())
@@ -630,12 +672,21 @@ const fn default_table_sync_monitor_refresh_interval_ms() -> u64 {
     PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS
 }
 
+/// Returns the default interval between pipeline-wide lag samples.
+const fn default_replication_lag_refresh_interval_ms() -> u64 {
+    PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS
+}
+
 fn default_memory_backpressure() -> Option<MemoryBackpressureConfig> {
     Some(MemoryBackpressureConfig::default())
 }
 
 const fn default_run_source_migrations() -> bool {
     true
+}
+
+const fn default_drain_on_shutdown() -> bool {
+    PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN
 }
 
 /// Same as [`PipelineConfig`] but without secrets. This type implements
@@ -664,14 +715,6 @@ pub struct PipelineConfigWithoutSecrets {
     /// Batch processing configuration.
     #[serde(default)]
     pub batch: BatchConfig,
-    /// Optional window, in milliseconds, before an idle keepalive may force
-    /// durability of an accepted streaming write.
-    ///
-    /// `None` allows forced durability at any keepalive. `Some` guarantees at
-    /// least this window of time before a later keepalive can force durability.
-    /// See the field of the same name on [`PipelineConfig`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub settle_durable_interval_ms: Option<u64>,
     /// Number of milliseconds between one retry and another for timed worker
     /// retries.
     ///
@@ -707,9 +750,32 @@ pub struct PipelineConfigWithoutSecrets {
     ///
     /// One shared sampler drives dynamic batch targets and emergency
     /// backpressure. Batch hot paths reuse each snapshot instead of reading
-    /// operating-system or cgroup files per row.
+    /// operating-system or cgroup files per row. Must be positive; defaults to
+    /// 100 milliseconds.
     #[serde(default = "default_memory_refresh_interval_ms")]
     pub memory_refresh_interval_ms: u64,
+    /// Milliseconds between replication-slot validity checks during table copy.
+    ///
+    /// Must be positive; defaults to 10,000 milliseconds. Controls how quickly
+    /// an unusable copy slot is detected, independently of lag sampling.
+    #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
+    pub table_sync_monitor_refresh_interval_ms: u64,
+    /// Milliseconds between pipeline-wide replication lag samples.
+    ///
+    /// One sampler measures all apply, table-copy, and table-sync CDC workers.
+    /// Must be positive; defaults to 10,000 milliseconds. Independent of copy
+    /// slot validity checks and Prometheus scraping.
+    #[serde(default = "default_replication_lag_refresh_interval_ms")]
+    pub replication_lag_refresh_interval_ms: u64,
+    /// Optional window, in milliseconds, before an idle keepalive may force
+    /// durability of an accepted streaming write.
+    ///
+    /// Defaults to `None`, allowing forced durability at any keepalive. `Some`
+    /// guarantees at least this window before a later keepalive can force
+    /// durability. This is a minimum age, not a periodic flush timer.
+    /// See the field of the same name on [`PipelineConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settle_durable_interval_ms: Option<u64>,
     /// Optional memory-based backpressure configuration.
     ///
     /// `None` disables memory backpressure. When omitted, this defaults to
@@ -719,10 +785,6 @@ pub struct PipelineConfigWithoutSecrets {
     /// Selection rules for tables participating in replication.
     #[serde(default)]
     pub table_sync_copy: TableSyncCopyConfig,
-    /// Number of milliseconds between periodic table sync monitor checks. See
-    /// the field of the same name on [`PipelineConfig`].
-    #[serde(default = "default_table_sync_monitor_refresh_interval_ms")]
-    pub table_sync_monitor_refresh_interval_ms: u64,
     /// Behavior when the main replication slot is found to be invalidated.
     #[serde(default)]
     pub invalidated_slot_behavior: InvalidatedSlotBehavior,
@@ -730,6 +792,10 @@ pub struct PipelineConfigWithoutSecrets {
     /// field of the same name on [`PipelineConfig`].
     #[serde(default = "default_run_source_migrations")]
     pub run_source_migrations: bool,
+    /// Whether shutdown drains buffered apply work. See the field of the same
+    /// name on [`PipelineConfig`].
+    #[serde(default = "default_drain_on_shutdown")]
+    pub drain_on_shutdown: bool,
 }
 
 impl Validate for PipelineConfigWithoutSecrets {
@@ -741,8 +807,11 @@ impl Validate for PipelineConfigWithoutSecrets {
             self.table_error_retry_max_attempts,
             self.max_copy_connections_per_table,
             self.memory_backpressure.as_ref(),
+        )?;
+        validate_refresh_intervals(
             self.memory_refresh_interval_ms,
             self.table_sync_monitor_refresh_interval_ms,
+            self.replication_lag_refresh_interval_ms,
         )?;
         validate_source_tls_config(&self.pg_connection.tls)?;
         validate_table_error_retry_delay_ms(self.table_error_retry_delay_ms)?;
@@ -759,17 +828,19 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             store_pg_connection: value.store_pg_connection.map(Into::into),
             replication_slot: value.replication_slot,
             batch: value.batch,
-            settle_durable_interval_ms: value.settle_durable_interval_ms,
             table_error_retry_delay_ms: value.table_error_retry_delay_ms,
             table_error_retry_max_attempts: value.table_error_retry_max_attempts,
             max_table_sync_workers: value.max_table_sync_workers,
             max_copy_connections_per_table: value.max_copy_connections_per_table,
             memory_refresh_interval_ms: value.memory_refresh_interval_ms,
+            table_sync_monitor_refresh_interval_ms: value.table_sync_monitor_refresh_interval_ms,
+            replication_lag_refresh_interval_ms: value.replication_lag_refresh_interval_ms,
+            settle_durable_interval_ms: value.settle_durable_interval_ms,
             memory_backpressure: value.memory_backpressure,
             table_sync_copy: value.table_sync_copy,
-            table_sync_monitor_refresh_interval_ms: value.table_sync_monitor_refresh_interval_ms,
             invalidated_slot_behavior: value.invalidated_slot_behavior,
             run_source_migrations: value.run_source_migrations,
+            drain_on_shutdown: value.drain_on_shutdown,
         }
     }
 }
@@ -926,6 +997,72 @@ mod tests {
         }
     }
 
+    /// Missing lag intervals use their own default even with custom copy
+    /// checks.
+    #[test]
+    fn pipeline_refresh_interval_defaults_and_overrides() {
+        for (copy_ms, lag_ms) in [(None, None), (Some(1_000), None), (Some(1_000), Some(30_000))] {
+            let mut json = pipeline_config_json();
+            if let Some(copy_ms) = copy_ms {
+                json["table_sync_monitor_refresh_interval_ms"] = copy_ms.into();
+            }
+            if let Some(lag_ms) = lag_ms {
+                json["replication_lag_refresh_interval_ms"] = lag_ms.into();
+            }
+            let config: PipelineConfig = serde_json::from_value(json.clone()).unwrap();
+            let without_secrets: PipelineConfigWithoutSecrets =
+                serde_json::from_value(json).unwrap();
+            let converted = PipelineConfigWithoutSecrets::from(config.clone());
+
+            assert_eq!(config.memory_refresh_interval_ms, 100);
+            assert_eq!(config.table_sync_monitor_refresh_interval_ms, copy_ms.unwrap_or(10_000));
+            assert_eq!(config.replication_lag_refresh_interval_ms, lag_ms.unwrap_or(10_000));
+            for without_secrets in [without_secrets, converted] {
+                assert_eq!(
+                    without_secrets.memory_refresh_interval_ms,
+                    config.memory_refresh_interval_ms
+                );
+                assert_eq!(
+                    without_secrets.table_sync_monitor_refresh_interval_ms,
+                    config.table_sync_monitor_refresh_interval_ms
+                );
+                assert_eq!(
+                    without_secrets.replication_lag_refresh_interval_ms,
+                    config.replication_lag_refresh_interval_ms
+                );
+                without_secrets.validate().unwrap();
+            }
+            config.validate().unwrap();
+        }
+    }
+
+    /// Periodic monitors reject zero before constructing Tokio intervals.
+    #[test]
+    fn pipeline_refresh_intervals_must_be_positive() {
+        for field in [
+            "memory_refresh_interval_ms",
+            "table_sync_monitor_refresh_interval_ms",
+            "replication_lag_refresh_interval_ms",
+        ] {
+            for interval_ms in [0, 1] {
+                let mut json = pipeline_config_json();
+                json[field] = interval_ms.into();
+                let config: PipelineConfig = serde_json::from_value(json).unwrap();
+                let without_secrets = PipelineConfigWithoutSecrets::from(config.clone());
+
+                for result in [config.validate(), without_secrets.validate()] {
+                    if interval_ms == 0 {
+                        let ValidationError::InvalidFieldValue { field: actual_field, .. } =
+                            result.unwrap_err();
+                        assert_eq!(actual_field, field);
+                    } else {
+                        result.unwrap();
+                    }
+                }
+            }
+        }
+    }
+
     /// Omitting the durability interval leaves idle settlement immediate.
     #[test]
     fn pipeline_settle_durable_interval_defaults_to_none() {
@@ -1046,6 +1183,36 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_config_deserializes_drain_on_shutdown() {
+        let pg_connection = r#""pg_connection": {
+                "host": "localhost",
+                "hostaddr": null,
+                "port": 5432,
+                "name": "postgres",
+                "username": "postgres",
+                "password": null,
+                "tls": {
+                    "trusted_root_certs": "",
+                    "enabled": false
+                }
+            }"#;
+
+        // A configuration written before the field existed keeps draining.
+        let json = format!(r#"{{"id": 1, "publication_name": "publication", {pg_connection}}}"#);
+        let config: PipelineConfig = serde_json::from_str(&json).unwrap();
+        assert!(config.drain_on_shutdown);
+        assert!(PipelineConfigWithoutSecrets::from(config).drain_on_shutdown);
+
+        let json = format!(
+            r#"{{"id": 1, "publication_name": "publication", {pg_connection},
+            "drain_on_shutdown": false}}"#
+        );
+        let config: PipelineConfig = serde_json::from_str(&json).unwrap();
+        assert!(!config.drain_on_shutdown);
+        assert!(!PipelineConfigWithoutSecrets::from(config).drain_on_shutdown);
+    }
+
+    #[test]
     fn table_sync_copy_serialization_roundtrips_variants() {
         for selection in [
             TableSyncCopyConfig::SkipAllTables,
@@ -1083,7 +1250,6 @@ mod tests {
             store_pg_connection: None,
             replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig::default(),
-            settle_durable_interval_ms: None,
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
             max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
@@ -1091,10 +1257,14 @@ mod tests {
             memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+            replication_lag_refresh_interval_ms:
+                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            settle_durable_interval_ms: None,
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
             run_source_migrations: true,
+            drain_on_shutdown: true,
         };
 
         assert_eq!(config.store_pg_connection().host, "replica.local");
@@ -1110,7 +1280,6 @@ mod tests {
             store_pg_connection: Some(pg_connection("primary.local", 6432)),
             replication_slot: ReplicationSlotConfig::default(),
             batch: BatchConfig::default(),
-            settle_durable_interval_ms: None,
             table_error_retry_delay_ms: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_DELAY_MS,
             table_error_retry_max_attempts: PipelineConfig::DEFAULT_TABLE_ERROR_RETRY_MAX_ATTEMPTS,
             max_table_sync_workers: PipelineConfig::DEFAULT_MAX_TABLE_SYNC_WORKERS,
@@ -1118,10 +1287,14 @@ mod tests {
             memory_refresh_interval_ms: PipelineConfig::DEFAULT_MEMORY_REFRESH_INTERVAL_MS,
             table_sync_monitor_refresh_interval_ms:
                 PipelineConfig::DEFAULT_TABLE_SYNC_MONITOR_REFRESH_INTERVAL_MS,
+            replication_lag_refresh_interval_ms:
+                PipelineConfig::DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS,
+            settle_durable_interval_ms: None,
             memory_backpressure: Some(MemoryBackpressureConfig::default()),
             table_sync_copy: TableSyncCopyConfig::default(),
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
             run_source_migrations: true,
+            drain_on_shutdown: true,
         };
 
         assert_eq!(config.store_pg_connection().host, "primary.local");

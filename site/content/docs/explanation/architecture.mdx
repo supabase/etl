@@ -105,7 +105,12 @@ and operating guidance.
 
 ### Pipeline
 
-The **central orchestrator** that manages the entire replication process. It spawns workers, coordinates state transitions, and handles shutdown.
+The **central orchestrator** manages the entire replication process. It spawns
+workers, coordinates state transitions, and handles shutdown. During controlled
+shutdown, it joins the apply worker before table-sync workers, then shuts down
+the destination. Lag and memory samplers remain alive through destination
+cleanup. See [Shutdown](/guides/standalone-replicator/#shutdown) for failure and
+recovery behavior.
 
 ### Destination
 
@@ -142,21 +147,21 @@ before ETL saves the corresponding checkpoint. Destinations can use idempotent
 writes or deduplication to keep replay from changing the final result.
 ETL also limits replay through:
 
-- **Controlled shutdown**: The pipeline stops intake, drains apply work, and joins tasks. Interrupted initial copies restart from a fresh snapshot. Failures return immediately and request abort of remaining owned tasks; persisted checkpoints still govern recovery
+- **Controlled shutdown**: The pipeline stops intake, drains apply work (or abandons it for replay when `drain_on_shutdown` is disabled), and joins tasks. Interrupted initial copies restart from a fresh snapshot. Failures return immediately and request abort of remaining owned tasks; persisted checkpoints still govern recovery
 - **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
 
 ### Handling Duplicates
 
 Destinations should make writes **idempotent** using the source table's replica
 identity or primary key plus ETL's event ordering metadata. For append-style CDC
-tables, persist a sequence key derived from `commit_lsn` and `tx_ordinal`. For
+tables, persist an event position derived from `commit_lsn` and `tx_ordinal`. For
 current-state tables, upsert by the destination's chosen row key so replayed
 events converge to the same state.
 
 The `commit_lsn` and `tx_ordinal` fields on sequenced events provide stable
 **ordering and replay detection**. Destinations such as ClickHouse and BigQuery
 use the pair to keep replayed events ordered. See [Event
-Types](/explanation/events/#understanding-event-sequence-keys) for details.
+Types](/explanation/events/#understanding-event-positions) for details.
 
 ## Table States
 

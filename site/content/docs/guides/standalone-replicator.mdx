@@ -157,6 +157,44 @@ ClickHouse password:
 export APP_DESTINATION__BIG_QUERY__SERVICE_ACCOUNT_KEY='placeholder-service-account-json'
 ```
 
+## Pipeline intervals
+
+The pipeline's intervals are independent. Omitted settings use these defaults:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `memory_refresh_interval_ms` | `100` (100 ms) | Sample memory for batch sizing and emergency backpressure. |
+| `table_sync_monitor_refresh_interval_ms` | `10000` (10 s) | Check replication-slot validity during initial table copy. |
+| `replication_lag_refresh_interval_ms` | `10000` (10 s) | Sample lag for all apply and table-sync workers, during both copy and CDC. |
+| `settle_durable_interval_ms` | `null` (`None`) | Allow an eligible idle keepalive to force durability without an additional age threshold. |
+
+All three refresh intervals must be greater than zero. The 100 ms memory
+interval keeps backpressure responsive without reading operating-system files
+on the hot path. The 10 s copy-slot interval balances invalid-slot detection
+against one check per copying table. Lag sampling uses one query per pipeline
+per tick; the 10 s default provides useful monitoring resolution without a
+query per worker. Lower lag intervals improve freshness at the cost of more
+source queries. They do not control replication batching, PostgreSQL feedback,
+or the Prometheus scrape interval.
+
+For example, sample lag every 5 s while keeping the other defaults:
+
+```yaml title="prod.yaml"
+pipeline:
+  replication_lag_refresh_interval_ms: 5000
+```
+
+A numeric `settle_durable_interval_ms` is the minimum age of an accepted
+streaming write before a later eligible keepalive may force durability. It is
+not a periodic flush timer or an upper bound on durability latency. `0` adds
+no age threshold, like `null`. Terminal table-sync completion forces durability
+without this wait; shutdown does not introduce a new durability barrier.
+
+Previously, `table_sync_monitor_refresh_interval_ms` also controlled lag
+sampling. If you customized it for metric freshness, set
+`replication_lag_refresh_interval_ms` explicitly when upgrading; otherwise lag
+sampling now uses its independent 10 s default.
+
 ## Run the replicator
 
 `APP_CONFIG_DIR` must be an absolute path:
@@ -180,11 +218,22 @@ Initialization errors return immediately.
 
 Once running, the pipeline stops intake and drains pending apply work under
 existing retry and durability rules. Interrupted initial copies restart from a
-fresh snapshot. Workers finish before destination cleanup and background tasks
-are joined. Enabled probes report stopping while liveness remains healthy.
+fresh snapshot. The pipeline joins the apply worker, then table-sync workers,
+then shuts down the destination. Lag and memory sampling remain alive through
+this sequence and are stopped and joined afterward. Enabled probes report
+stopping while liveness remains healthy.
 
-Requested task cancellations are silently accepted. Panics, task errors, and
-unexpected cancellations return immediately, requesting abort of remaining
+Lag and memory monitors are optional: a monitor panic is logged without
+stopping replication. If lag sampling stops, lag becomes unavailable. If memory
+sampling stops, memory gauges become unavailable and emergency memory
+backpressure is released; batch sizing retains the last sampled capacity.
+A failed PostgreSQL lag query marks lag unavailable and retries. Background
+schema pruning is also best-effort; if it fails, obsolete schema versions may
+be retained. PostgreSQL feedback remains required: sender failure stops the
+current replication attempt and follows the worker's retry policy.
+
+Requested task cancellations are silently accepted. Worker panics, task errors,
+and unexpected cancellations return immediately, requesting abort of remaining
 owned tasks without awaiting further cleanup. This does not roll back writes
 or guarantee that native work has stopped. Recovery uses persisted checkpoints;
 uncheckpointed work may be replayed even after a successful exit.
@@ -249,6 +298,25 @@ non-production environment before operating the replicator on production data.
   process memory, replication lag, and terminal errors.
 - Back up configuration metadata, but never include credentials in diagnostic
   bundles or public issues.
+
+### Replication lag
+
+`etl_replication_wal_lag_bytes` measures replication lag: the source WAL head
+minus progress safe to acknowledge, including durable destination work and idle
+WAL. `etl_replication_receive_wal_lag_bytes` measures receive lag: the same
+head minus the worker's consumed position. The source head is durably flushed
+WAL on a primary and replayed WAL on a standby.
+
+Labels identify `pipeline_id`, `worker_type` (`apply` or `table_sync`), and
+`replication_path` (`copy` or `cdc`). Table-sync copy and CDC lag are separate
+maxima, so initial-copy backlog is distinct from catchup in the apply loop.
+Copy exposes only replication lag, held at its fixed snapshot boundary through
+final durability and the wait to start CDC. Copying rows does not consume that
+WAL backlog.
+
+These are WAL address distances, not payload sizes or elapsed latency. Unknown
+values are **-1**; filter them out rather than treating them as zero. Query
+PostgreSQL directly for slot acknowledgment and retention details.
 
 See [Architecture](/explanation/architecture/) for the runtime model and
 [Extension Points](/explanation/traits/) if you need a custom destination or

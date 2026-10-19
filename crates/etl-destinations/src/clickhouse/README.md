@@ -1,8 +1,8 @@
 # ClickHouse Destination
 
-> **Private alpha.** The managed service admits a limited set of users; the
-> open-source destination is unrestricted. Expect operational requirements to
-> change.
+> **Public alpha.** This status applies to the managed service; local and
+> self-hosted use of the open-source destination is unrestricted. Expect
+> operational requirements to change.
 
 ## Requirements
 

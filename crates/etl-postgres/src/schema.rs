@@ -346,7 +346,11 @@ pub struct ColumnSchema {
     pub typ: Type,
     /// Type-specific modifier value (e.g., length for varchar).
     pub modifier: TypeModifier,
-    /// The 1-based ordinal position of the column in the table.
+    /// The PostgreSQL attribute number (`pg_attribute.attnum`) in DDL-aware
+    /// schemas. Stable across renames; dropped columns leave gaps and their
+    /// numbers are not reused within the same table. This is not an index
+    /// into a row. Legacy snapshots migrated from positional metadata
+    /// instead retain their original 1-based column order.
     pub ordinal_position: i32,
     /// The 1-based ordinal position of this column in the primary key, or None
     /// if not a primary key.

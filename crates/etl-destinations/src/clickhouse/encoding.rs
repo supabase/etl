@@ -29,7 +29,7 @@ pub(crate) enum ClickHouseValue {
     /// Unsigned 64-bit integer, used for MergeTree ordering metadata.
     UInt64(u64),
     /// Unsigned 128-bit integer, used for the ReplacingMergeTree `_etl_version`
-    /// column (the packed `EventSequenceKey`).
+    /// column (the packed `EventPosition`).
     UInt128(u128),
     Float32(f32),
     Float64(f64),

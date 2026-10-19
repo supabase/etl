@@ -3,10 +3,8 @@ import { Mermaid } from '@/components/mermaid';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import {
   ArchiveX,
-  BadgeCheck,
   Blocks,
   BookOpenText,
-  Construction,
   Database,
   DatabaseZap,
   FlaskConical,
@@ -28,9 +26,7 @@ const docPathIcons: Record<string, LucideIcon> = {
 };
 
 const destinationStatuses = {
-  stable: { icon: BadgeCheck, label: 'Stable' },
-  'private-alpha': { icon: FlaskConical, label: 'Private alpha' },
-  'in-progress': { icon: Construction, label: 'In progress' },
+  'public-alpha': { icon: FlaskConical, label: 'Public alpha' },
   deprecated: { icon: ArchiveX, label: 'Deprecated' },
 } as const;
 

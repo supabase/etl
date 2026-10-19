@@ -212,7 +212,7 @@ Sequenced ETL events include a commit LSN and transaction-local ordinal:
 
 Multiple events in the same transaction share the same `commit_lsn`; their
 `tx_ordinal` values distinguish their order. Relation events are connection-local
-metadata and do not have an event sequence key.
+metadata and do not have an event position.
 
 ## Persisted State
 
