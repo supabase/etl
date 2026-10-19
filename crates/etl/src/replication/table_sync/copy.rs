@@ -16,7 +16,6 @@ use tokio::{
     pin,
     sync::{Mutex, watch},
 };
-use tokio_postgres::types::PgLsn;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -39,13 +38,13 @@ use crate::{
         ETL_TABLE_COPY_ROWS_TOTAL, REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL, WRITE_STATUS_LABEL,
     },
     postgres::{
-        OutOfBandSourcePool, TableCopyRow, TableCopyStream,
+        TableCopyRow, TableCopyStream,
         client::{
             ChildPgReplicationClient, CtidPartition, PgChildReplicationTransaction,
             PgReplicationTransaction, PostgresConnectionUpdate,
         },
     },
-    replication::table_sync::monitor::TableSyncMonitor,
+    replication::{ReplicationLagMonitor, table_sync::monitor::TableSyncMonitor},
     runtime::{
         BatchMemoryGovernor, MemoryMonitor,
         concurrency::{
@@ -231,8 +230,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     publication_name: Option<&str>,
     slot_name: String,
     max_copy_connections: u16,
-    consistent_point: PgLsn,
-    out_of_band_source_pool: OutOfBandSourcePool,
+    replication_lag_monitor: ReplicationLagMonitor,
     table_sync_monitor_interval: Duration,
     batch_config: BatchConfig,
     shutdown_token: CancellationToken,
@@ -288,8 +286,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
     let mut monitor = TableSyncMonitor::spawn(
         table_id,
         slot_name.clone(),
-        consistent_point,
-        out_of_band_source_pool,
+        replication_lag_monitor,
         table_sync_monitor_interval,
     );
 
@@ -346,10 +343,13 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
             // and join before releasing the parent snapshot transaction.
             _ = shutdown_token.cancelled() => {
                 stop_table_copy_tasks(&mut tasks, monitor).await?;
+
                 return Ok(TableCopyResult::Shutdown);
             }
 
-            _ = monitor.wait_for_slot_invalidated() => {
+            result = monitor.wait_for_slot_invalidated() => {
+                result?;
+
                 info!(
                     table_id = table_id.0,
                     slot_name,
@@ -368,6 +368,7 @@ pub(crate) async fn table_copy<D: Destination + Clone + Send + 'static>(
                         slot_name, table_id.0
                     )
                 );
+
                 return Err(error);
             }
 
@@ -493,7 +494,7 @@ async fn table_copy_worker<D>(
 where
     D: Destination + Clone,
 {
-    let child_replication_transaction =
+    let mut child_replication_transaction =
         child_replication_client.begin_transaction(&snapshot_id).await?;
     let mut total_progress = TableCopyProgress::default();
 
@@ -509,7 +510,7 @@ where
 
         let partition_progress = table_copy_partition_rows(
             &activity_handle,
-            &child_replication_transaction,
+            &mut child_replication_transaction,
             &batch_id_generator,
             table_id,
             replicated_table_schema.clone(),
@@ -529,7 +530,7 @@ where
 #[expect(clippy::too_many_arguments)]
 async fn table_copy_partition_rows<D>(
     activity_handle: &ActivityHandle,
-    child_replication_transaction: &PgChildReplicationTransaction<'_>,
+    child_replication_transaction: &mut PgChildReplicationTransaction<'_>,
     batch_id_generator: &TableCopyBatchIdGenerator,
     table_id: TableId,
     replicated_table_schema: ReplicatedTableSchema,

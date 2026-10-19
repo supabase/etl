@@ -58,7 +58,7 @@ use crate::{
     },
     pipeline::PipelineId,
     postgres::{
-        OutOfBandSourcePool, ReplicationMessageStream,
+        ReplicationMessageStream,
         client::{PgReplicationClient, PostgresConnectionUpdate},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
@@ -71,13 +71,12 @@ use crate::{
         },
     },
     replication::{
-        PreviousRelationMasks, TableDecodingState, WorkerType,
-        apply::tasks::{ApplyLoopTasks, ReplicationLagMetrics},
-        state::TableState,
+        PreviousRelationMasks, ReplicationLagMetrics, ReplicationLagMonitor, TableDecodingState,
+        WorkerType, apply::tasks::ApplyLoopTasks, state::TableState,
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
-        TableSyncWorkerState,
+        TableSyncWorkerState, build_error_handling_policy,
         concurrency::{
             MemoryBackpressureStream, ShutdownResult, apply_worker_apply_stream_id,
             table_sync_worker_apply_stream_id, with_shutdown,
@@ -120,6 +119,7 @@ const MIN_KEEP_ALIVE_DEADLINE_DURATION: Duration = Duration::from_millis(100);
 /// accumulates the next batch. Register both positions so each receives a share
 /// of the configured decoded-batch capacity.
 const APPLY_LOOP_BATCH_SLOTS: usize = 2;
+
 /// Result type for the apply loop execution.
 ///
 /// Indicates the reason why the apply loop terminated, enabling appropriate
@@ -175,8 +175,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) store: S,
     /// Destination where replicated data is written.
     pub(crate) destination: D,
-    /// Shared pool for out-of-band source database queries.
-    pub(crate) out_of_band_source_pool: OutOfBandSourcePool,
+    /// Shared source sampler and copy/CDC progress registrations.
+    pub(crate) replication_lag_monitor: ReplicationLagMonitor,
     /// Cancellation token for graceful termination.
     pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -611,11 +611,8 @@ impl ApplyLoopState {
 
     /// Snapshots apply-loop progress into the replication lag metrics.
     fn update_replication_lag_metrics_from_progress(&self) {
-        self.replication_lag_metrics.update_progress(
-            self.replication_progress.last_received_lsn(),
-            self.replication_progress.last_flush_lsn(),
-            self.checkpoint_lsn(),
-        );
+        self.replication_lag_metrics
+            .update_progress(self.replication_progress.last_received_lsn(), self.checkpoint_lsn());
     }
 
     /// Returns the last received LSN that should be reported as written to the
@@ -834,7 +831,7 @@ where
         replication_client: &PgReplicationClient,
         schema_store: S,
         destination: D,
-        out_of_band_source_pool: OutOfBandSourcePool,
+        replication_lag_monitor: ReplicationLagMonitor,
         worker_context: WorkerContext<S, D>,
         shutdown_token: CancellationToken,
         memory_monitor: MemoryMonitor,
@@ -900,7 +897,7 @@ where
         let bootstrap_snapshot_id = SnapshotId::before_lsn(start_lsn);
 
         let replication_progress = ReplicationProgress::new(start_lsn);
-        let replication_lag_metrics = ReplicationLagMetrics::new(start_lsn);
+        let replication_lag_metrics = replication_lag_monitor.register_cdc(worker_type, start_lsn);
 
         let activity_registration =
             ActivityRegistration::register(ActivityKind::WalApply { wal_sender_timeout });
@@ -910,14 +907,9 @@ where
         let (feedback_handle, feedback_sender_future) = feedback
             .expect("A keep-alive deadline must create a feedback handle and sender future");
 
-        let table_sync_monitor_refresh_interval =
-            Duration::from_millis(config.table_sync_monitor_refresh_interval_ms);
         let tasks = ApplyLoopTasks::start(
             schema_store.clone(),
-            out_of_band_source_pool,
-            replication_lag_metrics.clone(),
             worker_type,
-            table_sync_monitor_refresh_interval,
             feedback_handle,
             feedback_sender_future,
         );
@@ -958,7 +950,17 @@ where
             state,
         };
 
-        let result = apply_loop.run(replication_client, replication_message_stream).await?;
+        let result = match apply_loop.run(replication_client, replication_message_stream).await {
+            Ok(result) => result,
+            Err(error) => {
+                return Err(Self::settle_pending_flush_on_error(
+                    error,
+                    apply_loop.state.pending_flush_result.take(),
+                    &apply_loop.shutdown_token,
+                )
+                .await);
+            }
+        };
 
         // We tear down all the tasks of the apply loop.
         apply_loop.tasks.teardown().await?;
@@ -1015,6 +1017,48 @@ where
         }
     }
 
+    /// Observes dispatched work before a failed attempt can replay or restart
+    /// copy.
+    ///
+    /// Source failures exit [`ApplyLoop::run`] without entering shutdown drain.
+    /// Only retryable failures need this boundary. Unlike normal flush
+    /// handling, this does not checkpoint, hand tables off, or dispatch the
+    /// buffered batch. Shutdown can interrupt the wait because it also
+    /// prevents automatic retry.
+    async fn settle_pending_flush_on_error(
+        error: EtlError,
+        pending_flush_result: Option<PendingWriteEventsResult>,
+        shutdown_token: &CancellationToken,
+    ) -> EtlError {
+        if !build_error_handling_policy(&error).should_retry() {
+            return error;
+        }
+        let Some(pending_flush_result) = pending_flush_result else {
+            return error;
+        };
+
+        warn!(
+            error = %error,
+            "waiting for pending destination work before retrying failed apply loop"
+        );
+
+        let ShutdownResult::Ok(completed) = with_shutdown!(pending_flush_result, shutdown_token)
+        else {
+            return error;
+        };
+
+        // This attempt cannot publish progress, so either successful status is
+        // sufficient. Replay will establish durability before checkpointing.
+        let (_, _, result) = completed.into_parts_with_completion();
+
+        match result {
+            // The destination error controls retry policy; keep the source failure
+            // as context without hiding a terminal write failure behind it.
+            Err(destination_error) => EtlError::from(vec![destination_error, error]),
+            Ok(_) => error,
+        }
+    }
+
     /// Runs one normal apply-loop iteration while the worker is still actively
     /// processing.
     ///
@@ -1024,7 +1068,7 @@ where
     ///
     /// After that preflight, this keeps the priority order explicit:
     /// 1. Shutdown requests.
-    /// 2. PostgreSQL connection lifecycle updates.
+    /// 2. PostgreSQL connection or feedback-sender failure.
     /// 3. Pending destination flush results.
     /// 4. Memory-pressure batch flushing.
     /// 5. Batch flush deadline expiry.
@@ -1034,9 +1078,8 @@ where
     /// sending while any handler below is awaiting work. Incoming PostgreSQL
     /// keepalives drive idle durability settlement; while intake is
     /// backpressured, both settlement and publication of fresh progress wait
-    /// for intake to resume. A failed feedback sender is detected by the next
-    /// keepalive response enqueue or a source connection failure; it does not
-    /// interrupt an in-flight handler.
+    /// for intake to resume. Feedback channel closure wakes the iteration
+    /// even when intake is paused; it does not interrupt an in-flight handler.
     ///
     /// Each branch performs its work and then relies on
     /// [`Self::try_finish_active_iteration`] to decide whether the loop may
@@ -1077,6 +1120,10 @@ where
             changed = connection_updates_rx.changed() => {
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
+
+            // Feedback is required for a live replication connection, even
+            // when source intake is paused by memory backpressure.
+            result = self.tasks.wait_for_feedback_failure() => result?,
 
             // PRIORITY 3: Handle the pending destination write result.
             // Finishing an in-flight flush may advance progress and unblock a
@@ -1125,7 +1172,7 @@ where
     /// intake.
     ///
     /// Priority order:
-    /// 1. PostgreSQL connection lifecycle updates.
+    /// 1. PostgreSQL connection or feedback-sender failure.
     /// 2. Pending destination flush results.
     /// 3. Memory-pressure batch flushing.
     /// 4. Batch flush deadline expiry.
@@ -1159,6 +1206,10 @@ where
             changed = connection_updates_rx.changed() => {
                 Self::handle_connection_update(changed, connection_updates_rx)?;
             }
+
+            // Feedback is required for a live replication connection, even
+            // when source intake is paused by memory backpressure.
+            result = self.tasks.wait_for_feedback_failure() => result?,
 
             // PRIORITY 2: Handle the pending destination write result.
             apply_result = Self::wait_for_flush_result(self.state.pending_flush_result.as_mut()), if self.state.pending_flush_result.is_some() => {
@@ -1921,10 +1972,8 @@ where
                 // current WAL end; the monotonic updates intentionally ignore
                 // the zero-valued envelopes.
                 let start_lsn = PgLsn::from(message.wal_start());
-                self.state.update_last_received_lsn(start_lsn);
-
                 let end_lsn = PgLsn::from(message.wal_end());
-                self.state.update_last_received_lsn(end_lsn);
+                self.state.update_last_received_lsn(start_lsn.max(end_lsn));
 
                 debug!(
                     %start_lsn,
@@ -4075,7 +4124,7 @@ mod apply_worker {
             table_id,
             ctx.store.clone(),
             ctx.destination.clone(),
-            ctx.out_of_band_source_pool.clone(),
+            ctx.replication_lag_monitor.clone(),
             ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),
@@ -4298,31 +4347,147 @@ mod table_sync_worker {
 mod tests {
     use std::{collections::HashSet, sync::Arc, time::Instant};
 
+    use futures::FutureExt;
     use tokio_postgres::types::{PgLsn, Type};
+    use tokio_util::sync::CancellationToken;
 
     use crate::{
         activity::{ActivityKind, ActivityRegistration},
         data::SizeHint,
-        destination::{ApplyLoopAsyncResultMetadata, WriteEventsDurability, WriteEventsResult},
+        destination::{
+            ApplyLoopAsyncResultMetadata, DestinationWriteStatus, WriteEventsDurability,
+            WriteEventsResult,
+        },
+        error::ErrorKind,
+        etl_error,
         event::Event,
         replication::{
-            TableDecodingState,
+            ReplicationLagMetrics, TableDecodingState,
             apply::{
-                ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
-                schema_cleanup_retention_snapshot_id, tasks::ReplicationLagMetrics,
+                ApplyLoop, ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
+                schema_cleanup_retention_snapshot_id,
             },
             state::{StoredTableDecodingState, TableState},
         },
+        runtime::build_error_handling_policy,
         schema::{
             ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId,
             TableId, TableName, TableSchema,
         },
         source_payload_metadata::StreamingPayloadMetadata,
+        store::MemoryStore,
+        test_utils::memory_destination::MemoryDestination,
     };
+
+    /// Apply loop type used to test retry handling independently of a pipeline.
+    type TestApplyLoop = ApplyLoop<MemoryStore, MemoryDestination<MemoryStore>>;
 
     /// Creates a synthetic composite snapshot ID for tests.
     fn test_snapshot_id(commit_lsn: u64, message_lsn: u64) -> SnapshotId {
         SnapshotId::new(PgLsn::from(commit_lsn), PgLsn::from(message_lsn))
+    }
+
+    /// Creates completion metadata for a pending batch in retry tests.
+    fn flush_metadata(durability: WriteEventsDurability) -> ApplyLoopAsyncResultMetadata {
+        ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: Some(100.into()),
+            durability,
+            event_count: 1,
+            relation_table_ids: HashSet::new(),
+            streaming_payload_metadata: StreamingPayloadMetadata::default(),
+            dispatched_at: Instant::now(),
+        }
+    }
+
+    /// A failed attempt waits for completion in either durability mode.
+    /// Accepted results need no extra barrier because the attempt cannot
+    /// checkpoint them.
+    #[test]
+    fn retry_waits_for_dispatched_completion() {
+        for durability in [WriteEventsDurability::MayDefer, WriteEventsDurability::RequireDurable] {
+            for status in [DestinationWriteStatus::Durable, DestinationWriteStatus::Accepted] {
+                let token = CancellationToken::new();
+                let (result, pending) = WriteEventsResult::new(flush_metadata(durability));
+
+                let settled = TestApplyLoop::settle_pending_flush_on_error(
+                    etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
+                    Some(pending),
+                    &token,
+                );
+                tokio::pin!(settled);
+                assert!(settled.as_mut().now_or_never().is_none());
+
+                result.send(Ok(status));
+
+                assert_eq!(
+                    settled.now_or_never().unwrap().kind(),
+                    ErrorKind::SourceConnectionFailed
+                );
+            }
+        }
+    }
+
+    /// A late terminal write error must override the source's retry policy.
+    #[test]
+    fn retry_preserves_destination_error_policy() {
+        let token = CancellationToken::new();
+        let (result, pending) =
+            WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
+
+        result.send(Err(etl_error!(
+            ErrorKind::DestinationAuthenticationError,
+            "Destination authentication failed"
+        )));
+
+        let error = TestApplyLoop::settle_pending_flush_on_error(
+            etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
+            Some(pending),
+            &token,
+        )
+        .now_or_never()
+        .unwrap();
+
+        assert_eq!(
+            error.kinds(),
+            vec![ErrorKind::DestinationAuthenticationError, ErrorKind::SourceConnectionFailed]
+        );
+        assert!(!build_error_handling_policy(&error).should_retry());
+    }
+
+    /// Shutdown stops retrying, so it can interrupt a failed attempt's wait.
+    #[test]
+    fn shutdown_interrupts_retry_completion_wait() {
+        let token = CancellationToken::new();
+        let (_result, pending) =
+            WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
+
+        let settled = TestApplyLoop::settle_pending_flush_on_error(
+            etl_error!(ErrorKind::SourceConnectionFailed, "Source disconnected"),
+            Some(pending),
+            &token,
+        );
+        tokio::pin!(settled);
+        assert!(settled.as_mut().now_or_never().is_none());
+
+        token.cancel();
+
+        assert_eq!(settled.now_or_never().unwrap().kind(), ErrorKind::SourceConnectionFailed);
+    }
+
+    /// Terminal failures still return immediately rather than draining work.
+    #[test]
+    fn terminal_error_does_not_wait_for_dispatched_completion() {
+        let token = CancellationToken::new();
+        let (_result, pending) =
+            WriteEventsResult::new(flush_metadata(WriteEventsDurability::MayDefer));
+
+        let error = TestApplyLoop::settle_pending_flush_on_error(
+            etl_error!(ErrorKind::SourceSchemaError, "Invalid source schema"),
+            Some(pending),
+            &token,
+        );
+
+        assert_eq!(error.now_or_never().unwrap().kind(), ErrorKind::SourceSchemaError);
     }
 
     fn replicated_schema(snapshot_id: SnapshotId) -> ReplicatedTableSchema {
@@ -4468,7 +4633,7 @@ mod tests {
         let mut state = ApplyLoopState::new(
             activity_registration.handle(),
             ReplicationProgress::new(100.into()),
-            ReplicationLagMetrics::new(100.into()),
+            ReplicationLagMetrics::create(100.into(), false),
             SnapshotId::initial(),
         );
 

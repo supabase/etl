@@ -3557,7 +3557,7 @@ mod tests {
         assert_eq!(count_rows(&conn, STREAMING_PROGRESS_TABLE), 1);
     }
 
-    /// Legacy streaming progress is reduced to its greatest sequence key.
+    /// Legacy streaming progress is reduced to its greatest event position.
     #[test]
     fn replay_helper_cleanup_deduplicates_implicit_legacy_progress() {
         let conn = duckdb::Connection::open_in_memory().unwrap();

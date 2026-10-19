@@ -3,6 +3,15 @@
 //! This module owns the schema view that ETL exposes to destinations and event
 //! consumers. Base Postgres schema identifiers are shared from `etl-postgres`,
 //! while replication masks and projected schemas live here with the ETL domain.
+//!
+//! Source schema snapshots are not projected for individual pipelines. Each
+//! pipeline combines a snapshot selected in WAL order with column membership
+//! from its PostgreSQL `RELATION` metadata. This lets publication column-list
+//! changes use the same logical schema-planning path as table DDL.
+//!
+//! Schema-change handling is in public beta. Catalog-helper visibility,
+//! concurrent DDL under an older transaction snapshot, and relation-mask
+//! ambiguity remain [documented limitations](https://supabase.github.io/etl/explanation/schema-changes/#current-limitations).
 
 use std::{
     cmp::Ordering,
@@ -103,36 +112,21 @@ impl ReplicationMask {
     /// Returns [`SchemaError::UnknownReplicatedColumns`] if any column in
     /// `replicated_column_names` does not exist in the table schema.
     ///
-    /// The column validation occurs because we have to make sure that the
-    /// stored table schema is always up to date, if not, it's a critical
-    /// problem.
+    /// # Limitations
+    ///
+    /// A stored column absent from `replicated_column_names` is interpreted as
+    /// publication filtering. The same subset can arise when the selected
+    /// snapshot and relation metadata disagree, for example during schema
+    /// capture or replay. This method cannot distinguish those cases. Success
+    /// validates column membership, not the snapshot's temporal correctness.
     pub fn try_build(
         table_schema: &TableSchema,
         replicated_column_names: &HashSet<String>,
     ) -> Result<Self, SchemaError> {
-        // This check ensures all replicated columns are present in the schema.
-        //
-        // Limitation: If a column exists in the schema but is absent from the
-        // replicated columns, we assume publication-level column filtering is
-        // enabled. However, this is indistinguishable from an invalid state
-        // where the schema has diverged, we cannot detect the difference.
-        //
-        // How schema divergence occurs: When progress tracking fails and the
-        // system restarts, we may receive a `Relation` message reflecting the
-        // *current* table schema rather than the schema at the time the
-        // in-flight events were emitted. This is how Postgres handles initial
-        // `Relation` messages on reconnection. It's not the wrong behavior
-        // since the data has the columns that it announces, but it conflicts
-        // with our schema management logic. TODO: We are still debugging this
-        // case to validate when it happens, since it's hard to  reproduce.
-        // Nonetheless, the error should be raised.
-        //
-        // Invariant: Our schema management assumes the schema in `Relation`
-        // messages is consistent with the schema under which the corresponding
-        // row events were produced.
-        //
-        // In the future we might want to implement a system to go around this
-        // edge case.
+        // The stored snapshot and protocol relation must describe the same
+        // schema state. Membership validation detects unknown columns but
+        // cannot prove that every omission is intentional publication
+        // filtering.
         validate_mask_column_names(table_schema, replicated_column_names)?;
 
         Ok(Self(Arc::new(build_mask_bytes(table_schema, replicated_column_names))))

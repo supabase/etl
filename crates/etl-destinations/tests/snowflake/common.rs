@@ -1,11 +1,15 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use etl::store::DestinationStore;
+use etl::{
+    schema::PgLsn,
+    store::{DestinationStore, StateStore, WorkerType},
+};
 use etl_destinations::snowflake::{
     AuthManager, Config, Destination, HttpExchanger, OffsetToken, RestStreamClient, SqlClient,
     StreamClient, test_utils,
 };
 use futures::FutureExt;
+use sha2::{Digest, Sha256};
 
 pub fn build_auth() -> Arc<AuthManager<HttpExchanger>> {
     Arc::new(AuthManager::new(test_utils::load_test_config()).expect("AuthManager creation failed"))
@@ -22,11 +26,39 @@ pub async fn with_table_cleanup<F, Fut>(
     let result = std::panic::AssertUnwindSafe(test_fn()).catch_unwind().await;
 
     for table in tables {
+        let config = test_utils::load_test_config();
+        let view = companion_name(table);
+        for name in [&view, &format!("{view}_PENDING")] {
+            let _ = sql
+                .execute_ddl(&format!(
+                    "drop view if exists {}.{}.{}",
+                    quote(config.database()),
+                    quote(config.schema()),
+                    quote(name),
+                ))
+                .await;
+        }
         let _ = sql.drop_table(table).await;
     }
 
     if let Err(e) = result {
         std::panic::resume_unwind(e);
+    }
+}
+
+/// Waits for the local apply checkpoint to cover a commit before stopping
+/// intake. Callers bound the wait so pipeline shutdown still runs on timeout.
+pub async fn wait_for_replication_checkpoint(store: &impl StateStore, commit_lsn: PgLsn) {
+    loop {
+        if store
+            .get_replication_checkpoint(WorkerType::Apply)
+            .await
+            .unwrap()
+            .is_some_and(|lsn| lsn >= commit_lsn)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -76,4 +108,30 @@ pub async fn poll_stream_offset(
         }
     }
     None
+}
+
+/// Quotes a test SQL identifier without changing its case.
+pub fn quote(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Derives the documented companion name, including the long-identifier case.
+pub fn companion_name(table: &str) -> String {
+    if table.chars().count() + "_CURRENT_PENDING".len() > 255 {
+        let hash: String =
+            Sha256::digest(table.as_bytes()).iter().map(|byte| format!("{byte:02X}")).collect();
+        format!("_ETL_{hash}_CURRENT")
+    } else {
+        format!("{table}_CURRENT")
+    }
+}
+
+/// Selects the destination-managed view using only Snowflake-side identifiers.
+pub fn companion_query(config: &Config, table: &str) -> String {
+    format!(
+        "select * from {}.{}.{}",
+        quote(config.database()),
+        quote(config.schema()),
+        quote(&companion_name(table))
+    )
 }

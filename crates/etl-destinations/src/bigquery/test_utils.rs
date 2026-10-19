@@ -3,9 +3,9 @@
 //! Provides a database wrapper for managing BigQuery datasets and constants for
 //! connecting to Google Cloud BigQuery in test environments.
 
-use std::{fmt, future::Future, path::Path, str::FromStr, time::Duration};
+use std::{error::Error as _, fmt, future::Future, path::Path, str::FromStr, time::Duration};
 
-use etl::{pipeline::PipelineId, schema::TableName, store::DestinationStore};
+use etl::{error::EtlError, pipeline::PipelineId, schema::TableName, store::DestinationStore};
 use gcp_bigquery_client::{
     Client,
     client_builder::ClientBuilder,
@@ -19,8 +19,8 @@ use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{BigQueryDestination, table_name_to_bigquery_table_id},
-    retry::{RetryDecision, RetryPolicy, retry_with_backoff},
+    bigquery::{BigQueryDestination, query::execute_query, table_name_to_bigquery_table_id},
+    retry::{RetryPolicy, retry_with_backoff},
 };
 
 /// Maximum number of times we re-run a verification query.
@@ -35,9 +35,6 @@ const BIGQUERY_QUERY_MAX_ATTEMPTS: u32 = 600;
 const BIGQUERY_NO_ROWS_MAX_ATTEMPTS: u32 = 30;
 /// Delay in milliseconds between verification attempts when querying BigQuery.
 const BIGQUERY_QUERY_RETRY_DELAY_MS: u64 = 500;
-/// BigQuery response reasons that are transient even when surfaced with a 4xx
-/// status code.
-const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &["backendError", "jobBackendError"];
 /// Environment variable name for the BigQuery project ID.
 pub const BIGQUERY_PROJECT_ID_ENV: &str = "TESTS_BIGQUERY_PROJECT_ID";
 /// Environment variable name for the BigQuery service account key path.
@@ -53,25 +50,7 @@ const BIGQUERY_TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
     max_delay: Duration::from_secs(4),
 };
 
-/// Returns whether a `BQError` is transient and worth retrying.
-fn is_transient_bq_error(err: &BQError) -> RetryDecision {
-    match err {
-        BQError::RequestError(_) => RetryDecision::Retry,
-        BQError::ResponseError { error } if error.error.code >= 500 => RetryDecision::Retry,
-        BQError::ResponseError { error }
-            if error.error.errors.iter().any(|nested_error| {
-                nested_error.get("reason").is_some_and(|reason| {
-                    TRANSIENT_BIGQUERY_RESPONSE_REASONS.contains(&reason.as_str())
-                })
-            }) =>
-        {
-            RetryDecision::Retry
-        }
-        _ => RetryDecision::Stop,
-    }
-}
-
-/// Runs a raw BigQuery test operation with transient-error retries.
+/// Runs a raw BigQuery test operation, retrying errors that are retryable.
 async fn retry_bigquery_test_operation<T, AttemptFn, AttemptFut>(
     operation: &'static str,
     attempt_fn: AttemptFn,
@@ -82,7 +61,7 @@ where
 {
     retry_with_backoff(
         BIGQUERY_TEST_RETRY_POLICY,
-        is_transient_bq_error,
+        |_| false,
         |delay| delay,
         |attempt| {
             eprintln!(
@@ -95,6 +74,14 @@ where
     )
     .await
     .map_err(|failure| failure.last_error)
+}
+
+/// Recognizes a missing table while preserving the query's typed error chain.
+fn is_missing_table_query_error(error: &EtlError) -> bool {
+    matches!(
+        error.source().and_then(|source| source.downcast_ref::<BQError>()),
+        Some(BQError::ResponseError { error }) if error.error.code == 404
+    )
 }
 
 /// Builds a query request whose result must reflect current destination state.
@@ -275,14 +262,15 @@ impl BigQueryDatabase {
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let (rows, not_found) = match retry_bigquery_test_operation("table query", || {
-                let request = uncached_query_request(query.clone());
-                async { self.client.job().query(&self.project_id, request).await }
-            })
+            let (rows, not_found) = match execute_query(
+                &self.client,
+                &self.project_id,
+                uncached_query_request(query.clone()),
+            )
             .await
             {
                 Ok(response) => (response.rows, false),
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => (None, true),
+                Err(error) if is_missing_table_query_error(&error) => (None, true),
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
@@ -322,14 +310,15 @@ impl BigQueryDatabase {
             // Only an observed empty result proves emptiness: a stale 404 could
             // hide a table that still has rows, so it is retried like a
             // non-empty result.
-            let observed_empty = match retry_bigquery_test_operation("table no-rows check", || {
-                let request = uncached_query_request(query.clone());
-                async { self.client.job().query(&self.project_id, request).await }
-            })
+            let observed_empty = match execute_query(
+                &self.client,
+                &self.project_id,
+                uncached_query_request(query.clone()),
+            )
             .await
             {
                 Ok(response) => response.rows.is_none_or(|rows| rows.is_empty()),
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => false,
+                Err(error) if is_missing_table_query_error(&error) => false,
                 Err(err) => panic!("Failed to query BigQuery table: {err:?}"),
             };
 
@@ -349,34 +338,32 @@ impl BigQueryDatabase {
     /// Queries the schema (column metadata) for a table.
     ///
     /// Returns the column names and data types from INFORMATION_SCHEMA.COLUMNS.
-    /// The table name pattern matches using REGEXP_CONTAINS to match the
-    /// sequenced table name format: `{table_id}_{sequence_number}`.
+    /// Matches both legacy numeric versions and random physical versions.
     pub async fn query_table_schema(&self, table_name: TableName) -> Option<BigQueryTableSchema> {
         let project_id = self.project_id();
         let dataset_id = self.dataset_id();
         let table_id = table_name_to_bigquery_table_id(&table_name).unwrap();
 
-        // Use REGEXP_CONTAINS to match the sequenced table name format.
-        // BigQuery table names have format: {schema}_{table}_{sequence_number}
-        // The regex matches the table_id followed by underscore and one or more
-        // digits.
+        // Include numeric versions retained by upgraded destinations.
         let query = format!(
-            "SELECT column_name, data_type, ordinal_position FROM \
-             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` WHERE \
-             REGEXP_CONTAINS(table_name, r'^{table_id}_[0-9]+$') ORDER BY ordinal_position"
+            "select column_name, data_type, ordinal_position from \
+             `{project_id}.{dataset_id}.INFORMATION_SCHEMA.COLUMNS` where \
+             regexp_contains(table_name, r'^{table_id}_([0-9]{{1,20}}|[0-9a-z]{{25}})$') order by \
+             ordinal_position"
         );
 
         let mut attempts_remaining = BIGQUERY_QUERY_MAX_ATTEMPTS;
 
         loop {
-            let rows = match retry_bigquery_test_operation("table schema query", || {
-                let request = uncached_query_request(query.clone());
-                async { self.client.job().query(project_id, request).await }
-            })
+            let rows = match execute_query(
+                &self.client,
+                project_id,
+                uncached_query_request(query.clone()),
+            )
             .await
             {
                 Ok(response) => response.rows,
-                Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+                Err(error) if is_missing_table_query_error(&error) => return None,
                 Err(err) => panic!("Failed to query BigQuery table schema: {err:?}"),
             };
 
@@ -426,14 +413,11 @@ impl BigQueryDatabase {
             self.project_id, self.dataset_id, table_id
         );
 
-        let rows = retry_bigquery_test_operation("table default metadata query", || {
-            let request = QueryRequest::new(query.clone());
-            async { self.client.job().query(&self.project_id, request).await }
-        })
-        .await
-        .unwrap_or_else(|err| panic!("Failed to query BigQuery column defaults: {err:?}"))
-        .rows
-        .unwrap_or_default();
+        let rows = execute_query(&self.client, &self.project_id, uncached_query_request(query))
+            .await
+            .unwrap_or_else(|err| panic!("Failed to query BigQuery column defaults: {err:?}"))
+            .rows
+            .unwrap_or_default();
 
         parse_bigquery_table_rows(rows)
     }
@@ -455,12 +439,9 @@ impl BigQueryDatabase {
             column_definitions.join(", ")
         );
 
-        retry_bigquery_test_operation("manual table creation", || {
-            let request = QueryRequest::new(ddl.clone());
-            async { self.client.job().query(&self.project_id, request).await.map(|_| ()) }
-        })
-        .await
-        .expect("Failed to create BigQuery table");
+        execute_query(&self.client, &self.project_id, QueryRequest::new(ddl))
+            .await
+            .expect("Failed to create BigQuery table");
     }
 
     /// Creates a [`BigQueryDestination`] configured for this database instance.

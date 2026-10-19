@@ -73,6 +73,16 @@ Copy and change data capture (CDC) are replication paths, not customer-visible
 phases. Initial sync uses the copy path followed by CDC catch-up; ongoing
 replication uses the CDC path after the table is ready.
 
+Each table's initial copy holds `ACCESS SHARE` locks from before snapshot
+creation until its source copy workers finish. On a primary, ordinary DML can
+continue while `ACCESS EXCLUSIVE` DDL waits; queued DDL can delay later queries.
+Long copies can also retain WAL and old row versions. Review
+[source impact and migration planning](https://supabase.github.io/etl/guides/configure-postgres/#planning-long-initial-copies)
+before starting a large initial sync.
+Schema-change handling is in public beta, with known catalog-visibility, concurrent-DDL,
+and relation-metadata risks. Read [Schema Changes](https://supabase.github.io/etl/explanation/schema-changes/)
+before planning migrations alongside a running pipeline.
+
 ## Start Here
 
 | Goal | Documentation |
@@ -123,20 +133,20 @@ for versions, measurement methodology, and configuration differences.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `clickhouse` | ClickHouse | Private alpha |
-| `bigquery` | Google BigQuery | Stable |
-| `ducklake` | DuckLake | Private alpha |
-| `snowflake` | Snowflake | Private alpha |
+| `clickhouse` | ClickHouse | Public alpha |
+| `bigquery` | Google BigQuery | Public alpha |
+| `ducklake` | DuckLake | Public alpha |
+| `snowflake` | Snowflake | Public alpha |
 | `iceberg` | Apache Iceberg | Deprecated |
 
-Private alpha refers to managed-service access and does not restrict local or
-self-hosted use of the open-source destinations.
+Public alpha describes the managed-service release stage. Local and self-hosted
+use of the open-source destinations is unrestricted.
 
 ClickHouse is the fastest way to start locally: `cargo x init` runs it, and
 `cargo x setup replicator` configures it by default. BigQuery is the most
 mature cloud destination. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
-for maturity and limitations, and the
+for release status and limitations, and the
 [`etl-examples` guide](crates/etl-examples/README.md) for runnable examples.
 
 ## Requirements

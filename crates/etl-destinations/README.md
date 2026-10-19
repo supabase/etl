@@ -6,16 +6,19 @@ building `etl-replicator`.
 
 | Feature | Destination | Status |
 | --- | --- | --- |
-| `clickhouse` | ClickHouse | Private alpha |
-| `bigquery` | Google BigQuery | Stable |
-| `ducklake` | DuckLake | In progress |
-| `snowflake` | Snowflake | In progress |
+| `clickhouse` | ClickHouse | Public alpha |
+| `bigquery` | Google BigQuery | Public alpha |
+| `ducklake` | DuckLake | Public alpha |
+| `snowflake` | Snowflake | Public alpha |
 | `iceberg` | Apache Iceberg | Deprecated |
+
+Public alpha describes the managed-service release stage. Local and self-hosted
+use of the open-source destinations is unrestricted.
 
 ClickHouse is the easiest destination to run locally. BigQuery is the most
 mature cloud destination. See the
 [Destinations reference](https://supabase.github.io/etl/reference/destinations/)
-for each implementation's maturity, requirements, and limitations.
+for release status, requirements, and limitations.
 
 DuckLake external maintenance is configured at runtime with
 `maintenance_mode`: `disabled`, `kubernetes`, or `postgres`. The default is

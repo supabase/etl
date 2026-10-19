@@ -161,7 +161,12 @@ ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
 Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
 Parser fuzz targets live in `fuzz/`.
 
-Use cargo-nextest 0.9.133 to match CI; sharding requires at least 0.9.127.
+Use cargo-nextest 0.9.148 or newer; CI pins 0.9.148. The repository requires
+this version to include the [capture-pipe inheritance fix](https://github.com/nextest-rs/nextest/pull/3553)
+that prevents false `LEAK` reports during parallel test runs on macOS. The Nix
+development shell supplies the same version. Outside Nix, upgrade an existing
+installation with `cargo nextest self update --version 0.9.148`.
+
 CI builds one nextest archive for the Postgres compatibility matrix and
 Multigres; coverage uses a separate instrumented build. Every Postgres and
 OrioleDB lane runs the full regular suite, including destination tests and
@@ -229,8 +234,8 @@ gh workflow run publish-image.yml --repo supabase/etl --ref main \
 
 ## Documentation
 
-The docs site uses Next.js and Fumadocs. Use Node.js 22, matching CI. From the
-repository root:
+The docs site uses Next.js and Fumadocs. Use Node.js 22 and its bundled npm,
+matching CI, including when updating the lockfile. From the repository root:
 
 ```bash
 cd site
@@ -253,6 +258,11 @@ npm run smoke:docs
 
 For a manual preview of the build, run `npm run preview` and open the URL
 printed by the server.
+
+For compatible dependency updates, run `npm update` from `site/`, then verify
+`npm ci` and the build and smoke checks above. Raise the `next` and
+`eslint-config-next` minimum versions together when applying a security fix.
+Commit both `package.json` and the generated `package-lock.json`.
 
 ## Troubleshooting
 

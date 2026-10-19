@@ -12,7 +12,7 @@ k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
 pg_escape = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
-schemars = "0.8.0"
+schemars = "1.2.1"
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

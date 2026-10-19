@@ -29,6 +29,9 @@ pub enum DestinationTableSchema {
     /// Destinations treat this state as authoritative. Restart and cache misses
     /// may rebuild process-local or derived non-data-bearing state, but must
     /// not recreate or structurally repair the data-bearing destination table.
+    /// A destination may explicitly upgrade a recognized legacy metadata format
+    /// before opening writes, such as adding Snowflake missing-column metadata.
+    /// This exception does not permit general repair or recovery of lost data.
     Applied {
         /// The applied source schema snapshot.
         snapshot_id: SnapshotId,

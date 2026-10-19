@@ -1,11 +1,14 @@
 use etl::{
-    error::{ErrorKind, EtlError},
+    error::{ErrorKind, EtlError, Retryability},
     schema::TableId,
 };
 use reqwest::StatusCode;
 use serde::Deserialize;
 
-use crate::snowflake::encoding::CdcOperation;
+use crate::{
+    retry::{ClassifiedError, classified_error},
+    snowflake::encoding::CdcOperation,
+};
 
 /// Name and serialized length of the largest column in a rejected row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +63,30 @@ pub enum Error {
         column_name: String,
         /// Zero-based position of the first SQL-null element.
         element_index: usize,
+    },
+
+    /// The source or physical table cannot satisfy the CDC layout requirements.
+    #[error("Snowflake CDC layout is unsupported: {0}")]
+    UnsupportedLayout(String),
+
+    /// The source identity cannot support the received partial update or
+    /// delete.
+    #[error("Snowflake source identity is unsupported: {0}")]
+    UnsupportedIdentity(String),
+
+    /// An existing managed view cannot represent the newly applied schema.
+    #[error(
+        "Snowflake companion view '{name}' is unavailable under '{pending}'; restore a supported \
+         primary-key identity and source column names, or deliberately remove both reserved views \
+         to continue with raw CDC only"
+    )]
+    CompanionViewUnsupported {
+        /// Public view that is no longer available.
+        name: String,
+        /// Reserved view retaining ownership and grants.
+        pending: String,
+        /// Query-generation requirement the new schema violates.
+        source: Box<Error>,
     },
 
     #[error("Configuration error: {0}")]
@@ -160,7 +187,10 @@ impl Error {
             Self::Snowpipe(SnowpipeError::HttpStatus { .. }) => AppendFailureType::Provider,
             Self::Encoding(_) | Self::NullJsonArrayElement { .. } => AppendFailureType::Encoding,
             Self::RowTooLarge { .. } => AppendFailureType::RowTooLarge,
-            Self::Config(_)
+            Self::UnsupportedIdentity(_)
+            | Self::UnsupportedLayout(_)
+            | Self::CompanionViewUnsupported { .. }
+            | Self::Config(_)
             | Self::MissingTableColumn { .. }
             | Self::UnexpectedTableColumn { .. }
             | Self::DatabaseNotFound(_)
@@ -169,28 +199,82 @@ impl Error {
     }
 }
 
+/// Request timeouts, rate limits, and server errors may succeed when sent
+/// again.
+fn http_status_retryability(status: StatusCode) -> Retryability {
+    if status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        Retryability::Retryable
+    } else {
+        Retryability::Permanent
+    }
+}
+
+/// Transport failures, retryable HTTP statuses, and retryable Snowpipe
+/// responses may succeed when sent again. Authentication, SQL, channel,
+/// encoding, configuration, and schema errors repeat until something changes.
+impl ClassifiedError for Error {
+    fn retryability(&self) -> Retryability {
+        match self {
+            Self::HttpTransport(_) => Retryability::Retryable,
+            Self::HttpStatus { status, .. } => http_status_retryability(*status),
+            Self::Snowpipe(error) => error.retryability(),
+            Self::Auth(_)
+            | Self::Sql { .. }
+            | Self::Channel(_)
+            | Self::Encoding(_)
+            | Self::NullJsonArrayElement { .. }
+            | Self::UnsupportedIdentity(_)
+            | Self::UnsupportedLayout(_)
+            | Self::CompanionViewUnsupported { .. }
+            | Self::Config(_)
+            | Self::MissingTableColumn { .. }
+            | Self::UnexpectedTableColumn { .. }
+            | Self::DatabaseNotFound(_)
+            | Self::SchemaNotFound { .. }
+            | Self::RowTooLarge { .. } => Retryability::Permanent,
+        }
+    }
+}
+
 impl From<Error> for EtlError {
     fn from(err: Error) -> Self {
         if matches!(&err, Error::MissingTableColumn { .. } | Error::UnexpectedTableColumn { .. }) {
-            return etl::etl_error!(
+            return classified_error(
                 ErrorKind::CorruptedTableSchema,
                 "Snowflake table schema is incompatible",
-                source: err
+                err,
+            );
+        }
+        if matches!(&err, Error::UnsupportedIdentity(_)) {
+            return classified_error(
+                ErrorKind::SourceReplicaIdentityError,
+                "Snowflake source identity is unsupported",
+                err,
+            );
+        }
+        if matches!(&err, Error::UnsupportedLayout(_)) {
+            return classified_error(
+                ErrorKind::DestinationLayoutUnsupported,
+                "Snowflake CDC layout is unsupported",
+                err,
             );
         }
         if matches!(&err, Error::RowTooLarge { .. }) {
-            return etl::etl_error!(
+            return classified_error(
                 ErrorKind::UnsupportedValueInDestination,
                 "Snowflake cannot accept a row of this size",
-                source: err
+                err,
             );
         }
 
         if matches!(&err, Error::NullJsonArrayElement { .. }) {
-            return etl::etl_error!(
+            return classified_error(
                 ErrorKind::NullValuesNotSupportedInArrayInDestination,
                 "Snowflake cannot preserve SQL NULL elements in JSON arrays",
-                source: err
+                err,
             );
         }
 
@@ -208,8 +292,13 @@ impl From<Error> for EtlError {
             Error::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
             Error::Encoding(_) => (ErrorKind::InvalidData, "Snowflake encoding error"),
             Error::Config(_) => (ErrorKind::ConfigError, "Snowflake configuration error"),
+            Error::CompanionViewUnsupported { .. } => {
+                (ErrorKind::ConfigError, "Snowflake companion view no longer supports the schema")
+            }
             Error::MissingTableColumn { .. }
             | Error::UnexpectedTableColumn { .. }
+            | Error::UnsupportedIdentity(_)
+            | Error::UnsupportedLayout(_)
             | Error::RowTooLarge { .. }
             | Error::NullJsonArrayElement { .. } => {
                 unreachable!("schema and unsupported value errors return above")
@@ -217,7 +306,7 @@ impl From<Error> for EtlError {
             Error::DatabaseNotFound(_) => (ErrorKind::ConfigError, "Snowflake database not found"),
             Error::SchemaNotFound { .. } => (ErrorKind::ConfigError, "Snowflake schema not found"),
         };
-        etl::etl_error!(kind, description, err.to_string())
+        classified_error(kind, description, err)
     }
 }
 
@@ -298,6 +387,24 @@ impl SnowpipeError {
     /// Returns whether this error is an authentication failure.
     pub fn is_authentication_expired(&self) -> bool {
         matches!(self, Self::AuthenticationExpired)
+    }
+}
+
+/// Snowpipe API statuses other than 0, 2, and 4 may succeed when sent again.
+/// Channel errors need the channel reopened first, and an expired token stays
+/// expired after the client refreshes it and resends the request once.
+impl ClassifiedError for SnowpipeError {
+    fn retryability(&self) -> Retryability {
+        match self {
+            Self::StaleContinuation
+            | Self::ChannelInvalidated
+            | Self::ChannelHasUncommittedRows
+            | Self::ChannelNotFound
+            | Self::AuthenticationExpired
+            | Self::ApiStatus { status_code: 0 | 2 | 4, .. } => Retryability::Permanent,
+            Self::ApiStatus { .. } => Retryability::Retryable,
+            Self::HttpStatus { status } => http_status_retryability(*status),
+        }
     }
 }
 
@@ -458,6 +565,75 @@ mod tests {
             };
 
             assert!(matches, "{case}: {error:?}");
+        }
+    }
+
+    /// Transport failures, request timeouts, rate limits, server errors, and
+    /// transient Snowpipe statuses are retryable. A token that was already
+    /// refreshed once, a rejected request, and channel errors are not.
+    #[test]
+    fn errors_classify_retryability() {
+        let http = |status: StatusCode| Error::HttpStatus { status, body: String::new() };
+        let api_status = |status_code| {
+            Error::Snowpipe(SnowpipeError::ApiStatus { status_code, message: String::new() })
+        };
+
+        for error in [
+            http(StatusCode::REQUEST_TIMEOUT),
+            http(StatusCode::TOO_MANY_REQUESTS),
+            http(StatusCode::SERVICE_UNAVAILABLE),
+            api_status(1),
+            api_status(99),
+            Error::Snowpipe(SnowpipeError::HttpStatus { status: StatusCode::BAD_GATEWAY }),
+        ] {
+            assert_eq!(error.retryability(), Retryability::Retryable, "{error:?}");
+        }
+        for error in [
+            http(StatusCode::UNAUTHORIZED),
+            http(StatusCode::BAD_REQUEST),
+            api_status(0),
+            api_status(2),
+            Error::Snowpipe(SnowpipeError::AuthenticationExpired),
+            Error::Snowpipe(SnowpipeError::StaleContinuation),
+            Error::Auth("expired".to_owned()),
+            Error::Sql { statement_handle: None, message: String::new() },
+        ] {
+            assert_eq!(error.retryability(), Retryability::Permanent, "{error:?}");
+        }
+    }
+
+    /// The converted ETL error keeps the Snowflake error as its source and
+    /// carries its retryability.
+    #[test]
+    fn conversion_records_retryability_and_source() {
+        let unavailable = EtlError::from(Error::HttpStatus {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: String::new(),
+        });
+        let unauthorized = EtlError::from(Error::HttpStatus {
+            status: StatusCode::UNAUTHORIZED,
+            body: String::new(),
+        });
+
+        assert_eq!(unavailable.kind(), ErrorKind::DestinationError);
+        assert_eq!(unavailable.retryability(), Retryability::Retryable);
+        assert!(unavailable.source().is_some());
+        assert_eq!(unauthorized.retryability(), Retryability::Permanent);
+        for (source, kind) in [
+            (
+                Error::UnsupportedIdentity("invalid key".into()),
+                ErrorKind::SourceReplicaIdentityError,
+            ),
+            (
+                Error::UnsupportedLayout("invalid layout".into()),
+                ErrorKind::DestinationLayoutUnsupported,
+            ),
+        ] {
+            assert_eq!(source.retryability(), Retryability::Permanent);
+            let error = EtlError::from(source);
+            assert_eq!(error.kind(), kind);
+            assert_eq!(error.retryability(), Retryability::Permanent);
+            assert!(error.source().is_some());
         }
     }
 }

@@ -1,5 +1,5 @@
-# Cross-binary slice partitioning requires 0.9.127; CI uses 0.9.133.
-nextest-version = { required = "0.9.127", recommended = "0.9.133" }
+# Require the CI version to avoid false leak reports from inherited capture pipes.
+nextest-version = { required = "0.9.148", recommended = "0.9.148" }
 
 [profile.default]
 fail-fast = false

@@ -302,8 +302,9 @@ async function checkSeoEndpoints() {
   );
   const destinationsText = markdownTexts[markdownPaths.indexOf('/reference/destinations.md')];
   assert(
-    destinationsText.includes('**Status: Stable**') &&
-      destinationsText.match(/\*\*Status: Private alpha\*\*/g)?.length === 3 &&
+    destinationsText.match(/\*\*Status: Public alpha\*\*/g)?.length === 4 &&
+      !destinationsText.includes('Private alpha') &&
+      !destinationsText.includes('**Status: Stable**') &&
       !destinationsText.includes('**Status: In progress**') &&
       destinationsText.includes('**Status: Deprecated**') &&
       !destinationsText.includes('<DestinationStatus'),
@@ -757,13 +758,18 @@ async function checkDesktop(page) {
   await page.goto(`${baseUrl}/reference/destinations/`, { waitUntil: 'networkidle' });
   await assertNoHorizontalOverflow(page);
   assert(
-    (await page.locator('.etl-destination-status[data-status="stable"] svg').count()) === 1 &&
-      (await page.locator('.etl-destination-status[data-status="private-alpha"] svg').count()) === 3 &&
-      (await page.locator('.etl-destination-status[data-status="in-progress"] svg').count()) === 0 &&
+    (await page.locator('.etl-destination-status').count()) === 5 &&
+      (await page.locator('.etl-destination-status[data-status="public-alpha"] svg').count()) === 4 &&
       (await page.locator('.etl-destination-status[data-status="deprecated"] svg').count()) === 1,
-    'Destination maturity badges are missing their status icons.',
+    'Destination release-status badges are missing their status icons.',
   );
   const destinationsCopy = await page.locator('#nd-page').innerText();
+  assert(
+    !destinationsCopy.includes('Private alpha') &&
+      (await page.locator('.etl-destination-status[data-status="public-alpha"]').allTextContents())
+        .every((status) => status === 'Public alpha'),
+    'The Destinations reference does not expose consistent public-alpha labels.',
+  );
   assert(
     destinationsCopy.includes('ClickHouse is the easiest destination to start with locally') &&
       destinationsCopy.includes('cargo x setup replicator') &&

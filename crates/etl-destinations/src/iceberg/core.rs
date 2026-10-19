@@ -13,7 +13,7 @@ use etl::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    event::{Event, EventSequenceKey},
+    event::{Event, EventPosition},
     schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, Type},
     store::SharedStateStore,
     task::{TaskGroup, TaskRegistry},
@@ -37,11 +37,11 @@ const CDC_OPERATION_COLUMN_NAME: &str = "cdc_operation";
 /// CDC sequence-number column name.
 const SEQUENCE_NUMBER_COLUMN_NAME: &str = "sequence_number";
 
-/// Formats a sequence key using Iceberg's existing fixed-width hexadecimal
+/// Formats an event position using Iceberg's existing fixed-width hexadecimal
 /// representation.
-fn iceberg_sequence_key(sequence_key: EventSequenceKey) -> String {
-    let commit_lsn = u64::from(sequence_key.commit_lsn);
-    format!("{commit_lsn:016x}/{:016x}", sequence_key.tx_ordinal)
+fn iceberg_sequence_number(event_position: EventPosition) -> String {
+    let commit_lsn = u64::from(event_position.commit_lsn);
+    format!("{commit_lsn:016x}/{:016x}", event_position.tx_ordinal)
 }
 
 /// Converts a source table name to an Iceberg changelog table name.
@@ -318,7 +318,7 @@ where
         };
 
         for table_row in &mut table_rows {
-            let sequence_number = iceberg_sequence_key(EventSequenceKey::new(0.into(), 0));
+            let sequence_number = iceberg_sequence_number(EventPosition::new(0.into(), 0));
             table_row.values_mut().push(IcebergOperationType::Insert.into());
             table_row.values_mut().push(Cell::String(sequence_number));
         }
@@ -335,7 +335,7 @@ where
     /// Handles a stream of CDC events by batching non-truncate events by table
     /// ID and processing them concurrently. Truncate events are processed
     /// separately and deduplicated for efficiency. Each event is augmented with
-    /// CDC metadata including its operation type and DML event sequence key.
+    /// CDC metadata including its operation type and DML event position.
     async fn write_events(&self, events: Vec<Event>) -> EtlResult<()> {
         let mut events_iter = events.into_iter().peekable();
 
@@ -357,9 +357,9 @@ where
                 };
                 match event {
                     Event::Insert(mut insert) => {
-                        let sequence_key = iceberg_sequence_key(insert.event_sequence_key());
+                        let sequence_number = iceberg_sequence_number(insert.event_position());
                         insert.table_row.values_mut().push(IcebergOperationType::Insert.into());
-                        insert.table_row.values_mut().push(Cell::String(sequence_key));
+                        insert.table_row.values_mut().push(Cell::String(sequence_number));
 
                         let table_id = insert.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -368,13 +368,13 @@ where
                         entry.1.push(insert.table_row);
                     }
                     Event::Update(update) => {
-                        let sequence_key = iceberg_sequence_key(update.event_sequence_key());
+                        let sequence_number = iceberg_sequence_number(update.event_position());
                         let mut table_row = iceberg_update_row(
                             &update.replicated_table_schema,
                             update.updated_table_row,
                         )?;
                         table_row.values_mut().push(IcebergOperationType::Update.into());
-                        table_row.values_mut().push(Cell::String(sequence_key));
+                        table_row.values_mut().push(Cell::String(sequence_number));
 
                         let table_id = update.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -383,13 +383,13 @@ where
                         entry.1.push(table_row);
                     }
                     Event::Delete(delete) => {
-                        let sequence_key = iceberg_sequence_key(delete.event_sequence_key());
+                        let sequence_number = iceberg_sequence_number(delete.event_position());
                         let mut old_table_row = iceberg_delete_row(
                             &delete.replicated_table_schema,
                             delete.old_table_row,
                         )?;
                         old_table_row.values_mut().push(IcebergOperationType::Delete.into());
-                        old_table_row.values_mut().push(Cell::String(sequence_key));
+                        old_table_row.values_mut().push(Cell::String(sequence_number));
 
                         let table_id = delete.replicated_table_schema.id();
                         let entry = table_id_to_data.entry(table_id).or_insert_with(|| {
@@ -844,7 +844,7 @@ mod tests {
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         destination::DestinationTableMetadata,
         error::ErrorKind,
-        event::EventSequenceKey,
+        event::EventPosition,
         schema::{
             ColumnSchema, IdentityMask, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId,
             TableId, TableName, TableSchema, Type,
@@ -853,7 +853,7 @@ mod tests {
 
     use crate::iceberg::core::{
         CDC_OPERATION_COLUMN_NAME, ensure_iceberg_relation_is_unchanged, find_unique_column_name,
-        iceberg_delete_row, iceberg_sequence_key, iceberg_update_row, schema_to_namespace,
+        iceberg_delete_row, iceberg_sequence_number, iceberg_update_row, schema_to_namespace,
     };
 
     /// Creates a synthetic composite snapshot ID for tests.
@@ -862,10 +862,10 @@ mod tests {
     }
 
     #[test]
-    fn sequence_key_format_preserves_fixed_width_hex_encoding() {
-        let sequence_key = EventSequenceKey::new(PgLsn::from(1), 2);
+    fn sequence_number_format_preserves_fixed_width_hex_encoding() {
+        let event_position = EventPosition::new(PgLsn::from(1), 2);
 
-        assert_eq!(iceberg_sequence_key(sequence_key), "0000000000000001/0000000000000002");
+        assert_eq!(iceberg_sequence_number(event_position), "0000000000000001/0000000000000002");
     }
 
     /// Creates a test column schema with common defaults.
