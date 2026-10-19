@@ -1,6 +1,7 @@
 #![cfg(all(feature = "test-utils", feature = "failpoints"))]
 
 use std::{
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -130,6 +131,21 @@ impl Destination for DeferredEventsDestination {
         durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
+        // Debug: show every batch so a stray transaction is visible by xid.
+        let summary: Vec<String> = events
+            .iter()
+            .map(|event| match event {
+                Event::Begin(begin) => {
+                    format!("Begin(xid={} commit={})", begin.xid, begin.commit_lsn)
+                }
+                Event::Commit(commit) => {
+                    format!("Commit(commit={} end={})", commit.commit_lsn, commit.end_lsn)
+                }
+                other => format!("{:?}", other.event_type()),
+            })
+            .collect();
+        eprintln!("[wal-debug] write_events durability={durability:?} events={summary:?}");
+
         let contains_target_insert = events.iter().any(|event| {
             matches!(
                 event,
@@ -2658,6 +2674,67 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
+/// Debug-only marker naming the cluster, database, and starting WAL position
+/// of an [`IdleDurabilityTest`], so CI can run `pg_waldump` after a failure.
+///
+/// The file is written only when `ETL_WAL_DEBUG_DIR` is set and is removed
+/// again unless the test panicked.
+struct WalDebugMarker {
+    /// Marker file, if one was written.
+    path: Option<PathBuf>,
+}
+
+impl WalDebugMarker {
+    /// Records the current WAL position for `database`.
+    async fn create(database: &PgDatabase<Client>) -> Self {
+        let Ok(dir) = std::env::var("ETL_WAL_DEBUG_DIR") else {
+            return Self { path: None };
+        };
+        let row = database
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(
+                "select pg_current_wal_lsn()::text, oid::text from pg_database where datname = \
+                 current_database()",
+                &[],
+            )
+            .await
+            .unwrap();
+        let start_lsn: String = row.get(0);
+        let database_oid: String = row.get(1);
+        let port = database.config.port;
+        let name = &database.config.name;
+        eprintln!(
+            "[wal-debug] test start port={port} database={name} oid={database_oid} \
+             start_lsn={start_lsn}"
+        );
+
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = PathBuf::from(dir).join(format!("{port}-{name}.txt"));
+        std::fs::write(
+            &path,
+            format!(
+                "port={port} database={name} oid={database_oid} start_lsn={start_lsn} test={}\n",
+                std::thread::current().name().unwrap_or("unknown")
+            ),
+        )
+        .unwrap();
+
+        Self { path: Some(path) }
+    }
+}
+
+impl Drop for WalDebugMarker {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path
+            && !std::thread::panicking()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Running apply-worker pipeline with externally controlled destination
 /// results.
 struct IdleDurabilityTest {
@@ -2674,6 +2751,8 @@ struct IdleDurabilityTest {
     slot_name: String,
     /// Ordered destination calls awaiting test-controlled results.
     writes_rx: mpsc::UnboundedReceiver<DeferredEventsWrite>,
+    /// Debug marker kept on disk when the test panics.
+    _wal_debug: WalDebugMarker,
 }
 
 impl IdleDurabilityTest {
@@ -2720,7 +2799,9 @@ impl IdleDurabilityTest {
 
         synced.notified().await;
 
-        Self { database, table_name, pipeline, store, slot_name, writes_rx }
+        let _wal_debug = WalDebugMarker::create(&database).await;
+
+        Self { database, table_name, pipeline, store, slot_name, writes_rx, _wal_debug }
     }
 
     /// Inserts one row without producing any schema changes.

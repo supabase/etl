@@ -19,6 +19,10 @@ on:
         description: Blacksmith runner size in vCPUs; the Postgres shard count follows the provisioned machine.
         type: number
         default: 8
+      debug-name:
+        description: Debug only. Unique suffix for WAL dump artifacts.
+        type: string
+        default: default
     secrets:
       TESTS_BIGQUERY_PROJECT_ID:
         required: false
@@ -137,12 +141,44 @@ jobs:
       - name: Run tests
         env:
           COVERAGE: ${{ inputs.coverage }}
+          ETL_WAL_DEBUG_DIR: ${{ github.workspace }}/target/wal-debug
         run: |
           if [[ "$COVERAGE" == true ]]; then
             cargo --locked xtask nextest llvm-cov
           else
             target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst
           fi
+      - name: Dump WAL for failed idle-durability tests
+        # Debug only: each marker names a failed test's cluster port, database
+        # OID, and starting WAL LSN.
+        if: failure()
+        run: |
+          mkdir -p target/wal-debug
+          for marker in target/wal-debug/*.txt; do
+            [[ -e "$marker" ]] || { echo "no WAL debug markers"; break; }
+            echo "::group::marker $marker"
+            cat "$marker"
+            port="$(sed -E 's/.*port=([0-9]+).*/\1/' "$marker")"
+            start="$(sed -E 's/.*start_lsn=([0-9A-F/]+).*/\1/' "$marker")"
+            container="$(docker ps --filter "publish=${port}" --format '{{.Names}}' | head -n1)"
+            echo "port=${port} start=${start} container=${container}"
+            out="${marker%.txt}.waldump"
+            docker exec -u postgres "$container" psql -At -c \
+              "select oid, datname from pg_database order by oid" > "${marker%.txt}.databases" || true
+            docker exec -u postgres "$container" sh -c \
+              "pg_waldump -p \"\$PGDATA/pg_wal\" -s ${start} -n 20000" > "$out" 2>&1 || true
+            echo "databases:"; cat "${marker%.txt}.databases"
+            echo "commit records:"; grep -E 'COMMIT' "$out" | head -n 200
+            echo "::endgroup::"
+          done
+      - name: Upload WAL dumps
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wal-debug-${{ inputs.debug-name }}-${{ github.run_attempt }}
+          path: target/wal-debug
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Export coverage
         if: inputs.coverage
         run: cargo llvm-cov report --locked --lcov --output-path lcov.info

@@ -223,31 +223,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: PostgreSQL 17
-            version: '17'
-            image: postgres:17
-          - name: PostgreSQL 16
-            version: '16'
-            image: postgres:16
-          - name: PostgreSQL 15
-            version: '15'
-            image: postgres:15
-          - name: PostgreSQL 14
+          # Debug only: three PG14 runs to catch the idle-durability flake.
+          - name: PostgreSQL 14 a
             version: '14'
             image: postgres:14
-          - name: OrioleDB beta14 (PostgreSQL 17)
-            version: '17'
-            image: orioledb/orioledb:beta14-pg17
+            debug: pg14-a
+          - name: PostgreSQL 14 b
+            version: '14'
+            image: postgres:14
+            debug: pg14-b
+          - name: PostgreSQL 14 c
+            version: '14'
+            image: postgres:14
+            debug: pg14-c
     uses: ./.github/workflows/reusable-tests.yml
     with:
       postgres-version: ${{ matrix.version }}
       postgres-image: ${{ matrix.image }}
+      debug-name: ${{ matrix.debug }}
     secrets:
       TESTS_BIGQUERY_PROJECT_ID: ${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}
       TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
 
   coverage:
     name: Tests (PostgreSQL 18, coverage)
+    # Debug only: skip coverage on this throwaway branch.
+    if: false
     uses: ./.github/workflows/reusable-tests.yml
     with:
       coverage: true
