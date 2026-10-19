@@ -112,7 +112,7 @@ services:
 
   # Start MinIO for S3-compatible object storage
   object-store-minio:
-    image: minio/minio:latest
+    image: cgr.dev/chainguard/minio:latest
     environment:
       MINIO_ROOT_USER: minio-admin
       MINIO_ROOT_PASSWORD: minio-admin-password
@@ -123,14 +123,14 @@ services:
     volumes:
       - minio_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "mc", "ready", "local"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   # Create MinIO bucket
   object-store-minio-init:
-    image: minio/mc:latest
+    image: cgr.dev/chainguard/minio:latest
     depends_on:
       object-store-minio:
         condition: service_healthy
