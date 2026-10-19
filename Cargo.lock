@@ -2039,7 +2039,6 @@ dependencies = [
  "prost",
  "r2d2",
  "rand 0.9.4",
- "regex",
  "reqwest",
  "rust_decimal",
  "rustls",
