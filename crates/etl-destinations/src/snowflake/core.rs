@@ -1072,7 +1072,7 @@ mod tests {
         ] {
             store.update_table_state(schema.id(), state).await.unwrap();
             let error = destination.startup().await.unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::DestinationError);
+            assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
         }
     }
 
@@ -1101,7 +1101,7 @@ mod tests {
             .await
             .unwrap();
         let error = destination.writer.initialize_table(&schema).await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DestinationError);
+        assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
     }
 
     #[tokio::test]
@@ -1179,7 +1179,7 @@ mod tests {
         else {
             panic!("initialization should not reacquire its table gate");
         };
-        assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationError);
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::DestinationAuthenticationError);
         assert!(
             store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap().is_applied()
         );

@@ -10,7 +10,7 @@ use crate::{
     retry::{RetryPolicy, retry_with_backoff},
     snowflake::{
         Error, Result, SnowpipeError,
-        auth::TokenProvider,
+        auth::{TokenProvider, send_with_token_refresh},
         streaming::{
             ChannelStatusResponse, InsertRowsResponse, OffsetToken, OpenChannelResponse, RowBatch,
             StreamClient,
@@ -52,16 +52,11 @@ impl<T: TokenProvider> RestStreamClient<T> {
     async fn get_or_discover_host(&self) -> Result<&str> {
         self.ingest_host
             .get_or_try_init(|| async {
-                let token = self.auth.get_token().await?;
                 let url = format!("{}/v2/streaming/hostname", self.account_url);
-                let resp = self
-                    .http
-                    .get(&url)
-                    .bearer_auth(&token)
-                    .header("User-Agent", USER_AGENT)
-                    .send()
-                    .await
-                    .map_err(Error::HttpTransport)?;
+                let resp = send_with_token_refresh(self.auth.as_ref(), |token| {
+                    self.http.get(&url).bearer_auth(token).header("User-Agent", USER_AGENT)
+                })
+                .await?;
 
                 let status = resp.status();
                 if status != StatusCode::OK {
@@ -564,19 +559,12 @@ fn parse_optional_offset_token(token: Option<String>) -> Result<Option<OffsetTok
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use etl::{
         data::{Cell, TableRow},
         error::Retryability,
         schema::{ColumnSchema, TableId, Type},
     };
     use serde_json::json;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-        task::JoinHandle,
-    };
 
     use super::*;
     use crate::{
@@ -584,64 +572,9 @@ mod tests {
         snowflake::{
             encoding::{CdcMeta, CdcOperation, serialize_row},
             streaming::{OffsetToken, RowBatchBuilder},
+            test_server::{CountingTokenProvider, serve_responses},
         },
     };
-
-    /// Token provider that names each token after how often it was invalidated.
-    #[derive(Default)]
-    struct CountingTokenProvider {
-        /// Number of invalidations so far.
-        invalidations: AtomicUsize,
-    }
-
-    impl TokenProvider for CountingTokenProvider {
-        async fn get_token(&self) -> Result<String> {
-            Ok(format!("token-{}", self.invalidations.load(Ordering::SeqCst)))
-        }
-
-        async fn invalidate_token(&self) {
-            self.invalidations.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    /// Answers one connection per scripted `(status, body)` response.
-    ///
-    /// Returns the server URL and a handle that yields the bearer token of
-    /// each answered request.
-    async fn serve_responses(
-        responses: Vec<(u16, &'static str)>,
-    ) -> (String, JoinHandle<Vec<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            let mut tokens = Vec::new();
-            for (status, body) in responses {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut head = Vec::new();
-                let mut chunk = [0; 1024];
-                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
-                    let read = stream.read(&mut chunk).await.unwrap();
-                    assert_ne!(read, 0);
-                    head.extend_from_slice(&chunk[..read]);
-                }
-                let head = String::from_utf8(head).unwrap();
-                tokens.extend(head.lines().find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("authorization: bearer ")
-                        .map(str::to_owned)
-                }));
-                let response = format!(
-                    "HTTP/1.1 {status} Test\r\ncontent-length: {}\r\nconnection: \
-                     close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-            tokens
-        });
-
-        (url, server)
-    }
 
     /// Every identifier stays in its own segment after reqwest parses the URL.
     #[test]
@@ -800,7 +733,39 @@ mod tests {
         // THEN: the request was resent once, and the error is permanent.
         assert_eq!(error.retryability(), Retryability::Permanent);
         assert_eq!(server.await.unwrap(), vec!["token-0", "token-1"]);
-        assert_eq!(auth.invalidations.load(Ordering::SeqCst), 2);
+        assert_eq!(auth.invalidations(), 2);
+    }
+
+    /// Hostname discovery refreshes a rejected token once, and reports a
+    /// second rejection.
+    #[tokio::test]
+    async fn hostname_discovery_refreshes_rejected_token_once() {
+        for (second_status, second_body) in [(200, "ingest.example.com"), (401, "{}")] {
+            // GIVEN: Snowflake rejects the cached token, then answers the
+            // resent request.
+            let (url, server) =
+                serve_responses(vec![(401, "{}"), (second_status, second_body)]).await;
+            let auth = Arc::new(CountingTokenProvider::default());
+            let stream = RestStreamClient::new(
+                url,
+                Arc::clone(&auth),
+                Client::builder().no_proxy().build().unwrap(),
+            );
+
+            // WHEN: the ingest host is discovered.
+            let discovered = stream.discover_ingest_host().await;
+
+            // THEN: the request was resent once with a fresh token.
+            match second_status {
+                200 => assert_eq!(discovered.unwrap(), "https://ingest.example.com"),
+                _ => assert!(matches!(
+                    discovered,
+                    Err(Error::HttpStatus { status: StatusCode::UNAUTHORIZED, .. })
+                )),
+            }
+            assert_eq!(server.await.unwrap(), vec!["token-0", "token-1"]);
+            assert_eq!(auth.invalidations(), 1);
+        }
     }
 
     /// A removed channel starts its next incarnation with a fresh token, but
