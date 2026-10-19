@@ -20,12 +20,15 @@ const SECRET_OPTION_REPLACEMENT: &str = "$1 '[redacted]'";
 
 /// Matches one libpq `password` field and its value.
 ///
-/// Values may be single-quoted with backslash escapes (libpq conninfo),
-/// doubled-quoted with `\''` escapes (conninfo inside a SQL string literal),
-/// unterminated, which redacts the rest of the line, or unquoted.
+/// Values may be single-quoted with backslash escapes (libpq conninfo), or
+/// conninfo quoted again inside a SQL string literal, where libpq's `\'` and
+/// `\\` become `\\''` and `\\\\` and the quotes around the value double. A
+/// value that does not close cleanly redacts the rest of the line, so an
+/// unknown escape over-redacts instead of leaking. Unquoted values end at
+/// whitespace or punctuation.
 static PASSWORD_FIELD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"(?i)\bpassword\s*=\s*(?:''(?:[^'\\]|\\''|\\.)*''|'(?:[^'\\]|\\.)*'|'[^\r\n]*|[^\s'",);]+)"#,
+        r#"(?i)\bpassword\s*=\s*(?:''(?:\\\\''|\\\\\\\\|[^'\\])*(?:''|[^\r\n]*)|'(?:[^'\\]|\\.)*(?:'|[^\r\n]*)|[^\s'",);]+)"#,
     )
     .expect("password field redaction regex should compile")
 });
@@ -132,8 +135,12 @@ mod tests {
                 r"ATTACH 'ducklake:postgres:host=''h'' password='[redacted]' dbname=''lake''' AS lake",
             ),
             (
-                r"ATTACH 'ducklake:postgres:password=''pla\''ceholder'' dbname=''lake'''",
-                r"ATTACH 'ducklake:postgres:password='[redacted]' dbname=''lake'''",
+                r"ATTACH E'ducklake:postgres:password=''pla\\''ce\\\\holder'' dbname=''lake'''",
+                r"ATTACH E'ducklake:postgres:password='[redacted]' dbname=''lake'''",
+            ),
+            (
+                r"ATTACH E'ducklake:postgres:password=''pla\x\\''unknown escape'' dbname=''lake'''",
+                r"ATTACH E'ducklake:postgres:password='[redacted]'",
             ),
             (r"host=h PASSWORD = 'placeholder'", r"host=h password='[redacted]'"),
             (r"password='unterminated secret", r"password='[redacted]'"),

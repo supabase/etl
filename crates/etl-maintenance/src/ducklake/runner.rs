@@ -3694,6 +3694,57 @@ mod tests {
         );
     }
 
+    /// DuckDB parser errors echo the failing statement, so redaction must
+    /// remove credentials from the setup SQL exactly as the plan builder
+    /// escapes them, including quotes and backslashes.
+    #[test]
+    fn setup_sql_echoed_in_errors_redacts_escaped_credentials() {
+        // Each credential mixes a quote and a backslash between unique words.
+        let password = r"alphapw'betapw\gammapw";
+        let mut catalog_url = Url::parse("postgres://user@host/db").unwrap();
+        catalog_url.set_password(Some(password)).unwrap();
+        let s3 = S3Config {
+            access_key_id: r"alphakey'betakey\gammakey".to_owned(),
+            secret_access_key: r"alphasec'betasec\gammasec".to_owned(),
+            region: "eu-west-3".to_owned(),
+            endpoint: None,
+            url_style: "path".to_owned(),
+            use_ssl: true,
+        };
+        let plan = build_setup_plan_with_strategy(
+            &catalog_url,
+            &Url::parse("s3://warehouse/tenant/").unwrap(),
+            Some(&s3),
+            None,
+            &DuckLakeWriterConfig::default(),
+            DuckDbExtensionStrategy::InstallFromRepository,
+            None,
+        )
+        .unwrap();
+        let echoed_sql =
+            plan.steps().iter().map(|step| step.sql.as_str()).collect::<Vec<_>>().join("\n");
+        // Guards the test itself: the plan carries every credential word.
+        for word in ["betapw", "gammapw", "betakey", "gammakey", "betasec", "gammasec"] {
+            assert!(echoed_sql.contains(word));
+        }
+
+        let error = DuckLakeConnectionError::setup_phase(
+            &plan.steps()[0],
+            duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(1),
+                Some(format!("Parser Error: syntax error\n{echoed_sql}")),
+            ),
+        )
+        .to_string();
+
+        for word in [
+            "alphapw", "betapw", "gammapw", "alphakey", "betakey", "gammakey", "alphasec",
+            "betasec", "gammasec",
+        ] {
+            assert!(!error.contains(word), "{word}");
+        }
+    }
+
     #[test]
     fn should_rewrite_requires_only_file_count() {
         assert!(!should_rewrite(&metrics(39, 1, 50), 40));
