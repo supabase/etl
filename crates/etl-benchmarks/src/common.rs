@@ -194,7 +194,8 @@ pub struct DestinationArgs {
     /// ClickHouse password.
     #[arg(long)]
     pub clickhouse_password: Option<String>,
-    /// ClickHouse database. Must already exist.
+    /// ClickHouse database prefix. Each run writes to a new
+    /// `<database>_<pipeline_id>` database, dropped when the run cleans up.
     #[arg(long)]
     pub clickhouse_database: Option<String>,
     /// DuckLake PostgreSQL catalog URL.
@@ -516,8 +517,11 @@ impl BenchDestination {
         expect(clippy::unused_async)
     )]
     #[cfg_attr(
-        not(any(feature = "bigquery", feature = "snowflake")),
-        expect(unused_variables, reason = "pipeline_id is only used by BigQuery and Snowflake")
+        not(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake")),
+        expect(
+            unused_variables,
+            reason = "pipeline_id is only used by BigQuery, ClickHouse and Snowflake"
+        )
     )]
     pub async fn new(
         destination_args: &DestinationArgs,
@@ -585,6 +589,16 @@ impl BenchDestination {
                     .context("ClickHouse database is required for ClickHouse benchmarks")?;
                 let password =
                     destination_args.clickhouse_password.clone().filter(|p| !p.is_empty());
+
+                let database = clickhouse_run_database(&database, pipeline_id);
+                clickhouse_root_client(&url, &user, password.as_deref())
+                    .query(&format!(
+                        "CREATE DATABASE IF NOT EXISTS {}",
+                        quote_clickhouse_identifier(&database)
+                    ))
+                    .execute()
+                    .await
+                    .with_context(|| format!("failed to create ClickHouse database {database}"))?;
 
                 let destination = ClickHouseDestination::new(
                     url,
@@ -973,6 +987,61 @@ pub async fn cleanup_replication_slots(
 
     pool.close().await;
     Ok(())
+}
+
+/// Drops the destination state created by a benchmark run.
+#[cfg_attr(
+    not(feature = "clickhouse"),
+    expect(unused_variables, reason = "only ClickHouse runs create destination state")
+)]
+pub async fn cleanup_destination(
+    destination_args: &DestinationArgs,
+    pipeline_id: u64,
+) -> Result<()> {
+    #[cfg(feature = "clickhouse")]
+    if matches!(destination_args.destination, DestinationType::ClickHouse) {
+        let url = destination_args
+            .clickhouse_url
+            .as_deref()
+            .context("ClickHouse URL is required for ClickHouse benchmarks")?;
+        let url = Url::parse(url).context("invalid ClickHouse URL")?;
+        let user = destination_args
+            .clickhouse_user
+            .as_deref()
+            .context("ClickHouse user is required for ClickHouse benchmarks")?;
+        let database = destination_args
+            .clickhouse_database
+            .as_deref()
+            .context("ClickHouse database is required for ClickHouse benchmarks")?;
+        let password = destination_args.clickhouse_password.as_deref().filter(|p| !p.is_empty());
+        let database = clickhouse_run_database(database, pipeline_id);
+        clickhouse_root_client(&url, user, password)
+            .query(&format!("DROP DATABASE IF EXISTS {}", quote_clickhouse_identifier(&database)))
+            .execute()
+            .await
+            .with_context(|| format!("failed to drop ClickHouse database {database}"))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "clickhouse")]
+fn clickhouse_run_database(database: &str, pipeline_id: u64) -> String {
+    format!("{database}_{pipeline_id}")
+}
+
+#[cfg(feature = "clickhouse")]
+fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clickhouse::Client {
+    let client = clickhouse::Client::default().with_url(url.as_str()).with_user(user);
+    match password {
+        Some(password) => client.with_password(password),
+        None => client,
+    }
+}
+
+#[cfg(feature = "clickhouse")]
+fn quote_clickhouse_identifier(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
 }
 
 /// Writes a machine-readable benchmark report.

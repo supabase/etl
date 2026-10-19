@@ -1971,6 +1971,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "clickhouse",
  "etl",
  "etl-config",
  "etl-destinations",
