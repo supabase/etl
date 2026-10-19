@@ -29,11 +29,12 @@ runs:
           x86_64:linux/amd64|aarch64:linux/arm64) ;;
           *) echo '::error::Image platform must match the native runner'; exit 1 ;;
         esac
-    # Reuse CI caches when publishing; persistent BuildKit needs no cache export/import.
+    # Publishing uses its own persistent BuildKit state, so cache mounts that
+    # pull-request builds can write never feed published images.
     - name: Set up Docker builder
       uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184 # v2.2.0
       with:
-        cache-key: ${{ github.repository }}/crates/etl-replicator/Dockerfile-${{ inputs.platform }}
+        cache-key: ${{ github.repository }}/crates/etl-replicator/Dockerfile-${{ inputs.platform }}${{ inputs.push == 'true' && '-publish' || '' }}
         platforms: ${{ inputs.platform }}
     - name: Build image
       id: build
