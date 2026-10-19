@@ -3417,4 +3417,747 @@ mod tests {
 
         assert_eq!(error.kind(), ErrorKind::SourceReplicaIdentityError);
     }
+
+    /// Insert and copy rows whose width differs from the schema must fail
+    /// before any request reaches BigQuery.
+    ///
+    /// Update and delete rows check their width, but the insert and copy
+    /// paths tag cells by position without comparing against the schema. A
+    /// short row moves `_CHANGE_TYPE` and `_CHANGE_SEQUENCE_NUMBER` onto user
+    /// columns, so BigQuery either rejects the batch or, when the shifted
+    /// fields happen to fit, stores the CDC metadata as user data.
+    #[ignore = "known defect: BigQuery insert and copy rows are not checked against the schema \
+                width"]
+    #[tokio::test]
+    async fn insert_and_copy_rows_with_wrong_width_fail_before_append() {
+        let (progress, mut requests) = mpsc::unbounded_channel();
+        let release = Arc::new(Semaphore::new(0));
+        // A closed gate fails authentication immediately, so every append ends
+        // after reporting that it reached BigQuery.
+        release.close();
+        let destination =
+            destination_with_authenticator(Arc::new(PausedAuthenticator { progress, release }))
+                .await;
+        let schema = schema_for_table(1);
+        seed_table(&destination, &schema).await;
+        let insert = |table_row| {
+            Event::Insert(etl::event::InsertEvent {
+                commit_lsn: PgLsn::from(1),
+                tx_ordinal: 0,
+                replicated_table_schema: schema.clone(),
+                table_row,
+            })
+        };
+
+        // A well-formed row reaches authentication, proving the probe works.
+        let full_row = TableRow::new(vec![Cell::I32(1), Cell::Null]);
+        assert!(destination.write_events(vec![insert(full_row)]).await.is_err());
+        requests.recv().await.unwrap();
+        while requests.try_recv().is_ok() {}
+
+        let short_row = TableRow::new(vec![Cell::I32(1)]);
+        assert!(destination.write_events(vec![insert(short_row.clone())]).await.is_err());
+        assert!(requests.try_recv().is_err(), "a short insert row was sent to BigQuery");
+
+        assert!(destination.write_table_rows(&schema, vec![short_row]).await.is_err());
+        assert!(requests.try_recv().is_err(), "a short copy row was sent to BigQuery");
+
+        destination.shutdown().await.unwrap();
+    }
+
+    /// CDC rows merged the way BigQuery merges them reproduce the source table.
+    ///
+    /// BigQuery applies CDC rows per primary key by keeping the row with the
+    /// greatest `_CHANGE_SEQUENCE_NUMBER`, in any arrival order. If two rows
+    /// for one key tie, or an older event sorts after a newer one, a deleted
+    /// row comes back or an update is lost without any error.
+    mod cdc_merge_properties {
+        use std::{cmp::Ordering, collections::BTreeMap};
+
+        use etl::test_utils::property::run_property;
+        use proptest::{collection::vec, option, prelude::*};
+        use prost::{
+            bytes::Buf,
+            encoding::{DecodeContext, decode_key, int32, string},
+        };
+
+        use super::*;
+
+        /// Number of distinct primary-key values the operations draw from.
+        const KEY_DOMAIN: i32 = 4;
+
+        /// One source operation, resolved against the model table when applied
+        /// so every generated sequence is valid for Postgres.
+        #[derive(Debug, Clone)]
+        enum Operation {
+            /// Inserts a row at the `key`-th absent key.
+            Insert { key: usize, value: Option<String> },
+            /// Updates the `key`-th present row, moving it to the `new_key`-th
+            /// absent key when given and one exists.
+            Update { key: usize, new_key: Option<usize>, value: Option<String>, key_image: bool },
+            /// Deletes the `key`-th present row.
+            Delete { key: usize },
+        }
+
+        /// One generated scenario.
+        #[derive(Debug, Clone)]
+        struct Scenario {
+            /// Whether the table uses `REPLICA IDENTITY FULL` old rows instead
+            /// of key-only old rows.
+            full_identity: bool,
+            /// Rows present in the initial copy snapshot.
+            snapshot: BTreeMap<i32, Option<String>>,
+            /// First transaction's commit LSN.
+            first_commit_lsn: u64,
+            /// Gap between consecutive transactions' commit LSNs.
+            commit_lsn_step: u64,
+            /// Transactions as a first `tx_ordinal` and their operations.
+            transactions: Vec<(u64, Vec<Operation>)>,
+            /// Seed for the arrival-order shuffle.
+            shuffle_seed: u64,
+        }
+
+        /// One CDC row decoded from its protobuf encoding.
+        #[derive(Debug)]
+        struct DecodedRow {
+            /// Primary-key value.
+            id: i32,
+            /// Non-key value, absent for NULL and on delete rows.
+            value: Option<String>,
+            /// `_CHANGE_TYPE`.
+            change_type: String,
+            /// `_CHANGE_SEQUENCE_NUMBER`.
+            sequence_number: String,
+        }
+
+        /// Small non-key values, including NULL and the empty string.
+        fn value() -> impl Strategy<Value = Option<String>> {
+            option::of("[ab]{0,2}")
+        }
+
+        /// Operations biased toward primary-key changes and key reuse.
+        fn operation() -> impl Strategy<Value = Operation> {
+            let insert =
+                (any::<usize>(), value()).prop_map(|(key, value)| Operation::Insert { key, value });
+            let update = (any::<usize>(), option::of(any::<usize>()), value(), any::<bool>())
+                .prop_map(|(key, new_key, value, key_image)| Operation::Update {
+                    key,
+                    new_key,
+                    value,
+                    key_image,
+                });
+            let delete = any::<usize>().prop_map(|key| Operation::Delete { key });
+
+            prop_oneof![2 => insert, 3 => update, 2 => delete]
+        }
+
+        /// Scenarios with commit LSNs and transaction ordinals near zero, near
+        /// `2^32`, and near `u64::MAX`.
+        fn scenario() -> impl Strategy<Value = Scenario> {
+            let tx_ordinal = prop_oneof![
+                0u64..4,
+                (1u64 << 32) - 3..(1u64 << 32) + 3,
+                u64::MAX - 20..=u64::MAX - 10,
+            ];
+            // Twelve transactions of at most 100 LSNs each stay below u64::MAX.
+            let first_commit_lsn = prop_oneof![1u64..1_000, u64::MAX - 1_300..=u64::MAX - 1_200];
+
+            (
+                any::<bool>(),
+                proptest::collection::btree_map(0..KEY_DOMAIN, value(), 0..=KEY_DOMAIN as usize),
+                first_commit_lsn,
+                1u64..=100,
+                vec((tx_ordinal, vec(operation(), 1..=5)), 1..=12),
+                any::<u64>(),
+            )
+                .prop_map(
+                    |(
+                        full_identity,
+                        snapshot,
+                        first_commit_lsn,
+                        commit_lsn_step,
+                        transactions,
+                        shuffle_seed,
+                    )| Scenario {
+                        full_identity,
+                        snapshot,
+                        first_commit_lsn,
+                        commit_lsn_step,
+                        transactions,
+                        shuffle_seed,
+                    },
+                )
+        }
+
+        /// Builds the source row for a key and value.
+        fn row(id: i32, value: &Option<String>) -> TableRow {
+            TableRow::new(vec![Cell::I32(id), value.clone().map_or(Cell::Null, Cell::String)])
+        }
+
+        /// Picks the `index`-th key matching `present` in the model, if any.
+        fn pick_key(
+            model: &BTreeMap<i32, Option<String>>,
+            index: usize,
+            present: bool,
+        ) -> Option<i32> {
+            let keys = (0..KEY_DOMAIN)
+                .filter(|key| model.contains_key(key) == present)
+                .collect::<Vec<_>>();
+
+            (!keys.is_empty()).then(|| keys[index % keys.len()])
+        }
+
+        /// Applies the scenario to the model table and builds the CDC rows
+        /// exactly as the copy and streaming paths do.
+        fn apply(scenario: &Scenario) -> (BTreeMap<i32, Option<String>>, Vec<BigQueryTableRow>) {
+            let schema = replicated_schema(if scenario.full_identity {
+                IdentityType::Full
+            } else {
+                IdentityType::PrimaryKey
+            });
+            let mut model = scenario.snapshot.clone();
+            let mut rows = model
+                .iter()
+                .map(|(id, value)| {
+                    bigquery_upsert_row(row(*id, value), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned())
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let old_image = |id: i32, value: &Option<String>| {
+                if scenario.full_identity {
+                    OldTableRow::Full(row(id, value))
+                } else {
+                    OldTableRow::Key(TableRow::new(vec![Cell::I32(id)]))
+                }
+            };
+
+            for (index, (first_tx_ordinal, operations)) in scenario.transactions.iter().enumerate()
+            {
+                let commit_lsn =
+                    scenario.first_commit_lsn + index as u64 * scenario.commit_lsn_step;
+                for (ordinal, operation) in operations.iter().enumerate() {
+                    let position = EventPosition::new(
+                        PgLsn::from(commit_lsn),
+                        first_tx_ordinal + ordinal as u64,
+                    );
+                    let sequence_number =
+                        bigquery_sequence_number(position, BIGQUERY_SEQUENCE_ORDINAL_FIRST);
+                    match operation {
+                        Operation::Insert { key, value } => {
+                            let Some(id) = pick_key(&model, *key, false) else { continue };
+                            model.insert(id, value.clone());
+                            rows.push(
+                                bigquery_upsert_row(row(id, value), sequence_number).unwrap(),
+                            );
+                        }
+                        Operation::Update { key, new_key, value, key_image } => {
+                            let Some(id) = pick_key(&model, *key, true) else { continue };
+                            let new_id = new_key
+                                .and_then(|new_key| pick_key(&model, new_key, false))
+                                .unwrap_or(id);
+                            let old_value = model.remove(&id).unwrap();
+                            model.insert(new_id, value.clone());
+                            // pgoutput omits the key image when a primary-key
+                            // identity is unchanged, but FULL always sends it.
+                            let old_row = (scenario.full_identity || new_id != id || *key_image)
+                                .then(|| old_image(id, &old_value));
+                            rows.extend(
+                                bigquery_update_rows(
+                                    &schema,
+                                    row(new_id, value),
+                                    old_row,
+                                    position,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        Operation::Delete { key } => {
+                            let Some(id) = pick_key(&model, *key, true) else { continue };
+                            let old_value = model.remove(&id).unwrap();
+                            rows.push(
+                                bigquery_delete_row(
+                                    &schema,
+                                    old_image(id, &old_value),
+                                    sequence_number,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            (model, rows)
+        }
+
+        /// Decodes a CDC row with prost's low-level field decoders.
+        fn decode_row(row: &BigQueryTableRow) -> DecodedRow {
+            let bytes = row.encode_to_vec();
+            let mut buf = bytes.as_slice();
+            let mut decoded = DecodedRow {
+                id: 0,
+                value: None,
+                change_type: String::new(),
+                sequence_number: String::new(),
+            };
+            let mut id = None;
+            while buf.has_remaining() {
+                let (tag, wire_type) = decode_key(&mut buf).unwrap();
+                let context = DecodeContext::default();
+                match tag {
+                    1 => {
+                        let mut value = 0;
+                        int32::merge(wire_type, &mut value, &mut buf, context).unwrap();
+                        id = Some(value);
+                    }
+                    2 => {
+                        let mut value = String::new();
+                        string::merge(wire_type, &mut value, &mut buf, context).unwrap();
+                        decoded.value = Some(value);
+                    }
+                    3 => string::merge(wire_type, &mut decoded.change_type, &mut buf, context)
+                        .unwrap(),
+                    4 => string::merge(wire_type, &mut decoded.sequence_number, &mut buf, context)
+                        .unwrap(),
+                    _ => panic!("unexpected field {tag}"),
+                }
+            }
+            decoded.id = id.expect("every CDC row carries its primary key");
+
+            decoded
+        }
+
+        /// Parses `_CHANGE_SEQUENCE_NUMBER` the way BigQuery documents it: up
+        /// to four `/`-separated sections of at most 16 hexadecimal
+        /// digits, each an unsigned 64-bit integer.
+        fn sequence_sections(sequence_number: &str) -> Result<Vec<u64>, TestCaseError> {
+            let sections = sequence_number
+                .split('/')
+                .map(|section| {
+                    prop_assert!(
+                        (1..=16).contains(&section.len()),
+                        "section {section:?} of {sequence_number:?} has an invalid length"
+                    );
+                    u64::from_str_radix(section, 16).map_err(|err| {
+                        TestCaseError::fail(format!(
+                            "{sequence_number:?} is not hexadecimal: {err}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            prop_assert!(sections.len() <= 4, "{sequence_number:?} has too many sections");
+
+            Ok(sections)
+        }
+
+        /// Shuffles rows with a seeded xorshift generator, modeling BigQuery's
+        /// freedom to apply appended rows in any order.
+        fn shuffle<T>(items: &mut [T], mut seed: u64) {
+            seed |= 1;
+            for index in (1..items.len()).rev() {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                items.swap(index, (seed % (index as u64 + 1)) as usize);
+            }
+        }
+
+        /// Merges CDC rows per primary key as BigQuery does, rejecting ties.
+        fn bigquery_merge(
+            rows: Vec<DecodedRow>,
+        ) -> Result<BTreeMap<i32, Option<String>>, TestCaseError> {
+            let mut latest: BTreeMap<i32, (Vec<u64>, DecodedRow)> = BTreeMap::new();
+            for row in rows {
+                prop_assert!(
+                    matches!(row.change_type.as_str(), "UPSERT" | "DELETE"),
+                    "unknown change type {:?}",
+                    row.change_type
+                );
+                let sections = sequence_sections(&row.sequence_number)?;
+                match latest.get(&row.id) {
+                    Some((current, current_row)) => match sections.cmp(current) {
+                        Ordering::Greater => {
+                            latest.insert(row.id, (sections, row));
+                        }
+                        Ordering::Equal => {
+                            return Err(TestCaseError::fail(format!(
+                                "key {} has two rows with sequence number {}: {current_row:?} and \
+                                 {row:?}",
+                                row.id, row.sequence_number
+                            )));
+                        }
+                        Ordering::Less => {}
+                    },
+                    None => {
+                        latest.insert(row.id, (sections, row));
+                    }
+                }
+            }
+
+            Ok(latest
+                .into_values()
+                .filter(|(_, row)| row.change_type == "UPSERT")
+                .map(|(_, row)| (row.id, row.value))
+                .collect())
+        }
+
+        /// The table BigQuery materializes from shuffled CDC rows equals the
+        /// Postgres table after the same snapshot and events, and no two rows
+        /// for one key share a sequence number.
+        #[test]
+        fn merged_cdc_rows_match_source_table() {
+            run_property("bigquery_merged_cdc_rows_match_source_table", &scenario(), |scenario| {
+                let (model, rows) = apply(scenario);
+                let mut decoded = rows.iter().map(decode_row).collect::<Vec<_>>();
+                shuffle(&mut decoded, scenario.shuffle_seed);
+
+                prop_assert_eq!(bigquery_merge(decoded)?, model);
+                Ok(())
+            });
+        }
+
+        /// Swapping two keys inside one transaction near the top of the LSN and
+        /// ordinal ranges leaves both rows with their swapped values.
+        #[test]
+        fn key_swap_in_one_transaction_merges_to_swapped_rows() {
+            let schema = replicated_schema(IdentityType::PrimaryKey);
+            let a = Some("a".to_owned());
+            let b = Some("b".to_owned());
+            let mut rows = vec![
+                bigquery_upsert_row(row(1, &a), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned()).unwrap(),
+                bigquery_upsert_row(row(2, &b), BIGQUERY_COPY_SEQUENCE_NUMBER.to_owned()).unwrap(),
+            ];
+            let key = |id| Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(id)])));
+            let position = |ordinal| EventPosition::new(PgLsn::from(u64::MAX), ordinal);
+            for (ordinal, old_id, new_id, value) in
+                [(u64::MAX - 2, 1, 3, &a), (u64::MAX - 1, 2, 1, &b), (u64::MAX, 3, 2, &a)]
+            {
+                rows.extend(
+                    bigquery_update_rows(
+                        &schema,
+                        row(new_id, value),
+                        key(old_id),
+                        position(ordinal),
+                    )
+                    .unwrap(),
+                );
+            }
+            let mut decoded = rows.iter().map(decode_row).collect::<Vec<_>>();
+            decoded.reverse();
+
+            assert_eq!(bigquery_merge(decoded).unwrap(), BTreeMap::from([(1, b), (2, a)]));
+        }
+    }
+
+    /// Type changes that BigQuery keeps must not change what new values mean.
+    ///
+    /// ETL logs and skips source type changes, so the BigQuery column keeps the
+    /// type created for the old source type while later rows are written with
+    /// the new type's writer descriptor. The compatibility oracle follows the
+    /// BigQuery Storage Write API protobuf conversion table
+    /// (<https://cloud.google.com/bigquery/docs/supported-data-types>).
+    mod type_change_tables {
+        use gcp_bigquery_client::storage::{ColumnMode, ColumnType};
+
+        use super::*;
+        use crate::bigquery::schema::postgres_to_bigquery_type;
+
+        /// Source types with a dedicated BigQuery mapping, plus representative
+        /// string-fallback types.
+        const SUPPORTED_TYPES: &[Type] = &[
+            Type::BOOL,
+            Type::INT2,
+            Type::INT4,
+            Type::INT8,
+            Type::FLOAT4,
+            Type::FLOAT8,
+            Type::NUMERIC,
+            Type::BYTEA,
+            Type::DATE,
+            Type::TIME,
+            Type::TIMETZ,
+            Type::TIMESTAMP,
+            Type::TIMESTAMPTZ,
+            Type::UUID,
+            Type::JSON,
+            Type::JSONB,
+            Type::OID,
+            Type::TEXT,
+            Type::VARCHAR,
+            Type::BOOL_ARRAY,
+            Type::INT2_ARRAY,
+            Type::INT4_ARRAY,
+            Type::INT8_ARRAY,
+            Type::FLOAT4_ARRAY,
+            Type::FLOAT8_ARRAY,
+            Type::NUMERIC_ARRAY,
+            Type::BYTEA_ARRAY,
+            Type::DATE_ARRAY,
+            Type::TIME_ARRAY,
+            Type::TIMETZ_ARRAY,
+            Type::TIMESTAMP_ARRAY,
+            Type::TIMESTAMPTZ_ARRAY,
+            Type::UUID_ARRAY,
+            Type::JSON_ARRAY,
+            Type::JSONB_ARRAY,
+            Type::OID_ARRAY,
+            Type::TEXT_ARRAY,
+            Type::VARCHAR_ARRAY,
+        ];
+
+        /// How BigQuery reads a writer field into an existing column.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Reading {
+            /// The stored value means what the source value means.
+            Same,
+            /// BigQuery accepts the field but stores a different value.
+            Reinterpreted,
+            /// BigQuery rejects the field or every value it can carry, failing
+            /// the append.
+            Rejected,
+        }
+
+        /// What a writer field's value means for the source type behind it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Meaning {
+            /// A protobuf `bool`.
+            Boolean,
+            /// An integer value.
+            Integer,
+            /// Microseconds since the Unix epoch.
+            EpochMicros,
+            /// A floating-point value.
+            Float,
+            /// Raw bytes.
+            Bytes,
+            /// A decimal literal.
+            DecimalText,
+            /// A `YYYY-MM-DD` date literal.
+            DateText,
+            /// A time-of-day literal.
+            TimeText,
+            /// A civil date-and-time literal.
+            DateTimeText,
+            /// A JSON document.
+            JsonText,
+            /// Any other text.
+            OtherText,
+        }
+
+        /// Returns the element type of an array type, or the type itself.
+        fn element_type(typ: &Type) -> Type {
+            match *typ {
+                Type::BOOL_ARRAY => Type::BOOL,
+                Type::INT2_ARRAY => Type::INT2,
+                Type::INT4_ARRAY => Type::INT4,
+                Type::INT8_ARRAY => Type::INT8,
+                Type::FLOAT4_ARRAY => Type::FLOAT4,
+                Type::FLOAT8_ARRAY => Type::FLOAT8,
+                Type::NUMERIC_ARRAY => Type::NUMERIC,
+                Type::BYTEA_ARRAY => Type::BYTEA,
+                Type::DATE_ARRAY => Type::DATE,
+                Type::TIME_ARRAY => Type::TIME,
+                Type::TIMETZ_ARRAY => Type::TIMETZ,
+                Type::TIMESTAMP_ARRAY => Type::TIMESTAMP,
+                Type::TIMESTAMPTZ_ARRAY => Type::TIMESTAMPTZ,
+                Type::UUID_ARRAY => Type::UUID,
+                Type::JSON_ARRAY => Type::JSON,
+                Type::JSONB_ARRAY => Type::JSONB,
+                Type::OID_ARRAY => Type::OID,
+                Type::TEXT_ARRAY => Type::TEXT,
+                Type::VARCHAR_ARRAY => Type::VARCHAR,
+                _ => typ.clone(),
+            }
+        }
+
+        /// Returns what a writer field of `column_type` means for `typ`.
+        fn meaning(column_type: ColumnType, typ: &Type) -> Meaning {
+            let element = element_type(typ);
+            match column_type {
+                ColumnType::Bool => Meaning::Boolean,
+                ColumnType::Int32 | ColumnType::Int64 if element == Type::TIMESTAMPTZ => {
+                    Meaning::EpochMicros
+                }
+                ColumnType::Int32 | ColumnType::Int64 => Meaning::Integer,
+                ColumnType::Float | ColumnType::Double => Meaning::Float,
+                ColumnType::Bytes => Meaning::Bytes,
+                ColumnType::String => match element {
+                    Type::NUMERIC => Meaning::DecimalText,
+                    Type::DATE => Meaning::DateText,
+                    Type::TIME => Meaning::TimeText,
+                    Type::TIMESTAMP => Meaning::DateTimeText,
+                    Type::JSON | Type::JSONB => Meaning::JsonText,
+                    _ => Meaning::OtherText,
+                },
+                other => panic!("the descriptor never uses {other:?}"),
+            }
+        }
+
+        /// Reads one writer element into one BigQuery column element type,
+        /// following the documented protobuf conversion table.
+        ///
+        /// Text that is not a literal of the column type is `Rejected`, because
+        /// the new source type allows values BigQuery cannot parse.
+        fn bigquery_reading(column: &str, column_type: ColumnType, meaning: Meaning) -> Reading {
+            use ColumnType::{Bool, Bytes, Double, Float, Int32, Int64, String};
+            use Meaning::*;
+
+            match (column, column_type, meaning) {
+                ("bool", Bool, _) => Reading::Same,
+                // BOOL accepts integers and stores whether they are nonzero.
+                ("bool", Int32 | Int64, _) => Reading::Reinterpreted,
+                ("int64", Int32 | Int64, Integer) => Reading::Same,
+                ("int64", Int32 | Int64, EpochMicros) => Reading::Reinterpreted,
+                ("float64", Float | Double, _) => Reading::Same,
+                ("bignumeric", Int32 | Int64, Integer) => Reading::Same,
+                ("bignumeric", Int32 | Int64, EpochMicros) => Reading::Reinterpreted,
+                ("bignumeric", Float | Double, _) => Reading::Same,
+                ("bignumeric", String, DecimalText) => Reading::Same,
+                // Bytes are read as a `BigDecimalByteStringEncoder` value.
+                ("bignumeric", Bytes, _) => Reading::Reinterpreted,
+                // Integers are read as days since the Unix epoch.
+                ("date", Int32 | Int64, _) => Reading::Reinterpreted,
+                ("date", String, DateText) => Reading::Same,
+                // `int64` is read as a `CivilTimeEncoder` packed value.
+                ("datetime" | "time", Int64, _) => Reading::Reinterpreted,
+                // A DATETIME literal may omit the time, meaning midnight.
+                ("datetime", String, DateTimeText | DateText) => Reading::Same,
+                ("time", String, TimeText) => Reading::Same,
+                ("timestamp", Int32 | Int64, EpochMicros) => Reading::Same,
+                // Integers are read as microseconds since the Unix epoch.
+                ("timestamp", Int32 | Int64, Integer) => Reading::Reinterpreted,
+                ("json", String, JsonText) => Reading::Same,
+                ("bytes", Bytes, _) => Reading::Same,
+                // Strings are stored as their UTF-8 bytes, not decoded.
+                ("bytes", String, _) => Reading::Reinterpreted,
+                ("string", String, _) => Reading::Same,
+                _ => Reading::Rejected,
+            }
+        }
+
+        /// Builds a keyed two-column schema whose second column has `typ`.
+        fn schema_with(typ: &Type) -> ReplicatedTableSchema {
+            ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+                TableId::new(1),
+                TableName::new("public".to_owned(), "events".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("value".to_owned(), typ.clone(), -1, 2, true),
+                ],
+            )))
+        }
+
+        /// Returns how BigQuery reads rows written for `after` into the column
+        /// created for `before`.
+        fn reading_after_change(before: &Type, after: &Type) -> Reading {
+            let column = postgres_to_bigquery_type(before);
+            let field =
+                &column_schemas_to_table_descriptor(&schema_with(after), true).field_descriptors[1];
+            let repeated = matches!(field.mode, ColumnMode::Repeated);
+            let column_element = match column.strip_prefix("array<") {
+                Some(element) if repeated => element.trim_end_matches('>'),
+                None if !repeated => column.as_str(),
+                // A scalar column cannot take a repeated field, and the reverse.
+                _ => return Reading::Rejected,
+            };
+
+            bigquery_reading(column_element, field.typ, meaning(field.typ, after))
+        }
+
+        /// Returns whether the streaming schema-change path accepts the change
+        /// without rejecting it before DDL.
+        fn change_is_accepted(before: &Type, after: &Type) -> bool {
+            let current = schema_with(before);
+            let new = schema_with(after);
+            validate_bigquery_table_capabilities(&new).is_ok()
+                && ensure_bigquery_primary_key_unchanged(&current, &new).is_ok()
+                && current
+                    .plan_schema_change(&new, BIGQUERY_COLUMN_NAME_MAPPING)
+                    .is_ok_and(|plan| validate_bigquery_schema_plan(&new, &plan).is_ok())
+        }
+
+        /// Returns every accepted type change BigQuery reads as `reading`.
+        fn accepted_changes_read_as(reading: Reading) -> Vec<String> {
+            SUPPORTED_TYPES
+                .iter()
+                .flat_map(|before| SUPPORTED_TYPES.iter().map(move |after| (before, after)))
+                .filter(|(before, after)| before != after)
+                .filter(|(before, after)| {
+                    change_is_accepted(before, after)
+                        && reading_after_change(before, after) == reading
+                })
+                .map(|(before, after)| {
+                    format!("{before} -> {after} ({})", postgres_to_bigquery_type(before))
+                })
+                .collect()
+        }
+
+        /// Every supported type is written with a protobuf type its own
+        /// BigQuery column reads without changing the value, so the descriptor
+        /// and DDL mappings cannot drift apart.
+        #[test]
+        fn every_type_is_written_with_a_wire_type_its_column_reads_unchanged() {
+            for typ in SUPPORTED_TYPES {
+                assert_eq!(reading_after_change(typ, typ), Reading::Same, "{typ}");
+            }
+        }
+
+        /// Common widening migrations stay accepted and keep their meaning.
+        #[test]
+        fn widening_type_changes_keep_wire_meaning() {
+            for (before, after) in [
+                (Type::INT2, Type::INT4),
+                (Type::INT2, Type::INT8),
+                (Type::INT4, Type::INT8),
+                (Type::FLOAT4, Type::FLOAT8),
+                (Type::VARCHAR, Type::TEXT),
+                (Type::UUID, Type::TEXT),
+                (Type::TIMETZ, Type::TEXT),
+                (Type::JSON, Type::JSONB),
+                (Type::INT4_ARRAY, Type::INT8_ARRAY),
+                (Type::VARCHAR_ARRAY, Type::TEXT_ARRAY),
+            ] {
+                assert!(change_is_accepted(&before, &after), "{before} -> {after}");
+                assert_eq!(
+                    reading_after_change(&before, &after),
+                    Reading::Same,
+                    "{before} -> {after}"
+                );
+            }
+        }
+
+        /// `timestamp -> timestamptz` keeps the BigQuery DATETIME column but
+        /// sends epoch microseconds as `int64`, which BigQuery decodes as a
+        /// packed civil time instead of an instant.
+        #[ignore = "known defect: BigQuery accepts timestamp -> timestamptz and writes epoch \
+                    micros into a DATETIME column"]
+        #[test]
+        fn timestamp_to_timestamptz_change_is_rejected_before_ddl() {
+            assert_eq!(
+                reading_after_change(&Type::TIMESTAMP, &Type::TIMESTAMPTZ),
+                Reading::Reinterpreted
+            );
+            assert!(!change_is_accepted(&Type::TIMESTAMP, &Type::TIMESTAMPTZ));
+        }
+
+        /// No accepted type change may make BigQuery store a different value
+        /// without an error.
+        #[ignore = "known defect: BigQuery accepts type changes whose new wire values the kept \
+                    column reinterprets"]
+        #[test]
+        fn type_changes_bigquery_would_reinterpret_are_rejected_before_ddl() {
+            let changes = accepted_changes_read_as(Reading::Reinterpreted);
+            assert!(changes.is_empty(), "accepted reinterpreting changes:\n{}", changes.join("\n"));
+        }
+
+        /// No accepted type change may make every later append fail.
+        #[ignore = "known defect: BigQuery accepts type changes whose new wire values the kept \
+                    column rejects"]
+        #[test]
+        fn type_changes_bigquery_cannot_read_are_rejected_before_ddl() {
+            let changes = accepted_changes_read_as(Reading::Rejected);
+            assert!(changes.is_empty(), "accepted unreadable changes:\n{}", changes.join("\n"));
+        }
+    }
 }
