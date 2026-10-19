@@ -184,20 +184,21 @@ impl DuckDbErrorType {
             // reports lost catalog connections and failed catalog queries as
             // I/O errors. An interrupt comes from DuckLake's own query deadline
             // or shutdown, not from the statement. Memory pressure from
-            // concurrent work may ease.
+            // concurrent work may ease. `Invalid` wraps an exception that is
+            // not DuckDB's, such as one an extension throws, so its type says
+            // nothing about the cause; retries are capped either way.
             Self::Transaction
             | Self::Io
             | Self::Http
             | Self::Connection
             | Self::Interrupt
-            | Self::OutOfMemory => Retryability::Retryable,
+            | Self::OutOfMemory
+            | Self::Invalid => Retryability::Retryable,
 
             // The statement, its data, or the lake's state is rejected the
-            // same way until something changes. `Invalid` covers non-DuckDB
-            // exceptions, `Fatal` an invalidated database, and `Internal` a
-            // failed DuckDB assertion.
-            Self::Invalid
-            | Self::OutOfRange
+            // same way until something changes. `Fatal` is an invalidated
+            // database and `Internal` a failed DuckDB assertion.
+            Self::OutOfRange
             | Self::Conversion
             | Self::UnknownType
             | Self::Decimal
@@ -317,6 +318,7 @@ mod tests {
             ("Connection Error: connection closed", Retryability::Retryable),
             ("INTERRUPT Error: Interrupted!", Retryability::Retryable),
             ("Out of Memory Error: failed to allocate", Retryability::Retryable),
+            ("Invalid Error: std::exception", Retryability::Retryable),
             ("Constraint Error: NOT NULL constraint failed", Retryability::Permanent),
             ("Catalog Error: Table with name t does not exist!", Retryability::Permanent),
             ("Parser Error: syntax error at or near", Retryability::Permanent),
