@@ -176,7 +176,9 @@ concurrently and must all pass readiness checks before tests run. All
 Postgres-backed tests run in one nextest invocation with the `pg-sharded`
 profile and one test thread per cluster: each free thread takes the next test,
 and the test connects to the cluster at its `NEXTEST_TEST_GLOBAL_SLOT`, so no
-two running tests share a cluster. The slowest tests start first. A plain
+two running tests share a cluster. The slowest tests start first; the rest are
+ordered by test-name length mod 40, a fixed pseudo-random order that keeps
+DuckLake and ClickHouse tests from all running at once. A plain
 `cargo nextest run` keeps them serial on one cluster. BigQuery
 destination-only tests use isolated datasets and an in-memory store. They run
 serially in the non-Postgres lane, with priority over short unit tests to
