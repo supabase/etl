@@ -251,6 +251,9 @@ jobs:
     uses: ./.github/workflows/reusable-tests.yml
     with:
       coverage: true
+      # Coverage is usually the last job to finish. The shard step sizes
+      # Postgres shards to the runner, so 16 vCPUs also means 16 shards.
+      runner-vcpus: 16
     secrets:
       TESTS_BIGQUERY_PROJECT_ID: ${{ secrets.TESTS_BIGQUERY_PROJECT_ID }}
       TESTS_BIGQUERY_SA_KEY_JSON: ${{ secrets.TESTS_BIGQUERY_SA_KEY_JSON }}
