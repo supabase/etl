@@ -17,6 +17,18 @@ max-threads = 1
 [test-groups.bigquery-destination]
 max-threads = 1
 
+# The pg-sharded queue hands out tests in name order, so without a cap every
+# thread reaches the DuckLake tests, then the ClickHouse tests, at the same
+# time. Each DuckDB instance uses every core by default, and all ClickHouse
+# tests share one server, so overlap inflated their run times. A cap lets the
+# other threads run other tests meanwhile; before the queue, about two ran at
+# once.
+[test-groups.ducklake-pg]
+max-threads = 3
+
+[test-groups.clickhouse-pg]
+max-threads = 3
+
 [[profile.default.overrides]]
 filter = "test(exclusive_) | binary_id(etl::main) | (binary_id(etl-destinations::main) & test(/^(bigquery|ducklake|iceberg)::/) & not test(/^bigquery::destination::/)) | (binary_id(etl-destinations::main) & test(/^clickhouse::pipeline/)) | (binary_id(etl-destinations) & test(/ducklake::core::tests::postgres_backed::/))"
 test-group = "shared-pg"
@@ -38,6 +50,16 @@ priority = 10
 [[profile.pg-sharded.overrides]]
 filter = "binary_id(etl::main) & (test(=pipeline_with_faulty_destination::apply_disconnect_at_randomized_positions_converges_without_loss) | test(=pipeline_dirty_restart::postgres_store_dirty_restart_at_randomized_positions_converges_without_recopy) | test(=replication::apply_slot_creation_exempts_lock_timeout) | test(=replication_copy_locks::copy_slot_bounds_writer_ddl_deadlock) | test(=replication::slot_creation_restores_lock_timeout_after_errors))"
 priority = 50
+
+# Group overrides must precede the `all()` override below, because the first
+# matching override sets a test's group.
+[[profile.pg-sharded.overrides]]
+filter = "package(etl-destinations) & test(/^ducklake::/)"
+test-group = "ducklake-pg"
+
+[[profile.pg-sharded.overrides]]
+filter = "package(etl-destinations) & test(/^clickhouse::/)"
+test-group = "clickhouse-pg"
 
 [[profile.pg-sharded.overrides]]
 filter = "all()"
