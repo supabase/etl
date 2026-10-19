@@ -5482,7 +5482,9 @@ mod tests {
             let dir = TempDir::new().unwrap();
             let data = path_to_file_url(&dir.path().join("data"));
             let (catalog_database, catalog) = create_catalog_database().await;
-            let password = catalog.password().unwrap().to_owned();
+            // Without a password the outage error has nothing to redact.
+            let password =
+                catalog.password().expect("TESTS_DATABASE_PASSWORD must be set").to_owned();
             let conn = open_lake_conn(&catalog, &data);
             conn.execute_batch("create table lake.main.t (id integer);").unwrap();
 
@@ -5513,11 +5515,20 @@ mod tests {
             );
 
             assert_eq!(error.retryability(), Retryability::Retryable);
-            assert!(error.to_string().contains("password='[redacted]'"));
+            let mut texts = vec![format!("{error:?}")];
             let mut source = Some(&error as &dyn std::error::Error);
             while let Some(current) = source {
-                assert!(!current.to_string().contains(&raw_password));
+                texts.push(current.to_string());
                 source = current.source();
+            }
+            assert!(texts[1].contains("password='[redacted]'"));
+            for text in &texts {
+                // Every password field is redacted, whatever its quoting.
+                assert!(
+                    text.match_indices("password=")
+                        .all(|(index, _)| text[index..].starts_with("password='[redacted]'"))
+                );
+                assert!(!text.contains(&format!(":{password}@")));
             }
         }
 
