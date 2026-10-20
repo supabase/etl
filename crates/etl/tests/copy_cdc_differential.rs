@@ -358,8 +358,6 @@ async fn copy_and_pgoutput_decode_identical_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "known defect: bytea_output is not pinned, so a database default of escape halts bytea \
-            decoding"]
 async fn bytea_decodes_under_database_default_bytea_output_escape() {
     init_test_tracing();
 
@@ -378,8 +376,8 @@ async fn bytea_decodes_under_database_default_bytea_output_escape() {
         .await
         .unwrap();
 
-    // A new session picks up the database default, which the pinned startup
-    // options leave in place.
+    // A new session picks up the database default, which the pinned session
+    // options must override.
     let (client, _) = connect_to_pg_database(&database.config).await;
     apply_replicator_session_options(&client).await;
 
