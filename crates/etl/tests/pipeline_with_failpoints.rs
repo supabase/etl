@@ -2723,6 +2723,13 @@ impl WalDebugMarker {
 
         Self { path: Some(path) }
     }
+
+    /// Removes the marker now, for tests that panic on purpose.
+    fn disarm(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 impl Drop for WalDebugMarker {
@@ -2752,7 +2759,7 @@ struct IdleDurabilityTest {
     /// Ordered destination calls awaiting test-controlled results.
     writes_rx: mpsc::UnboundedReceiver<DeferredEventsWrite>,
     /// Debug marker kept on disk when the test panics.
-    _wal_debug: WalDebugMarker,
+    wal_debug: WalDebugMarker,
 }
 
 impl IdleDurabilityTest {
@@ -2799,9 +2806,9 @@ impl IdleDurabilityTest {
 
         synced.notified().await;
 
-        let _wal_debug = WalDebugMarker::create(&database).await;
+        let wal_debug = WalDebugMarker::create(&database).await;
 
-        Self { database, table_name, pipeline, store, slot_name, writes_rx, _wal_debug }
+        Self { database, table_name, pipeline, store, slot_name, writes_rx, wal_debug }
     }
 
     /// Inserts one row without producing any schema changes.
@@ -3006,6 +3013,8 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
 #[should_panic(expected = "expected an event batch")]
 async fn idle_durability_disallows_multiple_writes_without_settle_interval() {
     let mut test = IdleDurabilityTest::start().await;
+    // Debug: this test panics on purpose, so its marker is not evidence.
+    test.wal_debug.disarm();
     test.insert(1).await;
     let (_commit_lsn, result) = test.next_batch().await;
     result.send(Ok(DestinationWriteStatus::Accepted));
