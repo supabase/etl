@@ -1561,6 +1561,22 @@ fn validate_bigquery_table_capabilities(
         );
     }
 
+    // BigQuery keeps the change with the highest sequence number per key. A
+    // deferrable key lets one statement move a row into a key before the key's
+    // previous row moves out. The later move writes an old-key delete that
+    // outranks the row that moved in, so BigQuery silently drops that row.
+    if replicated_table_schema.inner().primary_key_deferrable {
+        bail!(
+            ErrorKind::SourceSchemaError,
+            "BigQuery requires a non-deferrable primary key",
+            format!(
+                "Table '{}' has a DEFERRABLE primary key. Recreate it as NOT DEFERRABLE, or \
+                 remove the table from the publication.",
+                replicated_table_schema.name()
+            )
+        );
+    }
+
     Ok(())
 }
 
@@ -2941,6 +2957,31 @@ mod tests {
         let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
         assert!(error.to_string().contains("tenant_id"));
+    }
+
+    #[test]
+    fn validate_bigquery_table_shape_rejects_deferrable_primary_key() {
+        // GIVEN: a table whose primary key is DEFERRABLE.
+        let table_schema = Arc::new(
+            TableSchema::new(
+                TableId::new(1),
+                TableName::new("public".to_owned(), "positions".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
+                ],
+            )
+            .with_primary_key_deferrable(true),
+        );
+        let replicated_table_schema = ReplicatedTableSchema::all(table_schema);
+
+        // WHEN: BigQuery validates the table.
+        let error = validate_bigquery_table_shape(&replicated_table_schema).unwrap_err();
+
+        // THEN: it rejects the deferrable key.
+        assert_eq!(error.kind(), ErrorKind::SourceSchemaError);
+        assert_eq!(error.description(), Some("BigQuery requires a non-deferrable primary key"));
     }
 
     #[test]
