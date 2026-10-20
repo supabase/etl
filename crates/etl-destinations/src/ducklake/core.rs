@@ -14,7 +14,7 @@ use etl::{
         DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability, WriteEventsResult,
         WriteTableRowsResult,
     },
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     event::{Event, EventPosition},
     schema::{
@@ -31,6 +31,7 @@ use etl_config::{
         DuckLakeSortNulls, DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
     },
 };
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use metrics::gauge;
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -61,7 +62,7 @@ use crate::{
             DuckLakeBlockingGuard, DuckLakeConnectionManager, DuckLakeDedicatedConnection,
             DuckLakeInterruptRegistry, build_warm_ducklake_pool, drain_duckdb_blocking_operations,
             ducklake_shutdown_requested_error, format_query_error_detail,
-            is_ducklake_shutdown_requested_error, retryable_until_classified, run_duckdb_blocking,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_dedicated_blocking_with_context,
         },
         config::{
@@ -938,7 +939,7 @@ fn read_ducklake_table_column_names_blocking(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table schema lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
     let mut rows = statement.query([]).map_err(|source| {
@@ -946,7 +947,7 @@ fn read_ducklake_table_column_names_blocking(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table schema lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
     let mut column_names = Vec::new();
@@ -955,7 +956,7 @@ fn read_ducklake_table_column_names_blocking(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table schema lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })? {
         column_names.push(row.get(0).map_err(|source| {
@@ -963,7 +964,7 @@ fn read_ducklake_table_column_names_blocking(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake table schema lookup failed",
                 format_query_error_detail(&sql),
-                source,
+                RedactedDuckDbError::from(source),
             )
         })?);
     }
@@ -990,7 +991,7 @@ fn read_ducklake_nullable_column_names_blocking(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table nullability lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
     let rows = statement.query_map([], |row| row.get(0)).map_err(|source| {
@@ -998,7 +999,7 @@ fn read_ducklake_nullable_column_names_blocking(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table nullability lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
 
@@ -1007,7 +1008,7 @@ fn read_ducklake_nullable_column_names_blocking(
             ErrorKind::DestinationQueryFailed,
             "DuckLake table nullability lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })
 }
@@ -1489,9 +1490,10 @@ fn missing_replicated_columns_ducklake(
         .collect()
 }
 
-/// Classifies a COPY inlining transition failure for the runtime retry policy.
+/// Wraps a COPY inlining transition failure with its table context.
 ///
-/// The failure is retryable whatever caused it, except a shutdown request.
+/// The failure keeps the classification of its cause. A shutdown request is
+/// returned unchanged so callers still recognize it.
 fn classify_copy_data_inlining_error(
     table_name: &DuckLakeTableName,
     row_limit: u64,
@@ -1501,12 +1503,12 @@ fn classify_copy_data_inlining_error(
         return error;
     }
 
-    retryable_until_classified(classified_error_with_detail(
+    classified_error_with_detail(
         ErrorKind::DestinationQueryFailed,
         "DuckLake COPY data inlining configuration failed",
         format!("table={table_name}, row_limit={row_limit}"),
         error,
-    ))
+    )
 }
 
 impl<S> DuckLakeDestination<S>
@@ -1885,7 +1887,7 @@ where
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake target_file_size configuration failed",
-                        error,
+                        RedactedDuckDbError::from(error),
                     )
                 })?;
                 Ok(())
@@ -1909,7 +1911,7 @@ where
                                 "Invalid expire_snapshots_older_than value \
                                  `{expire_snapshots_older_than_for_error}`"
                             ),
-                            source,
+                            RedactedDuckDbError::from(source),
                         )
                     })?;
                 if !retention_is_safe {
@@ -2104,7 +2106,7 @@ where
                 classified_error(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake BEGIN TRANSACTION failed",
-                    e,
+                    RedactedDuckDbError::from(e),
                 )
             })?;
 
@@ -2116,7 +2118,7 @@ where
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake TRUNCATE TABLE failed",
                         format_query_error_detail(&truncate_table_sql),
-                        e,
+                        RedactedDuckDbError::from(e),
                     )
                 })?;
                 Ok(())
@@ -2124,11 +2126,16 @@ where
 
             match result {
                 Ok(()) => conn.execute_batch("COMMIT").map_err(|e| {
-                    classified_error(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", e)
+                    classified_error(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake COMMIT failed",
+                        RedactedDuckDbError::from(e),
+                    )
                 }),
                 Err(error) => {
                     let err = conn.execute_batch("ROLLBACK");
                     if let Err(err) = err {
+                        let err = RedactedDuckDbError::from(err);
                         tracing::error!(error = %err, "error rollback");
                     }
                     Err(error)
@@ -2170,7 +2177,7 @@ where
                 classified_error(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake BEGIN TRANSACTION failed",
-                    e,
+                    RedactedDuckDbError::from(e),
                 )
             })?;
 
@@ -2182,7 +2189,7 @@ where
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake DROP TABLE failed",
                         format_query_error_detail(&drop_table_sql),
-                        e,
+                        RedactedDuckDbError::from(e),
                     )
                 })?;
                 Ok(())
@@ -2190,11 +2197,16 @@ where
 
             match result {
                 Ok(()) => conn.execute_batch("commit").map_err(|e| {
-                    classified_error(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", e)
+                    classified_error(
+                        ErrorKind::DestinationQueryFailed,
+                        "DuckLake COMMIT failed",
+                        RedactedDuckDbError::from(e),
+                    )
                 }),
                 Err(error) => {
                     let err = conn.execute_batch("rollback");
                     if let Err(err) = err {
+                        let err = RedactedDuckDbError::from(err);
                         tracing::error!(error = %err, "error rollback");
                     }
                     Err(error)
@@ -2278,7 +2290,7 @@ where
             let _guard = guard;
             debug!(table = %table_name, row_limit, "ducklake table data inlining configuration begin");
             conn.execute_batch(&sql).map_err(|error| {
-                classified_error_with_detail(ErrorKind::DestinationQueryFailed, "DuckLake table data inlining configuration failed", format_query_error_detail(&sql), error)
+                classified_error_with_detail(ErrorKind::DestinationQueryFailed, "DuckLake table data inlining configuration failed", format_query_error_detail(&sql), RedactedDuckDbError::from(error))
             })?;
             debug!(table = %table_name, row_limit, "ducklake table data inlining configuration finished");
             Ok(())
@@ -2644,13 +2656,16 @@ where
 
     /// Builds the sticky error returned after a buffered copy attempt fails.
     ///
-    /// The error is retryable because restarting the table copy recovers.
+    /// The error is retryable whatever failed the copy, because restarting
+    /// the table copy discards the invalidated buffer. The original failure
+    /// was already returned with its own classification.
     fn invalidated_copy_buffer_error(table_name: &DuckLakeTableName) -> etl::error::EtlError {
-        retryable_until_classified(etl_error!(
+        etl_error!(
             ErrorKind::DestinationError,
             "DuckLake buffered table copy was invalidated",
             format!("table={table_name}; restart the table-copy attempt")
-        ))
+        )
+        .with_retryability(Retryability::Retryable)
     }
 
     /// Handles relation metadata, applying the schema diff and advancing
@@ -2825,7 +2840,7 @@ where
                         ErrorKind::DestinationQueryFailed,
                         description,
                         format_query_error_detail(sql),
-                        source,
+                        RedactedDuckDbError::from(source),
                     )
                 })
             };
@@ -2853,6 +2868,7 @@ where
 
             if let Err(error) = apply_result {
                 if let Err(rollback_error) = conn.execute_batch("rollback") {
+                    let rollback_error = RedactedDuckDbError::from(rollback_error);
                     warn!(
                         error = %rollback_error,
                         table = %table_name,
@@ -2939,7 +2955,7 @@ where
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake table sorting reconciliation failed",
                     format_query_error_detail(&ddl),
-                    source,
+                    RedactedDuckDbError::from(source),
                 )
             })?;
             debug!(table = %table_name, "ducklake table sorting reconciled");
@@ -3022,7 +3038,7 @@ where
                         ErrorKind::DestinationQueryFailed,
                         description,
                         format_query_error_detail(sql),
-                        source,
+                        RedactedDuckDbError::from(source),
                     )
                 })
             };
@@ -3053,6 +3069,7 @@ where
 
             if let Err(error) = cleanup_result {
                 if let Err(rollback_error) = conn.execute_batch("rollback") {
+                    let rollback_error = RedactedDuckDbError::from(rollback_error);
                     warn!(
                         error = %rollback_error,
                         table = %table_name,
@@ -3491,7 +3508,7 @@ where
                             ErrorKind::DestinationQueryFailed,
                             "DuckLake create table failed",
                             format_query_error_detail(&ddl),
-                            error,
+                            RedactedDuckDbError::from(error),
                         ));
                     }
                 }
@@ -4351,7 +4368,10 @@ mod tests {
         store::{MemoryStore, SchemaStore},
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
-    use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
+    use etl_postgres::{
+        test_utils::{local_tls_config_from_env, test_database_port_from_env},
+        tokio::test_utils::PgDatabase,
+    };
     use pg_escape::{quote_identifier, quote_literal};
     use tempfile::TempDir;
     use tokio_postgres::Client;
@@ -4376,13 +4396,28 @@ mod tests {
     }
 
     #[test]
-    fn copy_data_inlining_errors_are_retryable_except_during_shutdown() {
+    fn copy_data_inlining_errors_keep_their_cause_classification() {
         let table_name = DuckLakeTableName::new("public", "users");
-        let query_error =
-            etl_error!(ErrorKind::DestinationQueryFailed, "Synthetic DuckLake inlining failure");
+        let timeout = crate::ducklake::client::duckdb_blocking_timeout_error(
+            Duration::from_secs(1),
+            "query_execution",
+        );
+        let rejected = classified_error(
+            ErrorKind::DestinationQueryFailed,
+            "Synthetic DuckLake inlining failure",
+            RedactedDuckDbError::from(
+                duckdb::Connection::open_in_memory()
+                    .unwrap()
+                    .execute_batch("call missing_procedure()")
+                    .unwrap_err(),
+            ),
+        );
 
-        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, query_error);
-        assert_eq!(error.retryability(), etl::error::Retryability::Retryable);
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, timeout);
+        assert_eq!(error.retryability(), Retryability::Retryable);
+
+        let error = classify_copy_data_inlining_error(&table_name, 1_000_000, rejected);
+        assert_eq!(error.retryability(), Retryability::Permanent);
 
         let shutdown_error = crate::ducklake::client::ducklake_shutdown_requested_error();
         let error = classify_copy_data_inlining_error(&table_name, 1_000_000, shutdown_error);
@@ -5245,10 +5280,7 @@ mod tests {
         PgConnectionConfig {
             host: env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
             hostaddr: None,
-            port: env::var("TESTS_DATABASE_PORT")
-                .expect("TESTS_DATABASE_PORT must be set")
-                .parse()
-                .expect("TESTS_DATABASE_PORT must be a valid port number"),
+            port: test_database_port_from_env(),
             name: database_name,
             username: env::var("TESTS_DATABASE_USERNAME")
                 .expect("TESTS_DATABASE_USERNAME must be set"),
@@ -5261,10 +5293,7 @@ mod tests {
     async fn create_catalog_database() -> (PgDatabase<Client>, Url) {
         let database_name = Uuid::new_v4().to_string();
         let host = env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set");
-        let port = env::var("TESTS_DATABASE_PORT")
-            .expect("TESTS_DATABASE_PORT must be set")
-            .parse()
-            .expect("TESTS_DATABASE_PORT must be a valid port number");
+        let port = test_database_port_from_env();
         let username =
             env::var("TESTS_DATABASE_USERNAME").expect("TESTS_DATABASE_USERNAME must be set");
         let password = env::var("TESTS_DATABASE_PASSWORD").ok();
@@ -5442,6 +5471,64 @@ mod tests {
 
     mod postgres_backed {
         use super::*;
+
+        /// DuckDB's Postgres extension writes the catalog connection string
+        /// into a catalog outage error; the converted error must not expose
+        /// the password anywhere in its chain.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn catalog_outage_errors_redact_catalog_password() {
+            let dir = TempDir::new().unwrap();
+            let data = path_to_file_url(&dir.path().join("data"));
+            let (catalog_database, catalog) = create_catalog_database().await;
+            // Without a password the outage error has nothing to redact.
+            let password =
+                catalog.password().expect("TESTS_DATABASE_PASSWORD must be set").to_owned();
+            let conn = open_lake_conn(&catalog, &data);
+            conn.execute_batch("create table lake.main.t (id integer);").unwrap();
+
+            // Refuse new catalog connections and drop the open ones.
+            let (admin, _) = etl_postgres::tokio::test_utils::connect_to_pg_database(
+                &local_pg_connection_config("postgres".to_owned()),
+            )
+            .await;
+            admin
+                .batch_execute(&format!(
+                    "alter database {} with allow_connections false; select \
+                     pg_terminate_backend(pid) from pg_stat_activity where datname = {};",
+                    quote_identifier(&catalog_database.config.name),
+                    quote_literal(&catalog_database.config.name),
+                ))
+                .await
+                .unwrap();
+
+            let duckdb_error =
+                conn.execute_batch("insert into lake.main.t (id) values (1);").unwrap_err();
+            let raw_password = format!("password='{password}'");
+            // Guards the test itself: the raw error must carry the password.
+            assert!(duckdb_error.to_string().contains(&raw_password));
+            let error = classified_error(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake insert failed",
+                RedactedDuckDbError::from(duckdb_error),
+            );
+
+            assert_eq!(error.retryability(), Retryability::Retryable);
+            let mut texts = vec![format!("{error:?}")];
+            let mut source = Some(&error as &dyn std::error::Error);
+            while let Some(current) = source {
+                texts.push(current.to_string());
+                source = current.source();
+            }
+            assert!(texts[1].contains("password='[redacted]'"));
+            for text in &texts {
+                // Every password field is redacted, whatever its quoting.
+                assert!(
+                    text.match_indices("password=")
+                        .all(|(index, _)| text[index..].starts_with("password='[redacted]'"))
+                );
+                assert!(!text.contains(&format!(":{password}@")));
+            }
+        }
 
         /// A pending replay epoch is stable until its table reset commits.
         #[tokio::test(flavor = "multi_thread")]

@@ -803,4 +803,333 @@ mod tests {
             assert_eq!(restored_state, expected_state);
         }
     }
+
+    /// Generative checks that durable table states survive storage and that
+    /// stored decoders rebuild exactly the schema they were captured from.
+    #[cfg(feature = "test-utils")]
+    mod durable_state_properties {
+        use std::sync::Arc;
+
+        use chrono::DateTime;
+        use etl_postgres::store::table_state;
+        use proptest::{
+            arbitrary::any,
+            bool::weighted,
+            collection::vec,
+            option, prop_assert, prop_assert_eq, prop_oneof,
+            strategy::{Just, Strategy},
+            test_runner::TestCaseError,
+        };
+        use tokio_postgres::types::{PgLsn, Type};
+
+        use crate::{
+            error::ErrorKind,
+            etl_error,
+            replication::state::{StoredTableDecodingState, TableRetryPolicy, TableState},
+            schema::{
+                ColumnSchema, IdentityMask, IdentityType, ReplicatedTableSchema, ReplicationMask,
+                SnapshotId, TableId, TableName, TableSchema,
+            },
+            test_utils::property::run_property,
+        };
+
+        /// Upper bound on generated table width.
+        const MAX_COLUMNS: usize = 10;
+
+        /// Last second of year 9999, the latest retry timestamp generated.
+        ///
+        /// Retry timestamps come from `now + configured delay`, so later years
+        /// are outside what the pipeline can write.
+        const MAX_RETRY_TIMESTAMP_SECS: i64 = 253_402_300_799;
+
+        /// Generates LSNs biased toward the encoding boundaries.
+        fn lsn() -> impl Strategy<Value = PgLsn> {
+            prop_oneof![
+                Just(0_u64),
+                Just(u64::MAX),
+                Just(u64::from(u32::MAX)),
+                Just(u64::from(u32::MAX) + 1),
+                any::<u64>(),
+            ]
+            .prop_map(PgLsn::from)
+        }
+
+        /// Generates schema snapshot identifiers.
+        fn snapshot_id() -> impl Strategy<Value = SnapshotId> {
+            (lsn(), lsn())
+                .prop_map(|(commit_lsn, message_lsn)| SnapshotId::new(commit_lsn, message_lsn))
+        }
+
+        /// Generates every retry policy the pipeline can persist.
+        fn retry_policy() -> impl Strategy<Value = TableRetryPolicy> {
+            prop_oneof![
+                Just(TableRetryPolicy::NoRetry),
+                Just(TableRetryPolicy::ManualRetry),
+                (0..=MAX_RETRY_TIMESTAMP_SECS, 0..1_000_000_000_u32).prop_map(|(secs, nanos)| {
+                    TableRetryPolicy::TimedRetry {
+                        next_retry: DateTime::from_timestamp(secs, nanos).unwrap(),
+                    }
+                }),
+            ]
+        }
+
+        /// Generates every durable [`TableState`] variant.
+        ///
+        /// Stored masks are arbitrary bytes because storage must preserve
+        /// them exactly; validation belongs to
+        /// [`StoredTableDecodingState::materialize`].
+        fn durable_table_state() -> impl Strategy<Value = TableState> {
+            let table_decoding_state = (
+                snapshot_id(),
+                vec(any::<u8>(), 0..=MAX_COLUMNS),
+                vec(any::<u8>(), 0..=MAX_COLUMNS),
+            )
+                .prop_map(|(snapshot_id, replication_mask, identity_mask)| {
+                    StoredTableDecodingState { snapshot_id, replication_mask, identity_mask }
+                });
+            prop_oneof![
+                Just(TableState::Init),
+                Just(TableState::DataSync),
+                Just(TableState::FinishedCopy),
+                (lsn(), option::of(table_decoding_state)).prop_map(
+                    |(lsn, table_decoding_state)| TableState::SyncDone {
+                        lsn,
+                        table_decoding_state
+                    }
+                ),
+                Just(TableState::Ready),
+                (any::<String>(), option::of(any::<String>()), retry_policy()).prop_map(
+                    |(reason, solution, retry_policy)| TableState::Errored {
+                        reason,
+                        solution,
+                        retry_policy,
+                        source_err: etl_error!(ErrorKind::Unknown, "Generated error"),
+                    }
+                ),
+            ]
+        }
+
+        /// Writes a state in storage format and reads it back as a state row.
+        fn store_and_load(state: &TableState) -> Result<TableState, TestCaseError> {
+            let (stored_state_type, metadata) = state.to_storage_format().unwrap();
+            prop_assert_eq!(stored_state_type, state.as_type().to_storage_type().unwrap());
+
+            let row = table_state::StoredTableStateRow {
+                id: 1,
+                pipeline_id: 1,
+                table_id: sqlx::postgres::types::Oid(42),
+                state: stored_state_type,
+                metadata: Some(metadata),
+                prev: None,
+                is_current: true,
+            };
+
+            Ok(TableState::from_state_row(row).unwrap())
+        }
+
+        /// A replicated schema plus the `SyncDone` LSN that captured it.
+        #[derive(Debug, Clone)]
+        struct CapturedDecoder {
+            /// Primary-key membership of each column.
+            primary_key: Vec<bool>,
+            /// Publication-column membership.
+            replicated: Vec<bool>,
+            /// Replica-identity membership before restricting it to
+            /// replicated columns.
+            identity: Vec<bool>,
+            /// Commit LSN of the captured snapshot.
+            snapshot_commit_lsn: u64,
+            /// Message LSN of the captured snapshot.
+            snapshot_message_lsn: u64,
+            /// Distance from the snapshot commit to `SyncDone`.
+            sync_done_distance: u64,
+        }
+
+        /// Generates a valid captured decoder.
+        fn captured_decoder() -> impl Strategy<Value = CapturedDecoder> {
+            (0..=MAX_COLUMNS)
+                .prop_flat_map(|column_count| {
+                    (
+                        vec(weighted(0.3), column_count),
+                        vec(weighted(0.8), column_count),
+                        vec(weighted(0.4), column_count),
+                        0..u64::MAX - 1,
+                        any::<u64>(),
+                        prop_oneof![Just(1_u64), Just(u64::MAX), any::<u64>()],
+                    )
+                })
+                .prop_map(
+                    |(
+                        primary_key,
+                        replicated,
+                        identity,
+                        snapshot_commit_lsn,
+                        snapshot_message_lsn,
+                        sync_done_distance,
+                    )| CapturedDecoder {
+                        primary_key,
+                        replicated,
+                        identity,
+                        snapshot_commit_lsn,
+                        snapshot_message_lsn,
+                        sync_done_distance,
+                    },
+                )
+        }
+
+        /// Builds the stored table schema of a captured decoder.
+        fn captured_table_schema(decoder: &CapturedDecoder) -> Arc<TableSchema> {
+            let snapshot_id = SnapshotId::new(
+                PgLsn::from(decoder.snapshot_commit_lsn),
+                PgLsn::from(decoder.snapshot_message_lsn),
+            );
+            let mut primary_key_ordinal = 0;
+            let column_schemas = decoder
+                .primary_key
+                .iter()
+                .enumerate()
+                .map(|(index, &primary_key)| {
+                    let attnum = i32::try_from(index + 1).unwrap();
+                    let column =
+                        ColumnSchema::new(format!("c{index}"), Type::INT4, -1, attnum, true);
+                    if primary_key {
+                        primary_key_ordinal += 1;
+                        column.with_primary_key(primary_key_ordinal)
+                    } else {
+                        column
+                    }
+                })
+                .collect();
+
+            Arc::new(TableSchema::with_snapshot_id(
+                TableId::new(1),
+                TableName::new("public".to_owned(), "t".to_owned()),
+                column_schemas,
+                snapshot_id,
+            ))
+        }
+
+        /// Returns the first `SyncDone` LSN whose frontier still contains the
+        /// captured snapshot, moved forward by the generated distance.
+        fn sync_done_lsn(decoder: &CapturedDecoder) -> PgLsn {
+            let earliest = decoder.snapshot_commit_lsn + 1;
+            PgLsn::from(earliest.saturating_add(decoder.sync_done_distance.saturating_sub(1)))
+        }
+
+        /// Projects a replicated schema onto everything row decoding uses.
+        fn decoder_view(
+            schema: &ReplicatedTableSchema,
+        ) -> (Vec<u8>, Vec<u8>, Vec<String>, Vec<String>, IdentityType) {
+            (
+                schema.replication_mask().to_bytes(),
+                schema.identity_mask().to_bytes(),
+                schema.column_schemas().map(|column| column.name.clone()).collect(),
+                schema.identity_column_schemas().map(|column| column.name.clone()).collect(),
+                schema.identity_type(),
+            )
+        }
+
+        #[test]
+        fn durable_table_states_round_trip_through_storage() {
+            run_property("durable table state round trip", &durable_table_state(), |state| {
+                let restored = store_and_load(state)?;
+                prop_assert_eq!(&restored, state);
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn stored_sync_done_decoder_restores_the_captured_schema() {
+            run_property("sync done decoder restore", &captured_decoder(), |decoder| {
+                let table_schema = captured_table_schema(decoder);
+                let replication_mask =
+                    decoder.replicated.iter().map(|&replicated| u8::from(replicated)).collect();
+                let identity_mask = decoder
+                    .replicated
+                    .iter()
+                    .zip(&decoder.identity)
+                    .map(|(&replicated, &identity)| u8::from(replicated && identity))
+                    .collect();
+                let captured = ReplicatedTableSchema::from_masks(
+                    Arc::clone(&table_schema),
+                    ReplicationMask::from_bytes(replication_mask),
+                    IdentityMask::from_bytes(identity_mask),
+                );
+                let sync_done_lsn = sync_done_lsn(decoder);
+
+                let restored_state =
+                    store_and_load(&TableState::sync_done(sync_done_lsn, &captured))?;
+                let TableState::SyncDone { lsn, table_decoding_state: Some(table_decoding_state) } =
+                    restored_state
+                else {
+                    return Err(TestCaseError::fail("SyncDone lost its decoding state"));
+                };
+                prop_assert_eq!(lsn, sync_done_lsn);
+                prop_assert_eq!(table_decoding_state.snapshot_id(), table_schema.snapshot_id);
+
+                let restored = table_decoding_state.materialize(table_schema, lsn).unwrap();
+                prop_assert_eq!(decoder_view(&restored), decoder_view(&captured));
+                Ok(())
+            });
+        }
+
+        #[test]
+        fn stored_decoder_materializes_only_valid_states() {
+            let strategy = (
+                0..=MAX_COLUMNS,
+                vec(prop_oneof![8 => 0_u8..=1, 1 => any::<u8>()], 0..=MAX_COLUMNS + 1),
+                vec(prop_oneof![8 => 0_u8..=1, 1 => any::<u8>()], 0..=MAX_COLUMNS + 1),
+                0_u64..=4,
+                0_u64..=4,
+            );
+            run_property(
+                "stored decoder validation",
+                &strategy,
+                |(column_count, replication_mask, identity_mask, snapshot_commit, sync_done)| {
+                    let decoder = CapturedDecoder {
+                        primary_key: vec![false; *column_count],
+                        replicated: vec![],
+                        identity: vec![],
+                        snapshot_commit_lsn: *snapshot_commit,
+                        snapshot_message_lsn: 0,
+                        sync_done_distance: 1,
+                    };
+                    let table_schema = captured_table_schema(&decoder);
+                    let stored = StoredTableDecodingState {
+                        snapshot_id: table_schema.snapshot_id,
+                        replication_mask: replication_mask.clone(),
+                        identity_mask: identity_mask.clone(),
+                    };
+
+                    // A transaction committing at `SyncDone` belongs to the
+                    // apply worker, so only strictly earlier snapshots are
+                    // part of the handover decoder. A zero `SyncDone` still
+                    // admits the initial `0/0` snapshot sentinel.
+                    let snapshot_reachable =
+                        snapshot_commit < sync_done || (*snapshot_commit == 0 && *sync_done == 0);
+                    let valid = snapshot_reachable
+                        && replication_mask.len() == *column_count
+                        && identity_mask.len() == *column_count
+                        && replication_mask.iter().chain(identity_mask).all(|value| *value <= 1)
+                        && replication_mask
+                            .iter()
+                            .zip(identity_mask)
+                            .all(|(replicated, identity)| identity <= replicated);
+                    let result = stored.materialize(table_schema, PgLsn::from(*sync_done));
+                    prop_assert_eq!(result.is_ok(), valid);
+                    if let Ok(schema) = result {
+                        prop_assert_eq!(
+                            schema.replication_mask().as_slice(),
+                            &replication_mask[..]
+                        );
+                        prop_assert_eq!(schema.identity_mask().as_slice(), &identity_mask[..]);
+                        prop_assert!(
+                            schema.column_schemas().len() == schema.column_schemas().count()
+                        );
+                    }
+                    Ok(())
+                },
+            );
+        }
+    }
 }

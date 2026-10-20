@@ -1,3 +1,4 @@
+mod cdc_property;
 mod destination;
 mod pipeline;
 mod pipeline_large_rows;
