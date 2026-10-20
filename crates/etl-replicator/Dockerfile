@@ -53,6 +53,12 @@ RUN apt-get update && \
 # ARM64) even when DuckDB did not change. In the mount, Cargo rebuilds only the
 # crates a change affects. Mounts are not part of the image, so the binaries are
 # copied out in the same step.
+#
+# Cargo judges workspace crates fresh by file mtime, and a cached `COPY . .`
+# layer can restore sources older than another build's output in the shared
+# mount. Touching the workspace sources makes every build recompile them, so
+# an image never ships workspace code from a different commit. Third-party
+# crates live outside `crates/` and stay cached.
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
@@ -62,6 +68,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
       false) features="" ;; \
       *) echo "ENABLE_EGRESS must be true or false" >&2; exit 1 ;; \
     esac && \
+    find crates -type f -exec touch {} + && \
     cargo build --locked --release --package etl-replicator --bins --features "$features" && \
     mkdir -p /app/bin && \
     cp target/release/etl-replicator target/release/etl-ducklake-maintenance /app/bin/ && \
