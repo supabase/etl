@@ -70,6 +70,12 @@ use tokio_postgres::{
 /// PostgreSQL inactivity timeout used by the suspended-feedback tests.
 const FEEDBACK_TEST_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Longest wait for an idle durability test's next destination write.
+///
+/// Keepalives arrive every few seconds, so a missing write fails the test
+/// instead of hanging it until the CI job times out.
+const IDLE_DURABILITY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
     /// Target-table event batch held before reporting its write status.
@@ -84,7 +90,9 @@ enum DeferredEventsWrite {
 /// Other non-empty batches are acknowledged as durable at once. PostgreSQL 14
 /// sends catalog-only transactions, such as autovacuum's `ANALYZE`, as empty
 /// `Begin`/`Commit` pairs, so the apply checkpoint may move past a test's own
-/// commit.
+/// commit. Such an acknowledgement also settles any accepted write before it,
+/// so [`IdleDurabilityTest`] analyzes its database up front to keep autovacuum
+/// out of its window.
 #[derive(Clone)]
 struct DeferredEventsDestination {
     /// Table whose insert batches should be held.
@@ -2766,6 +2774,13 @@ impl IdleDurabilityTest {
 
         synced.notified().await;
 
+        // Analyze now so autovacuum has nothing to analyze during the test. On
+        // PostgreSQL 14 its catalog-only transaction would reach the
+        // destination, settle the test's accepted write, and suppress the
+        // barrier the test waits for. These empty transactions precede every
+        // test insert, so no accepted write is pending yet.
+        database.run_sql("analyze").await.unwrap();
+
         Self { database, table_name, pipeline, store, slot_name, writes_rx, received_end_lsn }
     }
 
@@ -2777,7 +2792,10 @@ impl IdleDurabilityTest {
     /// Receives the next event batch, failing if an unexpected barrier
     /// overtakes it.
     async fn next_batch(&mut self) -> (PgLsn, WriteEventsResult) {
-        let write = self.writes_rx.recv().await.unwrap();
+        let write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, self.writes_rx.recv())
+            .await
+            .expect("timed out waiting for an event batch")
+            .unwrap();
         let DeferredEventsWrite::Batch { commit_end_lsn, result } = write else {
             panic!("expected an event batch");
         };
@@ -2788,7 +2806,10 @@ impl IdleDurabilityTest {
     /// Receives an empty barrier driven by an incoming primary keepalive,
     /// including a reply requested by ETL's periodic feedback.
     async fn next_barrier(&mut self) -> WriteEventsResult {
-        let write = self.writes_rx.recv().await.unwrap();
+        let write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, self.writes_rx.recv())
+            .await
+            .expect("timed out waiting for an idle durability barrier")
+            .unwrap();
         let DeferredEventsWrite::DurabilityBarrier { result } = write else {
             panic!("expected an idle durability barrier");
         };
