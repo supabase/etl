@@ -224,6 +224,12 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 
 - Every replicated source table needs a primary key, and all primary-key
   columns must be included in the publication.
+- The source primary key must not be `DEFERRABLE`. A deferrable key lets one
+  statement move a row into a key before the key's previous row moves out,
+  which BigQuery's per-key change application cannot represent. ETL fails the
+  table during its initial copy. A schema change that makes an existing key
+  deferrable fails instead, and replication of every table stops until you
+  resynchronize this one.
 - PostgreSQL arrays containing `NULL` elements are not supported.
 - BigQuery stores a top-level PostgreSQL `NULL` array as an empty array, so the
   two source values are indistinguishable in the destination.
