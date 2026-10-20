@@ -263,7 +263,7 @@ where
                 replication_client.create_table_copy_slot(
                     &slot_name,
                     table_id,
-                    config.replication_slot.failover
+                    &config.replication_slot
                 ),
                 shutdown_token,
             ) else {
