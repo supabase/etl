@@ -146,9 +146,7 @@ jobs:
           if [[ "$COVERAGE" == true ]]; then
             cargo --locked xtask nextest llvm-cov
           else
-            # Debug only: wal_keep_size stops invalidate_slot from losing slots.
-            target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst \
-              -- -- --skip slot_invalidated --skip lost_slot
+            target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst
           fi
       - name: Dump WAL for failed idle-durability tests
         # Debug only: each marker names a failed test's cluster port, database

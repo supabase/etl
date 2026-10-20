@@ -35,7 +35,6 @@ services:
       -c max_wal_senders=${POSTGRES_MAX_WAL_SENDERS:-100}
       -c max_replication_slots=${POSTGRES_MAX_REPLICATION_SLOTS:-100}
       -c wal_sender_timeout=${POSTGRES_WAL_SENDER_TIMEOUT:-10s}
-      -c wal_keep_size=4GB
       -c hba_file=/etc/postgresql/pg_hba.conf
       ${POSTGRES_SSL_ARGS:-}
     restart: unless-stopped
