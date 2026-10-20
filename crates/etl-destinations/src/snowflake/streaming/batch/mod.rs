@@ -296,10 +296,12 @@ impl RowBatchBuilder {
 #[cfg(test)]
 mod tests {
     use etl::{
-        data::{Cell, TableRow},
+        data::{ArrayCell, Cell, TableRow},
         error::{ErrorKind, EtlError},
-        schema::{ColumnSchema, TableId, Type},
+        schema::{ColumnSchema, PgLsn, TableId, Type},
+        test_utils::property::run_property,
     };
+    use proptest::{collection, prelude::*, prop_oneof};
     use serde_json::Value;
 
     use super::*;
@@ -764,5 +766,193 @@ mod tests {
             assert!(request.size() * 10 >= REQUEST_LIMIT_BYTES * 9, "fill {} B", request.size());
         }
         assert_rows_in_order(&batches, 32, REQUEST_LIMIT_BYTES);
+    }
+
+    /// Text fill of a generated row payload.
+    #[derive(Debug, Clone, Copy)]
+    enum Fill {
+        /// One repeated byte, which compresses to almost nothing.
+        Repeated,
+        /// Random alphanumerics, which compress poorly.
+        Random,
+    }
+
+    /// Value that makes a generated row fail to serialize, if any.
+    #[derive(Debug, Clone, Copy)]
+    enum Defect {
+        /// The row serializes.
+        None,
+        /// A NaN `float8`, which Snowflake JSON cannot carry.
+        NanRatio,
+        /// A SQL NULL `jsonb[]` element, which JSON cannot tell from JSON null.
+        NullJsonElement,
+    }
+
+    /// One generated row of the packing property.
+    #[derive(Debug, Clone)]
+    struct PackedRow {
+        /// Payload length in bytes.
+        len: usize,
+        /// Payload fill.
+        fill: Fill,
+        /// Seed for the random fill and the numeric columns.
+        seed: u64,
+        /// Serialization failure to inject.
+        defect: Defect,
+    }
+
+    /// Columns of the packing property: text payload plus the two value kinds
+    /// that can fail serialization.
+    fn packing_cols() -> [ColumnSchema; 4] {
+        [
+            ColumnSchema::new("id".into(), Type::INT4, -1, 1, true),
+            ColumnSchema::new("payload".into(), Type::TEXT, -1, 2, true),
+            ColumnSchema::new("ratio".into(), Type::FLOAT8, -1, 3, true),
+            ColumnSchema::new("doc".into(), Type::JSONB_ARRAY, -1, 4, true),
+        ]
+    }
+
+    /// Builds the row for `generated`.
+    fn packing_row(ordinal: u64, generated: &PackedRow) -> TableRow {
+        let payload = match generated.fill {
+            Fill::Repeated => "z".repeat(generated.len),
+            Fill::Random => random_text(generated.len, generated.seed),
+        };
+        let ratio = match generated.defect {
+            Defect::NanRatio => f64::NAN,
+            _ => generated.seed as f64,
+        };
+        let last_element = match generated.defect {
+            Defect::NullJsonElement => None,
+            _ => Some(Value::Null),
+        };
+        TableRow::new(vec![
+            Cell::I32(ordinal as i32),
+            Cell::String(payload),
+            Cell::F64(ratio),
+            Cell::Array(ArrayCell::Json(vec![
+                Some(Value::from(generated.seed % 1000)),
+                last_element,
+            ])),
+        ])
+    }
+
+    /// Consistent limits, including flush intervals both below and far above
+    /// the small-row limit, and requests with little room beyond the headroom.
+    fn consistent_limits() -> impl Strategy<Value = BatchLimits> {
+        let flush_interval = prop_oneof![1usize..=256, 256usize..=16 * 1024];
+        (64usize..=4096, flush_interval, 1usize..=32 * 1024).prop_map(
+            |(small_row_limit, flush_interval, spare)| {
+                let mut limits = BatchLimits { request_limit: 0, small_row_limit, flush_interval };
+                limits.request_limit = limits.stream_headroom() + small_row_limit + spare;
+                limits
+            },
+        )
+    }
+
+    /// Rows mixing small, boundary and large payloads with failing rows.
+    fn packed_rows(limits: BatchLimits) -> impl Strategy<Value = Vec<PackedRow>> {
+        let small = limits.small_row_limit;
+        // The serialized row adds roughly 150 bytes of id, ratio, doc and CDC
+        // fields, so this band straddles the stream/frame boundary.
+        let len = prop_oneof![
+            6 => 0..small,
+            2 => small.saturating_sub(256)..small + 64,
+            1 => small..limits.request_limit * 2,
+        ];
+        let fill = prop_oneof![Just(Fill::Repeated), Just(Fill::Random)];
+        let defect = prop_oneof![
+            8 => Just(Defect::None),
+            1 => Just(Defect::NanRatio),
+            1 => Just(Defect::NullJsonElement),
+        ];
+        collection::vec(
+            (len, fill, any::<u64>(), defect).prop_map(|(len, fill, seed, defect)| PackedRow {
+                len,
+                fill,
+                seed,
+                defect,
+            }),
+            1..80,
+        )
+    }
+
+    /// Every request fits the limit, and the requests carry exactly the
+    /// accepted rows' serialized lines, in order, with matching row counts and
+    /// contiguous offset ranges. Only rows that cannot serialize, or whose own
+    /// frame exceeds the limit, are rejected.
+    #[test]
+    fn requests_pack_accepted_rows_exactly_under_random_limits() {
+        let strategy =
+            consistent_limits().prop_flat_map(|limits| (Just(limits), packed_rows(limits)));
+        run_property("snowflake request packing", &strategy, |(limits, rows)| {
+            let cols = packing_cols();
+            let mut builder = RowBatchBuilder::with_limits(TableId::new(7), *limits);
+            let mut batches = Vec::new();
+            let mut accepted: Vec<(OffsetToken, Vec<u8>)> = Vec::new();
+            for (index, generated) in rows.iter().enumerate() {
+                let ordinal = index as u64;
+                let offset = OffsetToken::new(PgLsn::from(10 + ordinal / 4), ordinal % 4);
+                let row = packing_row(ordinal, generated);
+                let cdc = CdcMeta::new(CdcOperation::Insert, offset.as_ref());
+                let mut line = Vec::new();
+                let serializable = serialize_row(&mut line, &cols, &row, cdc).is_ok();
+                match builder.push_row(&cols, &row, cdc, &offset) {
+                    Ok(completed) => {
+                        prop_assert!(serializable, "row {index} cannot serialize but was accepted");
+                        batches.extend(completed);
+                        accepted.push((offset, line));
+                    }
+                    Err(Error::RowTooLarge { compressed_lower_bound, request_limit, .. }) => {
+                        prop_assert!(serializable, "row {index} reported too large, not invalid");
+                        prop_assert_eq!(request_limit, limits.request_limit);
+                        prop_assert!(compressed_lower_bound > request_limit);
+                        // Rows here are shorter than either compressor's
+                        // window, so an independent level-3 frame is within a
+                        // header's bytes of the builder's frame.
+                        let independent = zstd::bulk::compress(&line, 3).unwrap().len();
+                        prop_assert!(
+                            independent + 64 > request_limit,
+                            "row {index} rejected as too large but compresses to {independent} B"
+                        );
+                    }
+                    Err(error) => {
+                        prop_assert!(!serializable, "row {index} serializes but failed: {error}");
+                    }
+                }
+            }
+            let last = builder
+                .finish()
+                .map_err(|error| TestCaseError::fail(format!("finish failed: {error}")))?;
+            batches.extend(last);
+
+            let mut next = 0;
+            for (index, batch) in batches.iter().enumerate() {
+                prop_assert!(
+                    batch.size() <= limits.request_limit,
+                    "request {index} is {} B, over {}",
+                    batch.size(),
+                    limits.request_limit
+                );
+                prop_assert!(batch.row_count() > 0);
+                prop_assert!(
+                    next + batch.row_count() <= accepted.len(),
+                    "request {index} has extra rows"
+                );
+                let rows = &accepted[next..next + batch.row_count()];
+                prop_assert_eq!(batch.start_offset(), &rows[0].0);
+                prop_assert_eq!(batch.end_offset(), &rows[rows.len() - 1].0);
+                let decoded = zstd::decode_all(batch.bytes().as_ref()).unwrap();
+                let expected =
+                    rows.iter().flat_map(|(_, line)| line.iter().copied()).collect::<Vec<_>>();
+                prop_assert!(
+                    decoded == expected,
+                    "request {index} body differs from its rows' lines"
+                );
+                next += batch.row_count();
+            }
+            prop_assert_eq!(next, accepted.len(), "accepted rows missing from requests");
+            Ok(())
+        });
     }
 }

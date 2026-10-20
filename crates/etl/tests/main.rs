@@ -1,5 +1,7 @@
 #![cfg(feature = "test-utils")]
 
+mod copy_cdc_differential;
+mod default_expression_property;
 mod migrations;
 mod pipeline;
 mod pipeline_copy_locks;
@@ -7,6 +9,7 @@ mod pipeline_dirty_restart;
 mod pipeline_failover;
 mod pipeline_read_replica;
 mod pipeline_replica_identity;
+mod pipeline_temporary_slots;
 #[cfg(feature = "failpoints")]
 mod pipeline_with_failpoints;
 mod pipeline_with_faulty_destination;

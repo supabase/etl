@@ -4801,4 +4801,364 @@ mod tests {
         // frontier.
         assert_eq!(state.checkpoint_lsn(), PgLsn::from(300));
     }
+
+    /// Generative checks that relation metadata materializes into a decoder
+    /// whose positional columns are the relation's columns.
+    ///
+    /// Tuple data is decoded positionally against the replicated schema that
+    /// [`ApplyLoop::materialize_relation_schema`] builds, so whenever that
+    /// materialization succeeds, its columns must be the relation's columns in
+    /// relation order with the relation's types. Any disagreement lands source
+    /// values in the wrong destination columns or decodes them with the wrong
+    /// type.
+    #[cfg(feature = "test-utils")]
+    mod relation_agreement_properties {
+        use std::sync::Arc;
+
+        use bytes::{BufMut, Bytes, BytesMut};
+        use postgres_replication::protocol::{
+            LogicalReplicationMessage, RelationBody, ReplicaIdentity,
+        };
+        use proptest::{
+            bool::weighted,
+            collection::vec,
+            prop_assert, prop_assert_eq, prop_oneof,
+            strategy::{Just, Strategy},
+            test_runner::TestCaseError,
+        };
+        use tokio_postgres::types::Type;
+
+        use crate::{
+            error::EtlResult,
+            postgres::codec::{parse_replica_identity_column_names, parse_replicated_column_names},
+            schema::{
+                ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId,
+                TableName, TableSchema,
+            },
+            test_utils::property::run_property,
+        };
+
+        /// Relation OID used by every generated relation.
+        const RELATION_ID: u32 = 16_384;
+
+        /// Upper bound on the number of source columns.
+        const MAX_COLUMNS: usize = 8;
+
+        /// Exact column names the generator draws from.
+        const NAME_POOL: [&str; 10] = ["id", "a", "b", "c", "d", "e", "f", "g", "h", "i"];
+
+        /// Column types the generator assigns.
+        const COLUMN_TYPES: [Type; 6] =
+            [Type::INT4, Type::INT8, Type::TEXT, Type::NUMERIC, Type::TIMESTAMP, Type::TIMESTAMPTZ];
+
+        /// How the stored snapshot differs from the table that produced the
+        /// relation message.
+        #[derive(Debug, Clone)]
+        enum StaleSnapshot {
+            /// The stored snapshot is current.
+            Current,
+            /// The source added the column at this index after the snapshot.
+            ColumnAdded(usize),
+            /// The source dropped a column that the snapshot still has, at
+            /// this index and with this type.
+            ColumnDropped(usize, usize),
+            /// The source renamed columns so that these swaps of the current
+            /// names produce the snapshot's names.
+            NamesPermuted(Vec<(usize, usize)>),
+            /// The source changed the type of the column at this index; the
+            /// snapshot holds this older type.
+            TypeChanged(usize, usize),
+        }
+
+        /// One relation message and the stored snapshot it is applied to.
+        #[derive(Debug, Clone)]
+        struct RelationCase {
+            /// Replica identity byte as pgoutput sends it.
+            replica_identity: u8,
+            /// Relation columns as name, type, and identity flag.
+            relation_columns: Vec<(String, Type, bool)>,
+            /// Stored snapshot columns in `attnum` order.
+            stored_columns: Vec<(String, Type)>,
+        }
+
+        /// Generates the current source table and how the stored snapshot is
+        /// stale relative to it.
+        fn relation_case(
+            stale_snapshot: impl Strategy<Value = StaleSnapshot>,
+        ) -> impl Strategy<Value = RelationCase> {
+            (
+                1..=MAX_COLUMNS,
+                Just(NAME_POOL.to_vec()).prop_shuffle(),
+                vec(0..COLUMN_TYPES.len(), MAX_COLUMNS),
+                vec(weighted(0.8), MAX_COLUMNS),
+                vec(weighted(0.4), MAX_COLUMNS),
+                prop_oneof![Just(b'd'), Just(b'i'), Just(b'f'), Just(b'n')],
+                stale_snapshot,
+            )
+                .prop_map(
+                    |(column_count, names, types, published, identity, replica_identity, stale)| {
+                        let current: Vec<(String, Type)> = (0..column_count)
+                            .map(|index| {
+                                (names[index].to_owned(), COLUMN_TYPES[types[index]].clone())
+                            })
+                            .collect();
+
+                        // pgoutput sends only published columns, flags every
+                        // sent column under `FULL`, and flags none under
+                        // `NOTHING`.
+                        let relation_columns = current
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| published[*index])
+                            .map(|(index, (name, typ))| {
+                                let flagged = match replica_identity {
+                                    b'f' => true,
+                                    b'n' => false,
+                                    _ => identity[index],
+                                };
+                                (name.clone(), typ.clone(), flagged)
+                            })
+                            .collect();
+
+                        let mut stored_columns = current;
+                        match stale {
+                            StaleSnapshot::Current => {}
+                            StaleSnapshot::ColumnAdded(index) => {
+                                stored_columns.remove(index % column_count);
+                            }
+                            StaleSnapshot::ColumnDropped(index, type_index) => {
+                                // Pool names past `column_count` are unused by
+                                // the current table, so the dropped name is
+                                // unique; a full pool has no spare name.
+                                if let Some(name) = names.get(column_count) {
+                                    stored_columns.insert(
+                                        index % (column_count + 1),
+                                        ((*name).to_owned(), COLUMN_TYPES[type_index].clone()),
+                                    );
+                                }
+                            }
+                            StaleSnapshot::NamesPermuted(swaps) => {
+                                for (left, right) in swaps {
+                                    let left = left % column_count;
+                                    let right = right % column_count;
+                                    let left_name = stored_columns[left].0.clone();
+                                    let right_name =
+                                        std::mem::replace(&mut stored_columns[right].0, left_name);
+                                    stored_columns[left].0 = right_name;
+                                }
+                            }
+                            StaleSnapshot::TypeChanged(index, type_index) => {
+                                stored_columns[index % column_count].1 =
+                                    COLUMN_TYPES[type_index].clone();
+                            }
+                        }
+
+                        RelationCase { replica_identity, relation_columns, stored_columns }
+                    },
+                )
+        }
+
+        /// Generates staleness that keeps relation order and types aligned
+        /// with the snapshot whenever every relation name is known.
+        fn order_preserving_staleness() -> impl Strategy<Value = StaleSnapshot> {
+            prop_oneof![
+                Just(StaleSnapshot::Current),
+                (0..MAX_COLUMNS).prop_map(StaleSnapshot::ColumnAdded),
+                (0..=MAX_COLUMNS, 0..COLUMN_TYPES.len()).prop_map(|(index, type_index)| {
+                    StaleSnapshot::ColumnDropped(index, type_index)
+                }),
+            ]
+        }
+
+        /// Encodes a pgoutput `RELATION` message.
+        fn encode_relation(case: &RelationCase) -> Bytes {
+            let mut bytes = BytesMut::new();
+            bytes.put_u8(b'R');
+            bytes.put_u32(RELATION_ID);
+            bytes.put_slice(b"public\0");
+            bytes.put_slice(b"t\0");
+            bytes.put_u8(case.replica_identity);
+            bytes.put_i16(i16::try_from(case.relation_columns.len()).unwrap());
+            for (name, typ, flagged) in &case.relation_columns {
+                bytes.put_i8(i8::from(*flagged));
+                bytes.put_slice(name.as_bytes());
+                bytes.put_u8(0);
+                bytes.put_i32(i32::try_from(typ.oid()).unwrap());
+                bytes.put_i32(-1);
+            }
+            bytes.freeze()
+        }
+
+        /// Parses relation bytes with the same parser the replication stream
+        /// uses.
+        fn parse_relation(bytes: &Bytes) -> RelationBody {
+            let LogicalReplicationMessage::Relation(body) =
+                LogicalReplicationMessage::parse(bytes).unwrap()
+            else {
+                panic!("encoded relation should parse as a relation message");
+            };
+            body
+        }
+
+        /// Builds the stored snapshot a relation is materialized against.
+        fn stored_schema(case: &RelationCase) -> Arc<TableSchema> {
+            Arc::new(TableSchema::new(
+                TableId::new(RELATION_ID),
+                TableName::new("public".to_owned(), "t".to_owned()),
+                case.stored_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, typ))| {
+                        let attnum = i32::try_from(index + 1).unwrap();
+                        ColumnSchema::new(name.clone(), typ.clone(), -1, attnum, true)
+                    })
+                    .collect(),
+            ))
+        }
+
+        /// Runs the relation-to-decoder steps of
+        /// [`super::ApplyLoop::handle_relation_message`] and
+        /// [`super::ApplyLoop::materialize_relation_schema`] without the store
+        /// lookup that selects the snapshot.
+        fn materialize(
+            table_schema: Arc<TableSchema>,
+            relation: &RelationBody,
+        ) -> EtlResult<ReplicatedTableSchema> {
+            let replicated_columns = parse_replicated_column_names(relation)?;
+            let identity_columns = parse_replica_identity_column_names(relation)?;
+            let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
+            let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
+
+            Ok(ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask))
+        }
+
+        /// Checks that a successful materialization agrees with the relation
+        /// position by position.
+        fn check_relation_agreement(case: &RelationCase) -> Result<(), TestCaseError> {
+            let relation = parse_relation(&encode_relation(case));
+            let Ok(replicated_table_schema) = materialize(stored_schema(case), &relation) else {
+                return Ok(());
+            };
+
+            let decoder_columns: Vec<(String, u32)> = replicated_table_schema
+                .column_schemas()
+                .map(|column| (column.name.clone(), column.typ.oid()))
+                .collect();
+            let relation_columns: Vec<(String, u32)> = relation
+                .columns()
+                .iter()
+                .map(|column| {
+                    (column.name().unwrap().to_owned(), u32::try_from(column.type_id()).unwrap())
+                })
+                .collect();
+            prop_assert_eq!(decoder_columns, relation_columns);
+            prop_assert_eq!(
+                replicated_table_schema.column_schemas().len(),
+                relation.columns().len()
+            );
+
+            let decoder_identity: Vec<&str> = replicated_table_schema
+                .identity_column_schemas()
+                .map(|column| column.name.as_str())
+                .collect();
+            let relation_identity: Vec<&str> = relation
+                .columns()
+                .iter()
+                .filter(|column| {
+                    matches!(relation.replica_identity(), ReplicaIdentity::Full)
+                        || column.flags() & 1 == 1
+                })
+                .map(|column| column.name().unwrap())
+                .collect();
+            prop_assert_eq!(decoder_identity, relation_identity);
+            prop_assert!(
+                replicated_table_schema.identity_column_schemas().len()
+                    == replicated_table_schema.identity_column_schemas().count()
+            );
+
+            Ok(())
+        }
+
+        /// Builds a fully published default-identity case.
+        fn published_case(
+            relation_columns: &[(&str, Type)],
+            stored_columns: &[(&str, Type)],
+        ) -> RelationCase {
+            RelationCase {
+                replica_identity: b'd',
+                relation_columns: relation_columns
+                    .iter()
+                    .map(|(name, typ)| ((*name).to_owned(), typ.clone(), false))
+                    .collect(),
+                stored_columns: stored_columns
+                    .iter()
+                    .map(|(name, typ)| ((*name).to_owned(), typ.clone()))
+                    .collect(),
+            }
+        }
+
+        // Name-permuting and type-changing staleness is excluded here because
+        // materialization currently accepts it with misaligned columns; see
+        // the ignored `relation_materialization_rejects_permuted_names` and
+        // `relation_materialization_rejects_changed_types`.
+        #[test]
+        fn relation_materialization_agrees_with_relation_columns() {
+            run_property(
+                "relation materialization agreement",
+                &relation_case(order_preserving_staleness()),
+                check_relation_agreement,
+            );
+        }
+
+        #[test]
+        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
+                    positions"]
+        fn relation_materialization_rejects_permuted_names() {
+            let swaps = vec((0..MAX_COLUMNS, 0..MAX_COLUMNS), 1..=3);
+            run_property(
+                "relation materialization with permuted names",
+                &relation_case(swaps.prop_map(StaleSnapshot::NamesPermuted)),
+                check_relation_agreement,
+            );
+        }
+
+        #[test]
+        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
+        fn relation_materialization_rejects_changed_types() {
+            let type_change = (0..MAX_COLUMNS, 0..COLUMN_TYPES.len())
+                .prop_map(|(index, type_index)| StaleSnapshot::TypeChanged(index, type_index));
+            run_property(
+                "relation materialization with changed types",
+                &relation_case(type_change),
+                check_relation_agreement,
+            );
+        }
+
+        // Minimal counterexample: `alter table root rename a to tmp; rename b
+        // to a; rename tmp to b` reaches a partition leaf with no DDL message,
+        // so its stored snapshot still says (a, b) while the relation says
+        // (b, a). Rows would put source `b` into destination `a`.
+        #[test]
+        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
+                    positions"]
+        fn relation_with_swapped_column_names_is_not_materialized_at_stale_positions() {
+            let case = published_case(
+                &[("b", Type::INT4), ("a", Type::INT4)],
+                &[("a", Type::INT4), ("b", Type::INT4)],
+            );
+
+            check_relation_agreement(&case).unwrap();
+        }
+
+        // Minimal counterexample: `alter table root alter column a type int8`
+        // reaches a partition leaf with no DDL message, so its stored
+        // snapshot still decodes `a` as `int4`.
+        #[test]
+        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
+        fn relation_with_changed_column_type_is_not_materialized_with_the_stale_type() {
+            let case = published_case(&[("a", Type::INT8)], &[("a", Type::INT4)]);
+
+            check_relation_agreement(&case).unwrap();
+        }
+    }
 }

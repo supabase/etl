@@ -462,9 +462,11 @@ not automatically reject or detect every operation outside these rules.
 
 Coordinate migrations across every pipeline using the affected tables or
 shared objects. Stopping a pipeline does not disable the source event trigger,
-so keep maintenance transactions short and use `READ COMMITTED` too. A restart
-alone does not rebuild destination tables or repair inconsistent schema history;
-plan any required table resynchronization before resuming replication.
+so keep maintenance transactions short and use `READ COMMITTED` too. With
+permanent slots, a restart alone does not rebuild destination tables. Temporary
+pipelines resynchronize on every start. Restarting does not repair inconsistent
+schema history; plan any required table resynchronization before resuming
+replication.
 
 - Table creation, removal, and rename are pipeline lifecycle operations, not
   live schema changes.

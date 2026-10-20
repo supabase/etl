@@ -3130,4 +3130,448 @@ mod tests {
         assert_eq!(operation_names(&plan), ["drop:a", "add:c"]);
         assert_operations_converge(&before_schema, &after_schema);
     }
+
+    /// Generative checks that every schema plan replays as legal destination
+    /// DDL and converges on the after endpoint.
+    #[cfg(feature = "test-utils")]
+    mod plan_replay_properties {
+        use std::{
+            collections::{BTreeMap, HashMap, HashSet, VecDeque},
+            sync::Arc,
+        };
+
+        use proptest::{
+            bool::weighted,
+            collection::vec,
+            prop_assert, prop_assert_eq,
+            strategy::{Just, Strategy},
+            test_runner::TestCaseError,
+        };
+
+        use crate::{
+            schema::{
+                ColumnAlterationKind, ColumnNameMapping, ColumnSchema, DDL_TEMPORARY_COLUMN_PREFIX,
+                ReplicatedTableSchema, ReplicationMask, SchemaEndpoint, SchemaOperation,
+                SchemaPlanError, TableId, TableName, TableSchema, Type,
+            },
+            test_utils::property::run_property,
+        };
+
+        /// Upper bound on the number of before-endpoint columns.
+        const MAX_BEFORE_COLUMNS: usize = 12;
+
+        /// Exact source names the generator draws from.
+        ///
+        /// The pool mixes ASCII case pairs, `İ` (whose Unicode lowercase is the
+        /// two-character `i̇`, so it collides with `i̇` only under Unicode
+        /// lowercase), the German sharp s pair (`ẞ` lowercases to `ß` only
+        /// under Unicode rules), and user columns spelled like planner
+        /// temporary names, which the planner must never reuse for a
+        /// cycle break.
+        const NAME_POOL: [&str; 16] = [
+            "a",
+            "A",
+            "b",
+            "B",
+            "c",
+            "C",
+            "i",
+            "I",
+            "İ",
+            "i\u{307}",
+            "x",
+            "X",
+            "ß",
+            "ẞ",
+            "supabase_etl_ddl_tmp_column_1_0",
+            "supabase_etl_ddl_tmp_column_2_0",
+        ];
+
+        /// Column types with the type modifiers the generator assigns.
+        const COLUMN_TYPES: [(Type, i32); 5] = [
+            (Type::INT4, -1),
+            (Type::INT8, -1),
+            (Type::TEXT, -1),
+            (Type::VARCHAR, 14),
+            (Type::NUMERIC, ((10 << 16) | 2) + 4),
+        ];
+
+        /// Default expressions the generator assigns.
+        const DEFAULT_EXPRESSIONS: [Option<&str>; 4] =
+            [None, Some("0"), Some("'x'::text"), Some("now()")];
+
+        /// Every destination name mapping a plan can target.
+        const COLUMN_NAME_MAPPINGS: [ColumnNameMapping; 3] = [
+            ColumnNameMapping::Identity,
+            ColumnNameMapping::AsciiLowercase,
+            ColumnNameMapping::UnicodeLowercase,
+        ];
+
+        /// Indexes into the fact tables plus primary-key membership.
+        type ColumnFacts = (usize, bool, usize, bool);
+
+        /// Raw randomness from which [`build_endpoints`] derives one
+        /// transition.
+        #[derive(Debug, Clone)]
+        struct RawTransition {
+            /// Number of before-endpoint columns.
+            column_count: usize,
+            /// Gaps between consecutive attnums, so dropped attnums leave
+            /// holes.
+            attnum_gaps: Vec<i32>,
+            /// Shuffled name pool; the first `column_count` names are the
+            /// before names and the rest are fresh names.
+            names: Vec<&'static str>,
+            /// Before-endpoint replication mask.
+            before_mask: Vec<bool>,
+            /// Before-endpoint column facts.
+            before_facts: Vec<ColumnFacts>,
+            /// Whether each before column survives into the after table.
+            survives: Vec<bool>,
+            /// Swaps applied to the survivor names, composing into cycles.
+            name_swaps: Vec<(usize, usize)>,
+            /// Whether each survivor takes a currently free name.
+            fresh_rename: Vec<bool>,
+            /// Whether each survivor flips its replication bit.
+            mask_flips: Vec<bool>,
+            /// Replacement facts for each survivor.
+            fact_tweaks: Vec<Option<ColumnFacts>>,
+            /// Added columns as attnum gap, replication bit, and facts.
+            additions: Vec<(i32, bool, ColumnFacts)>,
+        }
+
+        /// Generates facts for one column.
+        fn column_facts() -> impl Strategy<Value = ColumnFacts> {
+            (
+                0..COLUMN_TYPES.len(),
+                proptest::bool::ANY,
+                0..DEFAULT_EXPRESSIONS.len(),
+                weighted(0.2),
+            )
+        }
+
+        /// Generates one raw endpoint transition.
+        fn raw_transition() -> impl Strategy<Value = RawTransition> {
+            let per_column = MAX_BEFORE_COLUMNS;
+            (
+                (
+                    0..=MAX_BEFORE_COLUMNS,
+                    vec(1i32..=3, per_column),
+                    Just(NAME_POOL.to_vec()).prop_shuffle(),
+                    vec(weighted(0.8), per_column),
+                    vec(column_facts(), per_column),
+                    vec(weighted(0.75), per_column),
+                ),
+                (
+                    vec((0..per_column, 0..per_column), 0..=4),
+                    vec(weighted(0.15), per_column),
+                    vec(weighted(0.2), per_column),
+                    vec(proptest::option::weighted(0.25, column_facts()), per_column),
+                    vec((1i32..=3, weighted(0.8), column_facts()), 0..=3),
+                ),
+            )
+                .prop_map(
+                    |(
+                        (column_count, attnum_gaps, names, before_mask, before_facts, survives),
+                        (name_swaps, fresh_rename, mask_flips, fact_tweaks, additions),
+                    )| RawTransition {
+                        column_count,
+                        attnum_gaps,
+                        names,
+                        before_mask,
+                        before_facts,
+                        survives,
+                        name_swaps,
+                        fresh_rename,
+                        mask_flips,
+                        fact_tweaks,
+                        additions,
+                    },
+                )
+        }
+
+        /// Builds one column from its generated facts.
+        fn column(name: &str, ordinal_position: i32, facts: ColumnFacts) -> ColumnSchema {
+            let (type_index, nullable, default_index, primary_key) = facts;
+            let (typ, modifier) = COLUMN_TYPES[type_index].clone();
+            ColumnSchema::new(name.to_owned(), typ, modifier, ordinal_position, nullable)
+                .with_default_expression_option(
+                    DEFAULT_EXPRESSIONS[default_index].map(str::to_owned),
+                )
+                .with_primary_key_ordinal_position(primary_key.then_some(1))
+        }
+
+        /// Builds a replicated schema from columns and their replication bits.
+        fn replicated_schema(columns: Vec<(ColumnSchema, bool)>) -> ReplicatedTableSchema {
+            let mask = columns.iter().map(|(_, replicated)| u8::from(*replicated)).collect();
+            let table_schema = Arc::new(TableSchema::new(
+                TableId::new(123),
+                TableName::new("public".to_owned(), "t".to_owned()),
+                columns.into_iter().map(|(column, _)| column).collect(),
+            ));
+            ReplicatedTableSchema::from_mask(table_schema, ReplicationMask::from_bytes(mask))
+        }
+
+        /// Derives the before and after endpoints of one transition.
+        ///
+        /// Exact names stay unique within each table because PostgreSQL
+        /// requires that, while mapped names may collide. Survivors keep their
+        /// attnum, additions take attnums above every before attnum because
+        /// PostgreSQL never reuses one, and additions prefer just-freed names
+        /// to model `drop column x; add column x`.
+        fn build_endpoints(raw: &RawTransition) -> (ReplicatedTableSchema, ReplicatedTableSchema) {
+            let mut attnum = 0;
+            let mut before_columns = Vec::with_capacity(raw.column_count);
+            for index in 0..raw.column_count {
+                attnum += raw.attnum_gaps[index];
+                before_columns.push((
+                    column(raw.names[index], attnum, raw.before_facts[index]),
+                    raw.before_mask[index],
+                ));
+            }
+
+            let survivors: Vec<usize> =
+                (0..raw.column_count).filter(|&index| raw.survives[index]).collect();
+            let mut free_names: VecDeque<&str> = (0..raw.column_count)
+                .filter(|&index| !raw.survives[index])
+                .map(|index| raw.names[index])
+                .chain(raw.names[raw.column_count..].iter().copied())
+                .collect();
+
+            let mut survivor_names: Vec<&str> =
+                survivors.iter().map(|&index| raw.names[index]).collect();
+            if !survivor_names.is_empty() {
+                for &(left, right) in &raw.name_swaps {
+                    let len = survivor_names.len();
+                    survivor_names.swap(left % len, right % len);
+                }
+            }
+            for (position, name) in survivor_names.iter_mut().enumerate() {
+                if raw.fresh_rename[position]
+                    && let Some(fresh_name) = free_names.pop_front()
+                {
+                    free_names.push_back(std::mem::replace(name, fresh_name));
+                }
+            }
+
+            let mut after_columns = Vec::with_capacity(survivors.len() + raw.additions.len());
+            for (position, &index) in survivors.iter().enumerate() {
+                let (before_column, _) = &before_columns[index];
+                let facts = raw.fact_tweaks[position].unwrap_or(raw.before_facts[index]);
+                after_columns.push((
+                    column(survivor_names[position], before_column.ordinal_position, facts),
+                    raw.before_mask[index] ^ raw.mask_flips[position],
+                ));
+            }
+            for &(gap, replicated, facts) in &raw.additions {
+                let Some(name) = free_names.pop_front() else {
+                    break;
+                };
+                attnum += gap;
+                after_columns.push((column(name, attnum, facts), replicated));
+            }
+
+            (replicated_schema(before_columns), replicated_schema(after_columns))
+        }
+
+        /// Returns the first pair of distinct replicated names that share a
+        /// destination name, if any.
+        fn endpoint_collision(
+            schema: &ReplicatedTableSchema,
+            column_name_mapping: ColumnNameMapping,
+        ) -> Option<(String, String)> {
+            let mut seen: HashMap<String, &str> = HashMap::new();
+            for column in schema.column_schemas() {
+                if let Some(first) =
+                    seen.insert(column_name_mapping.map_name(&column.name), &column.name)
+                {
+                    return Some((first.to_owned(), column.name.clone()));
+                }
+            }
+            None
+        }
+
+        /// Projects a column onto the facts a destination materializes.
+        ///
+        /// Primary-key membership is excluded because schema plans do not
+        /// alter destination keys; a key-only change plans no operation.
+        fn destination_facts(column: &ColumnSchema) -> (String, Type, i32, bool, Option<String>) {
+            (
+                column.name.clone(),
+                column.typ.clone(),
+                column.modifier,
+                column.nullable,
+                column.default_expression.clone(),
+            )
+        }
+
+        /// Counts rename cycles among the endpoint renames of a transition.
+        ///
+        /// A cycle is a set of mapped renames whose after names are exactly
+        /// their own before names, so no rename in it can run first without a
+        /// temporary name.
+        fn rename_cycles(renames: &HashMap<String, String>) -> usize {
+            let mut visited: HashSet<&str> = HashSet::new();
+            let mut cycles = 0;
+            for start in renames.keys() {
+                if visited.contains(start.as_str()) {
+                    continue;
+                }
+                let mut path = Vec::new();
+                let mut current = start.as_str();
+                while let Some(next) = renames.get(current) {
+                    if !visited.insert(current) {
+                        break;
+                    }
+                    path.push(current);
+                    current = next;
+                }
+                if current == start.as_str() && !path.is_empty() {
+                    cycles += 1;
+                }
+            }
+            cycles
+        }
+
+        /// Replays one plan on a destination model and checks it converges.
+        fn check_plan_replay(
+            before_schema: &ReplicatedTableSchema,
+            after_schema: &ReplicatedTableSchema,
+            column_name_mapping: ColumnNameMapping,
+        ) -> Result<(), TestCaseError> {
+            let before_collision = endpoint_collision(before_schema, column_name_mapping);
+            let after_collision = endpoint_collision(after_schema, column_name_mapping);
+            let plan = match before_schema.plan_schema_change(after_schema, column_name_mapping) {
+                Ok(plan) => {
+                    prop_assert_eq!(before_collision, None);
+                    prop_assert_eq!(after_collision, None);
+                    plan
+                }
+                Err(SchemaPlanError::DestinationColumnNameCollision {
+                    endpoint,
+                    column_name_mapping: error_mapping,
+                    first_column_name,
+                    second_column_name,
+                }) => {
+                    prop_assert_eq!(error_mapping, column_name_mapping);
+                    prop_assert!(first_column_name != second_column_name);
+                    prop_assert!(
+                        column_name_mapping.equivalent(&first_column_name, &second_column_name)
+                    );
+                    let endpoint_schema = match endpoint {
+                        SchemaEndpoint::Before => before_schema,
+                        SchemaEndpoint::After => after_schema,
+                    };
+                    for name in [&first_column_name, &second_column_name] {
+                        prop_assert!(
+                            endpoint_schema.column_schemas().any(|column| &column.name == name)
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(TestCaseError::fail(format!("unexpected plan error: {error}")));
+                }
+            };
+
+            // The model is the destination table keyed by physical name. Each
+            // operation must find exactly the state it claims to expect.
+            let mut model: BTreeMap<String, ColumnSchema> = before_schema
+                .destination_column_schemas(column_name_mapping)
+                .map(|column| (column.name.clone(), column))
+                .collect();
+            let mut planned_renames = 0;
+            for operation in plan.ordered_operations() {
+                match operation {
+                    SchemaOperation::DropColumn { before_column_schema, .. } => {
+                        let removed = model.remove(&before_column_schema.name);
+                        prop_assert_eq!(removed.as_ref(), Some(before_column_schema));
+                    }
+                    SchemaOperation::AddColumn { after_column_schema, .. } => {
+                        prop_assert!(!model.contains_key(&after_column_schema.name));
+                        let attnum_free = model.values().all(|column| {
+                            column.ordinal_position != after_column_schema.ordinal_position
+                        });
+                        prop_assert!(attnum_free);
+                        model.insert(after_column_schema.name.clone(), after_column_schema.clone());
+                    }
+                    SchemaOperation::AlterColumn { alteration } => {
+                        let before = alteration.before_column_schema();
+                        let after = alteration.after_column_schema();
+                        let removed = model.remove(&before.name);
+                        prop_assert_eq!(removed.as_ref(), Some(before));
+                        if alteration.kind() == ColumnAlterationKind::Rename {
+                            planned_renames += 1;
+                            prop_assert!(before.name != after.name);
+                            prop_assert!(!model.contains_key(&after.name));
+                        } else {
+                            prop_assert_eq!(&before.name, &after.name);
+                        }
+                        model.insert(after.name.clone(), after.clone());
+                    }
+                }
+            }
+
+            // Equality on attnum-keyed destination facts already implies that
+            // no planner temporary name survives; the explicit check below
+            // names that failure directly.
+            let replayed: BTreeMap<i32, _> = model
+                .iter()
+                .map(|(name, column)| {
+                    prop_assert_eq!(name, &column.name);
+                    Ok((column.ordinal_position, destination_facts(column)))
+                })
+                .collect::<Result<_, TestCaseError>>()?;
+            let expected: BTreeMap<i32, _> = after_schema
+                .destination_column_schemas(column_name_mapping)
+                .map(|column| (column.ordinal_position, destination_facts(&column)))
+                .collect();
+            prop_assert_eq!(&replayed, &expected);
+            let after_names: Vec<String> = after_schema
+                .destination_column_schemas(column_name_mapping)
+                .map(|column| column.name)
+                .collect();
+            let temporary_name_survives = model.keys().any(|name| {
+                name.starts_with(DDL_TEMPORARY_COLUMN_PREFIX) && !after_names.contains(name)
+            });
+            prop_assert!(!temporary_name_survives);
+
+            // Each cycle needs exactly one temporary rename beyond its
+            // endpoint renames; chains need none.
+            let endpoint_renames: HashMap<String, String> = plan
+                .diff()
+                .altered_columns
+                .iter()
+                .filter(|change| {
+                    !column_name_mapping.equivalent(
+                        &change.before_column_schema().name,
+                        &change.after_column_schema().name,
+                    )
+                })
+                .map(|change| {
+                    (
+                        column_name_mapping.map_name(&change.before_column_schema().name),
+                        column_name_mapping.map_name(&change.after_column_schema().name),
+                    )
+                })
+                .collect();
+            prop_assert_eq!(
+                planned_renames,
+                endpoint_renames.len() + rename_cycles(&endpoint_renames)
+            );
+
+            Ok(())
+        }
+
+        #[test]
+        fn schema_plans_replay_legally_onto_the_after_endpoint() {
+            run_property("schema plan replay", &raw_transition(), |raw| {
+                let (before_schema, after_schema) = build_endpoints(raw);
+                for column_name_mapping in COLUMN_NAME_MAPPINGS {
+                    check_plan_replay(&before_schema, &after_schema, column_name_mapping)?;
+                }
+                Ok(())
+            });
+        }
+    }
 }
