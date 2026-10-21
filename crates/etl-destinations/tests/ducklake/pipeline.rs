@@ -412,6 +412,69 @@ async fn build_destination(
     TestDestinationWrapper::wrap(raw_destination)
 }
 
+/// Checks existing rows, streamed rows, and the final native destination
+/// default.
+async fn assert_ddl_default_row_values(
+    column_clauses: &[&str],
+    existing_value: Option<i32>,
+    future_value: Option<i32>,
+) {
+    let mut database = spawn_source_database().await;
+    let table_name = test_table_name("ordered_ddl_defaults");
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("value", "integer")]).await.unwrap();
+    let table = table_name.as_quoted_identifier();
+    database.run_sql(&format!("insert into {table} default values")).await.unwrap();
+    let publication = "ordered_ddl_defaults_pub";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let lake = create_test_lake("ordered_ddl_defaults").await;
+    let store = NotifyingStore::new();
+    let destination = build_destination(&lake.catalog_url, &lake.data_url, store.clone()).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        publication.to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    synced.notified().await;
+
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    let transaction = database.begin_transaction().await;
+    for clauses in column_clauses {
+        transaction.run_sql(&format!("alter table {table} {clauses}")).await.unwrap();
+    }
+    transaction.run_sql(&format!("insert into {table} default values")).await.unwrap();
+    transaction.commit_transaction().await;
+
+    applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    drop(destination);
+    checkpoint_lake(&lake.catalog_url, &lake.data_url);
+
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let target =
+        qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
+    // Omit score to verify that the final native default also advanced.
+    conn.execute_batch(&format!("insert into {target} (id) values (3)")).unwrap();
+    let mut statement =
+        conn.prepare(&format!("select id, score from {target} order by id")).unwrap();
+    let rows = statement
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i32>>(1)?)))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(rows, [(1, existing_value), (2, future_value), (3, future_value)]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_and_streaming_with_restart() {
     init_test_tracing();
@@ -1056,10 +1119,7 @@ async fn schema_change_add_column() {
     let initial_snapshot_id = initial_metadata.snapshot_id();
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -1106,6 +1166,50 @@ async fn schema_change_add_column() {
             },
         ]
     );
+}
+
+/// Add-time defaults survive a later statement changing the future default.
+#[tokio::test(flavor = "multi_thread")]
+async fn ordered_ddl_defaults_preserve_existing_row_values() {
+    assert_ddl_default_row_values(
+        &["add column score integer default 1", "alter column score set default 2"],
+        Some(1),
+        Some(2),
+    )
+    .await;
+}
+
+/// A single statement can give existing and future rows different defaults.
+#[tokio::test(flavor = "multi_thread")]
+async fn combined_ddl_defaults_preserve_existing_row_values() {
+    assert_ddl_default_row_values(
+        &["add column score integer default 1, alter column score set default 2"],
+        Some(1),
+        Some(2),
+    )
+    .await;
+}
+
+/// A default installed after addition does not replace existing nulls.
+#[tokio::test(flavor = "multi_thread")]
+async fn combined_ddl_default_preserves_existing_nulls() {
+    assert_ddl_default_row_values(
+        &["add column score integer, alter column score set default 2"],
+        None,
+        Some(2),
+    )
+    .await;
+}
+
+/// Removing a default in a later statement retains the add-time value.
+#[tokio::test(flavor = "multi_thread")]
+async fn ordered_ddl_drop_default_preserves_existing_row_values() {
+    assert_ddl_default_row_values(
+        &["add column score integer default 1", "alter column score drop default"],
+        Some(1),
+        None,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1157,10 +1261,7 @@ async fn case_only_rename_keeps_canonical_ducklake_column() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .run_sql(&format!(
@@ -1249,10 +1350,7 @@ async fn publication_mask_adds_existing_defaulted_column_without_backfill() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -1331,10 +1429,7 @@ async fn schema_change_is_visible_to_already_open_connection() {
     assert_eq!(query_table_columns(&conn, &ducklake_table_name), vec!["id", "name", "age"]);
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -1407,10 +1502,7 @@ async fn schema_change_ordered_name_reuse() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -1532,7 +1624,6 @@ async fn schema_change_then_update_and_delete() {
 
     let events_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
             EventCondition::TableCount(EventType::Insert, table_id, 1),
             EventCondition::TableCount(EventType::Update, table_id, 1),
             EventCondition::TableCount(EventType::Delete, table_id, 1),
@@ -1630,10 +1721,7 @@ async fn schema_change_handles_generated_column_rotation() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -1651,10 +1739,7 @@ async fn schema_change_handles_generated_column_rotation() {
         .unwrap();
     events_notify.notified().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
     database
         .alter_table(
@@ -1672,10 +1757,7 @@ async fn schema_change_handles_generated_column_rotation() {
         .unwrap();
     events_notify.notified().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "ddl_col_0_1" }])
@@ -1690,10 +1772,7 @@ async fn schema_change_handles_generated_column_rotation() {
         .unwrap();
     events_notify.notified().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 4),
-            EventCondition::TableCount(EventType::Insert, table_id, 4),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 4)])
         .await;
     database
         .alter_table(
@@ -1768,10 +1847,7 @@ async fn schema_change_handles_generated_column_types() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -1789,10 +1865,7 @@ async fn schema_change_handles_generated_column_types() {
         .unwrap();
     events_notify.notified().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
     database
         .alter_table(
@@ -1811,10 +1884,7 @@ async fn schema_change_handles_generated_column_types() {
         .unwrap();
     events_notify.notified().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
     database
         .alter_table(
@@ -1833,10 +1903,7 @@ async fn schema_change_handles_generated_column_types() {
         .unwrap();
     events_notify.notified().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 4),
-            EventCondition::TableCount(EventType::Insert, table_id, 4),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 4)])
         .await;
     database
         .alter_table(
@@ -1855,10 +1922,7 @@ async fn schema_change_handles_generated_column_types() {
         .unwrap();
     events_notify.notified().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 5),
-            EventCondition::TableCount(EventType::Insert, table_id, 5),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 5)])
         .await;
     database
         .alter_table(

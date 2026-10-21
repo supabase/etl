@@ -44,6 +44,13 @@ pub(crate) struct SchemaChangeMessage {
     /// schema change messages were introduced. Publication DDL without this
     /// field is rejected by [`SchemaChangeMessage::applies_to_publication`].
     pub(crate) publication_name: Option<String>,
+    /// Effective column attnums for each publication at this DDL boundary.
+    ///
+    /// A null entry means all supported columns. Explicit lists use stable
+    /// PostgreSQL attnums, avoiding repeated name lookups in the source
+    /// trigger. Older WAL payloads omit this field and require a protocol
+    /// relation to supply the publication mask.
+    pub(crate) publication_column_attnums: Option<HashMap<String, Option<HashSet<i32>>>>,
     /// The schema name from `pg_namespace.nspname`.
     pub(crate) nspname: String,
     /// The table name from `pg_class.relname`.
@@ -68,11 +75,15 @@ impl SchemaChangeMessage {
     /// Publication DDL without an explicit publication is rejected so it cannot
     /// mutate another pipeline's schema state.
     pub(crate) fn applies_to_publication(&self, publication_name: &str) -> bool {
-        if self.command_tag == "ALTER PUBLICATION" {
-            return self.publication_name.as_deref() == Some(publication_name);
+        if self.command_tag == "ALTER PUBLICATION"
+            && self.publication_name.as_deref() != Some(publication_name)
+        {
+            return false;
         }
 
-        true
+        self.publication_column_attnums
+            .as_ref()
+            .is_none_or(|publications| publications.contains_key(publication_name))
     }
 
     /// Converts a [`SchemaChangeMessage`] to a [`TableSchema`] with a specific
@@ -97,11 +108,11 @@ impl FromStr for SchemaChangeMessage {
     type Err = EtlError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_str(s).map_err(|e| {
+        serde_json::from_str(s).map_err(|error| {
             etl_error!(
                 ErrorKind::ConversionError,
                 "Failed to parse schema change message",
-                format!("Invalid JSON in schema change message: {}", e)
+                source: error
             )
         })
     }
@@ -120,8 +131,25 @@ pub(crate) fn schema_snapshot_id_from_message(
     SnapshotId::new(commit_lsn, PgLsn::from(message.message_lsn()))
 }
 
+/// Source identity fields, including the legacy explicit-index representation.
+#[derive(Deserialize)]
+struct IdentityMessagePayload {
+    /// The source primary-key columns.
+    primary_key_attnums: Vec<i32>,
+    /// Whether the source primary key is deferrable.
+    #[serde(default)]
+    primary_key_condeferrable: bool,
+    /// The source replica-identity mode.
+    relreplident: String,
+    /// The resolved table-local replication index keys, when supplied.
+    replica_identity_attnums: Option<Vec<i32>>,
+    /// Explicit-index keys supplied by older source helpers.
+    replica_identity_index_attnums: Option<Vec<i32>>,
+}
+
 /// The identity metadata emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "IdentityMessagePayload")]
 pub struct IdentityMessage {
     /// The primary key columns in key order, expressed as `pg_attribute.attnum`
     /// values.
@@ -131,13 +159,15 @@ pub struct IdentityMessage {
     ///
     /// Payloads emitted before the source helper reported it omit the field;
     /// they are read as not deferrable.
-    #[serde(default)]
     pub(crate) primary_key_condeferrable: bool,
     /// The replica-identity mode from `pg_class.relreplident`.
     pub(crate) relreplident: String,
-    /// The replica-identity index columns in key order, expressed as
-    /// `pg_attribute.attnum` values.
-    pub(crate) replica_identity_index_attnums: Vec<i32>,
+    /// The table-local replication index keys, expressed as
+    /// `pg_attribute.attnum` values in index-key order.
+    ///
+    /// Both default and explicit-index identity use these resolved keys.
+    /// Older payloads are normalized during deserialization.
+    pub(crate) replica_identity_attnums: Vec<i32>,
 }
 
 impl IdentityMessage {
@@ -153,9 +183,12 @@ impl IdentityMessage {
     /// do not use identity data.
     ///
     /// `REPLICA IDENTITY FULL` uses every replicated column as the runtime row
-    /// identity. `DEFAULT` uses the primary key, `USING INDEX` uses the
-    /// configured replica-identity index, and `NOTHING` produces an empty
-    /// identity mask, each intersected with the replication mask.
+    /// identity. `DEFAULT` uses the table-local non-deferrable primary index,
+    /// `USING INDEX` uses the eligible configured replica-identity index, and
+    /// `NOTHING` produces an empty identity mask, each intersected with the
+    /// replication mask. Both index-based modes exclude non-immediate indexes,
+    /// including an explicit identity index later attached to a deferrable
+    /// unique constraint.
     pub(crate) fn build_identity_mask(
         &self,
         table_schema: &TableSchema,
@@ -163,15 +196,10 @@ impl IdentityMessage {
     ) -> EtlResult<IdentityMask> {
         match self.relreplident.as_str() {
             "f" => Ok(IdentityMask::from_bytes(replication_mask.as_slice().to_vec())),
-            "d" => Ok(Self::build_identity_mask_from_attnums(
+            "d" | "i" => Ok(Self::build_identity_mask_from_attnums(
                 table_schema,
                 replication_mask,
-                &self.primary_key_attnums,
-            )),
-            "i" => Ok(Self::build_identity_mask_from_attnums(
-                table_schema,
-                replication_mask,
-                &self.replica_identity_index_attnums,
+                &self.replica_identity_attnums,
             )),
             "n" => Ok(IdentityMask::from_bytes(vec![0; table_schema.column_schemas.len()])),
             relreplident => {
@@ -213,6 +241,39 @@ impl IdentityMessage {
     }
 }
 
+impl TryFrom<IdentityMessagePayload> for IdentityMessage {
+    type Error = &'static str;
+
+    fn try_from(payload: IdentityMessagePayload) -> Result<Self, Self::Error> {
+        // Resolve legacy payloads once so mask construction only uses protocol
+        // keys. An explicit empty set is authoritative, not missing metadata.
+        let replica_identity_attnums = match payload.replica_identity_attnums {
+            Some(attnums) => attnums,
+            None => match payload.relreplident.as_str() {
+                "d" if !payload.primary_key_condeferrable => payload.primary_key_attnums.clone(),
+                "i" => payload
+                    .replica_identity_index_attnums
+                    .ok_or("Missing replica identity index columns")?,
+                _ => Vec::new(),
+            },
+        };
+
+        if replica_identity_attnums
+            .iter()
+            .any(|attnum| !i16::try_from(*attnum).is_ok_and(|attnum| attnum > 0))
+        {
+            return Err("Invalid replica identity column number");
+        }
+
+        Ok(Self {
+            primary_key_attnums: payload.primary_key_attnums,
+            primary_key_condeferrable: payload.primary_key_condeferrable,
+            relreplident: payload.relreplident,
+            replica_identity_attnums,
+        })
+    }
+}
+
 /// The column schema shape emitted by Postgres.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ColumnSchemaMessage {
@@ -228,6 +289,8 @@ pub(crate) struct ColumnSchemaMessage {
     pub(crate) attnotnull: bool,
     /// The default expression from `pg_attrdef`, if one exists.
     pub(crate) default_expression: Option<String>,
+    /// The captured missing-value literal, omitted by legacy payloads.
+    pub(crate) missing_value_expression: Option<String>,
 }
 
 /// Builds [`ColumnSchema`] values from PostgreSQL-native schema and identity
@@ -263,6 +326,7 @@ pub(crate) fn build_column_schemas(
             )
             .with_primary_key_ordinal_position(primary_key_positions.get(&column.attnum).copied())
             .with_default_expression_option(column.default_expression)
+            .with_missing_value_expression(column.missing_value_expression)
         })
         .collect()
 }
@@ -1001,7 +1065,7 @@ fn convert_tuple_data_to_cell(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     use bytes::Bytes;
     use postgres_replication::protocol::{
@@ -1011,19 +1075,20 @@ mod tests {
     use proptest::{arbitrary::any, collection, prop_assert_eq, strategy::Strategy};
     use tokio_postgres::types::{PgLsn, Type};
 
-    use super::{
-        DDL_MESSAGE_PREFIX, IdentityMessage, SchemaChangeMessage, calculate_tuple_bytes,
-        convert_tuple_to_row, convert_update_tuple_to_updated_table_row,
-        delete_message_payload_bytes, insert_message_payload_bytes, normalize_key_tuple_to_row,
-        parse_event_from_delete_message, parse_event_from_update_message,
-        schema_snapshot_id_from_message, update_message_payload_bytes,
-    };
     #[cfg(feature = "test-utils")]
     use crate::test_utils::property::{pg_text, run_property};
     use crate::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
         event::{DeleteEvent, UpdateEvent},
+        postgres::codec::event::{
+            ColumnSchemaMessage, DDL_MESSAGE_PREFIX, IdentityMessage, SchemaChangeMessage,
+            build_column_schemas, calculate_tuple_bytes, convert_tuple_to_row,
+            convert_update_tuple_to_updated_table_row, delete_message_payload_bytes,
+            insert_message_payload_bytes, normalize_key_tuple_to_row,
+            parse_event_from_delete_message, parse_event_from_update_message,
+            schema_snapshot_id_from_message, update_message_payload_bytes,
+        },
         schema::{
             ColumnSchema, IdentityType, ReplicatedTableSchema, ReplicationMask, SnapshotId,
             TableId, TableName, TableSchema,
@@ -1093,6 +1158,35 @@ mod tests {
         }"#;
         let unscoped = table_ddl.parse::<SchemaChangeMessage>().unwrap();
         assert!(unscoped.applies_to_publication("pipeline_publication"));
+        assert!(unscoped.publication_column_attnums.is_none());
+
+        let captured_columns = table_ddl.replace(
+            "\"columns\": []",
+            "\"columns\": [], \"publication_column_attnums\": {\"pipeline_publication\": [1]}",
+        );
+        let captured = captured_columns.parse::<SchemaChangeMessage>().unwrap();
+        assert!(captured.applies_to_publication("pipeline_publication"));
+        assert!(!captured.applies_to_publication("other_publication"));
+        assert_eq!(
+            captured.publication_column_attnums.unwrap()["pipeline_publication"]
+                .as_ref()
+                .unwrap()
+                .clone(),
+            HashSet::from([1])
+        );
+        for invalid_attnums in ["[\"id\"]", "[2147483648]", "[{}]"] {
+            assert!(
+                captured_columns
+                    .replace("[1]", invalid_attnums)
+                    .parse::<SchemaChangeMessage>()
+                    .is_err()
+            );
+        }
+
+        let all_columns = captured_columns.replace("[1]", "null");
+        let all_columns = all_columns.parse::<SchemaChangeMessage>().unwrap();
+        assert!(all_columns.applies_to_publication("pipeline_publication"));
+        assert!(all_columns.publication_column_attnums.unwrap()["pipeline_publication"].is_none());
 
         for invalid_oid in ["-1", "4294967296"] {
             let invalid_payload =
@@ -1165,6 +1259,41 @@ mod tests {
             "columns": []
         }"#;
         assert!(malformed.parse::<SchemaChangeMessage>().is_err());
+    }
+
+    /// Malformed DDL payloads fail without panicking and retain their cause.
+    #[test]
+    fn schema_change_message_rejects_malformed_json_with_source() {
+        for payload in ["", "{", "[]", "null", "{\"columns\": [", "{\"relname\": \"旧"] {
+            let error = payload.parse::<SchemaChangeMessage>().unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ConversionError);
+            assert!(std::error::Error::source(&error).is_some());
+        }
+    }
+
+    /// Optional missing-value literals preserve decoding of older column
+    /// payloads.
+    #[test]
+    fn column_schema_message_preserves_legacy_and_captured_missing_values() {
+        let legacy = serde_json::json!({
+            "attname": "score", "attnum": 2, "atttypid": Type::INT4.oid(),
+            "atttypmod": -1, "attnotnull": false, "default_expression": "2"
+        });
+        let parsed: ColumnSchemaMessage = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(parsed.missing_value_expression.is_none());
+        for expression in ["1", "null"] {
+            let mut current = legacy.clone();
+            current["missing_value_expression"] = serde_json::json!(expression);
+            let parsed: ColumnSchemaMessage = serde_json::from_value(current).unwrap();
+            let columns = build_column_schemas(vec![parsed], vec![]);
+            assert_eq!(columns[0].default_expression.as_deref(), Some("2"));
+            assert_eq!(columns[0].missing_value_expression.as_deref(), Some(expression));
+        }
+        for invalid in [serde_json::json!(1), serde_json::json!([]), serde_json::json!({})] {
+            let mut current = legacy.clone();
+            current["missing_value_expression"] = invalid;
+            assert!(serde_json::from_value::<ColumnSchemaMessage>(current).is_err());
+        }
     }
 
     #[test]
@@ -1416,6 +1545,86 @@ mod tests {
         assert_eq!(delete_message_payload_bytes(&delete), 4);
     }
 
+    /// Legacy WAL is normalized without letting fallback metadata replace
+    /// explicit keys.
+    #[test]
+    fn identity_payload_normalizes_legacy_and_resolved_keys() {
+        for (mode, resolved, expected) in [
+            ("d", None, vec![1]),
+            ("i", None, vec![2]),
+            ("f", None, vec![]),
+            ("n", None, vec![]),
+            ("d", Some(vec![]), vec![]),
+            ("i", Some(vec![]), vec![]),
+            ("d", Some(vec![3]), vec![3]),
+            ("i", Some(vec![3]), vec![3]),
+        ] {
+            let mut payload = serde_json::json!({
+                "primary_key_attnums": [1],
+                "relreplident": mode,
+                "replica_identity_index_attnums": [2],
+            });
+            if let Some(resolved) = resolved {
+                payload["replica_identity_attnums"] = serde_json::json!(resolved);
+            }
+            let identity: IdentityMessage = serde_json::from_value(payload).unwrap();
+            assert_eq!(identity.replica_identity_attnums, expected);
+            assert!(!identity.primary_key_condeferrable);
+        }
+
+        let identity: IdentityMessage = serde_json::from_value(serde_json::json!({
+            "primary_key_attnums": [1],
+            "primary_key_condeferrable": true,
+            "relreplident": "d",
+            "replica_identity_attnums": [],
+        }))
+        .unwrap();
+        assert!(identity.primary_key_condeferrable);
+        assert!(identity.replica_identity_attnums.is_empty());
+    }
+
+    /// Legacy deferrable primary keys cannot act as default replica identity.
+    #[test]
+    fn identity_payload_normalizes_legacy_deferrable_primary_key() {
+        let identity: IdentityMessage = serde_json::from_value(serde_json::json!({
+            "primary_key_attnums": [1],
+            "primary_key_condeferrable": true,
+            "relreplident": "d",
+            "replica_identity_index_attnums": [],
+        }))
+        .unwrap();
+        assert!(identity.replica_identity_attnums.is_empty());
+    }
+
+    /// Missing explicit-index metadata must not silently become an empty key.
+    #[test]
+    fn identity_payload_rejects_missing_or_malformed_keys() {
+        for keys in [None, Some(serde_json::Value::Null)] {
+            let mut payload = serde_json::json!({
+                "primary_key_attnums": [1],
+                "relreplident": "i",
+            });
+            if let Some(keys) = keys {
+                payload["replica_identity_attnums"] = keys;
+            }
+            assert!(serde_json::from_value::<IdentityMessage>(payload).is_err());
+        }
+        for keys in [
+            serde_json::json!(["bad"]),
+            serde_json::json!([0]),
+            serde_json::json!([-1]),
+            serde_json::json!([32768]),
+            serde_json::json!([2147483648_i64]),
+        ] {
+            let payload = serde_json::json!({
+                "primary_key_attnums": [1],
+                "relreplident": "i",
+                "replica_identity_attnums": keys,
+            });
+            assert!(serde_json::from_value::<IdentityMessage>(payload).is_err());
+        }
+    }
+
     #[test]
     fn build_identity_classifies_using_index_with_primary_key_columns_as_primary_key() {
         let table_schema = TableSchema::new(
@@ -1431,7 +1640,7 @@ mod tests {
             primary_key_attnums: vec![1],
             primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
-            replica_identity_index_attnums: vec![1],
+            replica_identity_attnums: vec![1],
         };
 
         let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
@@ -1460,7 +1669,7 @@ mod tests {
             primary_key_attnums: vec![1],
             primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
-            replica_identity_index_attnums: vec![2],
+            replica_identity_attnums: vec![2],
         };
 
         let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
@@ -1490,7 +1699,7 @@ mod tests {
             primary_key_attnums: vec![1, 2],
             primary_key_condeferrable: false,
             relreplident: "d".to_owned(),
-            replica_identity_index_attnums: Vec::new(),
+            replica_identity_attnums: vec![1, 2],
         };
 
         let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
@@ -1514,7 +1723,7 @@ mod tests {
             primary_key_attnums: vec![1],
             primary_key_condeferrable: false,
             relreplident: "i".to_owned(),
-            replica_identity_index_attnums: vec![2, 3],
+            replica_identity_attnums: vec![2, 3],
         };
 
         let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();
@@ -1537,7 +1746,7 @@ mod tests {
             primary_key_attnums: vec![1],
             primary_key_condeferrable: false,
             relreplident: "f".to_owned(),
-            replica_identity_index_attnums: Vec::new(),
+            replica_identity_attnums: Vec::new(),
         };
 
         let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask).unwrap();

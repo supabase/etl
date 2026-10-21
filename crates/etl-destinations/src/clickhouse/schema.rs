@@ -403,6 +403,7 @@ mod tests {
     #[test]
     fn create_merge_tree_sql_quotes_identifiers() {
         let schemas = vec![ColumnSchema {
+            missing_value_expression: None,
             name: "id\"value".to_owned(),
             typ: Type::INT4,
             modifier: -1,
@@ -477,6 +478,7 @@ mod tests {
     fn create_merge_tree_sql_nullable() {
         let schemas = vec![
             ColumnSchema {
+                missing_value_expression: None,
                 name: "id".to_owned(),
                 typ: Type::INT4,
                 modifier: -1,
@@ -486,6 +488,7 @@ mod tests {
                 default_expression: None,
             },
             ColumnSchema {
+                missing_value_expression: None,
                 name: "name".to_owned(),
                 typ: Type::TEXT,
                 modifier: -1,
@@ -602,6 +605,7 @@ mod tests {
     #[test]
     fn create_merge_tree_sql_cdc_columns() {
         let schemas = vec![ColumnSchema {
+            missing_value_expression: None,
             name: "id".to_owned(),
             typ: Type::INT4,
             modifier: -1,
@@ -621,6 +625,7 @@ mod tests {
     #[test]
     fn create_merge_tree_sql_array_columns() {
         let schemas = vec![ColumnSchema {
+            missing_value_expression: None,
             name: "tags".to_owned(),
             typ: Type::TEXT_ARRAY,
             modifier: -1,
@@ -641,6 +646,7 @@ mod tests {
         // GIVEN: a single-column PK with a nullable non-PK column.
         let schemas = vec![
             ColumnSchema {
+                missing_value_expression: None,
                 name: "id".to_owned(),
                 typ: Type::INT4,
                 modifier: -1,
@@ -650,6 +656,7 @@ mod tests {
                 default_expression: None,
             },
             ColumnSchema {
+                missing_value_expression: None,
                 name: "name".to_owned(),
                 typ: Type::TEXT,
                 modifier: -1,
@@ -677,6 +684,7 @@ mod tests {
         // GIVEN: a composite PK whose ordinal order differs from table order.
         let schemas = vec![
             ColumnSchema {
+                missing_value_expression: None,
                 name: "id".to_owned(),
                 typ: Type::INT4,
                 modifier: -1,
@@ -686,6 +694,7 @@ mod tests {
                 default_expression: None,
             },
             ColumnSchema {
+                missing_value_expression: None,
                 name: "name".to_owned(),
                 typ: Type::TEXT,
                 modifier: -1,
@@ -695,6 +704,7 @@ mod tests {
                 default_expression: None,
             },
             ColumnSchema {
+                missing_value_expression: None,
                 name: "tenant_id".to_owned(),
                 typ: Type::INT4,
                 modifier: -1,
@@ -719,6 +729,7 @@ mod tests {
     fn create_replacing_merge_tree_sql_rejects_pkless_schema() {
         // GIVEN: a schema with no PK columns.
         let schemas = vec![ColumnSchema {
+            missing_value_expression: None,
             name: "value".to_owned(),
             typ: Type::TEXT,
             modifier: -1,
@@ -739,6 +750,7 @@ mod tests {
     fn create_table_sql_dispatches_on_engine() {
         // GIVEN: a schema with a single PK column.
         let schemas = vec![ColumnSchema {
+            missing_value_expression: None,
             name: "id".to_owned(),
             typ: Type::INT4,
             modifier: -1,
@@ -763,6 +775,7 @@ mod tests {
         // GIVEN: a two-column schema.
         let schemas = vec![
             ColumnSchema {
+                missing_value_expression: None,
                 name: "id".to_owned(),
                 typ: Type::INT4,
                 modifier: -1,
@@ -772,6 +785,7 @@ mod tests {
                 default_expression: None,
             },
             ColumnSchema {
+                missing_value_expression: None,
                 name: "name".to_owned(),
                 typ: Type::TEXT,
                 modifier: -1,

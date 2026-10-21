@@ -6,8 +6,9 @@
 //!
 //! Source schema snapshots are not projected for individual pipelines. Each
 //! pipeline combines a snapshot selected in WAL order with column membership
-//! from its PostgreSQL `RELATION` metadata. This lets publication column-list
-//! changes use the same logical schema-planning path as table DDL.
+//! captured by DDL or supplied by PostgreSQL `RELATION` metadata. This lets
+//! publication column-list changes use the same logical schema-planning path as
+//! table DDL.
 //!
 //! Schema-change handling is in public beta. Catalog-helper visibility,
 //! concurrent DDL under an older transaction snapshot, and relation-mask
@@ -668,15 +669,14 @@ impl ReplicatedTableSchema {
     /// - Positions only in the before schema are columns to drop.
     /// - Positions only in the after schema are columns to add.
     ///
-    /// Each DDL message stores a complete post-statement table snapshot, but it
-    /// does not materialize a schema change at the destination. `pgoutput`
-    /// emits relation metadata lazily before the next DML event, and that
-    /// [`crate::event::RelationEvent`] advances the destination from its last
-    /// applied schema to the newest stored snapshot. Several DDL statements
-    /// without intervening DML can therefore appear here as one endpoint diff
-    /// containing any combination of additions, drops, renames, and metadata
-    /// changes, including rename chains or cycles that one `ALTER TABLE`
-    /// statement could not express.
+    /// New DDL messages store complete post-statement table and publication
+    /// snapshots and immediately emit a synthetic
+    /// [`crate::event::RelationEvent`]. Real PostgreSQL relations refresh
+    /// the same decoder lineage. Queued legacy messages lack publication
+    /// metadata and retain the lazy relation-driven fallback, so several
+    /// old DDL statements can still appear as one endpoint diff, including
+    /// rename chains or cycles. A conservative partition-tree refresh can
+    /// also produce a new snapshot with no schema differences.
     ///
     /// Diffing catalog snapshots is intentional. Row decoding still requires
     /// immutable schemas at their WAL positions, so capturing operations would
@@ -688,8 +688,7 @@ impl ReplicatedTableSchema {
     /// Source snapshots contain only PostgreSQL catalog states used to decode
     /// WAL rows. Planner-generated temporary names exist only while destination
     /// DDL is running and are never stored as source schema versions. The
-    /// planner emits only the operations needed to reach the schema used by the
-    /// next row event.
+    /// planner emits only the operations needed to reach the relation's schema.
     pub fn diff(&self, after_schema: &ReplicatedTableSchema) -> SchemaDiff {
         let before_table_ordinals: HashSet<_> =
             self.inner().column_schemas.iter().map(|column| column.ordinal_position).collect();
@@ -1674,15 +1673,26 @@ impl SchemaOperationPlanner {
         Ok(())
     }
 
-    /// Phase 3: emits additions after every reusable name is available.
+    /// Phase 3: adds columns with captured missing values, then restores their
+    /// future defaults.
     fn plan_additions(&mut self, added_columns: &[ColumnAddition]) {
         for change in added_columns {
+            let final_column =
+                self.column_name_mapping.map_column_schema(&change.after_column_schema);
+            let mut initial_column = final_column.clone();
+            if change.reason == ColumnPresenceChangeReason::TableSchema
+                && let Some(expression) = &final_column.missing_value_expression
+            {
+                initial_column.default_expression =
+                    (!expression.eq_ignore_ascii_case("null")).then(|| expression.clone());
+            }
             self.operations.push(SchemaOperation::AddColumn {
-                after_column_schema: self
-                    .column_name_mapping
-                    .map_column_schema(&change.after_column_schema),
+                after_column_schema: initial_column.clone(),
                 reason: change.reason,
             });
+            if initial_column.default_expression != final_column.default_expression {
+                self.push_alteration(initial_column, final_column, ColumnAlterationKind::Default);
+            }
         }
     }
 
@@ -2556,6 +2566,38 @@ mod tests {
         assert!(added_names.contains("email"));
         assert!(diff.dropped_columns.is_empty());
         assert!(diff.altered_columns.is_empty());
+    }
+
+    /// Physical additions preserve missing values before installing the future
+    /// default.
+    #[test]
+    fn schema_plan_separates_missing_values_from_future_defaults() {
+        for (future_default, missing_value, initial_default) in
+            [(Some("2"), "1", Some("1")), (Some("2"), "null", None), (None, "1", Some("1"))]
+        {
+            let id = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false);
+            let before = create_replicated_schema(vec![id.clone()]);
+            let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 2, true)
+                .with_default_expression_option(future_default.map(ToOwned::to_owned))
+                .with_missing_value_expression(Some(missing_value.to_owned()));
+            let after = create_replicated_schema(vec![id, column]);
+            let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
+            let [
+                SchemaOperation::AddColumn { after_column_schema, reason },
+                SchemaOperation::AlterColumn { alteration },
+            ] = plan.ordered_operations()
+            else {
+                panic!("the plan must add the column before restoring its default");
+            };
+            assert_eq!(*reason, ColumnPresenceChangeReason::TableSchema);
+            assert_eq!(after_column_schema.default_expression.as_deref(), initial_default);
+            assert_eq!(alteration.kind(), ColumnAlterationKind::Default);
+            assert_eq!(
+                alteration.after_column_schema().default_expression.as_deref(),
+                future_default
+            );
+            assert_operations_converge(&before, &after);
+        }
     }
 
     #[test]

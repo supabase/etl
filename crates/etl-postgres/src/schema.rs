@@ -340,7 +340,7 @@ pub fn numeric_modifiers(modifier: TypeModifier) -> Option<NumericModifiers> {
 ///
 /// This type contains all metadata about a column including its name, data
 /// type, type modifier, ordinal position, primary key information, nullability,
-/// and default expression.
+/// default expression, and captured missing-row value.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ColumnSchema {
     /// The name of the column.
@@ -362,6 +362,14 @@ pub struct ColumnSchema {
     pub nullable: bool,
     /// The source default expression for this column, if one is defined.
     pub default_expression: Option<String>,
+    /// The captured SQL literal used for rows missing this physical column.
+    ///
+    /// Physical additions use this before installing the current default for
+    /// future rows. `Some("null")` records a missing NULL value; `None` retains
+    /// the legacy fallback to [`Self::default_expression`]. Publication-only
+    /// additions do not backfill this value. This is not a history of values
+    /// materialized by heap rewrites or volatile defaults.
+    pub missing_value_expression: Option<String>,
 }
 
 impl ColumnSchema {
@@ -381,6 +389,7 @@ impl ColumnSchema {
             primary_key_ordinal_position: None,
             nullable,
             default_expression: None,
+            missing_value_expression: None,
         }
     }
 
@@ -410,6 +419,12 @@ impl ColumnSchema {
     /// Sets the optional source default expression for this column.
     pub fn with_default_expression_option(mut self, default_expression: Option<String>) -> Self {
         self.default_expression = default_expression;
+        self
+    }
+
+    /// Sets the captured literal for a physically missing column value.
+    pub fn with_missing_value_expression(mut self, expression: Option<String>) -> Self {
+        self.missing_value_expression = expression;
         self
     }
 
@@ -497,6 +512,7 @@ impl ColumnSchemaBuilder {
             primary_key_ordinal_position: self.primary_key_ordinal_position,
             nullable: self.nullable,
             default_expression: self.default_expression,
+            missing_value_expression: None,
         }
     }
 }

@@ -971,6 +971,7 @@ mod tests {
 
     fn column_schema(name: &str) -> ColumnSchema {
         ColumnSchema {
+            missing_value_expression: None,
             name: name.to_owned(),
             typ: Type::INT4,
             modifier: -1,

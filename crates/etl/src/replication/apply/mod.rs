@@ -2158,9 +2158,16 @@ where
 
     /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
     ///
-    /// For `supabase_etl_ddl`, we persist the new table schema as soon as the
-    /// logical message is decoded and record the exact snapshot that any
-    /// following relation must materialize.
+    /// For `supabase_etl_ddl`, we persist the new table schema and emit a
+    /// synthetic relation event in this connection's WAL order using the
+    /// publication columns and identity captured by the trigger. This
+    /// preserves intermediate DDL effects even without later rows. Real
+    /// PostgreSQL relation messages keep their normal path; destinations
+    /// treat an identical snapshot and mask as an idempotent notification.
+    ///
+    /// Table-sync workers emit events only for their owned table, while apply
+    /// skips that table until handover. This preserves per-worker order, not
+    /// global schema order between independently owned tables.
     ///
     /// Supported publication DDL also advances this cursor: a column-list
     /// change needs an ordered snapshot for its new replication mask even
@@ -2173,11 +2180,13 @@ where
     /// DDL message, and no-op DDL can emit a message without invalidating
     /// the relation cache.
     ///
-    /// When no relation follows DDL, the first row combines the pending schema
-    /// with the previous masks and emits a destination-facing relation event.
-    /// A received relation replaces those fallback masks before row decoding.
-    /// Without previous masks, a table-sync worker must wait for a relation
-    /// before handing over its decoding state.
+    /// Legacy payloads without publication columns retain the pending-relation
+    /// fallback. When no relation follows DDL, the first row combines the
+    /// pending schema with the previous masks and emits a
+    /// destination-facing relation event. A received relation replaces
+    /// those fallback masks before row decoding. Without previous masks, a
+    /// table-sync worker must wait for a relation before handing over its
+    /// decoding state.
     async fn handle_message(
         &mut self,
         message: &protocol::MessageBody,
@@ -2261,10 +2270,13 @@ where
         // The `remote_final_lsn` is the `commit_lsn` of the current
         // transaction.
         let snapshot_id = schema_snapshot_id_from_message(remote_final_lsn, message);
+        let publication_filter = schema_change_message
+            .publication_column_attnums
+            .as_ref()
+            .and_then(|publications| publications.get(&self.config.publication_name))
+            .cloned();
+        let identity = schema_change_message.identity.clone();
         let table_schema = schema_change_message.into_table_schema(snapshot_id);
-        let previous_state = self.table_decoding_states.remove(&table_id);
-        self.table_decoding_states
-            .insert(table_id, TableDecodingState::pending_relation(snapshot_id, previous_state));
 
         debug!(
             table_id = %table_id,
@@ -2276,17 +2288,46 @@ where
         );
 
         // Store the new schema version in the store.
-        if let Err(err) = self.schema_store.store_table_schema(table_schema).await {
-            counter!(
-                ETL_DDL_SCHEMA_CHANGES_TOTAL,
-                WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
-                COMMAND_TAG_LABEL => command_tag,
-                OUTCOME_LABEL => "failed_store",
-            )
-            .increment(1);
+        let table_schema = match self.schema_store.store_table_schema(table_schema).await {
+            Ok(table_schema) => table_schema,
+            Err(err) => {
+                counter!(
+                    ETL_DDL_SCHEMA_CHANGES_TOTAL,
+                    WORKER_TYPE_LABEL => self.worker_context.worker_type().as_str(),
+                    COMMAND_TAG_LABEL => command_tag,
+                    OUTCOME_LABEL => "failed_store",
+                )
+                .increment(1);
 
-            return Err(err);
-        }
+                return Err(err);
+            }
+        };
+
+        let synthetic_relation = if let Some(column_attnums) = publication_filter {
+            let replication_mask = match column_attnums {
+                Some(attnums) => ReplicationMask::from_bytes(
+                    table_schema
+                        .column_schemas
+                        .iter()
+                        .map(|column| u8::from(attnums.contains(&column.ordinal_position)))
+                        .collect(),
+                ),
+                None => ReplicationMask::all(&table_schema),
+            };
+            let identity_mask = identity.build_identity_mask(&table_schema, &replication_mask)?;
+            let replicated_table_schema =
+                ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+            self.table_decoding_states
+                .insert(table_id, TableDecodingState::WithSchema(replicated_table_schema.clone()));
+            Some(RelationEvent { replicated_table_schema })
+        } else {
+            let previous_state = self.table_decoding_states.remove(&table_id);
+            self.table_decoding_states.insert(
+                table_id,
+                TableDecodingState::pending_relation(snapshot_id, previous_state),
+            );
+            None
+        };
 
         counter!(
             ETL_DDL_SCHEMA_CHANGES_TOTAL,
@@ -2313,7 +2354,10 @@ where
             "stored schema snapshot from ddl message"
         );
 
-        Ok(HandleMessageResult::no_event())
+        Ok(match synthetic_relation {
+            Some(relation) => HandleMessageResult::return_event(Event::Relation(relation)),
+            None => HandleMessageResult::no_event(),
+        })
     }
 
     /// Handles Postgres BEGIN messages.
@@ -2459,16 +2503,17 @@ where
     /// synchronization. Therefore, an empty entry after the ownership boundary
     /// means the relation must rebuild the connection-local decoder.
     ///
-    /// A preceding DDL message installs `PendingRelation`, which takes priority
-    /// because it identifies a newer exact snapshot observed by this
-    /// connection. Otherwise the schema lookup uses the later of the connection
-    /// bootstrap and an applicable `SyncDone.lsn`. This lets the same
-    /// connection include schemas skipped before handover, while a restarted
-    /// connection can include schemas stored after handover. For `Ready`, the
-    /// persisted-checkpoint condition guarantees that bootstrap is already at
-    /// or beyond the discarded `SyncDone` boundary. The relation supplies fresh
-    /// publication and identity masks, so its lookup needs only the `SyncDone`
-    /// boundary, not the stored decoding payload.
+    /// Complete DDL metadata installs `WithSchema`; legacy DDL installs
+    /// `PendingRelation`. Both pin the exact snapshot observed by this
+    /// connection. Without either, the schema lookup uses the later of the
+    /// connection bootstrap and an applicable `SyncDone.lsn`. This lets the
+    /// same connection include schemas skipped before handover, while a
+    /// restarted connection can include schemas stored after handover. For
+    /// `Ready`, the persisted-checkpoint condition guarantees that
+    /// bootstrap is already at or beyond the discarded `SyncDone` boundary.
+    /// The relation supplies fresh publication and identity masks, so its
+    /// lookup needs only the `SyncDone` boundary, not the stored decoding
+    /// payload.
     async fn resolve_relation_schema_selection(
         &self,
         table_id: TableId,
@@ -2495,10 +2540,12 @@ where
     ///
     /// Under normal non-streaming pgoutput ordering, a relation arrives either
     /// with no connection-local state or after a DDL message has installed
+    /// [`TableDecodingState::WithSchema`] or, for legacy metadata,
     /// [`TableDecodingState::PendingRelation`]. A table-sync worker can instead
     /// start with a materialized bootstrap schema before its first catch-up
     /// relation arrives. A materialized state also covers repeated relation
-    /// metadata.
+    /// metadata. This pins schema lineage only: materialization still rebuilds
+    /// both masks from the real relation, including identity-only changes.
     ///
     /// Without local state, the newest schema is bounded by the later of the
     /// connection bootstrap and `SyncDone`. The bootstrap prevents a fresh
@@ -2517,8 +2564,9 @@ where
                 RelationSchemaSelection::Exact(snapshot_id)
             }
             Some(TableDecodingState::WithSchema(schema)) => {
-                // A cache invalidation can resend the same schema. Preserve
-                // its lineage instead of selecting a newer preloaded snapshot.
+                // Synthetic relations already advance this connection to the
+                // observed DDL snapshot. A real relation refreshes its masks
+                // against that schema, even if later snapshots are preloaded.
                 RelationSchemaSelection::Exact(schema.inner().snapshot_id)
             }
             None => {
@@ -2718,9 +2766,9 @@ where
     /// Materializes and installs `WithSchema` after a row arrives without a new
     /// protocol relation.
     ///
-    /// The DDL event trigger emits a logical message for every handled schema
-    /// command, including no-op DDL that does not invalidate pgoutput's cached
-    /// relation metadata. ETL therefore stores a new schema snapshot and enters
+    /// Legacy DDL payloads lack publication columns, including for no-op DDL
+    /// that does not invalidate pgoutput's cached relation metadata. ETL stores
+    /// a new schema snapshot for such a message and enters
     /// `PendingRelation`, but pgoutput may send the next row without another
     /// protocol relation. In that sequence, the stored snapshot is the current
     /// table schema and the masks from the previous relation are still the

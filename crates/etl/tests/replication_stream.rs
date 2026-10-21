@@ -2107,7 +2107,7 @@ async fn logical_replication_filters_unpublished_transactions_by_server_version(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl_messages() {
+async fn logical_replication_recursive_alter_partitioned_table_emits_leaf_ddl_messages() {
     init_test_tracing();
     let database = spawn_source_database().await;
 
@@ -2149,16 +2149,19 @@ async fn logical_replication_recursive_alter_partitioned_table_emits_no_leaf_ddl
         .await
         .unwrap();
 
-    // PostgreSQL reports only the explicitly altered partitioned parent to the
-    // event trigger. It does not enumerate the regular-table leaves changed by
-    // the recursive `alter table`, so the next leaf DML emits its updated
-    // relation without any preceding DDL message. PostgreSQL 14 still emits an
-    // empty transaction for the filtered ALTER, while PostgreSQL 15+ suppresses
-    // it.
-    let mut expected = Vec::new();
-    if below_version!(database.server_version(), POSTGRES_15) {
-        expected.extend([ExpectedStreamMarker::Begin, ExpectedStreamMarker::Commit]);
+    // The trigger expands the parent command to effective leaf identities.
+    // Both ordered DDL snapshots precede the transaction containing leaf rows.
+    let columns =
+        vec!["id".to_owned(), "data".to_owned(), "partition_key".to_owned(), "category".to_owned()];
+    let mut expected = vec![ExpectedStreamMarker::Begin];
+    for table_id in &leaf_table_ids {
+        expected.push(ExpectedStreamMarker::DdlMessage(
+            table_id.into_inner(),
+            None,
+            columns.clone(),
+        ));
     }
+    expected.push(ExpectedStreamMarker::Commit);
     expected.extend([
         ExpectedStreamMarker::Begin,
         ExpectedStreamMarker::Relation(

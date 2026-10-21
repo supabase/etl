@@ -10,7 +10,7 @@ use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 
-/// Columns per INSERT, capped at 2,048 bind parameters per batch.
+/// Columns per INSERT, capped at 2,304 bind parameters per batch.
 pub const MAX_COLUMNS_PER_INSERT: usize = 256;
 
 macro_rules! define_type_mappings {
@@ -310,7 +310,8 @@ where
         r#"
             insert into etl.table_columns
             (table_schema_id, column_name, column_type, type_modifier, nullable,
-             ordinal_position, primary_key_ordinal_position, default_expression)
+             ordinal_position, primary_key_ordinal_position, default_expression,
+             missing_value_expression)
             "#,
     );
     query.push_values(columns, |mut row, column| {
@@ -321,7 +322,8 @@ where
             .push_bind(column.nullable)
             .push_bind(column.ordinal_position)
             .push_bind(column.primary_key_ordinal_position)
-            .push_bind(&column.default_expression);
+            .push_bind(&column.default_expression)
+            .push_bind(&column.missing_value_expression);
     });
     query.build().persistent(false).execute(executor).await?;
 
@@ -354,7 +356,8 @@ where
             tc.nullable,
             tc.ordinal_position,
             tc.primary_key_ordinal_position,
-            tc.default_expression
+            tc.default_expression,
+            tc.missing_value_expression
         from etl.table_schemas ts
         left join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.pipeline_id = $1
@@ -548,6 +551,7 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     )
     .with_primary_key_ordinal_position(primary_key_ordinal_position)
     .with_default_expression_option(default_expression)
+    .with_missing_value_expression(row.get("missing_value_expression"))
 }
 
 #[cfg(test)]

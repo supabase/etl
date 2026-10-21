@@ -2408,10 +2408,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 
     // --- WHEN: add column and insert with new schema ---
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -2546,10 +2543,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -2686,10 +2680,7 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     let initial_snapshot_id = initial_metadata.snapshot_id();
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -2888,10 +2879,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
 
     // Add a column and stream one row that carries data in it.
     let event_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(

@@ -275,7 +275,8 @@ fn assert_table_event_sequence(
     }
 }
 
-/// Asserts one filtered relation followed by one insert for a table.
+/// Asserts ordered intermediate barriers followed by a filtered relation and
+/// insert for a table.
 fn assert_filtered_table_events(
     events: &[Event],
     table_id: TableId,
@@ -283,14 +284,20 @@ fn assert_filtered_table_events(
     expected_mask: &[u8],
     expected_snapshot_id: SnapshotId,
     expected_values: &[Cell],
+    earlier_snapshot_ids: &[SnapshotId],
 ) {
     let table_events = collect_table_events(events, table_id);
-    assert_eq!(
-        table_events.iter().map(Event::event_type).collect::<Vec<_>>(),
-        vec![EventType::Relation, EventType::Insert]
-    );
+    let mut expected_types = vec![EventType::Relation; earlier_snapshot_ids.len() + 2];
+    expected_types.push(EventType::Insert);
+    assert_eq!(table_events.iter().map(Event::event_type).collect::<Vec<_>>(), expected_types);
+    for (event, expected_snapshot_id) in table_events.iter().zip(earlier_snapshot_ids) {
+        let Event::Relation(relation) = event else {
+            unreachable!("the preceding assertion guarantees relation barriers");
+        };
+        assert_eq!(relation.replicated_table_schema.inner().snapshot_id, *expected_snapshot_id);
+    }
 
-    for event in table_events {
+    for event in table_events.into_iter().skip(earlier_snapshot_ids.len()) {
         let replicated_table_schema = match event {
             Event::Relation(relation) => relation.replicated_table_schema,
             Event::Insert(insert) => {
@@ -314,32 +321,32 @@ fn assert_relation_insert_schema_pairs(
     expected_snapshot_ids: &[SnapshotId],
 ) {
     let table_events = collect_table_events(events, table_id);
-    let relations = table_events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Relation(relation) => Some(&relation.replicated_table_schema),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let inserts = table_events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Insert(insert) => Some(&insert.replicated_table_schema),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(relations.len(), inserts.len());
-    assert_eq!(relations.len(), expected_snapshot_ids.len());
-
-    for ((relation_schema, insert_schema), expected_snapshot_id) in
-        relations.into_iter().zip(inserts).zip(expected_snapshot_ids)
-    {
-        assert_eq!(relation_schema.inner().snapshot_id, *expected_snapshot_id);
-        assert_eq!(relation_schema.inner().snapshot_id, insert_schema.inner().snapshot_id);
-        assert_eq!(relation_schema.replication_mask(), insert_schema.replication_mask());
-        assert_eq!(relation_schema.identity_mask(), insert_schema.identity_mask());
+    let mut relation_schema: Option<&ReplicatedTableSchema> = None;
+    let mut inserts = 0;
+    for event in &table_events {
+        match event {
+            Event::Relation(relation) => {
+                let schema = &relation.replicated_table_schema;
+                assert_eq!(schema.inner().snapshot_id, expected_snapshot_ids[inserts]);
+                if let Some(previous) = relation_schema {
+                    assert_eq!(previous.inner(), schema.inner());
+                    assert_eq!(previous.replication_mask(), schema.replication_mask());
+                    assert_eq!(previous.identity_mask(), schema.identity_mask());
+                }
+                relation_schema = Some(schema);
+            }
+            Event::Insert(insert) => {
+                let relation_schema = relation_schema.take().unwrap();
+                let insert_schema = &insert.replicated_table_schema;
+                assert_eq!(relation_schema.inner(), insert_schema.inner());
+                assert_eq!(relation_schema.replication_mask(), insert_schema.replication_mask());
+                assert_eq!(relation_schema.identity_mask(), insert_schema.identity_mask());
+                inserts += 1;
+            }
+            _ => unreachable!("the scenario contains only relation and insert events"),
+        }
     }
+    assert_eq!(inserts, expected_snapshot_ids.len());
 }
 
 fn assert_table_schema_snapshots(
@@ -946,8 +953,8 @@ async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
     assert_insert_ordinals(&destination.get_events().await, 1);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
+/// Exercises DDL-only handover with complete and legacy schema messages.
+async fn run_table_sync_ddl_without_protocol_relation(legacy: bool) {
     let _scenario = FailScenario::setup();
     fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
 
@@ -957,6 +964,18 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users_schema = database_schema.users_schema();
     let table_id = users_schema.id;
+
+    if legacy {
+        database
+            .client
+            .as_ref()
+            .unwrap()
+            .batch_execute(include_str!(
+                "../migrations/source/20260724120000_publication_schema_change_messages.up.sql"
+            ))
+            .await
+            .unwrap();
+    }
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -989,12 +1008,39 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
     wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
 
-    let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
+    let completed = store
+        .notify_on_table_state_type(
+            table_id,
+            if legacy { TableStateType::Errored } else { TableStateType::SyncDone },
+        )
+        .await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-    errored_notify.notified().await;
+    completed.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
+
+    if !legacy {
+        let mut state_history = store.get_table_state_history(table_id).await;
+        state_history.push(store.get_table_state(table_id).await.unwrap().unwrap());
+        assert!(state_history.iter().any(|state| matches!(
+            state,
+            TableState::SyncDone { table_decoding_state: Some(_), .. }
+        )));
+        assert!(!state_history.iter().any(|state| matches!(state, TableState::Errored { .. })));
+        let table_schemas = store.get_table_schemas().await;
+        let (_, schema) = table_schemas[&table_id].last().unwrap();
+        assert_table_schema_column_names_types(
+            schema,
+            &[
+                ("id", Type::INT8),
+                ("name", Type::TEXT),
+                ("age", Type::INT4),
+                ("handover_value", Type::INT4),
+            ],
+        );
+        return;
+    }
 
     let table_state = store.get_table_state(table_id).await.unwrap().unwrap();
     let TableState::Errored { retry_policy, source_err, .. } = table_state else {
@@ -1020,6 +1066,18 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
             ],
         ],
     );
+}
+
+/// Legacy payloads cannot hand over an incomplete decoder without a relation.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
+    run_table_sync_ddl_without_protocol_relation(true).await;
+}
+
+/// Captured publication and identity masks make DDL-only handover complete.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_sync_ddl_without_relation_persists_complete_sync_done() {
+    run_table_sync_ddl_without_protocol_relation(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1720,10 +1778,7 @@ async fn run_schema_replay_scenario(
         SchemaReplayOrder::DdlBeforeDml => 2,
     };
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, event_count),
-            EventCondition::TableCount(EventType::Insert, table_id, event_count),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, event_count)])
         .await;
 
     match transaction_scope {
@@ -1818,7 +1873,9 @@ async fn run_schema_replay_scenario(
     }
     expected_events.extend([
         ExpectedReplicatedEvent::Relation(added_columns.as_slice()),
+        ExpectedReplicatedEvent::Relation(added_columns.as_slice()),
         ExpectedReplicatedEvent::Insert(added_columns.as_slice()),
+        ExpectedReplicatedEvent::Relation(final_columns.as_slice()),
         ExpectedReplicatedEvent::Relation(final_columns.as_slice()),
         ExpectedReplicatedEvent::Insert(final_columns.as_slice()),
     ]);
@@ -1870,10 +1927,7 @@ async fn run_schema_replay_scenario(
     );
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, event_count),
-            EventCondition::TableCount(EventType::Insert, table_id, event_count),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, event_count)])
         .await;
 
     pipeline.start().await.unwrap();
@@ -1945,10 +1999,7 @@ async fn schema_snapshots_are_pruned_after_durable_relation_batch() {
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let prune_notify = store.notify_on_table_schema_prune().await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
     database
@@ -2011,10 +2062,7 @@ async fn first_relation_after_restart_retries_schema_cleanup() {
         .await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
     database
@@ -2192,8 +2240,8 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
         .await
         .unwrap();
 
-    // A physical schema change also advances the schema snapshot without
-    // synthesizing a Relation because no DML has occurred.
+    // A physical schema change publishes its own destination barrier even
+    // though no DML has occurred.
     database
         .run_sql(&format!(
             "alter table {} add column d integer not null default 0",
@@ -2220,10 +2268,15 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
     pipeline.shutdown_and_wait().await.unwrap();
 
     let first_run_events = destination.get_events().await;
-    assert!(
-        collect_table_events(&first_run_events, first_table_id).is_empty()
-            && collect_table_events(&first_run_events, second_table_id).is_empty()
-    );
+    for (table_id, count) in [(first_table_id, 2), (second_table_id, 1)] {
+        assert_eq!(
+            collect_table_events(&first_run_events, table_id)
+                .iter()
+                .map(Event::event_type)
+                .collect::<Vec<_>>(),
+            vec![EventType::Relation; count]
+        );
+    }
 
     let first_run_schemas = store.get_table_schemas().await;
     let first_snapshots = first_run_schemas.get(&first_table_id).unwrap();
@@ -2270,9 +2323,7 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
 
     let row_events_notify = destination
         .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, first_table_id, 1),
             EventCondition::TableCount(EventType::Insert, first_table_id, 1),
-            EventCondition::TableCount(EventType::Relation, second_table_id, 1),
             EventCondition::TableCount(EventType::Insert, second_table_id, 1),
         ])
         .await;
@@ -2309,6 +2360,7 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
         &[1, 1, 0, 1, 1],
         first_snapshots[2].0,
         &[Cell::I64(1), Cell::I32(1), Cell::I32(3), Cell::I32(4)],
+        &[first_snapshots[1].0],
     );
     assert_filtered_table_events(
         &events,
@@ -2317,6 +2369,7 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
         &[1, 0, 1, 1],
         second_snapshots[1].0,
         &[Cell::I64(1), Cell::I32(5), Cell::I32(6)],
+        &[],
     );
 }
 
@@ -2375,10 +2428,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     // We expect one relation and insert for the initial state, the physical
     // table change, and the publication-filter change.
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
 
     // State 1: Insert with all 4 columns (id, name, age, email).
@@ -2432,8 +2482,9 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     let verify_events = |events: &[Event], table_id: TableId| {
         let grouped = group_events_by_type_and_table_id(events);
 
-        // Verify we have 3 relation events.
-        let relation_events: Vec<_> = events
+        // The first real relation is followed by a synthetic and real pair
+        // for each DDL. Every pair must describe the identical full decoder.
+        let mut relation_events: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
                 Event::Relation(relation) if relation.replicated_table_schema.id() == table_id => {
@@ -2442,6 +2493,14 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
                 _ => None,
             })
             .collect();
+        assert_eq!(relation_events.len(), 5);
+        relation_events.dedup_by(|right, left| {
+            let left = &left.replicated_table_schema;
+            let right = &right.replicated_table_schema;
+            left.inner() == right.inner()
+                && left.replication_mask() == right.replication_mask()
+                && left.identity_mask() == right.identity_mask()
+        });
         assert_eq!(relation_events.len(), 3);
 
         assert!(
@@ -2592,10 +2651,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
 
     // Wait for 3 relation events and 3 insert events again after restart.
     let restart_events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
 
     pipeline.start().await.unwrap();
@@ -2612,6 +2668,147 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
         &initial_table_schema_snapshots,
     );
     assert_relation_insert_schema_pairs(&events_after_restart, table_id, &expected_snapshot_ids);
+}
+
+/// Independent workers preserve their own WAL order, but do not coordinate
+/// destination name ownership across a ready table and a table being recopied.
+/// This observes relation delivery; the memory destination does not implement
+/// table renames or enforce uniqueness of destination names.
+#[tokio::test(flavor = "multi_thread")]
+async fn synthetic_relation_order_is_local_to_each_worker() {
+    let _scenario = FailScenario::setup();
+    let mut database = spawn_source_database().await;
+    let first = test_table_name("sync_name_owner");
+    let second = test_table_name("ready_name_owner");
+    let archived = TableName::new(first.schema.clone(), "archived_name_owner".to_owned());
+    let first_id =
+        database.create_table(first.clone(), true, &[("value", "integer")]).await.unwrap();
+    let second_id =
+        database.create_table(second.clone(), true, &[("value", "integer")]).await.unwrap();
+    database
+        .create_publication("sync_name_order_pub", &[first.clone(), second.clone()])
+        .await
+        .unwrap();
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        "sync_name_order_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let first_synced = store.notify_on_table_sync_complete(first_id).await;
+    let second_synced = store.notify_on_table_sync_complete(second_id).await;
+
+    pipeline.start().await.unwrap();
+
+    first_synced.notified().await;
+    second_synced.notified().await;
+
+    let first_ready = store.notify_on_table_state_type(first_id, TableStateType::Ready).await;
+    let second_ready = store.notify_on_table_state_type(second_id, TableStateType::Ready).await;
+
+    database
+        .run_sql(&format!("insert into {} default values", first.as_quoted_identifier()))
+        .await
+        .unwrap();
+    database
+        .run_sql(&format!("insert into {} default values", second.as_quoted_identifier()))
+        .await
+        .unwrap();
+
+    first_ready.notified().await;
+    second_ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    // Only the first table is recopied. Pause after its copy transaction has
+    // released the source lock, but before it can enter catchup.
+    destination.clear_events().await;
+    store.reset_table_state(first_id).await.unwrap();
+    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
+    let finished_copy =
+        store.notify_on_table_state_type(first_id, TableStateType::FinishedCopy).await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        "sync_name_order_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    finished_copy.notified().await;
+
+    let reused_name = first.clone();
+    let ready_rename = destination
+        .notify_on_events(move |events| {
+            events.iter().any(|event| {
+                matches!(event, Event::Relation(relation)
+            if relation.replicated_table_schema.id() == second_id
+                && relation.replicated_table_schema.name() == &reused_name)
+            })
+        })
+        .await;
+
+    let transaction = database.begin_transaction().await;
+    transaction
+        .run_sql(&format!(
+            "alter table {} rename to {}",
+            first.as_quoted_identifier(),
+            quote_identifier(&archived.name)
+        ))
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} rename to {}",
+            second.as_quoted_identifier(),
+            quote_identifier(&first.name)
+        ))
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!("insert into {} default values", first.as_quoted_identifier()))
+        .await
+        .unwrap();
+    transaction.commit_transaction().await;
+
+    ready_rename.notified().await;
+    assert_eq!(store.get_table_state(first_id).await.unwrap(), Some(TableState::FinishedCopy));
+
+    let archived_name = archived.clone();
+    let syncing_rename = destination
+        .notify_on_events(move |events| {
+            events.iter().any(|event| {
+                matches!(event, Event::Relation(relation)
+            if relation.replicated_table_schema.id() == first_id
+                && relation.replicated_table_schema.name() == &archived_name)
+            })
+        })
+        .await;
+    let first_synced = store.notify_on_table_sync_complete(first_id).await;
+
+    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
+
+    syncing_rename.notified().await;
+    first_synced.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let rename_position = |table_id, name: &TableName| {
+        events
+            .iter()
+            .position(|event| {
+                matches!(event, Event::Relation(relation)
+            if relation.replicated_table_schema.id() == table_id
+                && relation.replicated_table_schema.name() == name)
+            })
+            .unwrap()
+    };
+    assert!(rename_position(second_id, &first) < rename_position(first_id, &archived));
 }
 
 #[tokio::test(flavor = "multi_thread")]

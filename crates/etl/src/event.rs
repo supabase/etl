@@ -201,6 +201,10 @@ impl TruncateEvent {
 /// Schema barrier synthesized by ETL from source schema metadata.
 ///
 /// Carries the schema and column masks for subsequent table events.
+/// ETL emits a synthetic relation event for every supported DDL message using
+/// its captured publication columns and identity. A real PostgreSQL relation
+/// message also produces this event; destinations must accept an identical
+/// snapshot and replication mask again without reapplying DDL.
 ///
 /// In ETL's non-streaming `pgoutput` session, PostgreSQL sends relation
 /// metadata lazily before a published row change or truncate:
@@ -222,10 +226,10 @@ impl TruncateEvent {
 /// no-op commands. Publication column-list changes need a new snapshot to
 /// order replication-mask changes even when the full table schema is unchanged.
 ///
-/// ETL also synthesizes this event before insert, update, or delete when DDL
-/// left a pending snapshot but PostgreSQL omitted a relation message. It uses
-/// the previous masks; a received relation always supplies fresh masks.
-/// Truncate relies on the existing protocol schema state instead.
+/// Legacy DDL payloads without captured publication columns keep the pending
+/// snapshot fallback: ETL synthesizes this event before a row using previous
+/// masks when PostgreSQL omits a relation message. A real relation supplies
+/// fresh masks. Legacy truncate requires an already materialized decoder.
 ///
 /// Destinations compare the snapshot and replication mask with their applied
 /// metadata. An identical pair needs no schema transition. A newer snapshot

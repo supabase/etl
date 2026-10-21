@@ -7,6 +7,10 @@
 //! column filter for that snapshot, and the replica-identity semantics for that
 //! same snapshot.
 //!
+//! DDL payloads that capture publication columns install `WithSchema` and emit
+//! a destination relation barrier immediately. The pending state below is the
+//! compatibility path for older WAL payloads without those columns.
+//!
 //! The connection-local map has two states:
 //!
 //! - [`TableDecodingState::WithSchema`] is a complete decoder and can decode a
@@ -32,7 +36,8 @@
 //!
 //! A table-sync worker seeds `WithSchema` from its consistent initial-copy
 //! snapshot. The apply worker clears its entry before starting table sync, then
-//! establishes `WithSchema` from an owned relation or durable `SyncDone` state
+//! establishes `WithSchema` from complete DDL metadata, an owned real relation,
+//! or durable `SyncDone` state
 //! after handover. Consequently, `WithSchema` also proves that the current
 //! apply connection can keep decoding after `SyncDone` becomes `Ready`.
 
@@ -69,8 +74,9 @@ impl PreviousRelationMasks {
 /// Per-table row-decoding state for one logical replication connection.
 #[derive(Debug, Clone)]
 pub(crate) enum TableDecodingState {
-    /// A DDL message was observed, but pgoutput has not yet shown whether it
-    /// will send replacement relation metadata before the next row.
+    /// A legacy DDL message was observed, but pgoutput has not yet shown
+    /// whether it will send replacement relation metadata before the next
+    /// row.
     PendingRelation {
         /// Exact stored schema snapshot for the DDL message.
         snapshot_id: SnapshotId,
