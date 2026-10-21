@@ -40,3 +40,10 @@ path = "fuzz_targets/numeric_text_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_pgoutput_tuple"
+path = "fuzz_targets/decode_pgoutput_tuple.rs"
+test = false
+doc = false
+bench = false

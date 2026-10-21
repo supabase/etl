@@ -70,6 +70,12 @@ use tokio_postgres::{
 /// PostgreSQL inactivity timeout used by the suspended-feedback tests.
 const FEEDBACK_TEST_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Longest wait for an idle durability test's next destination write.
+///
+/// Keepalives arrive every few seconds, so a missing write fails the test
+/// instead of hanging it until the CI job times out.
+const IDLE_DURABILITY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
     /// Target-table event batch held before reporting its write status.
@@ -80,12 +86,21 @@ enum DeferredEventsWrite {
 
 /// Destination test double that exposes target-table writes and empty barriers
 /// so tests control their completion.
+///
+/// Other non-empty batches are acknowledged as durable at once. PostgreSQL 14
+/// sends catalog-only transactions, such as autovacuum's `ANALYZE`, as empty
+/// `Begin`/`Commit` pairs, so the apply checkpoint may move past a test's own
+/// commit. Such an acknowledgement also settles any accepted write before it,
+/// so [`IdleDurabilityTest`] analyzes its database up front to keep autovacuum
+/// out of its window.
 #[derive(Clone)]
 struct DeferredEventsDestination {
     /// Table whose insert batches should be held.
     table_id: TableId,
     /// Channel used to expose event batches and empty barriers to the test.
     writes_tx: mpsc::UnboundedSender<DeferredEventsWrite>,
+    /// Highest commit end LSN received in any batch.
+    received_end_lsn: Arc<Mutex<Option<PgLsn>>>,
 }
 
 impl DeferredEventsDestination {
@@ -93,7 +108,12 @@ impl DeferredEventsDestination {
     fn new(table_id: TableId) -> (Self, mpsc::UnboundedReceiver<DeferredEventsWrite>) {
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
 
-        (Self { table_id, writes_tx }, writes_rx)
+        (Self { table_id, writes_tx, received_end_lsn: Arc::default() }, writes_rx)
+    }
+
+    /// Returns the shared highest commit end LSN received so far.
+    fn received_end_lsn(&self) -> Arc<Mutex<Option<PgLsn>>> {
+        Arc::clone(&self.received_end_lsn)
     }
 }
 
@@ -130,20 +150,35 @@ impl Destination for DeferredEventsDestination {
         durability: WriteEventsDurability,
         async_result: WriteEventsResult,
     ) -> EtlResult<()> {
-        let contains_target_insert = events.iter().any(|event| {
-            matches!(
-                event,
-                Event::Insert(insert) if insert.replicated_table_schema.id() == self.table_id
-            )
+        let batch_end_lsn = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Commit(commit) => Some(commit.end_lsn),
+                _ => None,
+            })
+            .max();
+        {
+            let mut received_end_lsn = self.received_end_lsn.lock().unwrap();
+            *received_end_lsn = (*received_end_lsn).max(batch_end_lsn);
+        }
+
+        let target_commit_lsn = events.iter().rev().find_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == self.table_id => {
+                Some(insert.commit_lsn)
+            }
+            _ => None,
         });
 
-        if contains_target_insert {
+        if let Some(target_commit_lsn) = target_commit_lsn {
             assert_eq!(durability, WriteEventsDurability::MayDefer);
+            // A batch may also hold unrelated transactions, so report the
+            // target transaction's own commit.
             let commit_end_lsn = events
                 .iter()
-                .rev()
                 .find_map(|event| match event {
-                    Event::Commit(commit) => Some(commit.end_lsn),
+                    Event::Commit(commit) if commit.commit_lsn == target_commit_lsn => {
+                        Some(commit.end_lsn)
+                    }
                     _ => None,
                 })
                 .expect("accepted event batch should contain its commit");
@@ -2658,6 +2693,22 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
     pipeline.shutdown_and_wait().await.unwrap();
 }
 
+/// Asserts the apply checkpoint covers `lsn` without passing any commit the
+/// destination received.
+///
+/// The checkpoint may be later than `lsn` when the destination acknowledged an
+/// unrelated transaction; see [`DeferredEventsDestination`].
+async fn assert_checkpoint_reached(
+    store: &NotifyingStore,
+    received_end_lsn: &Mutex<Option<PgLsn>>,
+    lsn: PgLsn,
+) {
+    let checkpoint = store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    let received = *received_end_lsn.lock().unwrap();
+    assert!(checkpoint >= Some(lsn), "checkpoint {checkpoint:?} is before {lsn}");
+    assert!(checkpoint <= received, "checkpoint {checkpoint:?} is past received {received:?}");
+}
+
 /// Running apply-worker pipeline with externally controlled destination
 /// results.
 struct IdleDurabilityTest {
@@ -2674,6 +2725,8 @@ struct IdleDurabilityTest {
     slot_name: String,
     /// Ordered destination calls awaiting test-controlled results.
     writes_rx: mpsc::UnboundedReceiver<DeferredEventsWrite>,
+    /// Highest commit end LSN the destination received.
+    received_end_lsn: Arc<Mutex<Option<PgLsn>>>,
 }
 
 impl IdleDurabilityTest {
@@ -2701,6 +2754,7 @@ impl IdleDurabilityTest {
             .unwrap();
         let store = NotifyingStore::new();
         let (destination, writes_rx) = DeferredEventsDestination::new(table_id);
+        let received_end_lsn = destination.received_end_lsn();
         let pipeline_id: PipelineId = random();
         let slot_name = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
         let mut pipeline = PipelineBuilder::new(
@@ -2720,7 +2774,14 @@ impl IdleDurabilityTest {
 
         synced.notified().await;
 
-        Self { database, table_name, pipeline, store, slot_name, writes_rx }
+        // Analyze now so autovacuum has nothing to analyze during the test. On
+        // PostgreSQL 14 its catalog-only transaction would reach the
+        // destination, settle the test's accepted write, and suppress the
+        // barrier the test waits for. These empty transactions precede every
+        // test insert, so no accepted write is pending yet.
+        database.run_sql("analyze").await.unwrap();
+
+        Self { database, table_name, pipeline, store, slot_name, writes_rx, received_end_lsn }
     }
 
     /// Inserts one row without producing any schema changes.
@@ -2731,7 +2792,10 @@ impl IdleDurabilityTest {
     /// Receives the next event batch, failing if an unexpected barrier
     /// overtakes it.
     async fn next_batch(&mut self) -> (PgLsn, WriteEventsResult) {
-        let write = self.writes_rx.recv().await.unwrap();
+        let write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, self.writes_rx.recv())
+            .await
+            .expect("timed out waiting for an event batch")
+            .unwrap();
         let DeferredEventsWrite::Batch { commit_end_lsn, result } = write else {
             panic!("expected an event batch");
         };
@@ -2742,7 +2806,10 @@ impl IdleDurabilityTest {
     /// Receives an empty barrier driven by an incoming primary keepalive,
     /// including a reply requested by ETL's periodic feedback.
     async fn next_barrier(&mut self) -> WriteEventsResult {
-        let write = self.writes_rx.recv().await.unwrap();
+        let write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, self.writes_rx.recv())
+            .await
+            .expect("timed out waiting for an idle durability barrier")
+            .unwrap();
         let DeferredEventsWrite::DurabilityBarrier { result } = write else {
             panic!("expected an idle durability barrier");
         };
@@ -2772,7 +2839,6 @@ impl IdleDurabilityTest {
 async fn apply_retry_replays_dispatched_write_without_checkpointing() {
     let _scenario = FailScenario::setup();
     let mut test = IdleDurabilityTest::start().await;
-    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
 
     // Failure is injected after dispatch and before completion handling, so
     // releasing the result cannot let the failed attempt checkpoint it.
@@ -2781,24 +2847,25 @@ async fn apply_retry_replays_dispatched_write_without_checkpointing() {
     test.insert(1).await;
 
     let (commit_lsn, result) = test.next_batch().await;
-    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(commit_lsn)
+    );
     assert!(test.confirmed_lsn().await < commit_lsn);
 
     result.send(Ok(DestinationWriteStatus::Durable));
 
     let (replay_lsn, replay_result) = test.next_batch().await;
     assert_eq!(replay_lsn, commit_lsn);
-    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(commit_lsn)
+    );
 
     replay_result.send(Ok(DestinationWriteStatus::Durable));
 
     test.wait_for_flush(commit_lsn).await;
     test.pipeline.shutdown_and_wait().await.unwrap();
 
-    assert_eq!(
-        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-        Some(commit_lsn)
-    );
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, commit_lsn).await;
 }
 
 /// A failed catchup attempt recopies from a fresh snapshot even when its
@@ -2873,19 +2940,17 @@ async fn idle_durability_settles_on_primary_keepalive() {
     let mut test = IdleDurabilityTest::start().await;
     test.insert(1).await;
     let (commit_lsn, result) = test.next_batch().await;
-    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
     result.send(Ok(DestinationWriteStatus::Accepted));
     let barrier = test.next_barrier().await;
-    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(commit_lsn)
+    );
     assert!(test.confirmed_lsn().await < commit_lsn);
 
     barrier.send(Ok(DestinationWriteStatus::Durable));
     test.wait_for_flush(commit_lsn).await;
     test.pipeline.shutdown_and_wait().await.unwrap();
-    assert_eq!(
-        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-        Some(commit_lsn)
-    );
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, commit_lsn).await;
     assert!(test.writes_rx.try_recv().is_err());
 }
 
@@ -2980,19 +3045,17 @@ async fn idle_durability_buffers_resumed_traffic_without_acknowledging_it() {
     let (second_lsn, second_result) = test.next_batch().await;
     assert!(second_lsn > first_lsn);
     test.wait_for_flush(first_lsn).await;
-    assert_eq!(test.confirmed_lsn().await, first_lsn);
-    assert_eq!(
-        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-        Some(first_lsn)
+    let confirmed_lsn = test.confirmed_lsn().await;
+    assert!(confirmed_lsn >= first_lsn && confirmed_lsn < second_lsn);
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, first_lsn).await;
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(second_lsn)
     );
 
     second_result.send(Ok(DestinationWriteStatus::Durable));
     test.wait_for_flush(second_lsn).await;
     test.pipeline.shutdown_and_wait().await.unwrap();
-    assert_eq!(
-        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-        Some(second_lsn)
-    );
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, second_lsn).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3000,14 +3063,15 @@ async fn idle_durability_failure_replays_the_unconfirmed_commit() {
     let mut test = IdleDurabilityTest::start().await;
     test.insert(1).await;
     let (commit_lsn, result) = test.next_batch().await;
-    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
     result.send(Ok(DestinationWriteStatus::Accepted));
     let barrier = test.next_barrier().await;
     barrier.send(Err(etl::etl_error!(ErrorKind::WithTimedRetry, "Test durability failure")));
 
     let (replayed_lsn, replayed_result) = test.next_batch().await;
     assert_eq!(replayed_lsn, commit_lsn);
-    assert_eq!(test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(), checkpoint);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(commit_lsn)
+    );
     assert!(test.confirmed_lsn().await < commit_lsn);
     replayed_result.send(Ok(DestinationWriteStatus::Durable));
     test.wait_for_flush(commit_lsn).await;
@@ -3028,10 +3092,7 @@ async fn idle_durability_shutdown_drains_the_existing_barrier() {
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut shutdown).await.is_err());
     barrier.send(Ok(DestinationWriteStatus::Durable));
     tokio::time::timeout(Duration::from_secs(30), shutdown).await.unwrap().unwrap();
-    assert_eq!(
-        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-        Some(commit_lsn)
-    );
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, commit_lsn).await;
     assert!(test.writes_rx.try_recv().is_err());
 }
 
@@ -3043,8 +3104,7 @@ async fn idle_durability_shutdown_preserves_error_policy_and_checkpoint() {
     for kind in [ErrorKind::WithTimedRetry, ErrorKind::WithNoRetry] {
         let mut test = IdleDurabilityTest::start().await;
         test.insert(1).await;
-        let (_, result) = test.next_batch().await;
-        let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+        let (commit_lsn, result) = test.next_batch().await;
         result.send(Ok(DestinationWriteStatus::Accepted));
         let barrier = test.next_barrier().await;
 
@@ -3057,9 +3117,9 @@ async fn idle_durability_shutdown_preserves_error_policy_and_checkpoint() {
         } else {
             assert!(result.unwrap_err().kinds().contains(&kind));
         }
-        assert_eq!(
-            test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-            checkpoint
+        assert!(
+            test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap()
+                < Some(commit_lsn)
         );
         assert!(test.writes_rx.try_recv().is_err());
     }

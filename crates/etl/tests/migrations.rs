@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::LazyLock};
+use std::{collections::BTreeSet, sync::LazyLock, time::Duration};
 
 use etl::{
     config::{
@@ -6,18 +6,20 @@ use etl::{
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
     pipeline::Pipeline,
-    postgres::migrations::run_source_migrations,
+    postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
     store::{MemoryStore, PostgresStore},
     test_utils::memory_destination::MemoryDestination,
 };
-use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
+use etl_postgres::{
+    test_utils::{local_tls_config_from_env, test_database_port_from_env},
+    tokio::test_utils::PgDatabase,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
 const DEFAULT_DATABASE_HOST: &str = "localhost";
-const DEFAULT_DATABASE_PORT: &str = "5430";
 const DEFAULT_DATABASE_USERNAME: &str = "postgres";
 const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
@@ -34,10 +36,7 @@ fn local_pg_connection_config() -> PgConnectionConfig {
     PgConnectionConfig {
         host: std::env::var("TESTS_DATABASE_HOST").unwrap_or(DEFAULT_DATABASE_HOST.into()),
         hostaddr: None,
-        port: std::env::var("TESTS_DATABASE_PORT")
-            .unwrap_or(DEFAULT_DATABASE_PORT.into())
-            .parse()
-            .expect("TESTS_DATABASE_PORT must be a valid port number"),
+        port: test_database_port_from_env(),
         name: Uuid::new_v4().to_string(),
         username: std::env::var("TESTS_DATABASE_USERNAME")
             .unwrap_or(DEFAULT_DATABASE_USERNAME.into()),
@@ -182,6 +181,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         table_sync_copy: TableSyncCopyConfig::default(),
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
         run_source_migrations: true,
+        drain_on_shutdown: true,
     }
 }
 
@@ -1147,4 +1147,60 @@ async fn split_migrations_can_be_reverted_independently() {
     assert!(!source_helper_exists(&database).await);
     assert!(!postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, Vec::<i64>::new());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn source_migrations_wait_for_concurrent_etl_schema_creation() {
+    init_test_tracing();
+
+    let database = spawn_unmigrated_database().await;
+
+    // Hold the schema creation open the way a concurrently starting pipeline
+    // does: lock taken, catalog row written, transaction not yet committed.
+    let options: PgConnectOptions = database.config.with_db(Some(&TEST_MIGRATION_OPTIONS));
+    let mut holder = PgConnection::connect_with(&options).await.unwrap();
+    let mut creating = holder.begin().await.unwrap();
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(ETL_SCHEMA_LOCK_ID)
+        .execute(&mut *creating)
+        .await
+        .unwrap();
+    creating.execute("create schema if not exists etl;").await.unwrap();
+
+    let config = database.config.clone();
+    let mut migrations = tokio::spawn(async move { run_source_migrations(&config).await });
+
+    // The migrations must queue behind the lock instead of failing on the
+    // uncommitted schema.
+    let outcome = tokio::time::timeout(Duration::from_millis(500), &mut migrations).await;
+    assert!(
+        outcome.is_err(),
+        "source migrations completed while the schema creation was still open"
+    );
+
+    creating.commit().await.unwrap();
+    migrations.await.unwrap().unwrap();
+    drop(holder);
+
+    assert!(source_helper_exists(&database).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_source_migrations_bootstrap_a_fresh_database() {
+    init_test_tracing();
+
+    let database = spawn_unmigrated_database().await;
+
+    let starts = (0..8)
+        .map(|_| {
+            let config = database.config.clone();
+            tokio::spawn(async move { run_source_migrations(&config).await })
+        })
+        .collect::<Vec<_>>();
+    for start in starts {
+        start.await.unwrap().unwrap();
+    }
+
+    assert!(source_helper_exists(&database).await);
+    assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
 }

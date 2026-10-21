@@ -7,7 +7,7 @@ use std::{
     process,
     str::FromStr,
     sync::{
-        Arc, LazyLock,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -22,7 +22,6 @@ use etl_config::{
 };
 use metrics::{gauge, histogram};
 use pg_escape::{quote_identifier, quote_literal};
-use regex::Regex;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 use tokio::{
     sync::{Semaphore, oneshot},
@@ -35,6 +34,8 @@ use tokio_postgres::{
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use url::Url;
+
+use crate::ducklake::RedactedDuckDbError;
 
 const LAKE_CATALOG: &str = "lake";
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
@@ -51,7 +52,7 @@ const LEGACY_REPLAY_EPOCH: &str = "__legacy__";
 const ATTACH_DATA_INLINING_ROW_LIMIT: u64 = 10_000;
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.6";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
@@ -159,11 +160,6 @@ impl ReplayHelperCleanupOutcome {
         self.applied_batch_rows.saturating_add(self.streaming_progress_rows)
     }
 }
-
-static POSTGRES_PASSWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"password=(?:'([^'\\]|\\.)*'|[^\s,);]+)")
-        .expect("postgres password redaction regex should compile")
-});
 
 /// S3-compatible storage credentials for DuckDB's httpfs extension.
 #[derive(Debug, Clone)]
@@ -747,14 +743,16 @@ fn build_setup_plan_with_strategy(
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
 
+    // Name the metadata catalog so schema discovery can access it.
     steps.push(DuckLakeSetupStep {
         label: "attach_catalog",
         sql: format!(
             "ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, \
-             AUTOMATIC_MIGRATION true{metadata_schema_clause});",
+             AUTOMATIC_MIGRATION true, metadata_catalog {}{metadata_schema_clause});",
             quote_literal(&format!("ducklake:{catalog_target}")),
             quote_literal(data_path),
-            ATTACH_DATA_INLINING_ROW_LIMIT
+            ATTACH_DATA_INLINING_ROW_LIMIT,
+            quote_literal(&format!("__ducklake_metadata_{LAKE_CATALOG}")),
         ),
     });
     steps.push(DuckLakeSetupStep {
@@ -772,22 +770,18 @@ struct DuckLakeConnectionError {
 
 impl DuckLakeConnectionError {
     fn setup_phase(step: &DuckLakeSetupStep, error: duckdb::Error) -> Self {
-        let error_message = error.to_string();
-        let error_message = if attach_step_uses_postgres_catalog(step) {
-            POSTGRES_PASSWORD_REGEX.replace_all(&error_message, "password='[redacted]'").to_string()
-        } else {
-            error_message
-        };
-
+        // Any step can fail with the catalog conninfo in DuckDB's message.
+        let error = RedactedDuckDbError::from(error);
         Self {
             message: format!(
-                "ducklake duckdb connection setup phase `{}` failed: {error_message}",
+                "ducklake duckdb connection setup phase `{}` failed: {error}",
                 step.label
             ),
         }
     }
 
     fn validation(error: duckdb::Error) -> Self {
+        let error = RedactedDuckDbError::from(error);
         Self { message: format!("DuckLake DuckDB connection validation failed: {error}") }
     }
 }
@@ -1482,10 +1476,6 @@ fn format_query_error_detail(sql: &str) -> String {
     format!("sql: {compact_sql}")
 }
 
-fn attach_step_uses_postgres_catalog(step: &DuckLakeSetupStep) -> bool {
-    step.label == "attach_catalog" && step.sql.contains("ducklake:postgres:")
-}
-
 /// Configuration for one external DuckLake maintenance run.
 #[derive(Clone, Debug)]
 pub struct DuckLakeMaintenanceConfig {
@@ -1750,7 +1740,7 @@ fn expire_snapshots_cutoff(conn: &duckdb::Connection, older_than: &str) -> EtlRe
                 ErrorKind::ConfigError,
                 "DuckLake expire_snapshots_older_than configuration failed",
                 format!("Invalid expire_snapshots_older_than value `{older_than}`"),
-                source: source
+                source: RedactedDuckDbError::from(source)
             )
         })?;
 
@@ -1806,7 +1796,7 @@ async fn open_maintenance_executor(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake target_file_size configuration failed",
                     format_query_error_detail(&sql),
-                    source: source
+                    source: RedactedDuckDbError::from(source)
                 )
             })?;
             Ok(())
@@ -2101,7 +2091,7 @@ async fn merge_adjacent_files_for_rewrite(duckdb: &DuckDbMaintenanceExecutor) ->
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake rewrite-triggered merge adjacent files failed",
                     format_query_error_detail(&sql),
-                    source: source
+                    source: RedactedDuckDbError::from(source)
                 )
             })?;
             Ok(())
@@ -2413,7 +2403,7 @@ pub fn flush_table_inlined_data(
             ErrorKind::DestinationQueryFailed,
             "DuckLake inlined data flush failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let rows_flushed = rows_flushed.max(0) as u64;
@@ -2477,7 +2467,7 @@ fn rewrite_data_files(
             ErrorKind::DestinationQueryFailed,
             "DuckLake rewrite data files failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     Ok(0)
@@ -2539,7 +2529,7 @@ fn cleanup_replay_helper_rows(
         etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake replay helper cleanup transaction failed to begin",
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
 
@@ -2583,13 +2573,14 @@ fn cleanup_replay_helper_rows(
                 etl_error!(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake replay helper cleanup transaction failed to commit",
-                    source: source
+                    source: RedactedDuckDbError::from(source)
                 )
             })?;
             Ok(cleanup)
         }
         Err(error) => {
             if let Err(rollback_error) = conn.execute_batch("rollback") {
+                let rollback_error = RedactedDuckDbError::from(rollback_error);
                 warn!(
                     error = %rollback_error,
                     "ducklake replay helper cleanup transaction failed to roll back"
@@ -2700,7 +2691,7 @@ fn read_streaming_progress_rows(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress cleanup query preparation failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let mut rows = statement.query([]).map_err(|source| {
@@ -2708,7 +2699,7 @@ fn read_streaming_progress_rows(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress cleanup query failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let Some(row) = rows.next().map_err(|source| {
@@ -2716,7 +2707,7 @@ fn read_streaming_progress_rows(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress cleanup row fetch failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?
     else {
@@ -2728,7 +2719,7 @@ fn read_streaming_progress_rows(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress cleanup epoch read failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let total_rows: u64 = row.get(3).map_err(|source| {
@@ -2736,7 +2727,7 @@ fn read_streaming_progress_rows(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress cleanup row count read failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let current = if is_current {
@@ -2746,7 +2737,7 @@ fn read_streaming_progress_rows(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake streaming progress cleanup commit lsn read failed",
                     format_query_error_detail(&sql),
-                    source: source
+                    source: RedactedDuckDbError::from(source)
                 )
             })?,
             last_tx_ordinal: row.get(1).map_err(|source| {
@@ -2754,7 +2745,7 @@ fn read_streaming_progress_rows(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake streaming progress cleanup tx ordinal read failed",
                     format_query_error_detail(&sql),
-                    source: source
+                    source: RedactedDuckDbError::from(source)
                 )
             })?,
         })
@@ -2796,7 +2787,7 @@ fn insert_streaming_progress_watermark(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress cleanup insert failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })
 }
@@ -2915,7 +2906,7 @@ fn execute_replay_helper_delete(conn: &duckdb::Connection, sql: &str) -> EtlResu
             ErrorKind::DestinationQueryFailed,
             "DuckLake replay helper cleanup failed",
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })
 }
@@ -2966,7 +2957,7 @@ fn duckdb_exists(
             ErrorKind::DestinationQueryFailed,
             description,
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let mut rows = statement.query([]).map_err(|source| {
@@ -2974,7 +2965,7 @@ fn duckdb_exists(
             ErrorKind::DestinationQueryFailed,
             description,
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
 
@@ -2983,7 +2974,7 @@ fn duckdb_exists(
             ErrorKind::DestinationQueryFailed,
             description,
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })
 }
@@ -2999,7 +2990,7 @@ fn count_maintenance_rows(
             ErrorKind::DestinationQueryFailed,
             description,
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let mut rows = statement.query([]).map_err(|source| {
@@ -3007,7 +2998,7 @@ fn count_maintenance_rows(
             ErrorKind::DestinationQueryFailed,
             description,
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     let mut count = 0u64;
@@ -3017,7 +3008,7 @@ fn count_maintenance_rows(
             ErrorKind::DestinationQueryFailed,
             description,
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })? {
         count = count.saturating_add(1);
@@ -3037,7 +3028,7 @@ fn count_maintenance_files(
             ErrorKind::DestinationQueryFailed,
             description,
             format_query_error_detail(sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })?;
     Ok(files_created.max(0) as u64)
@@ -3295,7 +3286,7 @@ fn resolve_ducklake_metadata_schema_blocking(conn: &duckdb::Connection) -> EtlRe
             ErrorKind::DestinationQueryFailed,
             "DuckLake metadata schema query failed",
             format_query_error_detail(&sql),
-            source: source
+            source: RedactedDuckDbError::from(source)
         )
     })
 }
@@ -3678,8 +3669,83 @@ mod tests {
         assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
         assert!(plan.steps()[2].sql.contains("URL_STYLE 'path'"));
         assert!(plan.steps()[2].sql.contains("USE_SSL true"));
+        assert!(plan.steps()[3].sql.contains("metadata_catalog '__ducklake_metadata_lake'"));
         assert!(plan.steps()[4].sql.contains("'parquet_row_group_size_bytes', '128MiB'"));
         assert!(plan.steps()[4].sql.contains("'parquet_row_group_size', '2500000'"));
+    }
+
+    /// A non-attach step can still surface the catalog conninfo, so redaction
+    /// must not depend on the step.
+    #[test]
+    fn ducklake_connection_error_redacts_password_for_any_setup_step() {
+        let step = DuckLakeSetupStep {
+            label: "configure_parquet",
+            sql: "CALL lake.set_option('parquet_compression', 'zstd');".to_owned(),
+        };
+        let error = duckdb::Error::DuckDBFailure(
+            duckdb::ffi::Error::new(1),
+            Some(
+                "IO Error: Unable to connect to Postgres at \"host='localhost' password='secret'\""
+                    .to_owned(),
+            ),
+        );
+
+        assert_eq!(
+            DuckLakeConnectionError::setup_phase(&step, error).to_string(),
+            "ducklake duckdb connection setup phase `configure_parquet` failed: IO Error: Unable \
+             to connect to Postgres at \"host='localhost' password='[redacted]'\""
+        );
+    }
+
+    /// DuckDB parser errors echo the failing statement, so redaction must
+    /// remove credentials from the setup SQL exactly as the plan builder
+    /// escapes them, including quotes and backslashes.
+    #[test]
+    fn setup_sql_echoed_in_errors_redacts_escaped_credentials() {
+        // Each credential mixes a quote and a backslash between unique words.
+        let password = r"alphapw'betapw\gammapw";
+        let mut catalog_url = Url::parse("postgres://user@host/db").unwrap();
+        catalog_url.set_password(Some(password)).unwrap();
+        let s3 = S3Config {
+            access_key_id: r"alphakey'betakey\gammakey".to_owned(),
+            secret_access_key: r"alphasec'betasec\gammasec".to_owned(),
+            region: "eu-west-3".to_owned(),
+            endpoint: None,
+            url_style: "path".to_owned(),
+            use_ssl: true,
+        };
+        let plan = build_setup_plan_with_strategy(
+            &catalog_url,
+            &Url::parse("s3://warehouse/tenant/").unwrap(),
+            Some(&s3),
+            None,
+            &DuckLakeWriterConfig::default(),
+            DuckDbExtensionStrategy::InstallFromRepository,
+            None,
+        )
+        .unwrap();
+        let echoed_sql =
+            plan.steps().iter().map(|step| step.sql.as_str()).collect::<Vec<_>>().join("\n");
+        // Guards the test itself: the plan carries every credential word.
+        for word in ["betapw", "gammapw", "betakey", "gammakey", "betasec", "gammasec"] {
+            assert!(echoed_sql.contains(word));
+        }
+
+        let error = DuckLakeConnectionError::setup_phase(
+            &plan.steps()[0],
+            duckdb::Error::DuckDBFailure(
+                duckdb::ffi::Error::new(1),
+                Some(format!("Parser Error: syntax error\n{echoed_sql}")),
+            ),
+        )
+        .to_string();
+
+        for word in [
+            "alphapw", "betapw", "gammapw", "alphakey", "betakey", "gammakey", "alphasec",
+            "betasec", "gammasec",
+        ] {
+            assert!(!error.contains(word), "{word}");
+        }
     }
 
     #[test]
@@ -3941,7 +4007,7 @@ mod tests {
                     etl_error!(
                         ErrorKind::DestinationQueryFailed,
                         "DuckLake maintenance timeout verification query failed",
-                        source: source
+                        source: RedactedDuckDbError::from(source)
                     )
                 })
             })

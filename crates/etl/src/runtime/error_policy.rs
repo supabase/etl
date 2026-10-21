@@ -82,6 +82,10 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
         ErrorKind::DestinationAuthenticationError => {
             "Verify destination credentials and authentication token validity."
         }
+        ErrorKind::PermissionDenied => {
+            "Grant the source database role or destination account the permissions required by the \
+             denied operation."
+        }
         ErrorKind::SourceSchemaError => {
             "Update the Postgres database schema to resolve compatibility issues."
         }
@@ -106,6 +110,12 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
         }
         ErrorKind::SourceSnapshotTooOld => {
             "Check replication slot status and database configuration."
+        }
+        ErrorKind::DestinationTableAlreadyExists => {
+            "A destination table already exists. If you previously deleted a pipeline, its \
+             replicated data was preserved. Choose an unused destination location, or remove the \
+             conflicting table only after confirming its data is no longer needed and another \
+             pipeline is not using it."
         }
         ErrorKind::DestinationLayoutUnsupported => {
             "Use a supported Snowflake source and CDC table layout. Resynchronize after \
@@ -187,6 +197,8 @@ mod tests {
             (ErrorKind::SourceLockTimeout, RetryDirective::Timed),
             (ErrorKind::SourceTableCopyLockConflict, RetryDirective::Timed),
             (ErrorKind::ReplicationFeedbackUnavailable, RetryDirective::Timed),
+            (ErrorKind::ReplicationSlotInUse, RetryDirective::Timed),
+            (ErrorKind::ReplicationSlotInvalidated, RetryDirective::Manual),
         ] {
             let error = EtlError::from((kind, "Test replication failure"));
             assert_eq!(build_error_handling_policy(&error).retry_directive(), retry);
@@ -203,6 +215,40 @@ mod tests {
         let solution = policy.solution().expect("replica identity errors should have a solution");
         assert!(solution.contains("least costly replica identity"));
         assert!(solution.contains("REPLICA IDENTITY FULL only"));
+    }
+
+    /// Missing permissions get their own guidance, distinct from rejected
+    /// credentials and from the generic fallback.
+    #[test]
+    fn permission_denied_has_specific_manual_remediation() {
+        let solution =
+            |kind| build_error_handling_policy(&EtlError::from((kind, "Denied"))).solution();
+
+        let denied = solution(ErrorKind::PermissionDenied);
+
+        assert!(denied.is_some());
+        assert_ne!(denied, solution(ErrorKind::DestinationAuthenticationError));
+        assert_ne!(denied, solution(ErrorKind::Unknown));
+    }
+
+    /// Destination conflicts require manual resolution, including when wrapped
+    /// with a transient failure.
+    #[test]
+    fn destination_table_conflicts_have_specific_manual_remediation() {
+        let conflict =
+            EtlError::from((ErrorKind::DestinationTableAlreadyExists, "Destination table exists"));
+        let connection_error =
+            EtlError::from((ErrorKind::DestinationConnectionFailed, "Connection failed"));
+
+        for error in [conflict.clone(), EtlError::from(vec![connection_error, conflict])] {
+            let policy = build_error_handling_policy(&error);
+
+            assert_eq!(policy.retry_directive(), RetryDirective::Manual);
+            let solution = policy.solution().unwrap();
+            assert!(solution.contains("If you previously deleted a pipeline"));
+            assert!(solution.contains("Choose an unused destination location"));
+            assert!(solution.contains("another pipeline is not using it"));
+        }
     }
 
     /// A classification made where the error happened decides the directive,

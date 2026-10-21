@@ -79,7 +79,8 @@ clickhouse = { version = "0.14.0", default-features = false }
 config = { version = "0.14.0", default-features = false }
 configcat = { version = "0.1.3", default-features = false }
 const-oid = { version = "0.9.6", default-features = false }
-duckdb = { version = "1.0.0", default-features = false }
+# Includes the zip 9 build dependency fixes for RUSTSEC-2026-0367 through 0369.
+duckdb = { version = "1.10506.1", default-features = false }
 etl = { path = "crates/etl", default-features = false }
 etl-config = { path = "crates/etl-config", default-features = false }
 etl-destinations = { path = "crates/etl-destinations", default-features = false }

@@ -9,7 +9,7 @@ use crate::{
     retry::{RetryPolicy, retry_with_backoff},
     snowflake::{
         Config, Error, Result,
-        auth::TokenProvider,
+        auth::{TokenProvider, send_with_token_refresh},
         sql::{quote_identifier, quote_string_literal},
     },
 };
@@ -334,7 +334,7 @@ impl<T: TokenProvider> SqlClient<T> {
     /// - HTTP 200: success, return parsed `StatementResponse`.
     /// - HTTP 202: async execution, poll until 200 or 422.
     /// - HTTP 422: SQL execution error, return `Error::Sql`.
-    /// - HTTP 401: invalidate cached token, retry once.
+    /// - HTTP 401: invalidate cached token, resend once.
     /// - HTTP 408/429/5xx: retriable via backoff.
     /// - Other 4xx: non-retriable `Error::HttpStatus`.
     pub(crate) async fn execute_statement(&self, sql: &str) -> Result<StatementResponse> {
@@ -355,6 +355,11 @@ impl<T: TokenProvider> SqlClient<T> {
     /// Build the retry-safe SQL statement URL for one logical request.
     fn statement_url_with_request_id(&self, request_id: Uuid) -> String {
         format!("{}/api/v2/statements?requestId={request_id}&retry=true", self.config.account_url())
+    }
+
+    /// Build the status URL of an asynchronously executing statement.
+    fn statement_status_url(&self, statement_handle: &str) -> String {
+        format!("{}/api/v2/statements/{statement_handle}", self.config.account_url())
     }
 
     /// Submit a SQL statement to a prebuilt URL and reuse it across retries.
@@ -387,80 +392,61 @@ impl<T: TokenProvider> SqlClient<T> {
 
     /// Submit a statement and interpret the HTTP response.
     ///
-    /// On a 401, invalidates the cached token and retries once.
+    /// On a 401, invalidates the cached token and resends once.
     async fn attempt_statement(
         &self,
         url: &str,
         body: &StatementRequest<'_>,
     ) -> Result<StatementResponse> {
-        let mut retried_auth = false;
+        let http_resp = send_with_token_refresh(self.auth.as_ref(), |token| {
+            self.http.post(url).bearer_auth(token).header("User-Agent", USER_AGENT).json(body)
+        })
+        .await?;
+        let status = http_resp.status();
 
-        loop {
-            let token = self.auth.get_token().await?;
-            let http_resp = self.send_post(url, &token, body).await?;
-            let status = http_resp.status();
+        match status {
+            StatusCode::OK => http_resp.json().await.map_err(Error::HttpTransport),
 
-            match status {
-                StatusCode::OK => return http_resp.json().await.map_err(Error::HttpTransport),
-
-                StatusCode::ACCEPTED => {
-                    let resp: StatementResponse =
-                        http_resp.json().await.map_err(Error::HttpTransport)?;
-                    return if let Some(ref handle) = resp.statement_handle {
-                        debug!(statement_handle = %handle, "statement executing asynchronously, polling");
-                        self.poll_until_complete(handle).await
-                    } else {
-                        Err(Error::Sql {
-                            statement_handle: None,
-                            message: "received 202 without a statement handle".into(),
-                        })
-                    };
+            StatusCode::ACCEPTED => {
+                let resp: StatementResponse =
+                    http_resp.json().await.map_err(Error::HttpTransport)?;
+                if let Some(handle) = &resp.statement_handle {
+                    debug!(statement_handle = %handle, "statement executing asynchronously, polling");
+                    self.poll_until_complete(&self.statement_status_url(handle), handle).await
+                } else {
+                    Err(Error::Sql {
+                        statement_handle: None,
+                        message: "received 202 without a statement handle".into(),
+                    })
                 }
+            }
 
-                StatusCode::UNPROCESSABLE_ENTITY => {
-                    let resp: StatementResponse =
-                        http_resp.json().await.map_err(Error::HttpTransport)?;
-                    return Err(Error::Sql {
-                        statement_handle: resp.statement_handle,
-                        message: resp.message.unwrap_or_default(),
-                    });
-                }
+            StatusCode::UNPROCESSABLE_ENTITY => {
+                let resp: StatementResponse =
+                    http_resp.json().await.map_err(Error::HttpTransport)?;
+                Err(Error::Sql {
+                    statement_handle: resp.statement_handle,
+                    message: resp.message.unwrap_or_default(),
+                })
+            }
 
-                StatusCode::UNAUTHORIZED if !retried_auth => {
-                    warn!("received 401 from sql rest api, invalidating cached token");
-                    self.auth.invalidate_token().await;
-                    retried_auth = true;
-                    continue;
-                }
-
-                _ => {
-                    let body_text = http_resp.text().await.unwrap_or_default();
-                    return Err(Error::HttpStatus { status, body: body_text });
-                }
+            _ => {
+                let body_text = http_resp.text().await.unwrap_or_default();
+                Err(Error::HttpStatus { status, body: body_text })
             }
         }
     }
 
-    async fn send_post(
+    /// Poll an async statement at `url` until Snowflake returns 200 (success)
+    /// or 422 (failure).
+    ///
+    /// Each poll refreshes a rejected token once, so a token that expires
+    /// during a long statement does not fail it.
+    async fn poll_until_complete(
         &self,
         url: &str,
-        token: &str,
-        body: &StatementRequest<'_>,
-    ) -> Result<reqwest::Response> {
-        self.http
-            .post(url)
-            .bearer_auth(token)
-            .header("User-Agent", USER_AGENT)
-            .json(body)
-            .send()
-            .await
-            .map_err(Error::HttpTransport)
-    }
-
-    /// Poll an async statement until Snowflake returns 200 (success) or 422
-    /// (failure).
-    async fn poll_until_complete(&self, statement_handle: &str) -> Result<StatementResponse> {
-        let url = format!("{}/api/v2/statements/{}", self.config.account_url(), statement_handle);
+        statement_handle: &str,
+    ) -> Result<StatementResponse> {
         let deadline = tokio::time::Instant::now() + POLL_TIMEOUT;
         let mut delay = POLL_INITIAL_DELAY;
 
@@ -478,15 +464,10 @@ impl<T: TokenProvider> SqlClient<T> {
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(POLL_MAX_DELAY);
 
-            let token = self.auth.get_token().await?;
-            let http_resp = self
-                .http
-                .get(&url)
-                .bearer_auth(&token)
-                .header("User-Agent", USER_AGENT)
-                .send()
-                .await
-                .map_err(Error::HttpTransport)?;
+            let http_resp = send_with_token_refresh(self.auth.as_ref(), |token| {
+                self.http.get(url).bearer_auth(token).header("User-Agent", USER_AGENT)
+            })
+            .await?;
 
             match http_resp.status() {
                 StatusCode::OK => return http_resp.json().await.map_err(Error::HttpTransport),
@@ -717,6 +698,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::snowflake::test_server::{CountingTokenProvider, serve_responses};
 
     /// Token provider used by hermetic SQL client tests.
     struct TestTokenProvider;
@@ -753,6 +735,42 @@ mod tests {
                     .map(|name| ResultColumnMetadata { name: (*name).to_owned(), nullable: None })
                     .collect(),
             }),
+        }
+    }
+
+    /// A token that expires while a statement runs is refreshed once per
+    /// poll, and a second rejection is reported.
+    #[tokio::test]
+    async fn statement_polling_refreshes_rejected_token_once() {
+        for (final_status, final_body) in
+            [(200, r#"{"statementHandle":"test-statement"}"#), (401, "{}")]
+        {
+            // GIVEN: the statement is still running, then Snowflake rejects
+            // the cached token and answers the resent poll.
+            let (url, server) =
+                serve_responses(vec![(202, "{}"), (401, "{}"), (final_status, final_body)]).await;
+            let auth = Arc::new(CountingTokenProvider::default());
+            let config =
+                Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+            let client = SqlClient::new(
+                config,
+                Arc::clone(&auth),
+                Client::builder().no_proxy().build().unwrap(),
+            );
+
+            // WHEN: the statement is polled to completion.
+            let polled = client.poll_until_complete(&url, "test-statement").await;
+
+            // THEN: only the rejected poll was resent, with a fresh token.
+            match final_status {
+                200 => assert_eq!(polled.unwrap().statement_handle.unwrap(), "test-statement"),
+                _ => assert!(matches!(
+                    polled,
+                    Err(Error::HttpStatus { status: StatusCode::UNAUTHORIZED, .. })
+                )),
+            }
+            assert_eq!(server.await.unwrap(), vec!["token-0", "token-0", "token-1"]);
+            assert_eq!(auth.invalidations(), 1);
         }
     }
 

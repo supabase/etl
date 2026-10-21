@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use etl::{
+    config::{ReplicationSlotConfig, ReplicationSlotPersistence},
     error::{ErrorKind, EtlError},
     postgres::client::{CtidPartition, PgReplicationClient},
     schema::TableId,
@@ -65,9 +66,10 @@ async fn copy_bytes(stream: CopyOutStream) -> Vec<u8> {
     bytes
 }
 
-/// The schema barrier precedes the slot snapshot and preserves normal writes.
-#[tokio::test(flavor = "multi_thread")]
-async fn copy_locks_precede_snapshot_and_allow_writes() {
+/// Checks copy locks and snapshot rows for the chosen slot persistence.
+async fn assert_copy_locks_precede_snapshot_and_allow_writes(
+    persistence: ReplicationSlotPersistence,
+) {
     let database = spawn_source_database().await;
     // Exercise identifier quoting in the name-based copy lock.
     let table_id = database
@@ -82,6 +84,7 @@ async fn copy_locks_precede_snapshot_and_allow_writes() {
     let (observer, _) = connect_to_pg_database(&database.config).await;
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("locked_copy");
+    let config = ReplicationSlotConfig { persistence, ..Default::default() };
 
     let release_writer = async {
         wait_for_table_lock(&observer, table_id, "AccessShareLock", true).await;
@@ -100,7 +103,7 @@ async fn copy_locks_precede_snapshot_and_allow_writes() {
         database.run_sql("commit").await.unwrap();
     };
     let (created, ()) =
-        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, false), release_writer);
+        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, &config), release_writer);
 
     let (transaction, _) = created.unwrap();
     let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
@@ -131,6 +134,20 @@ async fn copy_locks_precede_snapshot_and_allow_writes() {
     assert_table_locks_released(&observer, &schema.name).await;
 }
 
+/// The schema barrier precedes the slot snapshot and preserves normal writes.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_locks_precede_snapshot_and_allow_writes() {
+    assert_copy_locks_precede_snapshot_and_allow_writes(ReplicationSlotPersistence::Permanent)
+        .await;
+}
+
+/// Temporary slots retain the copy locks and use the same consistent snapshot.
+#[tokio::test(flavor = "multi_thread")]
+async fn temporary_copy_locks_precede_snapshot_and_allow_writes() {
+    assert_copy_locks_precede_snapshot_and_allow_writes(ReplicationSlotPersistence::Temporary)
+        .await;
+}
+
 /// A later worker fails immediately behind queued DDL; existing workers can
 /// finish, and releasing the copy transactions lets DDL proceed.
 #[tokio::test(flavor = "multi_thread")]
@@ -146,7 +163,7 @@ async fn copy_worker_rejects_queued_ddl_and_releases_locks() {
     let observer = database.client.as_ref().unwrap();
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = parent
-        .create_table_copy_slot(&test_slot_name("queued_ddl"), table_id, false)
+        .create_table_copy_slot(&test_slot_name("queued_ddl"), table_id, &Default::default())
         .await
         .unwrap();
     let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
@@ -215,8 +232,10 @@ async fn copy_worker_rejects_queued_ddl_and_releases_locks() {
     );
     ddl.unwrap();
 
-    let (transaction, _) =
-        parent.create_table_copy_slot(&test_slot_name("after_ddl"), table_id, false).await.unwrap();
+    let (transaction, _) = parent
+        .create_table_copy_slot(&test_slot_name("after_ddl"), table_id, &Default::default())
+        .await
+        .unwrap();
     let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
     assert_eq!(schema.column_schemas[0].typ, Type::INT8);
 
@@ -242,7 +261,7 @@ async fn copy_locks_cover_partition_descendants() {
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = parent
-        .create_table_copy_slot(&test_slot_name("partition_locks"), table_id, false)
+        .create_table_copy_slot(&test_slot_name("partition_locks"), table_id, &Default::default())
         .await
         .unwrap();
 
@@ -296,8 +315,9 @@ async fn copy_rejects_partition_attached_before_snapshot() {
         client.batch_execute("commit").await.unwrap();
     };
     let slot_name = test_slot_name("concurrent_attach");
+    let config = ReplicationSlotConfig::default();
     let (created, ()) =
-        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, false), attach);
+        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, &config), attach);
 
     assert_eq!(created.unwrap_err().kind(), ErrorKind::SourceTableCopyLockConflict);
 }
@@ -329,7 +349,7 @@ async fn copy_rejects_busy_table_before_snapshot() {
             .unwrap();
         let error = timeout(
             Duration::from_secs(2),
-            parent.create_table_copy_slot(&slot_name, table_id, false),
+            parent.create_table_copy_slot(&slot_name, table_id, &Default::default()),
         )
         .await
         .unwrap()
@@ -381,8 +401,9 @@ async fn copy_slot_bounds_writer_ddl_deadlock() {
         client.batch_execute("commit").await.unwrap();
     };
     let slot_name = test_slot_name("writer_ddl_cycle");
+    let config = ReplicationSlotConfig::default();
     let (created, ()) = timeout(Duration::from_secs(45), async {
-        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, false), writer_ddl)
+        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, &config), writer_ddl)
     })
     .await
     .unwrap();
@@ -392,7 +413,7 @@ async fn copy_slot_bounds_writer_ddl_deadlock() {
     assert_eq!(postgres_error_code(&error), &SqlState::LOCK_NOT_AVAILABLE);
 
     let (transaction, _) =
-        parent.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+        parent.create_table_copy_slot(&slot_name, table_id, &config).await.unwrap();
     let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
     assert_eq!(schema.column_schemas.len(), 3);
 
@@ -428,8 +449,9 @@ async fn copy_slot_classifies_postgres_deadlock_as_retryable() {
         client.batch_execute("alter table test.copied add column extra int; commit").await.unwrap();
     };
     let slot_name = test_slot_name("postgres_deadlock");
+    let config = ReplicationSlotConfig::default();
     let (created, ()) = timeout(Duration::from_secs(10), async {
-        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, false), writer_ddl)
+        tokio::join!(parent.create_table_copy_slot(&slot_name, table_id, &config), writer_ddl)
     })
     .await
     .unwrap();
@@ -439,7 +461,7 @@ async fn copy_slot_classifies_postgres_deadlock_as_retryable() {
     assert_eq!(postgres_error_code(&error), &SqlState::T_R_DEADLOCK_DETECTED);
 
     let (transaction, _) =
-        parent.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+        parent.create_table_copy_slot(&slot_name, table_id, &config).await.unwrap();
     let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
     assert_eq!(schema.column_schemas.len(), 3);
 
@@ -472,7 +494,7 @@ async fn copy_publication_metadata_uses_snapshot() {
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = parent
-        .create_table_copy_slot(&test_slot_name("publication"), table_id, false)
+        .create_table_copy_slot(&test_slot_name("publication"), table_id, &Default::default())
         .await
         .unwrap();
     let snapshot = transaction.export_snapshot().await.unwrap();
@@ -595,7 +617,7 @@ async fn copy_publication_columns_match_postgres() {
         let table_id: TableId =
             client.query_one("select $1::text::regclass::oid", &[&relation]).await.unwrap().get(0);
         let (transaction, _) =
-            parent.create_table_copy_slot(&slot_name, table_id, false).await.unwrap();
+            parent.create_table_copy_slot(&slot_name, table_id, &Default::default()).await.unwrap();
         let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
         for publication in &publications {
             // Use the server's view as an independent oracle while this
@@ -651,7 +673,7 @@ async fn copy_partition_plan_uses_snapshot() {
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = parent
-        .create_table_copy_slot(&test_slot_name("partition_plan"), table_id, false)
+        .create_table_copy_slot(&test_slot_name("partition_plan"), table_id, &Default::default())
         .await
         .unwrap();
 
@@ -689,7 +711,7 @@ async fn copy_partition_plan_rejects_foreign_leaf() {
 
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let (transaction, _) = parent
-        .create_table_copy_slot(&test_slot_name("foreign_leaf"), table_id, false)
+        .create_table_copy_slot(&test_slot_name("foreign_leaf"), table_id, &Default::default())
         .await
         .unwrap();
 
@@ -729,8 +751,10 @@ async fn copy_worker_rejects_queued_root_ddl() {
 
     let (ddl_client, _) = connect_to_pg_database(&database.config).await;
     let mut parent = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let (transaction, _) =
-        parent.create_table_copy_slot(&test_slot_name("root_ddl"), root_id, false).await.unwrap();
+    let (transaction, _) = parent
+        .create_table_copy_slot(&test_slot_name("root_ddl"), root_id, &Default::default())
+        .await
+        .unwrap();
     let snapshot = transaction.export_snapshot().await.unwrap();
     let (schema, _) = transaction.get_table_schema_with_identity(root_id).await.unwrap();
 

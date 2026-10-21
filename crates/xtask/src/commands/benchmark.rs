@@ -87,7 +87,8 @@ pub(crate) struct BenchmarkArgs {
     /// ClickHouse password.
     #[arg(long, env = "BENCH_CLICKHOUSE_PASSWORD")]
     clickhouse_password: Option<String>,
-    /// ClickHouse database. Must already exist.
+    /// ClickHouse database prefix. Each run creates and drops its own
+    /// `<prefix>_<pipeline_id>` database.
     #[arg(long, env = "BENCH_CLICKHOUSE_DATABASE")]
     clickhouse_database: Option<String>,
     /// Run the TPC-C streaming workload for this many seconds.

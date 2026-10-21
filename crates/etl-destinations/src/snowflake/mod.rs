@@ -12,6 +12,9 @@ mod sql_client;
 mod streaming;
 mod view;
 
+#[cfg(test)]
+mod test_server;
+
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 

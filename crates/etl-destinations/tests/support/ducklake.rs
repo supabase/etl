@@ -8,7 +8,10 @@ use std::{
 
 use duckdb::{Config, Connection};
 use etl::config::{PgConnectionConfig, TcpKeepaliveConfig};
-use etl_postgres::{test_utils::local_tls_config_from_env, tokio::test_utils::PgDatabase};
+use etl_postgres::{
+    test_utils::{local_tls_config_from_env, test_database_port_from_env},
+    tokio::test_utils::PgDatabase,
+};
 use pg_escape::quote_literal;
 use tokio_postgres::{
     Client, Config as PgConfig,
@@ -17,7 +20,7 @@ use tokio_postgres::{
 use url::Url;
 use uuid::Uuid;
 
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.3";
+const DUCKDB_EXTENSION_VERSION: &str = "1.5.6";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub struct DuckLakeTestEnv {
@@ -131,10 +134,7 @@ pub fn path_to_file_url(path: &Path) -> Url {
 async fn create_catalog_database() -> (PgDatabase<Client>, Url) {
     let database_name = Uuid::new_v4().to_string();
     let host = env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set");
-    let port = env::var("TESTS_DATABASE_PORT")
-        .expect("TESTS_DATABASE_PORT must be set")
-        .parse()
-        .expect("TESTS_DATABASE_PORT must be a valid port number");
+    let port = test_database_port_from_env();
     let username =
         env::var("TESTS_DATABASE_USERNAME").expect("TESTS_DATABASE_USERNAME must be set");
     let password = env::var("TESTS_DATABASE_PASSWORD").ok();
@@ -154,10 +154,7 @@ fn local_pg_connection_config(database_name: String) -> PgConnectionConfig {
     PgConnectionConfig {
         host: env::var("TESTS_DATABASE_HOST").expect("TESTS_DATABASE_HOST must be set"),
         hostaddr: None,
-        port: env::var("TESTS_DATABASE_PORT")
-            .expect("TESTS_DATABASE_PORT must be set")
-            .parse()
-            .expect("TESTS_DATABASE_PORT must be a valid port number"),
+        port: test_database_port_from_env(),
         name: database_name,
         username: env::var("TESTS_DATABASE_USERNAME").expect("TESTS_DATABASE_USERNAME must be set"),
         password: env::var("TESTS_DATABASE_PASSWORD").ok().map(Into::into),

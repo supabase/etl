@@ -224,6 +224,12 @@ the table DDL is rejected instead of ETL silently merging the two columns.
 
 - Every replicated source table needs a primary key, and all primary-key
   columns must be included in the publication.
+- The source primary key must not be `DEFERRABLE`. A deferrable key lets one
+  statement move a row into a key before the key's previous row moves out,
+  which BigQuery's per-key change application cannot represent. ETL fails the
+  table during its initial copy. A schema change that makes an existing key
+  deferrable fails instead, and replication of every table stops until you
+  resynchronize this one.
 - PostgreSQL arrays containing `NULL` elements are not supported.
 - BigQuery stores a top-level PostgreSQL `NULL` array as an empty array, so the
   two source values are indistinguishable in the destination.
@@ -601,6 +607,10 @@ recommended for new deployments.
 - Schema-change DDL is not supported. A newer relation schema is rejected even
   when only a default, nullability, mapped-equivalent type, or publication mask
   changed. Existing tables must match the exact generated Iceberg schema.
+- In `OnePerSchema` mode, source schema names are normalized into Iceberg
+  namespace names. The destination rejects different source schemas that map to
+  the same namespace within a pipeline, including during restart and recovery.
+  This check does not detect collisions with other pipelines or orphaned tables.
 - Apache Iceberg supports native schema evolution, but this deprecated ETL
   adapter does not implement it and does not translate PostgreSQL defaults.
 - The destination is deprecated and is not receiving the same product

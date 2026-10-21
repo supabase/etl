@@ -172,10 +172,15 @@ impl Error {
     pub(super) const fn append_failure_type(&self) -> AppendFailureType {
         match self {
             Self::HttpTransport(_) => AppendFailureType::Transport,
+            // A 401 or an expired-token status means Snowflake rejected the
+            // credentials the request carried.
+            Self::Auth(_)
+            | Self::HttpStatus { status: StatusCode::UNAUTHORIZED, .. }
+            | Self::Snowpipe(
+                SnowpipeError::AuthenticationExpired
+                | SnowpipeError::HttpStatus { status: StatusCode::UNAUTHORIZED },
+            ) => AppendFailureType::Authentication,
             Self::HttpStatus { .. } | Self::Sql { .. } => AppendFailureType::Provider,
-            Self::Auth(_) | Self::Snowpipe(SnowpipeError::AuthenticationExpired) => {
-                AppendFailureType::Authentication
-            }
             Self::Snowpipe(
                 SnowpipeError::StaleContinuation
                 | SnowpipeError::ChannelInvalidated
@@ -282,11 +287,20 @@ impl From<Error> for EtlError {
             Error::HttpTransport(_) => {
                 (ErrorKind::DestinationError, "Snowflake HTTP transport error")
             }
+            // A 401 or an expired-token status means Snowflake rejected the
+            // credentials the request carried.
+            Error::HttpStatus { status: StatusCode::UNAUTHORIZED, .. }
+            | Error::Snowpipe(
+                SnowpipeError::AuthenticationExpired
+                | SnowpipeError::HttpStatus { status: StatusCode::UNAUTHORIZED },
+            ) => (ErrorKind::DestinationAuthenticationError, "Snowflake rejected the credentials"),
             Error::HttpStatus { status, .. } if status.is_server_error() => {
                 (ErrorKind::DestinationError, "Snowflake server error")
             }
             Error::HttpStatus { .. } => (ErrorKind::DestinationError, "Snowflake HTTP error"),
-            Error::Auth(_) => (ErrorKind::DestinationError, "Snowflake authentication failed"),
+            Error::Auth(_) => {
+                (ErrorKind::DestinationAuthenticationError, "Snowflake authentication failed")
+            }
             Error::Sql { .. } => (ErrorKind::DestinationError, "Snowflake SQL execution failed"),
             Error::Snowpipe(_) => (ErrorKind::DestinationError, "Snowpipe streaming error"),
             Error::Channel(_) => (ErrorKind::DestinationError, "Snowflake channel error"),
@@ -635,5 +649,35 @@ mod tests {
             assert_eq!(error.retryability(), Retryability::Permanent);
             assert!(error.source().is_some());
         }
+    }
+
+    /// Rejected credentials stop for an operator with the destination
+    /// credentials hint and count as authentication append failures, from
+    /// both the SQL API and Snowpipe Streaming.
+    #[test]
+    fn authentication_failures_convert_to_authentication_errors() {
+        for source in [
+            Error::Auth("token exchange rejected".to_owned()),
+            Error::HttpStatus { status: StatusCode::UNAUTHORIZED, body: String::new() },
+            Error::Snowpipe(SnowpipeError::AuthenticationExpired),
+            Error::Snowpipe(SnowpipeError::HttpStatus { status: StatusCode::UNAUTHORIZED }),
+        ] {
+            let description = format!("{source:?}");
+            assert_eq!(
+                source.append_failure_type(),
+                AppendFailureType::Authentication,
+                "{description}"
+            );
+            let error = EtlError::from(source);
+
+            assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError, "{description}");
+            assert_eq!(error.retryability(), Retryability::Permanent, "{description}");
+        }
+
+        // Other client errors keep the generic kind and provider label.
+        let forbidden = Error::HttpStatus { status: StatusCode::FORBIDDEN, body: String::new() };
+        assert_eq!(forbidden.append_failure_type(), AppendFailureType::Provider);
+        let forbidden = EtlError::from(forbidden);
+        assert_eq!(forbidden.kind(), ErrorKind::DestinationError);
     }
 }

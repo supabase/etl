@@ -159,7 +159,9 @@ ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
 `TESTS_BIGQUERY_SA_KEY_PATH`.
 
 Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
-Parser fuzz targets live in `fuzz/`.
+Parser fuzz targets live in `fuzz/`. The nightly `Fuzz` workflow fuzzes each
+target for two minutes, and every CI run replays the committed `fuzz/corpus/`
+seeds once.
 
 Use cargo-nextest 0.9.148 or newer; CI pins 0.9.148. The repository requires
 this version to include the [capture-pipe inheritance fix](https://github.com/nextest-rs/nextest/pull/3553)
@@ -172,13 +174,19 @@ Multigres; coverage uses a separate instrumented build. Every Postgres and
 OrioleDB lane runs the full regular suite, including destination tests and
 BigQuery integration tests when credentials are available. Credentialed
 Snowflake tests and Multigres tests run separately. Postgres shards start
-concurrently and must all pass readiness checks before tests run. Nextest
-distributes Postgres-backed tests across those clusters in round-robin slices;
-tests sharing a cluster remain serial. BigQuery destination-only tests use
-isolated datasets and an in-memory store. They run serially in the non-Postgres
-lane, with priority over short unit tests to overlap remote work. BigQuery
-pipeline tests remain on the Postgres shards. This scheduling is the same
-locally and in every compatibility and coverage job. To reuse a local build:
+concurrently and must all pass readiness checks before tests run. All
+Postgres-backed tests run in one nextest invocation with the `pg-sharded`
+profile and one test thread per cluster: each free thread takes the next test,
+and the test connects to the cluster at its `NEXTEST_TEST_GLOBAL_SLOT`, so no
+two running tests share a cluster. The slowest tests start first; the rest are
+ordered by test-name length mod 40, a fixed pseudo-random order that keeps
+DuckLake and ClickHouse tests from all running at once. A plain
+`cargo nextest run` keeps them serial on one cluster. BigQuery
+destination-only tests use isolated datasets and an in-memory store. They run
+serially in the non-Postgres lane, with priority over short unit tests to
+overlap remote work. BigQuery pipeline tests remain on the Postgres shards.
+This scheduling is the same locally and in every compatibility and coverage
+job. To reuse a local build:
 
 ```bash
 mkdir -p target/ci
@@ -203,14 +211,17 @@ docker buildx build --load --build-arg ENABLE_EGRESS=true \
 ```
 
 When a workspace dependency disables default features, consumers that need them
-request `features = ["default"]`. This also lets cargo-chef preserve the feature
-selection without modifying its generated recipe.
+request `features = ["default"]`.
 
 CI builds AMD64 and ARM64 on separate native workers, pushes each image by
 digest, and verifies the combined manifest before tagging it at
 `public.ecr.aws/supabase/etl-replicator`. Both builds check out the same resolved
-source SHA. CI image checks and publishing share the build action and persistent
-Blacksmith layer cache. Pulling these images requires no private registry access. Only a merged-main PR at the current main tip can promote
+source SHA. CI image checks and publishing share the build action but use
+separate persistent Blacksmith caches: one for CI, one for manual experimental
+publishes, and one for merged-main publishes. State written by pull-request or
+experimental builds never reaches a stable image. The Dockerfile keeps Cargo's
+registry and target directory in BuildKit cache mounts, so a lockfile change
+rebuilds only the crates it affects; workspace crates always recompile. Pulling these images requires no private registry access. Only a merged-main PR at the current main tip can promote
 `latest`; manual builds never do. Require `CI passed` in branch protection
 after its first run, replacing old required job names including `Snowflake Gate`.
 

@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use etl_config::shared::{
     BatchConfig, InvalidatedSlotBehavior, MemoryBackpressureConfig, PgConnectionConfig,
-    PipelineConfig, ReplicationSlotConfig, TableSyncCopyConfig,
+    PipelineConfig, ReplicationSlotConfig, ReplicationSlotPersistence, TableSyncCopyConfig,
 };
 use etl_postgres::tokio::test_utils::PgDatabase;
 use rand::random;
@@ -113,6 +113,9 @@ pub struct PipelineBuilder<S, D> {
     memory_backpressure: MemoryBackpressureConfig,
     /// Logical replication slot configuration.
     replication_slot: ReplicationSlotConfig,
+    /// Whether shutdown drains buffered apply work. Default:
+    /// [`PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN`].
+    drain_on_shutdown: bool,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -174,13 +177,30 @@ where
                 resume_threshold: 0.85,
             },
             replication_slot: ReplicationSlotConfig::default(),
+            drain_on_shutdown: PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN,
         }
+    }
+
+    /// Sets whether shutdown drains buffered apply work before the apply loop
+    /// exits, or abandons it for replay on the next start.
+    pub fn with_drain_on_shutdown(mut self, drain_on_shutdown: bool) -> Self {
+        self.drain_on_shutdown = drain_on_shutdown;
+        self
     }
 
     /// Sets whether PostgreSQL failover support is enabled for replication
     /// slots.
     pub fn with_replication_slot_failover(mut self, enabled: bool) -> Self {
         self.replication_slot.failover = enabled;
+        self
+    }
+
+    /// Sets persistence for apply and table-sync replication slots.
+    pub fn with_replication_slot_persistence(
+        mut self,
+        persistence: ReplicationSlotPersistence,
+    ) -> Self {
+        self.replication_slot.persistence = persistence;
         self
     }
 
@@ -270,6 +290,7 @@ where
             settle_durable_interval_ms: self.settle_durable_interval_ms,
             memory_backpressure: Some(self.memory_backpressure),
             run_source_migrations: true,
+            drain_on_shutdown: self.drain_on_shutdown,
         };
 
         Pipeline::new(config, self.store, self.destination)

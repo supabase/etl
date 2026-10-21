@@ -149,6 +149,7 @@ jobs:
           platform: ${{ matrix.platform }}
           image: ${{ steps.registry.outputs.image }}
           push: 'true'
+          stable: ${{ needs.prepare.outputs.stable }}
       - name: Record platform digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
