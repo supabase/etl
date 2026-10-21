@@ -668,14 +668,9 @@ async fn cdc_history_matches_source_model_merge_tree() {
 
 /// Fragments that SQL lexers, escape decoders, or client-side templating may
 /// treat specially.
-///
-/// `?` is left out: the destination's DDL goes through the `clickhouse`
-/// client's `?` bind templating, so a single `?` fails DDL and `??` collapses
-/// to `?`. Those defects are pinned by the ignored tests
-/// `question_mark_in_column_name_fails_table_creation`,
-/// `question_mark_in_text_default_fails_table_creation`, and
-/// `doubled_question_mark_in_text_default_is_collapsed`.
-const SQL_FRAGMENTS: [&str; 36] = [
+const SQL_FRAGMENTS: [&str; 38] = [
+    "?",
+    "??",
     "\\",
     "'",
     "''",
@@ -715,11 +710,9 @@ const SQL_FRAGMENTS: [&str; 36] = [
 ];
 
 /// Text that is valid in Postgres and leans toward SQL-sensitive characters.
-///
-/// Excludes `?`; see [`SQL_FRAGMENTS`] for the ignored tests that cover it.
 fn sql_text() -> impl Strategy<Value = String> {
     prop_oneof![
-        1 => pg_text().prop_map(|text| text.replace('?', "")),
+        1 => pg_text(),
         2 => prop::collection::vec(select(SQL_FRAGMENTS.to_vec()), 0..10)
             .prop_map(|fragments| fragments.concat()),
     ]
@@ -943,21 +936,18 @@ async fn create_text_column_and_read_default(
 
 /// A source column whose name contains `?` gets a ClickHouse table.
 ///
-/// The `clickhouse` client treats `?` in query text as a bind placeholder, and
-/// the destination sends DDL as query text, so `CREATE TABLE` fails with
-/// "unbound query argument" and the table can never replicate.
-#[ignore = "known defect: `?` in a column name fails ClickHouse DDL as an unbound bind argument"]
+/// The `clickhouse` client treats `?` in query text as a bind placeholder, so
+/// DDL text must escape it or `CREATE TABLE` fails as an unbound argument.
 #[tokio::test(flavor = "multi_thread")]
-async fn question_mark_in_column_name_fails_table_creation() {
+async fn question_mark_in_column_name_creates_table() {
     let (names, _) = create_text_column_and_read_default("asked", "done?", "").await.unwrap();
 
     assert_eq!(names, vec!["id".to_owned(), "done?".to_owned()]);
 }
 
 /// A text default containing `?` gets a ClickHouse table.
-#[ignore = "known defect: `?` in a text default fails ClickHouse DDL as an unbound bind argument"]
 #[tokio::test(flavor = "multi_thread")]
-async fn question_mark_in_text_default_fails_table_creation() {
+async fn question_mark_in_text_default_creates_table() {
     let (_, stored) = create_text_column_and_read_default("asked", "status", "?").await.unwrap();
 
     assert_eq!(stored, "?");
@@ -965,12 +955,10 @@ async fn question_mark_in_text_default_fails_table_creation() {
 
 /// A text default containing `??` keeps both characters.
 ///
-/// The `clickhouse` client unescapes `??` to `?` in query text, so the DDL
-/// succeeds with a different default and rows that take it, such as existing
-/// rows when the column is added later, silently store `?`.
-#[ignore = "known defect: `??` in a text default is silently stored as `?`"]
+/// The `clickhouse` client reads `??` in query text as one `?`, so unescaped
+/// DDL would silently store a different default.
 #[tokio::test(flavor = "multi_thread")]
-async fn doubled_question_mark_in_text_default_is_collapsed() {
+async fn doubled_question_mark_in_text_default_is_kept() {
     let (_, stored) = create_text_column_and_read_default("asked", "status", "??").await.unwrap();
 
     assert_eq!(stored, "??");

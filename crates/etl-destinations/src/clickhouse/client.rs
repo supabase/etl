@@ -68,6 +68,15 @@ fn floor_secs(d: Duration) -> String {
     d.as_secs().max(1).to_string()
 }
 
+/// Escapes `?` in SQL that is sent without bind arguments.
+///
+/// The `clickhouse` client reads `?` in query text as a bind placeholder and
+/// `??` as a literal `?`. DDL embeds quoted names and default literals that
+/// may contain `?`, so each one is doubled to reach the server unchanged.
+fn escape_query_text(sql: &str) -> String {
+    sql.replace('?', "??")
+}
+
 /// Runs `fut` under `tokio::time::timeout` using the client-side timeout for
 /// `op` from `config`. Inner ClickHouse errors map onto `op.failed_kind()` and
 /// keep their own [`ClassifiedError::retryability`]; client-side deadlines map
@@ -618,7 +627,7 @@ impl ClickHouseClient {
         let ddl_secs = floor_secs(self.config.ddl_timeout);
         let query = self
             .inner
-            .query(sql)
+            .query(&escape_query_text(sql))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
         let result =
@@ -746,7 +755,7 @@ impl ClickHouseClient {
         let ddl_secs = floor_secs(self.config.ddl_timeout);
         let query = self
             .inner
-            .query(&build_truncate_table_sql(table_name))
+            .query(&escape_query_text(&build_truncate_table_sql(table_name)))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
         let result = timeout_call(
