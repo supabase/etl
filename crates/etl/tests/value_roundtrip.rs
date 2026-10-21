@@ -15,7 +15,7 @@
 //! values are covered by the replication-stream boundary matrix. Finite values
 //! beyond chrono's range and multidimensional arrays remain unsupported.
 
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Utc};
 use etl::{
     data::{ArrayCell, Cell, Date, PgTime, Timestamp},
     schema::ColumnSchema,
@@ -37,6 +37,12 @@ use tokio_postgres::{
     types::{Kind, ToSql, Type},
 };
 use uuid::Uuid;
+
+use crate::support::pg_literals::{
+    JSON_TREE_MAX_DEPTH, JsonNode, date_literal, inet_literal, interval_literal, json_document,
+    json_literal, money_literal, numeric_literal, timetz_literal, timetz_text_literal,
+    uuid_literal, varchar_literal,
+};
 
 /// Fetches the single text column the statement returns.
 fn query_text(
@@ -253,56 +259,6 @@ async fn float8_array_values_roundtrip_through_text_codec() {
     });
 }
 
-/// Decimal literal strings covering integers, fractions, scientific notation,
-/// and the numeric specials.
-///
-/// Exponents are tiered: most cases stay small so typical magnitudes dominate,
-/// while the two boundary tiers reach the extremes the codec and Postgres
-/// share, `1e131071` on the weight side and `1e-16383` on the scale side. With
-/// up to 45 integer and 45 fractional digits, exponents in `[-16_338, 131_027]`
-/// always stay inside Postgres's accepted range (verified empirically: one step
-/// past either bound overflows the numeric format), so Postgres stays a render
-/// oracle and never rejects a generated literal.
-fn numeric_literal() -> impl Strategy<Value = String> {
-    let digits = |max: usize| proptest::collection::vec(0u8..=9, 1..=max);
-
-    let exponent = prop_oneof![
-        8 => -60i32..=60,
-        1 => -16_338i32..=-16_200,
-        1 => 130_900i32..=131_027,
-    ];
-
-    let finite = (any::<bool>(), digits(45), option::of(digits(45)), option::of(exponent))
-        .prop_map(|(negative, int_digits, frac_digits, exponent)| {
-            let mut literal = String::new();
-            if negative {
-                literal.push('-');
-            }
-            for digit in int_digits {
-                literal.push((b'0' + digit) as char);
-            }
-            if let Some(frac_digits) = frac_digits {
-                literal.push('.');
-                for digit in frac_digits {
-                    literal.push((b'0' + digit) as char);
-                }
-            }
-            if let Some(exponent) = exponent {
-                literal.push('e');
-                literal.push_str(&exponent.to_string());
-            }
-
-            literal
-        });
-
-    prop_oneof![
-        45 => finite,
-        1 => Just("NaN".to_owned()),
-        1 => Just("Infinity".to_owned()),
-        1 => Just("-Infinity".to_owned()),
-    ]
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn numeric_values_roundtrip_through_text_codec() {
     init_test_tracing();
@@ -430,23 +386,6 @@ async fn timestamptz_array_values_roundtrip_through_text_codec() {
             )),
         )
     });
-}
-
-/// Formats a Postgres `time with time zone` input literal.
-///
-/// Offsets cover the full Postgres range including a seconds component.
-fn timetz_literal(time: &NaiveTime, offset_seconds: i32) -> String {
-    let sign = if offset_seconds < 0 { '-' } else { '+' };
-    let abs = offset_seconds.unsigned_abs();
-
-    format!(
-        "{}{}{:02}:{:02}:{:02}",
-        time.format("%H:%M:%S%.6f"),
-        sign,
-        abs / 3600,
-        abs % 3600 / 60,
-        abs % 60
-    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -726,4 +665,266 @@ async fn copy_rows_roundtrip_through_copy_codec() {
         prop_assert_eq!(row.values(), expected.as_slice());
         Ok(())
     });
+}
+
+/// Deepest container nesting `serde_json` decodes under its default recursion
+/// limit of 128.
+const SERDE_JSON_MAX_DEPTH: usize = 127;
+
+/// Statements that render one `text` parameter as `json` and as `jsonb`.
+struct JsonRenderStatements {
+    /// Renders the parameter through `json`, which keeps the input text.
+    json: Statement,
+    /// Renders the parameter through `jsonb`, which normalizes it.
+    jsonb: Statement,
+}
+
+impl JsonRenderStatements {
+    /// Prepares both statements on `client`.
+    async fn prepare(client: &Client) -> Self {
+        Self {
+            json: client.prepare("select ($1::text::json)::text").await.unwrap(),
+            jsonb: client.prepare("select ($1::text::jsonb)::text").await.unwrap(),
+        }
+    }
+}
+
+/// Asserts that Postgres's `typ` rendering of a document decodes to a
+/// [`Cell::Json`] with the document's `jsonb` meaning.
+fn assert_json_decodes(
+    typ: &Type,
+    rendered: &str,
+    document: &JsonNode,
+) -> Result<(), TestCaseError> {
+    let cell = parse_text_cell(typ, rendered)
+        .map_err(|err| TestCaseError::fail(format!("codec rejected {typ} {rendered:?}: {err}")))?;
+    let Cell::Json(value) = &cell else {
+        return Err(TestCaseError::fail(format!("expected json cell, got {cell:?}")));
+    };
+
+    prop_assert!(document.matches(value), "{typ} {rendered:?} decoded to {value}");
+    Ok(())
+}
+
+/// Checks that `document`, rendered with `whitespace`, decodes from its `json`
+/// output and (when `jsonb` accepts it) from its `jsonb` output to the same
+/// `jsonb` meaning.
+///
+/// `json` output is the input text verbatim, so it carries duplicate keys,
+/// escapes, whitespace, and number spellings that `jsonb` output normalizes
+/// away. Documents with NUL are checked through `json` only because `jsonb`
+/// rejects `\u0000`.
+fn check_json_document(
+    client: &Client,
+    statements: &JsonRenderStatements,
+    document: &JsonNode,
+    whitespace: &str,
+) -> Result<(), TestCaseError> {
+    let text = document.to_text(whitespace);
+
+    let json = query_text(client, &statements.json, &[&text])?;
+    assert_json_decodes(&Type::JSON, &json, document)?;
+
+    if !document.contains_nul() {
+        let jsonb = query_text(client, &statements.jsonb, &[&text])?;
+        assert_json_decodes(&Type::JSONB, &jsonb, document)?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_and_jsonb_values_decode_to_their_jsonb_meaning() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let statements = JsonRenderStatements::prepare(client).await;
+
+    // Nesting stops at serde_json's recursion limit. Deeper documents, which
+    // Postgres accepts, are a known defect covered by
+    // `json_nested_past_serde_recursion_limit_decodes` and
+    // `deep_json_values_decode_to_their_jsonb_meaning`.
+    let strategy = json_document(true, 0..=SERDE_JSON_MAX_DEPTH - JSON_TREE_MAX_DEPTH);
+    run_property("json/jsonb decode", &strategy, |(document, whitespace)| {
+        check_json_document(client, &statements, document, whitespace)
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "known defect: serde_json's recursion limit rejects json nested deeper than 127 levels"]
+async fn deep_json_values_decode_to_their_jsonb_meaning() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let statements = JsonRenderStatements::prepare(client).await;
+
+    let strategy = json_document(true, SERDE_JSON_MAX_DEPTH + 1..=300);
+    run_property("deep json/jsonb decode", &strategy, |(document, whitespace)| {
+        check_json_document(client, &statements, document, whitespace)
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "known defect: serde_json's recursion limit rejects json nested deeper than 127 levels"]
+async fn json_nested_past_serde_recursion_limit_decodes() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+
+    // Postgres accepts this document as both json and jsonb, so a row holding
+    // it halts replication and table copy on every retry.
+    let depth = SERDE_JSON_MAX_DEPTH + 1;
+    let document = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+    for typ in [Type::JSON, Type::JSONB] {
+        let rendered: String = client
+            .query_one(&format!("select ($1::text::{typ})::text"), &[&document])
+            .await
+            .unwrap()
+            .get(0);
+
+        let cell = parse_text_cell(&typ, &rendered).unwrap();
+        assert!(matches!(cell, Cell::Json(_)));
+    }
+}
+
+/// Converts an array cell into one optional [`Cell`] per element, so arrays
+/// of every element type compare uniformly against element-wise parses.
+fn array_cell_elements(array: ArrayCell) -> Vec<Option<Cell>> {
+    /// Wraps each present element with its scalar [`Cell`] constructor.
+    fn wrap<T>(values: Vec<Option<T>>, cell: fn(T) -> Cell) -> Vec<Option<Cell>> {
+        values.into_iter().map(|value| value.map(cell)).collect()
+    }
+
+    match array {
+        ArrayCell::Bool(values) => wrap(values, Cell::Bool),
+        ArrayCell::String(values) => wrap(values, Cell::String),
+        ArrayCell::I16(values) => wrap(values, Cell::I16),
+        ArrayCell::I32(values) => wrap(values, Cell::I32),
+        ArrayCell::U32(values) => wrap(values, Cell::U32),
+        ArrayCell::I64(values) => wrap(values, Cell::I64),
+        ArrayCell::F32(values) => wrap(values, Cell::F32),
+        ArrayCell::F64(values) => wrap(values, Cell::F64),
+        ArrayCell::Numeric(values) => wrap(values, Cell::Numeric),
+        ArrayCell::Date(values) => wrap(values, Cell::Date),
+        ArrayCell::Time(values) => wrap(values, Cell::Time),
+        ArrayCell::TimeTz(values) => wrap(values, Cell::TimeTz),
+        ArrayCell::Timestamp(values) => wrap(values, Cell::Timestamp),
+        ArrayCell::TimestampTz(values) => wrap(values, Cell::TimestampTz),
+        ArrayCell::Uuid(values) => wrap(values, Cell::Uuid),
+        ArrayCell::Json(values) => wrap(values, Cell::Json),
+        ArrayCell::Bytes(values) => wrap(values, Cell::Bytes),
+    }
+}
+
+/// Checks the array element law for `sql_type`: parsing a `T[]` value's text
+/// with `array_type` equals parsing each element's own output text with
+/// `element_type`, NULL elements mapping to `None`.
+///
+/// Postgres supplies both the array text and the element texts, so no
+/// hand-written expected values are involved. Elements are rendered with
+/// `format('%s', e)`, which calls the type's output function exactly as
+/// `array_out` does per element; `e::text` is not equivalent because types
+/// such as `inet` and `bool` have dedicated text casts that render
+/// differently.
+async fn check_array_element_law(
+    sql_type: &str,
+    element_type: Type,
+    array_type: Type,
+    element: impl Strategy<Value = String>,
+) {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let render = client
+        .prepare(&format!(
+            "select a::text, array(select case when u.e is null then null else format('%s', u.e) \
+             end from unnest(a) with ordinality as u(e, n) order by u.n) from (select \
+             $1::text[]::{sql_type}[] as a) as input"
+        ))
+        .await
+        .unwrap();
+
+    let strategy = proptest::collection::vec(option::of(element), 0..=6);
+    run_property(&format!("{sql_type}[] element law"), &strategy, |elements| {
+        let row = block_on(client.query_one(&render, &[elements]))
+            .map_err(|err| TestCaseError::fail(format!("postgres query failed: {err}")))?;
+        let array_text: String = row.get(0);
+        let element_texts: Vec<Option<String>> = row.get(1);
+
+        let cell = parse_text_cell(&array_type, &array_text)
+            .map_err(|err| TestCaseError::fail(format!("codec rejected {array_text:?}: {err}")))?;
+        let Cell::Array(array) = cell else {
+            return Err(TestCaseError::fail(format!("expected array cell, got {cell:?}")));
+        };
+
+        let mut expected = Vec::with_capacity(element_texts.len());
+        for text in &element_texts {
+            let element = match text {
+                Some(text) => Some(parse_text_cell(&element_type, text).map_err(|err| {
+                    TestCaseError::fail(format!("codec rejected element {text:?}: {err}"))
+                })?),
+                None => None,
+            };
+            expected.push(element);
+        }
+
+        prop_assert_eq!(array_cell_elements(array), expected, "array text {:?}", array_text);
+        Ok(())
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_array_elements_match_element_wise_parse() {
+    check_array_element_law("json", Type::JSON, Type::JSON_ARRAY, json_literal(true)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jsonb_array_elements_match_element_wise_parse() {
+    check_array_element_law("jsonb", Type::JSONB, Type::JSONB_ARRAY, json_literal(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn timetz_array_elements_match_element_wise_parse() {
+    check_array_element_law("timetz", Type::TIMETZ, Type::TIMETZ_ARRAY, timetz_text_literal())
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn date_array_elements_match_element_wise_parse() {
+    check_array_element_law("date", Type::DATE, Type::DATE_ARRAY, date_literal()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn numeric_array_elements_match_element_wise_parse() {
+    check_array_element_law("numeric", Type::NUMERIC, Type::NUMERIC_ARRAY, numeric_literal()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uuid_array_elements_match_element_wise_parse() {
+    check_array_element_law("uuid", Type::UUID, Type::UUID_ARRAY, uuid_literal()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn interval_array_elements_match_element_wise_parse() {
+    check_array_element_law("interval", Type::INTERVAL, Type::INTERVAL_ARRAY, interval_literal())
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inet_array_elements_match_element_wise_parse() {
+    check_array_element_law("inet", Type::INET, Type::INET_ARRAY, inet_literal()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn money_array_elements_match_element_wise_parse() {
+    check_array_element_law("money", Type::MONEY, Type::MONEY_ARRAY, money_literal()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn varchar_array_elements_match_element_wise_parse() {
+    check_array_element_law("varchar", Type::VARCHAR, Type::VARCHAR_ARRAY, varchar_literal()).await;
 }

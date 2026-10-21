@@ -596,30 +596,23 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
 }
 
 /// Returns a DuckDB SQL literal for a floating-point value.
+///
+/// DuckDB types a bare numeric literal by its text: a plain decimal becomes
+/// DECIMAL, which rounds again on the way to the float column, `-0` becomes
+/// integer zero, and a list literal takes a DECIMAL type from its elements
+/// that later elements may not fit. Casting the shortest round-trip text
+/// parses it directly as the target type, so the stored value keeps its bits.
+/// `FLOAT` values arrive widened to `f64`, which represents them exactly.
 fn float_literal(value: f64, is_double: bool) -> String {
+    let sql_type = if is_double { "DOUBLE" } else { "FLOAT" };
     if value.is_nan() {
-        return if is_double {
-            "CAST('NaN' AS DOUBLE)".to_owned()
-        } else {
-            "CAST('NaN' AS FLOAT)".to_owned()
-        };
+        format!("CAST('NaN' AS {sql_type})")
+    } else if value.is_infinite() {
+        let sign = if value.is_sign_negative() { "-" } else { "" };
+        format!("CAST('{sign}Infinity' AS {sql_type})")
+    } else {
+        format!("CAST('{value:e}' AS {sql_type})")
     }
-    if value == f64::INFINITY {
-        return if is_double {
-            "CAST('Infinity' AS DOUBLE)".to_owned()
-        } else {
-            "CAST('Infinity' AS FLOAT)".to_owned()
-        };
-    }
-    if value == f64::NEG_INFINITY {
-        return if is_double {
-            "CAST('-Infinity' AS DOUBLE)".to_owned()
-        } else {
-            "CAST('-Infinity' AS FLOAT)".to_owned()
-        };
-    }
-
-    value.to_string()
 }
 
 /// Encodes bytes as uppercase hexadecimal for DuckDB's `from_hex`.
@@ -718,7 +711,7 @@ fn array_cell_to_value(arr: ArrayCell) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use etl::{
         data::{PgTime, Timestamp},
         schema::{
@@ -937,6 +930,697 @@ mod tests {
                 )
                 .unwrap();
             assert!(valid);
+        }
+    }
+
+    /// Bit-exact float literal and three-encoder agreement properties.
+    ///
+    /// DuckLake writes the same Postgres value through three encoders: SQL
+    /// literals (partial-update `SET`s, array and special-temporal insert
+    /// groups), the row appender (plain CDC insert groups), and Arrow (initial
+    /// copy). A value that one encoder changes silently diverges between rows
+    /// written by COPY and by CDC, so each path must store the original value.
+    pub(in crate::ducklake) mod encoder_properties {
+        use std::str::FromStr;
+
+        use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
+        use etl::{
+            data::{PgNumeric, PgTimeTz},
+            test_utils::property::{
+                any_f32, any_f64, f32_matches, f64_matches, pg_text, pg_time, run_property,
+            },
+        };
+        use proptest::{
+            collection::{btree_map, vec},
+            option,
+            prelude::*,
+            strategy::Union,
+        };
+        use uuid::Uuid;
+
+        use super::*;
+        use crate::ducklake::{DuckLakeTableName, schema::build_create_table_sql_ducklake};
+
+        /// Microseconds per day, used to express `24:00:00` as DuckDB stores
+        /// it.
+        const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+        /// Returns the Postgres `numeric(p, s)` type modifier.
+        fn numeric_typmod(precision: i32, scale: i32) -> i32 {
+            ((precision << 16) | (scale & 0x7ff)) + 4
+        }
+
+        /// Parses one SQL float literal back through DuckDB as the target
+        /// type.
+        fn parse_float_literal(conn: &duckdb::Connection, literal: &str, sql_type: &str) -> Value {
+            conn.query_row(&format!("select cast({literal} as {sql_type})"), [], |row| row.get(0))
+                .unwrap()
+        }
+
+        /// Checks that DuckDB parses `float_literal(value, true)` back to the
+        /// same `double` bit pattern.
+        fn check_f64_literal(conn: &duckdb::Connection, value: f64) -> Result<(), TestCaseError> {
+            let literal = float_literal(value, true);
+            let Value::Double(parsed) = parse_float_literal(conn, &literal, "double") else {
+                return Err(TestCaseError::fail("expected a double"));
+            };
+            prop_assert!(
+                f64_matches(value, parsed),
+                "literal {literal} for {value:e} ({:#018x}) parsed as {parsed:e} ({:#018x})",
+                value.to_bits(),
+                parsed.to_bits()
+            );
+            Ok(())
+        }
+
+        /// Checks that DuckDB parses `float_literal(value, false)` back to the
+        /// same `float` bit pattern.
+        fn check_f32_literal(conn: &duckdb::Connection, value: f32) -> Result<(), TestCaseError> {
+            let literal = float_literal(f64::from(value), false);
+            let Value::Float(parsed) = parse_float_literal(conn, &literal, "float") else {
+                return Err(TestCaseError::fail("expected a float"));
+            };
+            prop_assert!(
+                f32_matches(value, parsed),
+                "literal {literal} for {value:e} ({:#010x}) parsed as {parsed:e} ({:#010x})",
+                value.to_bits(),
+                parsed.to_bits()
+            );
+            Ok(())
+        }
+
+        /// Checks one double literal on a fresh connection.
+        fn assert_f64_literal_bit_exact(value: f64) {
+            check_f64_literal(&duckdb::Connection::open_in_memory().unwrap(), value).unwrap();
+        }
+
+        /// Checks one float literal on a fresh connection.
+        fn assert_f32_literal_bit_exact(value: f32) {
+            check_f32_literal(&duckdb::Connection::open_in_memory().unwrap(), value).unwrap();
+        }
+
+        #[test]
+        fn float8_sql_literals_parse_bit_exact() {
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            run_property("ducklake_float8_sql_literal_bit_exact", &any_f64(), |&value| {
+                check_f64_literal(&conn, value)
+            });
+        }
+
+        #[test]
+        fn float4_sql_literals_parse_bit_exact() {
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            run_property("ducklake_float4_sql_literal_bit_exact", &any_f32(), |&value| {
+                check_f32_literal(&conn, value)
+            });
+        }
+
+        #[test]
+        fn float8_sql_literal_keeps_decimal_fraction_exact() {
+            // As a plain decimal, DuckDB reads 1e-30 as DECIMAL and rounds
+            // again when casting to DOUBLE, landing on 9.999999999999999e-31.
+            assert_f64_literal_bit_exact(1e-30);
+        }
+
+        #[test]
+        fn float4_sql_literal_keeps_decimal_fraction_exact() {
+            // As a plain decimal, the widened f64 text rounds through DECIMAL
+            // to 0x21915b53.
+            assert_f32_literal_bit_exact(f32::from_bits(0x2191_5b52));
+        }
+
+        #[test]
+        fn float8_sql_literal_keeps_magnitude_of_huge_values() {
+            // Plain notation spells 9.223372036854776e273 with 274 integer
+            // digits, wider than any DuckDB integer or DECIMAL type.
+            assert_f64_literal_bit_exact(f64::from_bits(0x78d1_0cb1_32c2_ff63));
+        }
+
+        #[test]
+        fn float8_sql_literal_keeps_negative_zero() {
+            assert_f64_literal_bit_exact(-0.0);
+        }
+
+        #[test]
+        fn float4_sql_literal_keeps_negative_zero() {
+            assert_f32_literal_bit_exact(-0.0);
+        }
+
+        /// One generated destination column with the cells written to it.
+        #[derive(Clone, Debug)]
+        struct EncoderCase {
+            typ: PgType,
+            modifier: i32,
+            cells: Vec<Cell>,
+        }
+
+        /// Encoder path that writes rows into the destination table.
+        #[derive(Clone, Copy, Debug)]
+        enum EncoderPath {
+            SqlLiteral,
+            Appender,
+            Copy,
+        }
+
+        impl EncoderPath {
+            /// Returns the destination table name used for this path.
+            fn table_name(self) -> DuckLakeTableName {
+                let table = match self {
+                    Self::SqlLiteral => "sql_literal",
+                    Self::Appender => "appender",
+                    Self::Copy => "copy",
+                };
+                DuckLakeTableName::new("public", table)
+            }
+        }
+
+        /// Builds cases for one column type from a non-null cell strategy,
+        /// mixing in NULLs.
+        fn case_for(
+            typ: PgType,
+            modifier: i32,
+            cell: impl Strategy<Value = Cell> + 'static,
+        ) -> BoxedStrategy<EncoderCase> {
+            vec(prop_oneof![1 => Just(Cell::Null), 6 => cell], 1..6)
+                .prop_map(move |cells| EncoderCase { typ: typ.clone(), modifier, cells })
+                .boxed()
+        }
+
+        /// Builds cases for one array column type with NULL elements.
+        fn array_case<T: std::fmt::Debug + Clone + 'static>(
+            typ: PgType,
+            element: impl Strategy<Value = T> + 'static,
+            wrap: fn(Vec<Option<T>>) -> ArrayCell,
+        ) -> BoxedStrategy<EncoderCase> {
+            case_for(
+                typ,
+                -1,
+                vec(option::weighted(0.8, element), 0..5).prop_map(move |v| Cell::Array(wrap(v))),
+            )
+        }
+
+        /// Text with SQL-significant characters, so E-string escaping is
+        /// exercised often instead of only by chance.
+        pub(in crate::ducklake) fn sql_text() -> impl Strategy<Value = String> {
+            prop_oneof![pg_text(), "[a\\\\'\"\n ]{0,8}"]
+        }
+
+        /// Calendar dates inside the Postgres and chrono ranges, biased toward
+        /// BC years, year zero, and years past 9999.
+        fn date_value() -> impl Strategy<Value = NaiveDate> {
+            use chrono::Datelike;
+
+            let days = |year: i32| NaiveDate::from_ymd_opt(year, 1, 1).unwrap().num_days_from_ce();
+            // Postgres dates start at 4713-11-24 BC; chrono stops at year
+            // 262142.
+            let min = NaiveDate::from_ymd_opt(-4712, 11, 24).unwrap().num_days_from_ce();
+            let max = NaiveDate::MAX.num_days_from_ce();
+            prop_oneof![
+                min..=max,
+                (days(0) - 800)..(days(0) + 800),
+                (days(10_000) - 800)..(days(10_000) + 800),
+                (days(1970) - 800)..(days(1970) + 800),
+            ]
+            .prop_map(|days| NaiveDate::from_num_days_from_ce_opt(days).unwrap())
+        }
+
+        /// Dates including both infinities.
+        fn pg_date() -> impl Strategy<Value = Date<NaiveDate>> {
+            prop_oneof![
+                8 => date_value().prop_map(Date::Value),
+                1 => Just(Date::PosInfinity),
+                1 => Just(Date::NegInfinity),
+            ]
+        }
+
+        /// Times of day including Postgres `24:00:00`.
+        fn pg_time_or_end_of_day() -> impl Strategy<Value = PgTime> {
+            prop_oneof![9 => pg_time().prop_map(PgTime::Value), 1 => Just(PgTime::EndOfDay)]
+        }
+
+        /// Timestamps including both infinities.
+        fn pg_timestamp() -> impl Strategy<Value = Timestamp<NaiveDateTime>> {
+            prop_oneof![
+                8 => (date_value(), pg_time())
+                    .prop_map(|(date, time)| Timestamp::Value(date.and_time(time))),
+                1 => Just(Timestamp::PosInfinity),
+                1 => Just(Timestamp::NegInfinity),
+            ]
+        }
+
+        /// UTC timestamps including both infinities.
+        fn pg_timestamptz() -> impl Strategy<Value = Timestamp<DateTime<Utc>>> {
+            pg_timestamp().prop_map(|timestamp| match timestamp {
+                Timestamp::Value(value) => Timestamp::Value(value.and_utc()),
+                Timestamp::PosInfinity => Timestamp::PosInfinity,
+                Timestamp::NegInfinity => Timestamp::NegInfinity,
+            })
+        }
+
+        /// `timetz` values with any offset Postgres accepts.
+        fn pg_timetz() -> impl Strategy<Value = PgTimeTz> {
+            (pg_time_or_end_of_day(), -57_599i32..=57_599).prop_map(|(time, offset)| {
+                PgTimeTz::new(time, FixedOffset::east_opt(offset).unwrap())
+            })
+        }
+
+        /// JSON numbers: integers, finite doubles, and digits beyond 64 bits.
+        fn json_number() -> impl Strategy<Value = serde_json::Number> {
+            prop_oneof![
+                any::<i64>().prop_map(serde_json::Number::from),
+                any_f64().prop_filter_map("json numbers are finite", serde_json::Number::from_f64),
+                "-?[1-9][0-9]{18,40}(\\.[0-9]{1,20})?"
+                    .prop_map(|text| serde_json::Number::from_str(&text).unwrap()),
+            ]
+        }
+
+        /// Nested JSON documents with escaped strings and wide numbers.
+        pub(in crate::ducklake) fn json_value() -> impl Strategy<Value = serde_json::Value> {
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                json_number().prop_map(serde_json::Value::Number),
+                sql_text().prop_map(serde_json::Value::String),
+            ];
+            leaf.prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                    btree_map(sql_text(), inner, 0..4)
+                        .prop_map(|map| serde_json::Value::Object(map.into_iter().collect())),
+                ]
+            })
+        }
+
+        /// Renders `digits` as a decimal integer without leading zeros.
+        fn digits_to_integer_text(digits: &[u8]) -> String {
+            let text: String = digits
+                .iter()
+                .skip_while(|digit| **digit == 0)
+                .map(|digit| char::from(b'0' + digit))
+                .collect();
+            if text.is_empty() { "0".to_owned() } else { text }
+        }
+
+        /// `numeric(p, s)` columns that map to DuckDB `decimal(p, s)`, with
+        /// values rendered at the column scale as Postgres sends them.
+        fn decimal_case() -> BoxedStrategy<EncoderCase> {
+            (1i32..=38)
+                .prop_flat_map(|precision| (Just(precision), 0..=precision))
+                .prop_flat_map(|(precision, scale)| {
+                    let integer_digits = (precision - scale) as usize;
+                    let value = (
+                        any::<bool>(),
+                        (0..=integer_digits).prop_flat_map(|len| vec(0u8..10, len)),
+                        vec(0u8..10, scale as usize),
+                    )
+                        .prop_map(|(negative, integer, fraction)| {
+                            let integer = digits_to_integer_text(&integer);
+                            let fraction: String =
+                                fraction.iter().map(|digit| char::from(b'0' + digit)).collect();
+                            let is_zero = integer == "0" && fraction.bytes().all(|b| b == b'0');
+                            let sign = if negative && !is_zero { "-" } else { "" };
+                            let text = if fraction.is_empty() {
+                                format!("{sign}{integer}")
+                            } else {
+                                format!("{sign}{integer}.{fraction}")
+                            };
+                            Cell::Numeric(PgNumeric::from_str(&text).unwrap())
+                        });
+                    case_for(PgType::NUMERIC, numeric_typmod(precision, scale), value)
+                })
+                .boxed()
+        }
+
+        /// Numeric values for columns that DuckLake stores as `varchar`.
+        fn varchar_numeric() -> impl Strategy<Value = PgNumeric> {
+            prop_oneof![
+                Just("NaN".to_owned()),
+                Just("Infinity".to_owned()),
+                Just("-Infinity".to_owned()),
+                "-?[0-9]{1,40}(\\.[0-9]{1,40})?",
+            ]
+            .prop_map(|text| PgNumeric::from_str(&text).unwrap())
+        }
+
+        /// Every Postgres type in the DuckLake type map with codec-shaped
+        /// cells.
+        fn encoder_case() -> impl Strategy<Value = EncoderCase> {
+            let uuid = || any::<u128>().prop_map(Uuid::from_u128);
+            let bytes = || vec(any::<u8>(), 0..12);
+            Union::new(vec![
+                case_for(PgType::BOOL, -1, any::<bool>().prop_map(Cell::Bool)),
+                case_for(PgType::INT2, -1, any::<i16>().prop_map(Cell::I16)),
+                case_for(PgType::INT4, -1, any::<i32>().prop_map(Cell::I32)),
+                case_for(PgType::INT8, -1, any::<i64>().prop_map(Cell::I64)),
+                case_for(PgType::OID, -1, any::<u32>().prop_map(Cell::U32)),
+                case_for(PgType::FLOAT4, -1, any_f32().prop_map(Cell::F32)),
+                case_for(PgType::FLOAT8, -1, any_f64().prop_map(Cell::F64)),
+                decimal_case(),
+                prop_oneof![Just(-1), Just(numeric_typmod(50, 10)), Just(numeric_typmod(10, -2))]
+                    .prop_flat_map(|modifier| {
+                        case_for(
+                            PgType::NUMERIC,
+                            modifier,
+                            varchar_numeric().prop_map(Cell::Numeric),
+                        )
+                    })
+                    .boxed(),
+                case_for(PgType::TEXT, -1, sql_text().prop_map(Cell::String)),
+                case_for(PgType::DATE, -1, pg_date().prop_map(Cell::Date)),
+                case_for(PgType::TIME, -1, pg_time_or_end_of_day().prop_map(Cell::Time)),
+                case_for(PgType::TIMETZ, -1, pg_timetz().prop_map(Cell::TimeTz)),
+                case_for(PgType::TIMESTAMP, -1, pg_timestamp().prop_map(Cell::Timestamp)),
+                case_for(PgType::TIMESTAMPTZ, -1, pg_timestamptz().prop_map(Cell::TimestampTz)),
+                case_for(PgType::UUID, -1, uuid().prop_map(Cell::Uuid)),
+                case_for(PgType::JSON, -1, json_value().prop_map(Cell::Json)),
+                case_for(PgType::JSONB, -1, json_value().prop_map(Cell::Json)),
+                case_for(PgType::BYTEA, -1, bytes().prop_map(Cell::Bytes)),
+                array_case(PgType::BOOL_ARRAY, any::<bool>(), ArrayCell::Bool),
+                array_case(PgType::INT2_ARRAY, any::<i16>(), ArrayCell::I16),
+                array_case(PgType::INT4_ARRAY, any::<i32>(), ArrayCell::I32),
+                array_case(PgType::INT8_ARRAY, any::<i64>(), ArrayCell::I64),
+                array_case(PgType::OID_ARRAY, any::<u32>(), ArrayCell::U32),
+                array_case(PgType::FLOAT4_ARRAY, any_f32(), ArrayCell::F32),
+                array_case(PgType::FLOAT8_ARRAY, any_f64(), ArrayCell::F64),
+                array_case(PgType::NUMERIC_ARRAY, varchar_numeric(), ArrayCell::Numeric),
+                array_case(PgType::TEXT_ARRAY, sql_text(), ArrayCell::String),
+                array_case(PgType::DATE_ARRAY, pg_date(), ArrayCell::Date),
+                array_case(PgType::TIME_ARRAY, pg_time_or_end_of_day(), ArrayCell::Time),
+                array_case(PgType::TIMETZ_ARRAY, pg_timetz(), ArrayCell::TimeTz),
+                array_case(PgType::TIMESTAMP_ARRAY, pg_timestamp(), ArrayCell::Timestamp),
+                array_case(PgType::TIMESTAMPTZ_ARRAY, pg_timestamptz(), ArrayCell::TimestampTz),
+                array_case(PgType::UUID_ARRAY, uuid(), ArrayCell::Uuid),
+                array_case(PgType::JSON_ARRAY, json_value(), ArrayCell::Json),
+                array_case(PgType::JSONB_ARRAY, json_value(), ArrayCell::Json),
+                array_case(PgType::BYTEA_ARRAY, bytes(), ArrayCell::Bytes),
+            ])
+        }
+
+        /// Returns the readback expression that yields a comparable value for
+        /// `column`.
+        ///
+        /// UUID and JSON columns are read as text because the Rust client has
+        /// no native value for them; decimals are read as text so precisions
+        /// above the client's 28-digit decimal type stay exact. DuckDB renders
+        /// `decimal(p, p)` values without the leading zero (`.50`), so that
+        /// zero is restored to match Postgres text; codec numeric text always
+        /// has it, so `varchar` numerics are unaffected.
+        pub(in crate::ducklake) fn readback_expression(typ: &PgType, column: &str) -> String {
+            let column = crate::ducklake::sql::quote_identifier(column);
+            match *typ {
+                PgType::NUMERIC => {
+                    format!("regexp_replace(cast({column} as varchar), '^(-?)\\.', '\\10.')")
+                }
+                PgType::UUID | PgType::JSON | PgType::JSONB => {
+                    format!("cast({column} as varchar)")
+                }
+                PgType::UUID_ARRAY | PgType::JSON_ARRAY | PgType::JSONB_ARRAY => {
+                    format!("cast({column} as varchar[])")
+                }
+                _ => column,
+            }
+        }
+
+        /// Returns DuckDB's day number for a date, using its infinity
+        /// sentinels.
+        fn expected_date_days(date: &Date<NaiveDate>) -> i32 {
+            match date {
+                Date::Value(date) => date
+                    .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+                    .num_days() as i32,
+                Date::PosInfinity => i32::MAX,
+                Date::NegInfinity => -i32::MAX,
+            }
+        }
+
+        /// Returns DuckDB's microsecond value for a timestamp, using its
+        /// infinity sentinels.
+        fn expected_timestamp_micros(micros: Timestamp<i64>) -> i64 {
+            match micros {
+                Timestamp::Value(micros) => micros,
+                Timestamp::PosInfinity => i64::MAX,
+                Timestamp::NegInfinity => -i64::MAX,
+            }
+        }
+
+        /// Returns the value DuckDB must hand back for a source cell, derived
+        /// from the cell's Postgres meaning rather than from any encoder.
+        pub(in crate::ducklake) fn expected_value(cell: &Cell) -> Value {
+            let micros = |unit_micros: i64| Value::Timestamp(TimeUnit::Microsecond, unit_micros);
+            match cell {
+                Cell::Null => Value::Null,
+                Cell::Bool(value) => Value::Boolean(*value),
+                Cell::String(value) => Value::Text(value.clone()),
+                Cell::I16(value) => Value::SmallInt(*value),
+                Cell::I32(value) => Value::Int(*value),
+                Cell::U32(value) => Value::UBigInt(u64::from(*value)),
+                Cell::I64(value) => Value::BigInt(*value),
+                Cell::F32(value) => Value::Float(*value),
+                Cell::F64(value) => Value::Double(*value),
+                Cell::Numeric(value) => Value::Text(value.to_string()),
+                Cell::Date(value) => Value::Date32(expected_date_days(value)),
+                Cell::Time(PgTime::Value(value)) => Value::Time64(
+                    TimeUnit::Microsecond,
+                    (*value - NaiveTime::MIN).num_microseconds().unwrap(),
+                ),
+                Cell::Time(PgTime::EndOfDay) => {
+                    Value::Time64(TimeUnit::Microsecond, MICROS_PER_DAY)
+                }
+                Cell::TimeTz(value) => Value::Text(value.to_string()),
+                Cell::Timestamp(value) => micros(expected_timestamp_micros(match value {
+                    Timestamp::Value(value) => Timestamp::Value(value.and_utc().timestamp_micros()),
+                    Timestamp::PosInfinity => Timestamp::PosInfinity,
+                    Timestamp::NegInfinity => Timestamp::NegInfinity,
+                })),
+                Cell::TimestampTz(value) => micros(expected_timestamp_micros(match value {
+                    Timestamp::Value(value) => Timestamp::Value(value.timestamp_micros()),
+                    Timestamp::PosInfinity => Timestamp::PosInfinity,
+                    Timestamp::NegInfinity => Timestamp::NegInfinity,
+                })),
+                Cell::Uuid(value) => Value::Text(value.to_string()),
+                Cell::Json(value) => Value::Text(value.to_string()),
+                Cell::Bytes(value) => Value::Blob(value.clone()),
+                Cell::Array(array) => Value::List(
+                    array_elements(array).iter().map(expected_value).collect::<Vec<_>>(),
+                ),
+            }
+        }
+
+        /// Splits an array cell into one scalar cell per element.
+        fn array_elements(array: &ArrayCell) -> Vec<Cell> {
+            /// Maps optional elements to cells, turning `None` into NULL.
+            fn cells<T: Clone>(values: &[Option<T>], wrap: fn(T) -> Cell) -> Vec<Cell> {
+                values.iter().map(|value| value.clone().map_or(Cell::Null, wrap)).collect()
+            }
+
+            match array {
+                ArrayCell::Bool(values) => cells(values, Cell::Bool),
+                ArrayCell::String(values) => cells(values, Cell::String),
+                ArrayCell::I16(values) => cells(values, Cell::I16),
+                ArrayCell::I32(values) => cells(values, Cell::I32),
+                ArrayCell::U32(values) => cells(values, Cell::U32),
+                ArrayCell::I64(values) => cells(values, Cell::I64),
+                ArrayCell::F32(values) => cells(values, Cell::F32),
+                ArrayCell::F64(values) => cells(values, Cell::F64),
+                ArrayCell::Numeric(values) => cells(values, Cell::Numeric),
+                ArrayCell::Date(values) => cells(values, Cell::Date),
+                ArrayCell::Time(values) => cells(values, Cell::Time),
+                ArrayCell::TimeTz(values) => cells(values, Cell::TimeTz),
+                ArrayCell::Timestamp(values) => cells(values, Cell::Timestamp),
+                ArrayCell::TimestampTz(values) => cells(values, Cell::TimestampTz),
+                ArrayCell::Uuid(values) => cells(values, Cell::Uuid),
+                ArrayCell::Json(values) => cells(values, Cell::Json),
+                ArrayCell::Bytes(values) => cells(values, Cell::Bytes),
+            }
+        }
+
+        /// Compares a read-back value with the expected one: floats bit for
+        /// bit, JSON as parsed documents, and lists element by element.
+        pub(in crate::ducklake) fn values_match(
+            expected: &Value,
+            actual: &Value,
+            is_json: bool,
+        ) -> bool {
+            match (expected, actual) {
+                (Value::Float(expected), Value::Float(actual)) => f32_matches(*expected, *actual),
+                (Value::Double(expected), Value::Double(actual)) => f64_matches(*expected, *actual),
+                (Value::List(expected), Value::List(actual)) => {
+                    expected.len() == actual.len()
+                        && expected
+                            .iter()
+                            .zip(actual)
+                            .all(|(expected, actual)| values_match(expected, actual, is_json))
+                }
+                (Value::Text(expected), Value::Text(actual)) if is_json => {
+                    serde_json::from_str::<serde_json::Value>(expected).unwrap()
+                        == serde_json::from_str::<serde_json::Value>(actual).unwrap()
+                }
+                _ => expected == actual,
+            }
+        }
+
+        /// Returns the replicated schema for an `id` key plus the case column.
+        fn case_schema(case: &EncoderCase) -> ReplicatedTableSchema {
+            replicated_schema(vec![
+                ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("v".to_owned(), case.typ.clone(), case.modifier, 2, true),
+            ])
+        }
+
+        /// Loads prepared rows through a temp staging table and inserts them
+        /// into the destination, mirroring the production staging path.
+        fn load_prepared_rows(
+            conn: &duckdb::Connection,
+            table_name: &DuckLakeTableName,
+            prepared_rows: &PreparedRows,
+        ) -> Result<(), duckdb::Error> {
+            let target = crate::ducklake::sql::qualified_lake_table_name(table_name);
+            conn.execute_batch(&format!(
+                "create or replace temp table stage as select id, v from {target} limit 0;"
+            ))?;
+            match prepared_rows {
+                PreparedRows::Appender(rows) => {
+                    let mut appender = conn.appender("stage")?;
+                    for values in rows {
+                        appender.append_row(duckdb::appender_params_from_iter(values))?;
+                    }
+                    appender.flush()?;
+                }
+                PreparedRows::ArrowRecordBatch(record_batch) => {
+                    let mut appender = conn.appender("stage")?;
+                    appender.append_record_batch(record_batch.clone())?;
+                    appender.flush()?;
+                }
+                PreparedRows::SqlLiterals(rows) if rows.is_empty() => {}
+                PreparedRows::SqlLiterals(rows) => {
+                    conn.execute_batch(&format!("insert into stage values {};", rows.join(", ")))?;
+                }
+            }
+            conn.execute_batch(&format!(
+                "insert into {target} select id, v from stage; drop table stage;"
+            ))
+        }
+
+        /// Writes `rows` through one encoder path and returns the read-back
+        /// `(id, value)` pairs ordered by id.
+        fn write_and_read(
+            conn: &duckdb::Connection,
+            case: &EncoderCase,
+            schema: &ReplicatedTableSchema,
+            path: EncoderPath,
+            rows: Vec<TableRow>,
+        ) -> Result<Vec<(i32, Value)>, TestCaseError> {
+            let table_name = path.table_name();
+            let column_schemas = schema.column_schemas().cloned().collect::<Vec<_>>();
+            conn.execute_batch(&build_create_table_sql_ducklake(&table_name, &column_schemas))
+                .unwrap();
+            let prepared_rows = match path {
+                EncoderPath::SqlLiteral => PreparedRows::SqlLiterals(
+                    rows.into_iter().map(table_row_to_sql_literal).collect(),
+                ),
+                EncoderPath::Appender => PreparedRows::Appender(
+                    rows.into_iter()
+                        .map(|row| row.into_values().into_iter().map(cell_to_value).collect())
+                        .collect(),
+                ),
+                EncoderPath::Copy => prepare_copy_rows(schema, rows).unwrap(),
+            };
+            load_prepared_rows(conn, &table_name, &prepared_rows).map_err(|error| {
+                TestCaseError::fail(format!("{path:?} write of {:?} failed: {error}", case.typ))
+            })?;
+            let mut statement = conn
+                .prepare(&format!(
+                    "select id, {} from {} order by id",
+                    readback_expression(&case.typ, "v"),
+                    crate::ducklake::sql::qualified_lake_table_name(&table_name)
+                ))
+                .unwrap();
+            Ok(statement
+                .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Value>(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap())
+        }
+
+        /// Checks that every encoder path stores each cell unchanged.
+        fn check_encoders_agree(case: &EncoderCase) -> Result<(), TestCaseError> {
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            conn.execute_batch("attach ':memory:' as lake;").unwrap();
+            let schema = case_schema(case);
+            let is_json = matches!(
+                case.typ,
+                PgType::JSON | PgType::JSONB | PgType::JSON_ARRAY | PgType::JSONB_ARRAY
+            );
+            let rows = case
+                .cells
+                .iter()
+                .enumerate()
+                .map(|(id, cell)| (id as i32, cell))
+                .collect::<Vec<_>>();
+
+            for path in [EncoderPath::SqlLiteral, EncoderPath::Appender, EncoderPath::Copy] {
+                // Production never appends cells that need SQL literals, so the
+                // appender path only sees cells `prepare_rows` would append.
+                let path_rows = rows
+                    .iter()
+                    .filter(|(_, cell)| {
+                        !matches!(path, EncoderPath::Appender) || !cell_requires_sql_literals(cell)
+                    })
+                    .collect::<Vec<_>>();
+                let table_rows = path_rows
+                    .iter()
+                    .map(|(id, cell)| TableRow::new(vec![Cell::I32(*id), cell_to_owned(cell)]))
+                    .collect();
+                let stored = write_and_read(&conn, case, &schema, path, table_rows)?;
+
+                prop_assert_eq!(
+                    stored.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    path_rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                    "{:?} stored a different row set",
+                    path
+                );
+                for ((id, actual), (_, cell)) in stored.iter().zip(&path_rows) {
+                    let expected = expected_value(cell);
+                    prop_assert!(
+                        values_match(&expected, actual, is_json),
+                        "{path:?} row {id} of {:?}: wrote {cell:?}, expected {expected:?}, read \
+                         {actual:?}",
+                        case.typ
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn sql_literal_appender_and_copy_encoders_store_the_same_value() {
+            run_property("ducklake_encoders_agree", &encoder_case(), check_encoders_agree);
+        }
+
+        #[test]
+        fn sql_literal_encoder_stores_floats_bit_exact() {
+            let float_case = Union::new(vec![
+                case_for(PgType::FLOAT4, -1, any_f32().prop_map(Cell::F32)),
+                case_for(PgType::FLOAT8, -1, any_f64().prop_map(Cell::F64)),
+                array_case(PgType::FLOAT4_ARRAY, any_f32(), ArrayCell::F32),
+                array_case(PgType::FLOAT8_ARRAY, any_f64(), ArrayCell::F64),
+            ]);
+            run_property("ducklake_float_sql_literal_encoder", &float_case, check_encoders_agree);
+        }
+
+        #[test]
+        fn float4_array_sql_literal_accepts_tiny_and_large_elements() {
+            // As plain decimals, the tiny element types the list as a DECIMAL
+            // with too few integer digits for 100000, so the insert fails.
+            let case = EncoderCase {
+                typ: PgType::FLOAT4_ARRAY,
+                modifier: -1,
+                cells: vec![Cell::Array(ArrayCell::F32(vec![
+                    Some(1.234_567_8e-20),
+                    Some(100_000.0),
+                ]))],
+            };
+            check_encoders_agree(&case).unwrap();
         }
     }
 }

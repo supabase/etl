@@ -572,4 +572,749 @@ mod tests {
             assert!(bytes.windows(value.len()).any(|bytes| bytes == value.as_bytes()));
         }
     }
+
+    /// Encoder and writer-descriptor agreement for every supported source
+    /// type.
+    ///
+    /// BigQuery decodes each appended row with the writer descriptor built by
+    /// [`column_schemas_to_table_descriptor`], not with the encoder's intent. A
+    /// field whose number, wire type, or integer width disagrees with its
+    /// descriptor entry is rejected or, worse, silently reinterpreted (an
+    /// over-long varint read as `int32` keeps only the low 32 bits). The
+    /// encoder, descriptor, and DDL mappings are maintained by hand, so these
+    /// properties decode every generated row the way BigQuery would and require
+    /// the original cell back.
+    mod wire_properties {
+        use std::{collections::BTreeMap, sync::Arc};
+
+        use chrono::{DateTime, Datelike, NaiveDate, NaiveTime};
+        use etl::{
+            data::ArrayCell,
+            error::ErrorKind,
+            schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
+            test_utils::{
+                property::{
+                    any_f32, any_f64, f32_matches, f64_matches, pg_text, pg_time, run_property,
+                },
+                replication_stream::parse_text_cell,
+            },
+        };
+        use gcp_bigquery_client::storage::{ColumnMode, ColumnType, FieldDescriptor};
+        use proptest::{
+            collection::{btree_map, vec},
+            option,
+            prelude::*,
+            strategy::Union,
+        };
+        use prost::{
+            bytes::Buf,
+            encoding::{WireType, decode_key, decode_varint},
+        };
+
+        use super::*;
+        use crate::bigquery::{
+            BIGQUERY_COLUMN_NAME_MAPPING, schema::column_schemas_to_table_descriptor,
+        };
+
+        /// Scalar source types with a dedicated text-codec mapping, plus `text`
+        /// for the string fallback every other type uses.
+        const SCALAR_TYPES: &[Type] = &[
+            Type::BOOL,
+            Type::INT2,
+            Type::INT4,
+            Type::INT8,
+            Type::FLOAT4,
+            Type::FLOAT8,
+            Type::NUMERIC,
+            Type::BYTEA,
+            Type::DATE,
+            Type::TIME,
+            Type::TIMETZ,
+            Type::TIMESTAMP,
+            Type::TIMESTAMPTZ,
+            Type::UUID,
+            Type::JSON,
+            Type::JSONB,
+            Type::OID,
+            Type::TEXT,
+        ];
+
+        /// Array source types paired with their element types.
+        const ARRAY_TYPES: &[(Type, Type)] = &[
+            (Type::BOOL_ARRAY, Type::BOOL),
+            (Type::INT2_ARRAY, Type::INT2),
+            (Type::INT4_ARRAY, Type::INT4),
+            (Type::INT8_ARRAY, Type::INT8),
+            (Type::FLOAT4_ARRAY, Type::FLOAT4),
+            (Type::FLOAT8_ARRAY, Type::FLOAT8),
+            (Type::NUMERIC_ARRAY, Type::NUMERIC),
+            (Type::BYTEA_ARRAY, Type::BYTEA),
+            (Type::DATE_ARRAY, Type::DATE),
+            (Type::TIME_ARRAY, Type::TIME),
+            (Type::TIMETZ_ARRAY, Type::TIMETZ),
+            (Type::TIMESTAMP_ARRAY, Type::TIMESTAMP),
+            (Type::TIMESTAMPTZ_ARRAY, Type::TIMESTAMPTZ),
+            (Type::UUID_ARRAY, Type::UUID),
+            (Type::JSON_ARRAY, Type::JSON),
+            (Type::JSONB_ARRAY, Type::JSONB),
+            (Type::OID_ARRAY, Type::OID),
+            (Type::TEXT_ARRAY, Type::TEXT),
+            (Type::VARCHAR_ARRAY, Type::VARCHAR),
+        ];
+
+        /// Sequence number appended to every generated row.
+        const SEQUENCE_NUMBER: &str = "0000000000000001/0000000000000000/0000000000000000";
+
+        /// Maximum timezone offset Postgres accepts, exclusive, in seconds.
+        const MAX_OFFSET_SECONDS: i32 = 16 * 60 * 60;
+
+        /// One generated column: its source type, Postgres text output (or
+        /// `None` for SQL NULL), and declared nullability.
+        type GeneratedColumn = (Type, Option<String>, bool);
+
+        /// One raw protobuf field payload, split by wire type.
+        #[derive(Debug)]
+        enum Payload {
+            /// A varint-encoded scalar.
+            Varint(u64),
+            /// A little-endian 32-bit scalar.
+            Fixed32(u32),
+            /// A little-endian 64-bit scalar.
+            Fixed64(u64),
+            /// A length-delimited payload: string, bytes, or a packed run.
+            Delimited(Vec<u8>),
+        }
+
+        /// Returns the element type of a supported array type.
+        fn array_element_type(typ: &Type) -> Option<&'static Type> {
+            ARRAY_TYPES.iter().find(|(array, _)| array == typ).map(|(_, element)| element)
+        }
+
+        /// Renders a calendar date as Postgres prints it, with an era suffix
+        /// for years before 1 AD.
+        fn render_date(date: NaiveDate) -> (String, &'static str) {
+            let year = date.year();
+            let (year, era) = if year <= 0 { (1 - year, " BC") } else { (year, "") };
+
+            (format!("{year:04}-{:02}-{:02}", date.month(), date.day()), era)
+        }
+
+        /// Renders a UTC offset as Postgres prints it: `+HH`, `+HH:MM`, or
+        /// `+HH:MM:SS`.
+        fn render_offset(seconds: i32) -> String {
+            let sign = if seconds < 0 { '-' } else { '+' };
+            let seconds = seconds.unsigned_abs();
+            let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+
+            match (minutes, seconds) {
+                (0, 0) => format!("{sign}{hours:02}"),
+                (_, 0) => format!("{sign}{hours:02}:{minutes:02}"),
+                _ => format!("{sign}{hours:02}:{minutes:02}:{seconds:02}"),
+            }
+        }
+
+        /// Renders a time of day as Postgres prints it.
+        fn render_time(time: NaiveTime) -> String {
+            time.format("%H:%M:%S%.f").to_string()
+        }
+
+        /// Calendar dates inside both the Postgres and chrono ranges, biased
+        /// toward BigQuery's 0001-9999 range.
+        ///
+        /// Postgres starts at 4713-11-24 BC. Its upper bound is beyond
+        /// chrono's, so the generator stops two days short of chrono's maximum
+        /// to leave room for UTC offsets.
+        fn pg_date() -> impl Strategy<Value = NaiveDate> {
+            let day = |date: NaiveDate| date.num_days_from_ce();
+            let postgres_min = NaiveDate::from_ymd_opt(-4712, 11, 24).unwrap();
+            let chrono_max = NaiveDate::MAX.pred_opt().unwrap().pred_opt().unwrap();
+            let common_min = NaiveDate::from_ymd_opt(1, 1, 1).unwrap();
+            let common_max = NaiveDate::from_ymd_opt(9999, 12, 31).unwrap();
+
+            prop_oneof![
+                3 => day(common_min)..=day(common_max),
+                1 => day(postgres_min)..=day(chrono_max),
+            ]
+            .prop_map(|days| NaiveDate::from_num_days_from_ce_opt(days).unwrap())
+        }
+
+        /// UTC offsets inside the Postgres limit, biased toward whole hours.
+        fn pg_offset_seconds() -> impl Strategy<Value = i32> {
+            prop_oneof![
+                2 => (-15i32..=15).prop_map(|hours| hours * 3600),
+                1 => (1 - MAX_OFFSET_SECONDS)..MAX_OFFSET_SECONDS,
+            ]
+        }
+
+        /// Arbitrary JSON documents, with numbers kept as their source text.
+        fn json_value() -> impl Strategy<Value = serde_json::Value> {
+            let number = "-?(0|[1-9][0-9]{0,20})(\\.[0-9]{1,10})?([eE][+-]?[0-9]{1,3})?"
+                .prop_map(|number| serde_json::Value::Number(number.parse().unwrap()));
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                number,
+                pg_text().prop_map(serde_json::Value::String),
+            ];
+
+            leaf.prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                    btree_map(pg_text(), inner, 0..4)
+                        .prop_map(|map| serde_json::Value::Object(map.into_iter().collect())),
+                ]
+            })
+        }
+
+        /// Adds the `infinity` and `-infinity` literals to finite temporal
+        /// text.
+        fn with_infinities(
+            finite: impl Strategy<Value = String> + 'static,
+        ) -> BoxedStrategy<String> {
+            prop_oneof![
+                8 => finite,
+                1 => Just("infinity".to_owned()),
+                1 => Just("-infinity".to_owned()),
+            ]
+            .boxed()
+        }
+
+        /// Renders a numeric literal as Postgres prints it, which has no
+        /// negative zero.
+        fn render_numeric(sign: &str, integer: &str, fraction: Option<&str>) -> String {
+            let zero =
+                integer.bytes().chain(fraction.unwrap_or("").bytes()).all(|digit| digit == b'0');
+            let sign = if zero { "" } else { sign };
+
+            match fraction {
+                Some(fraction) => format!("{sign}{integer}.{fraction}"),
+                None => format!("{sign}{integer}"),
+            }
+        }
+
+        /// Postgres `numeric` output, including the special values.
+        fn numeric_text() -> BoxedStrategy<String> {
+            let finite = ("-?", "0|[1-9][0-9]{0,40}", option::of("[0-9]{1,40}")).prop_map(
+                |(sign, integer, fraction)| render_numeric(&sign, &integer, fraction.as_deref()),
+            );
+
+            prop_oneof![
+                8 => finite,
+                1 => Just("NaN".to_owned()),
+                1 => Just("Infinity".to_owned()),
+                1 => Just("-Infinity".to_owned()),
+            ]
+            .boxed()
+        }
+
+        /// Postgres text output for one value of a scalar type.
+        fn scalar_text(typ: &Type) -> BoxedStrategy<String> {
+            match *typ {
+                Type::BOOL => prop_oneof![Just("t"), Just("f")].prop_map(str::to_owned).boxed(),
+                Type::INT2 => any::<i16>().prop_map(|value| value.to_string()).boxed(),
+                Type::INT4 => any::<i32>().prop_map(|value| value.to_string()).boxed(),
+                Type::INT8 => any::<i64>().prop_map(|value| value.to_string()).boxed(),
+                Type::OID => any::<u32>().prop_map(|value| value.to_string()).boxed(),
+                Type::FLOAT4 => any_f32()
+                    .prop_map(|value| render_float(f64::from(value), || format!("{value:?}")))
+                    .boxed(),
+                Type::FLOAT8 => {
+                    any_f64().prop_map(|value| render_float(value, || format!("{value:?}"))).boxed()
+                }
+                Type::NUMERIC => numeric_text(),
+                Type::BYTEA => vec(any::<u8>(), 0..16)
+                    .prop_map(|bytes| {
+                        let hex = bytes.iter().map(|byte| format!("{byte:02x}"));
+                        format!("\\x{}", hex.collect::<String>())
+                    })
+                    .boxed(),
+                Type::DATE => with_infinities(pg_date().prop_map(|date| {
+                    let (date, era) = render_date(date);
+                    format!("{date}{era}")
+                })),
+                Type::TIME => prop_oneof![
+                    16 => pg_time().prop_map(render_time),
+                    1 => Just("24:00:00".to_owned()),
+                ]
+                .boxed(),
+                Type::TIMETZ => (pg_time(), pg_offset_seconds())
+                    .prop_map(|(time, offset)| {
+                        format!("{}{}", render_time(time), render_offset(offset))
+                    })
+                    .boxed(),
+                Type::TIMESTAMP => {
+                    with_infinities((pg_date(), pg_time()).prop_map(|(date, time)| {
+                        let (date, era) = render_date(date);
+                        format!("{date} {}{era}", render_time(time))
+                    }))
+                }
+                Type::TIMESTAMPTZ => with_infinities(
+                    (pg_date(), pg_time(), pg_offset_seconds()).prop_map(|(date, time, offset)| {
+                        let (date, era) = render_date(date);
+                        format!("{date} {}{}{era}", render_time(time), render_offset(offset))
+                    }),
+                ),
+                Type::UUID => {
+                    any::<u128>().prop_map(|value| uuid::Uuid::from_u128(value).to_string()).boxed()
+                }
+                Type::JSON | Type::JSONB => {
+                    json_value().prop_map(|value| value.to_string()).boxed()
+                }
+                _ => pg_text().boxed(),
+            }
+        }
+
+        /// Renders a float as Postgres prints it, using `finite` for finite
+        /// values.
+        fn render_float(value: f64, finite: impl FnOnce() -> String) -> String {
+            if value.is_nan() {
+                "NaN".to_owned()
+            } else if value == f64::INFINITY {
+                "Infinity".to_owned()
+            } else if value == f64::NEG_INFINITY {
+                "-Infinity".to_owned()
+            } else {
+                finite()
+            }
+        }
+
+        /// Postgres array-literal output for a one-dimensional array, quoting
+        /// every element so element text never needs Postgres's own quoting
+        /// rules.
+        fn array_text(element: &Type) -> BoxedStrategy<String> {
+            vec(option::weighted(0.95, scalar_text(element)), 0..4)
+                .prop_map(|elements| {
+                    let mut text = String::from("{");
+                    for (index, element) in elements.iter().enumerate() {
+                        if index > 0 {
+                            text.push(',');
+                        }
+                        let Some(element) = element else {
+                            text.push_str("NULL");
+                            continue;
+                        };
+                        text.push('"');
+                        for ch in element.chars() {
+                            if matches!(ch, '"' | '\\') {
+                                text.push('\\');
+                            }
+                            text.push(ch);
+                        }
+                        text.push('"');
+                    }
+                    text.push('}');
+                    text
+                })
+                .boxed()
+        }
+
+        /// One column of any supported type, with optional NULL and a
+        /// nullability flag.
+        fn generated_column() -> impl Strategy<Value = GeneratedColumn> {
+            let scalars = SCALAR_TYPES
+                .iter()
+                .map(|typ| (Just(typ.clone()), option::weighted(0.9, scalar_text(typ))).boxed());
+            let arrays = ARRAY_TYPES.iter().map(|(array, element)| {
+                (Just(array.clone()), option::weighted(0.9, array_text(element))).boxed()
+            });
+
+            (Union::new(scalars.chain(arrays)), any::<bool>())
+                .prop_map(|((typ, text), nullable)| (typ, text, nullable))
+        }
+
+        /// Builds a replicated schema whose column `i` has the generated type
+        /// and is nullable when declared so or when the value is NULL.
+        fn schema_for(columns: &[GeneratedColumn]) -> ReplicatedTableSchema {
+            let column_schemas = columns
+                .iter()
+                .enumerate()
+                .map(|(index, (typ, text, nullable))| {
+                    ColumnSchema::new(
+                        format!("c{index}"),
+                        typ.clone(),
+                        -1,
+                        index as i32 + 1,
+                        *nullable || text.is_none(),
+                    )
+                })
+                .collect();
+
+            ReplicatedTableSchema::all(Arc::new(TableSchema::new(
+                TableId::new(1),
+                TableName::new("public".to_owned(), "wire".to_owned()),
+                column_schemas,
+            )))
+        }
+
+        /// Returns the error kind the encoder must report for a cell it cannot
+        /// represent, in encoding order.
+        fn expected_encoding_error(cell: &Cell) -> Option<ErrorKind> {
+            /// Classifies one timestamp with time zone value.
+            fn timestamptz(value: &Timestamp<DateTime<Utc>>) -> Option<ErrorKind> {
+                matches!(value, Timestamp::PosInfinity | Timestamp::NegInfinity)
+                    .then_some(ErrorKind::ConversionError)
+            }
+
+            let null_element = ErrorKind::NullValuesNotSupportedInArrayInDestination;
+            match cell {
+                Cell::TimestampTz(value) => timestamptz(value),
+                Cell::Array(ArrayCell::TimestampTz(values)) => values
+                    .iter()
+                    .find_map(|value| value.as_ref().map_or(Some(null_element), timestamptz)),
+                Cell::Array(array) => array_elements(array).contains(&None).then_some(null_element),
+                _ => None,
+            }
+        }
+
+        /// Splits an array cell into scalar cells, keeping NULL elements as
+        /// `None`.
+        fn array_elements(array: &ArrayCell) -> Vec<Option<Cell>> {
+            /// Maps every element through a scalar cell constructor.
+            fn map<T: Clone>(values: &[Option<T>], cell: fn(T) -> Cell) -> Vec<Option<Cell>> {
+                values.iter().map(|value| value.clone().map(cell)).collect()
+            }
+
+            match array {
+                ArrayCell::Bool(values) => map(values, Cell::Bool),
+                ArrayCell::String(values) => map(values, Cell::String),
+                ArrayCell::I16(values) => map(values, Cell::I16),
+                ArrayCell::I32(values) => map(values, Cell::I32),
+                ArrayCell::U32(values) => map(values, Cell::U32),
+                ArrayCell::I64(values) => map(values, Cell::I64),
+                ArrayCell::F32(values) => map(values, Cell::F32),
+                ArrayCell::F64(values) => map(values, Cell::F64),
+                ArrayCell::Numeric(values) => map(values, Cell::Numeric),
+                ArrayCell::Date(values) => map(values, Cell::Date),
+                ArrayCell::Time(values) => map(values, Cell::Time),
+                ArrayCell::TimeTz(values) => map(values, Cell::TimeTz),
+                ArrayCell::Timestamp(values) => map(values, Cell::Timestamp),
+                ArrayCell::TimestampTz(values) => map(values, Cell::TimestampTz),
+                ArrayCell::Uuid(values) => map(values, Cell::Uuid),
+                ArrayCell::Json(values) => map(values, Cell::Json),
+                ArrayCell::Bytes(values) => map(values, Cell::Bytes),
+            }
+        }
+
+        /// Compares cells, treating floats bit-for-bit and every NaN as equal.
+        fn cells_match(expected: &Cell, actual: &Cell) -> bool {
+            match (expected, actual) {
+                (Cell::F32(expected), Cell::F32(actual)) => f32_matches(*expected, *actual),
+                (Cell::F64(expected), Cell::F64(actual)) => f64_matches(*expected, *actual),
+                _ => expected == actual,
+            }
+        }
+
+        /// Splits an encoded row into raw fields with prost's wire decoder.
+        fn decode_fields(mut buf: &[u8]) -> Result<Vec<(u32, Payload)>, TestCaseError> {
+            let mut fields = Vec::new();
+            while !buf.is_empty() {
+                let (tag, wire_type) = decode_key(&mut buf)
+                    .map_err(|err| TestCaseError::fail(format!("invalid key: {err}")))?;
+                let payload = match wire_type {
+                    WireType::Varint => Payload::Varint(decode_varint(&mut buf).unwrap()),
+                    WireType::ThirtyTwoBit => Payload::Fixed32(buf.get_u32_le()),
+                    WireType::SixtyFourBit => Payload::Fixed64(buf.get_u64_le()),
+                    WireType::LengthDelimited => {
+                        let len = usize::try_from(decode_varint(&mut buf).unwrap()).unwrap();
+                        prop_assert!(len <= buf.len(), "field {tag} overruns the row");
+                        let (payload, rest) = buf.split_at(len);
+                        buf = rest;
+                        Payload::Delimited(payload.to_vec())
+                    }
+                    other => {
+                        return Err(TestCaseError::fail(format!(
+                            "field {tag} uses unsupported wire type {other:?}"
+                        )));
+                    }
+                };
+                fields.push((tag, payload));
+            }
+
+            Ok(fields)
+        }
+
+        /// Returns whether a payload's wire type is what a protobuf parser
+        /// accepts for the descriptor field, including packed repeated
+        /// scalars.
+        fn wire_type_matches(field: &FieldDescriptor, payload: &Payload) -> bool {
+            let repeated = matches!(field.mode, ColumnMode::Repeated);
+            match (field.typ, payload) {
+                (ColumnType::Bool | ColumnType::Int32 | ColumnType::Int64, Payload::Varint(_))
+                | (ColumnType::Float, Payload::Fixed32(_))
+                | (ColumnType::Double, Payload::Fixed64(_))
+                | (ColumnType::String | ColumnType::Bytes, Payload::Delimited(_)) => true,
+                (
+                    ColumnType::Bool | ColumnType::Int32 | ColumnType::Int64,
+                    Payload::Delimited(_),
+                ) => repeated,
+                (ColumnType::Float, Payload::Delimited(bytes)) => repeated && bytes.len() % 4 == 0,
+                (ColumnType::Double, Payload::Delimited(bytes)) => repeated && bytes.len() % 8 == 0,
+                _ => false,
+            }
+        }
+
+        /// One decoded element before it is given a source type.
+        enum Element {
+            /// A varint read as the descriptor's integer type would read it.
+            Varint(u64),
+            /// A `float` value.
+            Float(f32),
+            /// A `double` value.
+            Double(f64),
+            /// A string or bytes payload.
+            Bytes(Vec<u8>),
+        }
+
+        /// Splits a field's payloads into elements, unpacking packed runs.
+        fn elements(field: &FieldDescriptor, payloads: &[&Payload]) -> Vec<Element> {
+            let mut elements = Vec::new();
+            for payload in payloads {
+                match (field.typ, payload) {
+                    (_, Payload::Varint(value)) => elements.push(Element::Varint(*value)),
+                    (_, Payload::Fixed32(bits)) => {
+                        elements.push(Element::Float(f32::from_bits(*bits)));
+                    }
+                    (_, Payload::Fixed64(bits)) => {
+                        elements.push(Element::Double(f64::from_bits(*bits)));
+                    }
+                    (ColumnType::String | ColumnType::Bytes, Payload::Delimited(bytes)) => {
+                        elements.push(Element::Bytes(bytes.clone()));
+                    }
+                    (ColumnType::Float, Payload::Delimited(bytes)) => {
+                        elements.extend(bytes.chunks_exact(4).map(|chunk| {
+                            Element::Float(f32::from_le_bytes(chunk.try_into().unwrap()))
+                        }));
+                    }
+                    (ColumnType::Double, Payload::Delimited(bytes)) => {
+                        elements.extend(bytes.chunks_exact(8).map(|chunk| {
+                            Element::Double(f64::from_le_bytes(chunk.try_into().unwrap()))
+                        }));
+                    }
+                    (_, Payload::Delimited(bytes)) => {
+                        let mut bytes = bytes.as_slice();
+                        while !bytes.is_empty() {
+                            elements.push(Element::Varint(decode_varint(&mut bytes).unwrap()));
+                        }
+                    }
+                }
+            }
+
+            elements
+        }
+
+        /// Rewrites astronomical year numbering (`-0043-03-15`) into the
+        /// Postgres era form (`0044-03-15 BC`) so the etl text parser can read
+        /// the encoder's documented date format back.
+        fn astronomical_to_era(value: &str) -> String {
+            let (negative, rest) =
+                value.strip_prefix('-').map_or((false, value), |rest| (true, rest));
+            let Some((year, tail)) = rest.split_once('-') else {
+                return value.to_owned();
+            };
+            let Ok(year) = year.parse::<i64>() else {
+                return value.to_owned();
+            };
+            let year = if negative { -year } else { year };
+
+            if year <= 0 {
+                format!("{:04}-{tail} BC", 1 - year)
+            } else {
+                format!("{year:04}-{tail}")
+            }
+        }
+
+        /// Reads one element the way BigQuery reads the descriptor type, then
+        /// gives it the source element type.
+        fn element_cell(
+            field: &FieldDescriptor,
+            typ: &Type,
+            element: Element,
+        ) -> Result<Cell, String> {
+            let cell = match (field.typ, typ, element) {
+                (ColumnType::Bool, &Type::BOOL, Element::Varint(value)) => Cell::Bool(value != 0),
+                (ColumnType::Int32 | ColumnType::Int64, typ, Element::Varint(value)) => {
+                    // Protobuf `int32` keeps the low 32 bits of the varint and
+                    // `int64` all 64; the source type then decides whether the
+                    // value fits.
+                    let value = if matches!(field.typ, ColumnType::Int32) {
+                        i64::from(value as i32)
+                    } else {
+                        value as i64
+                    };
+                    let out_of_range = || format!("{value} is out of range for {typ}");
+                    match *typ {
+                        Type::INT2 => Cell::I16(i16::try_from(value).map_err(|_| out_of_range())?),
+                        Type::INT4 => Cell::I32(i32::try_from(value).map_err(|_| out_of_range())?),
+                        Type::INT8 => Cell::I64(value),
+                        Type::OID => Cell::U32(u32::try_from(value).map_err(|_| out_of_range())?),
+                        Type::TIMESTAMPTZ => Cell::TimestampTz(Timestamp::Value(
+                            DateTime::from_timestamp_micros(value).ok_or_else(out_of_range)?,
+                        )),
+                        _ => {
+                            return Err(format!(
+                                "descriptor type {:?} cannot carry {typ}",
+                                field.typ
+                            ));
+                        }
+                    }
+                }
+                (ColumnType::Float, &Type::FLOAT4, Element::Float(value)) => Cell::F32(value),
+                (ColumnType::Double, &Type::FLOAT8, Element::Double(value)) => Cell::F64(value),
+                (ColumnType::Bytes, &Type::BYTEA, Element::Bytes(bytes)) => Cell::Bytes(bytes),
+                (ColumnType::String, typ, Element::Bytes(bytes)) => {
+                    let text =
+                        String::from_utf8(bytes).map_err(|err| format!("invalid utf-8: {err}"))?;
+                    let text = if matches!(*typ, Type::DATE | Type::TIMESTAMP) {
+                        astronomical_to_era(&text)
+                    } else {
+                        text
+                    };
+                    parse_text_cell(typ, &text)
+                        .map_err(|err| format!("{text:?} does not re-parse as {typ}: {err}"))?
+                }
+                (column_type, typ, _) => {
+                    return Err(format!("descriptor type {column_type:?} cannot carry {typ}"));
+                }
+            };
+
+            Ok(cell)
+        }
+
+        /// Checks one encoded row against a writer descriptor and decodes each
+        /// source column back to its cell.
+        fn check_row_against_descriptor(
+            schema: &ReplicatedTableSchema,
+            cells: &[Cell],
+            fields: &[(u32, Payload)],
+            allow_missing_columns: bool,
+        ) -> Result<(), TestCaseError> {
+            let descriptor = column_schemas_to_table_descriptor(schema, allow_missing_columns);
+            let column_count = cells.len();
+            prop_assert_eq!(descriptor.field_descriptors.len(), column_count + 2);
+
+            let mut payloads_by_number: BTreeMap<u32, Vec<&Payload>> = BTreeMap::new();
+            for (number, payload) in fields {
+                let field =
+                    descriptor.field_descriptors.iter().find(|field| field.number == *number);
+                let Some(field) = field else {
+                    return Err(TestCaseError::fail(format!(
+                        "field {number} is not in the descriptor"
+                    )));
+                };
+                prop_assert!(
+                    wire_type_matches(field, payload),
+                    "field {} ({:?} {:?}) carries {:?}",
+                    number,
+                    field.typ,
+                    field.mode,
+                    payload
+                );
+                payloads_by_number.entry(*number).or_default().push(payload);
+            }
+
+            for (index, field) in descriptor.field_descriptors.iter().enumerate() {
+                prop_assert_eq!(field.number as usize, index + 1);
+                let payloads = payloads_by_number.remove(&field.number).unwrap_or_default();
+                let repeated = matches!(field.mode, ColumnMode::Repeated);
+                prop_assert!(repeated || payloads.len() <= 1, "field {} repeats", field.number);
+                prop_assert!(
+                    !matches!(field.mode, ColumnMode::Required) || !payloads.is_empty(),
+                    "required field {} is missing",
+                    field.number
+                );
+
+                let Some(column) = schema.column_schemas().nth(index) else {
+                    // CDC metadata columns are strings.
+                    let expected = if index == column_count { "UPSERT" } else { SEQUENCE_NUMBER };
+                    prop_assert!(matches!(field.typ, ColumnType::String));
+                    let elements = elements(field, &payloads);
+                    let value = match elements.as_slice() {
+                        [Element::Bytes(bytes)] => bytes.as_slice(),
+                        _ => &[],
+                    };
+                    prop_assert_eq!(value, expected.as_bytes());
+                    continue;
+                };
+                prop_assert_eq!(&field.name, &BIGQUERY_COLUMN_NAME_MAPPING.map_name(&column.name));
+
+                let element_type = array_element_type(&column.typ).unwrap_or(&column.typ);
+                let decoded = elements(field, &payloads)
+                    .into_iter()
+                    .map(|element| element_cell(field, element_type, element))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| {
+                        TestCaseError::fail(format!("column {index} ({}): {err}", column.typ))
+                    })?;
+
+                let expected = match &cells[index] {
+                    Cell::Array(array) => array_elements(array).into_iter().flatten().collect(),
+                    // BigQuery repeated fields cannot be NULL, so a NULL array
+                    // is stored as an empty array by design.
+                    Cell::Null => Vec::new(),
+                    cell => vec![cell.clone()],
+                };
+                prop_assert!(
+                    expected.len() == decoded.len()
+                        && expected
+                            .iter()
+                            .zip(&decoded)
+                            .all(|(expected, actual)| cells_match(expected, actual)),
+                    "column {} ({}) encoded {:?} but BigQuery reads {:?}",
+                    index,
+                    column.typ,
+                    cells[index],
+                    decoded
+                );
+            }
+
+            Ok(())
+        }
+
+        /// Every field of an encoded upsert row is declared by the writer
+        /// descriptor with a matching wire type, and reading it as BigQuery
+        /// does yields the original cell, for streaming and copy descriptors.
+        #[test]
+        fn encoded_rows_agree_with_writer_descriptor() {
+            run_property(
+                "bigquery_encoded_rows_agree_with_writer_descriptor",
+                &vec(generated_column(), 1..5),
+                |columns| {
+                    let mut cells = Vec::with_capacity(columns.len());
+                    for (typ, text, _) in columns {
+                        let cell = match text {
+                            Some(text) => parse_text_cell(typ, text).map_err(|err| {
+                                TestCaseError::fail(format!("codec rejected {typ} {text:?}: {err}"))
+                            })?,
+                            None => Cell::Null,
+                        };
+                        cells.push(cell);
+                    }
+                    let schema = schema_for(columns);
+
+                    let mut values = cells.clone();
+                    values.push(Cell::String("UPSERT".to_owned()));
+                    values.push(Cell::String(SEQUENCE_NUMBER.to_owned()));
+                    let result = BigQueryTableRow::try_from(TableRow::new(values));
+
+                    if let Some(kind) = cells.iter().find_map(expected_encoding_error) {
+                        let Err(err) = result else {
+                            return Err(TestCaseError::fail(format!(
+                                "expected {kind:?} for {cells:?}"
+                            )));
+                        };
+                        prop_assert_eq!(err.kind(), kind);
+                        return Ok(());
+                    }
+
+                    let row = result.map_err(|err| TestCaseError::fail(format!("{err}")))?;
+                    let bytes = row.encode_to_vec();
+                    prop_assert_eq!(bytes.len(), row.encoded_len());
+                    let fields = decode_fields(&bytes)?;
+
+                    check_row_against_descriptor(&schema, &cells, &fields, true)?;
+                    check_row_against_descriptor(&schema, &cells, &fields, false)
+                },
+            );
+        }
+    }
 }

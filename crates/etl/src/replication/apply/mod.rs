@@ -499,6 +499,15 @@ struct ApplyLoopState {
     next_tx_ordinal: u64,
     /// Whether the loop is draining buffered destination work for shutdown.
     draining_for_shutdown: bool,
+    /// Whether shutdown abandoned destination work the destination never
+    /// completed, because draining is disabled.
+    ///
+    /// While set, the loop is not quiescent, so a status update would report
+    /// the last flush LSN and the abandoned events replay on the next start.
+    /// The loop exits right after abandoning and teardown sends no final
+    /// update, so this is a safety net for any later feedback path rather than
+    /// something a current path reads.
+    abandoned_work_for_shutdown: bool,
     /// The deadline by which the current batch must be flushed.
     flush_deadline: Option<Instant>,
     /// Destination write result waiting to advance the last flush LSN.
@@ -546,6 +555,7 @@ impl ApplyLoopState {
             current_tx_events: 0,
             next_tx_ordinal: 0,
             draining_for_shutdown: false,
+            abandoned_work_for_shutdown: false,
             flush_deadline: None,
             pending_flush_result: None,
             exit_intent: None,
@@ -637,10 +647,15 @@ impl ApplyLoopState {
     /// durability at any keepalive. `Some` guarantees at least that window
     /// before a later keepalive can force durability. The loop remains
     /// non-quiescent until that result confirms durability.
+    ///
+    /// Work abandoned at shutdown also keeps the loop non-quiescent: its
+    /// events were received but never confirmed written, so the received LSN
+    /// is not a safe replay frontier.
     fn is_quiescent(&self) -> bool {
         !self.handling_transaction()
             && !self.has_unresolved_batch_work()
             && self.last_commit_end_lsn.is_none()
+            && !self.abandoned_work_for_shutdown
     }
 
     /// Returns whether a keepalive may settle an accepted commit without
@@ -782,6 +797,35 @@ impl ApplyLoopState {
     /// Stops active intake and starts draining buffered shutdown work.
     fn start_draining_for_shutdown(&mut self) {
         self.draining_for_shutdown = true;
+    }
+
+    /// Abandons buffered and in-flight destination work at shutdown and
+    /// returns how many buffered events were discarded.
+    ///
+    /// This is the shutdown path when draining is disabled. The destination
+    /// never received the buffered events, and the pending write result is
+    /// dropped unobserved, so nothing about either may be acknowledged: the
+    /// loop stays non-quiescent, feedback stays at the last flush LSN, and
+    /// PostgreSQL replays the events on the next start. The abandoned work may
+    /// carry the terminal catch-up batch of a table sync, whose `Complete`
+    /// intent is earned only once that batch is durable, so the exit intent is
+    /// pinned to a pause. With nothing unresolved, the state is left untouched.
+    fn abandon_work_for_shutdown(&mut self) -> usize {
+        if !self.has_unresolved_batch_work() {
+            return 0;
+        }
+
+        // The loop is about to exit, so the batch is dropped rather than taken
+        // for reuse.
+        let discarded_events = self.event_batch.len();
+        self.event_batch = EventBatch::empty();
+        self.pending_flush_result = None;
+        self.processing_paused = false;
+        self.reset_flush_deadline();
+        self.exit_intent = Some(ExitIntent::Pause);
+        self.abandoned_work_for_shutdown = true;
+
+        discarded_events
     }
 }
 
@@ -1324,6 +1368,11 @@ where
     /// continues during draining and is stopped at teardown without a final
     /// status update.
     ///
+    /// With [`PipelineConfig::drain_on_shutdown`] disabled, buffered and
+    /// in-flight work is abandoned instead of drained: the loop exits paused
+    /// without waiting for the destination, and the abandoned events are
+    /// replayed after restart.
+    ///
     /// Graceful shutdown cannot interrupt a handler already awaiting work. The
     /// caller remains responsible for enforcing an overall shutdown limit.
     fn handle_shutdown_signal(&mut self) {
@@ -1332,7 +1381,18 @@ where
         // Preserve a stronger completion intent if one was already recorded.
         self.state.record_exit_intent(Some(ExitIntent::Pause));
 
-        if self.state.has_unresolved_batch_work() {
+        let has_unresolved_batch_work = self.state.has_unresolved_batch_work();
+        if has_unresolved_batch_work && !self.config.drain_on_shutdown {
+            let pending_flush_result = self.state.has_pending_flush_result();
+            let discarded_events = self.state.abandon_work_for_shutdown();
+            info!(
+                %worker_type,
+                pending_flush_result,
+                discarded_events,
+                "shutdown signal received, abandoning destination work without draining, \
+                 PostgreSQL replays it on the next start",
+            );
+        } else if has_unresolved_batch_work {
             info!(
                 %worker_type,
                 pending_flush_result = self.state.has_pending_flush_result(),
@@ -4355,8 +4415,8 @@ mod tests {
         activity::{ActivityKind, ActivityRegistration},
         data::SizeHint,
         destination::{
-            ApplyLoopAsyncResultMetadata, DestinationWriteStatus, WriteEventsDurability,
-            WriteEventsResult,
+            ApplyLoopAsyncResultMetadata, DestinationWriteStatus, PendingWriteEventsResult,
+            WriteEventsDurability, WriteEventsResult,
         },
         error::ErrorKind,
         etl_error,
@@ -4364,8 +4424,8 @@ mod tests {
         replication::{
             ReplicationLagMetrics, TableDecodingState,
             apply::{
-                ApplyLoop, ApplyLoopState, EventBatch, ExitIntent, ReplicationProgress,
-                schema_cleanup_retention_snapshot_id,
+                ApplyLoop, ApplyLoopResult, ApplyLoopState, EventBatch, ExitIntent,
+                ReplicationProgress, schema_cleanup_retention_snapshot_id,
             },
             state::{StoredTableDecodingState, TableState},
         },
@@ -4625,17 +4685,33 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn idle_durability_requires_idle_accepted_work() {
+    fn state_with_progress_at(lsn: u64) -> ApplyLoopState {
         let activity_registration = ActivityRegistration::register(ActivityKind::WalApply {
             wal_sender_timeout: std::time::Duration::from_secs(60),
         });
-        let mut state = ApplyLoopState::new(
+
+        ApplyLoopState::new(
             activity_registration.handle(),
-            ReplicationProgress::new(100.into()),
-            ReplicationLagMetrics::create(100.into(), false),
+            ReplicationProgress::new(lsn.into()),
+            ReplicationLagMetrics::create(lsn.into(), false),
             SnapshotId::initial(),
-        );
+        )
+    }
+
+    fn pending_write_result() -> (WriteEventsResult, PendingWriteEventsResult) {
+        WriteEventsResult::new(ApplyLoopAsyncResultMetadata {
+            commit_end_lsn: Some(200.into()),
+            durability: WriteEventsDurability::MayDefer,
+            event_count: 1,
+            relation_table_ids: HashSet::new(),
+            streaming_payload_metadata: StreamingPayloadMetadata::default(),
+            dispatched_at: Instant::now(),
+        })
+    }
+
+    #[test]
+    fn idle_durability_requires_idle_accepted_work() {
+        let mut state = state_with_progress_at(100);
 
         // Only accepted work at an idle boundary may start a durability
         // barrier.
@@ -4671,5 +4747,418 @@ mod tests {
 
         state.start_draining_for_shutdown();
         assert!(!state.can_settle_idle_durability());
+    }
+
+    #[test]
+    fn abandoning_work_for_shutdown_pauses_and_keeps_the_flush_checkpoint() {
+        let mut state = state_with_progress_at(100);
+        state.update_last_received_lsn(300.into());
+        let (_result, pending) = pending_write_result();
+        state.pending_flush_result = Some(pending);
+        state.event_batch.push(Event::Unsupported, StreamingPayloadMetadata::default());
+        state.pause_processing();
+        state.set_flush_deadline_if_needed(std::time::Duration::from_secs(60));
+        // The in-flight write may be the terminal catch-up batch of a table
+        // sync, whose completion was requested at its commit.
+        state.record_exit_intent(Some(ExitIntent::Complete));
+
+        assert_eq!(state.abandon_work_for_shutdown(), 1);
+
+        assert!(!state.has_unresolved_batch_work());
+        assert!(!state.processing_paused);
+        assert!(state.flush_deadline.is_none());
+        // Nothing abandoned became durable, so the sync is not complete.
+        assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Paused)));
+        // Nothing abandoned is confirmed to PostgreSQL: feedback reports the
+        // last flush, not the last received LSN.
+        assert_eq!(state.checkpoint_lsn(), PgLsn::from(100));
+    }
+
+    #[test]
+    fn abandoning_an_in_flight_write_without_a_buffered_batch() {
+        let mut state = state_with_progress_at(100);
+        state.update_last_received_lsn(300.into());
+        let (_result, pending) = pending_write_result();
+        state.pending_flush_result = Some(pending);
+
+        assert_eq!(state.abandon_work_for_shutdown(), 0);
+
+        assert!(!state.has_unresolved_batch_work());
+        assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Paused)));
+        assert_eq!(state.checkpoint_lsn(), PgLsn::from(100));
+    }
+
+    #[test]
+    fn abandoning_nothing_keeps_a_completed_handoff() {
+        let mut state = state_with_progress_at(100);
+        state.update_last_received_lsn(300.into());
+        state.record_exit_intent(Some(ExitIntent::Complete));
+
+        assert_eq!(state.abandon_work_for_shutdown(), 0);
+
+        assert!(matches!(state.exit_result(), Some(ApplyLoopResult::Completed)));
+        // With nothing received but unwritten, the received LSN stays a safe
+        // frontier.
+        assert_eq!(state.checkpoint_lsn(), PgLsn::from(300));
+    }
+
+    /// Generative checks that relation metadata materializes into a decoder
+    /// whose positional columns are the relation's columns.
+    ///
+    /// Tuple data is decoded positionally against the replicated schema that
+    /// [`ApplyLoop::materialize_relation_schema`] builds, so whenever that
+    /// materialization succeeds, its columns must be the relation's columns in
+    /// relation order with the relation's types. Any disagreement lands source
+    /// values in the wrong destination columns or decodes them with the wrong
+    /// type.
+    #[cfg(feature = "test-utils")]
+    mod relation_agreement_properties {
+        use std::sync::Arc;
+
+        use bytes::{BufMut, Bytes, BytesMut};
+        use postgres_replication::protocol::{
+            LogicalReplicationMessage, RelationBody, ReplicaIdentity,
+        };
+        use proptest::{
+            bool::weighted,
+            collection::vec,
+            prop_assert, prop_assert_eq, prop_oneof,
+            strategy::{Just, Strategy},
+            test_runner::TestCaseError,
+        };
+        use tokio_postgres::types::Type;
+
+        use crate::{
+            error::EtlResult,
+            postgres::codec::{parse_replica_identity_column_names, parse_replicated_column_names},
+            schema::{
+                ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId,
+                TableName, TableSchema,
+            },
+            test_utils::property::run_property,
+        };
+
+        /// Relation OID used by every generated relation.
+        const RELATION_ID: u32 = 16_384;
+
+        /// Upper bound on the number of source columns.
+        const MAX_COLUMNS: usize = 8;
+
+        /// Exact column names the generator draws from.
+        const NAME_POOL: [&str; 10] = ["id", "a", "b", "c", "d", "e", "f", "g", "h", "i"];
+
+        /// Column types the generator assigns.
+        const COLUMN_TYPES: [Type; 6] =
+            [Type::INT4, Type::INT8, Type::TEXT, Type::NUMERIC, Type::TIMESTAMP, Type::TIMESTAMPTZ];
+
+        /// How the stored snapshot differs from the table that produced the
+        /// relation message.
+        #[derive(Debug, Clone)]
+        enum StaleSnapshot {
+            /// The stored snapshot is current.
+            Current,
+            /// The source added the column at this index after the snapshot.
+            ColumnAdded(usize),
+            /// The source dropped a column that the snapshot still has, at
+            /// this index and with this type.
+            ColumnDropped(usize, usize),
+            /// The source renamed columns so that these swaps of the current
+            /// names produce the snapshot's names.
+            NamesPermuted(Vec<(usize, usize)>),
+            /// The source changed the type of the column at this index; the
+            /// snapshot holds this older type.
+            TypeChanged(usize, usize),
+        }
+
+        /// One relation message and the stored snapshot it is applied to.
+        #[derive(Debug, Clone)]
+        struct RelationCase {
+            /// Replica identity byte as pgoutput sends it.
+            replica_identity: u8,
+            /// Relation columns as name, type, and identity flag.
+            relation_columns: Vec<(String, Type, bool)>,
+            /// Stored snapshot columns in `attnum` order.
+            stored_columns: Vec<(String, Type)>,
+        }
+
+        /// Generates the current source table and how the stored snapshot is
+        /// stale relative to it.
+        fn relation_case(
+            stale_snapshot: impl Strategy<Value = StaleSnapshot>,
+        ) -> impl Strategy<Value = RelationCase> {
+            (
+                1..=MAX_COLUMNS,
+                Just(NAME_POOL.to_vec()).prop_shuffle(),
+                vec(0..COLUMN_TYPES.len(), MAX_COLUMNS),
+                vec(weighted(0.8), MAX_COLUMNS),
+                vec(weighted(0.4), MAX_COLUMNS),
+                prop_oneof![Just(b'd'), Just(b'i'), Just(b'f'), Just(b'n')],
+                stale_snapshot,
+            )
+                .prop_map(
+                    |(column_count, names, types, published, identity, replica_identity, stale)| {
+                        let current: Vec<(String, Type)> = (0..column_count)
+                            .map(|index| {
+                                (names[index].to_owned(), COLUMN_TYPES[types[index]].clone())
+                            })
+                            .collect();
+
+                        // pgoutput sends only published columns, flags every
+                        // sent column under `FULL`, and flags none under
+                        // `NOTHING`.
+                        let relation_columns = current
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| published[*index])
+                            .map(|(index, (name, typ))| {
+                                let flagged = match replica_identity {
+                                    b'f' => true,
+                                    b'n' => false,
+                                    _ => identity[index],
+                                };
+                                (name.clone(), typ.clone(), flagged)
+                            })
+                            .collect();
+
+                        let mut stored_columns = current;
+                        match stale {
+                            StaleSnapshot::Current => {}
+                            StaleSnapshot::ColumnAdded(index) => {
+                                stored_columns.remove(index % column_count);
+                            }
+                            StaleSnapshot::ColumnDropped(index, type_index) => {
+                                // Pool names past `column_count` are unused by
+                                // the current table, so the dropped name is
+                                // unique; a full pool has no spare name.
+                                if let Some(name) = names.get(column_count) {
+                                    stored_columns.insert(
+                                        index % (column_count + 1),
+                                        ((*name).to_owned(), COLUMN_TYPES[type_index].clone()),
+                                    );
+                                }
+                            }
+                            StaleSnapshot::NamesPermuted(swaps) => {
+                                for (left, right) in swaps {
+                                    let left = left % column_count;
+                                    let right = right % column_count;
+                                    let left_name = stored_columns[left].0.clone();
+                                    let right_name =
+                                        std::mem::replace(&mut stored_columns[right].0, left_name);
+                                    stored_columns[left].0 = right_name;
+                                }
+                            }
+                            StaleSnapshot::TypeChanged(index, type_index) => {
+                                stored_columns[index % column_count].1 =
+                                    COLUMN_TYPES[type_index].clone();
+                            }
+                        }
+
+                        RelationCase { replica_identity, relation_columns, stored_columns }
+                    },
+                )
+        }
+
+        /// Generates staleness that keeps relation order and types aligned
+        /// with the snapshot whenever every relation name is known.
+        fn order_preserving_staleness() -> impl Strategy<Value = StaleSnapshot> {
+            prop_oneof![
+                Just(StaleSnapshot::Current),
+                (0..MAX_COLUMNS).prop_map(StaleSnapshot::ColumnAdded),
+                (0..=MAX_COLUMNS, 0..COLUMN_TYPES.len()).prop_map(|(index, type_index)| {
+                    StaleSnapshot::ColumnDropped(index, type_index)
+                }),
+            ]
+        }
+
+        /// Encodes a pgoutput `RELATION` message.
+        fn encode_relation(case: &RelationCase) -> Bytes {
+            let mut bytes = BytesMut::new();
+            bytes.put_u8(b'R');
+            bytes.put_u32(RELATION_ID);
+            bytes.put_slice(b"public\0");
+            bytes.put_slice(b"t\0");
+            bytes.put_u8(case.replica_identity);
+            bytes.put_i16(i16::try_from(case.relation_columns.len()).unwrap());
+            for (name, typ, flagged) in &case.relation_columns {
+                bytes.put_i8(i8::from(*flagged));
+                bytes.put_slice(name.as_bytes());
+                bytes.put_u8(0);
+                bytes.put_i32(i32::try_from(typ.oid()).unwrap());
+                bytes.put_i32(-1);
+            }
+            bytes.freeze()
+        }
+
+        /// Parses relation bytes with the same parser the replication stream
+        /// uses.
+        fn parse_relation(bytes: &Bytes) -> RelationBody {
+            let LogicalReplicationMessage::Relation(body) =
+                LogicalReplicationMessage::parse(bytes).unwrap()
+            else {
+                panic!("encoded relation should parse as a relation message");
+            };
+            body
+        }
+
+        /// Builds the stored snapshot a relation is materialized against.
+        fn stored_schema(case: &RelationCase) -> Arc<TableSchema> {
+            Arc::new(TableSchema::new(
+                TableId::new(RELATION_ID),
+                TableName::new("public".to_owned(), "t".to_owned()),
+                case.stored_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, typ))| {
+                        let attnum = i32::try_from(index + 1).unwrap();
+                        ColumnSchema::new(name.clone(), typ.clone(), -1, attnum, true)
+                    })
+                    .collect(),
+            ))
+        }
+
+        /// Runs the relation-to-decoder steps of
+        /// [`super::ApplyLoop::handle_relation_message`] and
+        /// [`super::ApplyLoop::materialize_relation_schema`] without the store
+        /// lookup that selects the snapshot.
+        fn materialize(
+            table_schema: Arc<TableSchema>,
+            relation: &RelationBody,
+        ) -> EtlResult<ReplicatedTableSchema> {
+            let replicated_columns = parse_replicated_column_names(relation)?;
+            let identity_columns = parse_replica_identity_column_names(relation)?;
+            let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
+            let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
+
+            Ok(ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask))
+        }
+
+        /// Checks that a successful materialization agrees with the relation
+        /// position by position.
+        fn check_relation_agreement(case: &RelationCase) -> Result<(), TestCaseError> {
+            let relation = parse_relation(&encode_relation(case));
+            let Ok(replicated_table_schema) = materialize(stored_schema(case), &relation) else {
+                return Ok(());
+            };
+
+            let decoder_columns: Vec<(String, u32)> = replicated_table_schema
+                .column_schemas()
+                .map(|column| (column.name.clone(), column.typ.oid()))
+                .collect();
+            let relation_columns: Vec<(String, u32)> = relation
+                .columns()
+                .iter()
+                .map(|column| {
+                    (column.name().unwrap().to_owned(), u32::try_from(column.type_id()).unwrap())
+                })
+                .collect();
+            prop_assert_eq!(decoder_columns, relation_columns);
+            prop_assert_eq!(
+                replicated_table_schema.column_schemas().len(),
+                relation.columns().len()
+            );
+
+            let decoder_identity: Vec<&str> = replicated_table_schema
+                .identity_column_schemas()
+                .map(|column| column.name.as_str())
+                .collect();
+            let relation_identity: Vec<&str> = relation
+                .columns()
+                .iter()
+                .filter(|column| {
+                    matches!(relation.replica_identity(), ReplicaIdentity::Full)
+                        || column.flags() & 1 == 1
+                })
+                .map(|column| column.name().unwrap())
+                .collect();
+            prop_assert_eq!(decoder_identity, relation_identity);
+            prop_assert!(
+                replicated_table_schema.identity_column_schemas().len()
+                    == replicated_table_schema.identity_column_schemas().count()
+            );
+
+            Ok(())
+        }
+
+        /// Builds a fully published default-identity case.
+        fn published_case(
+            relation_columns: &[(&str, Type)],
+            stored_columns: &[(&str, Type)],
+        ) -> RelationCase {
+            RelationCase {
+                replica_identity: b'd',
+                relation_columns: relation_columns
+                    .iter()
+                    .map(|(name, typ)| ((*name).to_owned(), typ.clone(), false))
+                    .collect(),
+                stored_columns: stored_columns
+                    .iter()
+                    .map(|(name, typ)| ((*name).to_owned(), typ.clone()))
+                    .collect(),
+            }
+        }
+
+        // Name-permuting and type-changing staleness is excluded here because
+        // materialization currently accepts it with misaligned columns; see
+        // the ignored `relation_materialization_rejects_permuted_names` and
+        // `relation_materialization_rejects_changed_types`.
+        #[test]
+        fn relation_materialization_agrees_with_relation_columns() {
+            run_property(
+                "relation materialization agreement",
+                &relation_case(order_preserving_staleness()),
+                check_relation_agreement,
+            );
+        }
+
+        #[test]
+        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
+                    positions"]
+        fn relation_materialization_rejects_permuted_names() {
+            let swaps = vec((0..MAX_COLUMNS, 0..MAX_COLUMNS), 1..=3);
+            run_property(
+                "relation materialization with permuted names",
+                &relation_case(swaps.prop_map(StaleSnapshot::NamesPermuted)),
+                check_relation_agreement,
+            );
+        }
+
+        #[test]
+        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
+        fn relation_materialization_rejects_changed_types() {
+            let type_change = (0..MAX_COLUMNS, 0..COLUMN_TYPES.len())
+                .prop_map(|(index, type_index)| StaleSnapshot::TypeChanged(index, type_index));
+            run_property(
+                "relation materialization with changed types",
+                &relation_case(type_change),
+                check_relation_agreement,
+            );
+        }
+
+        // Minimal counterexample: `alter table root rename a to tmp; rename b
+        // to a; rename tmp to b` reaches a partition leaf with no DDL message,
+        // so its stored snapshot still says (a, b) while the relation says
+        // (b, a). Rows would put source `b` into destination `a`.
+        #[test]
+        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
+                    positions"]
+        fn relation_with_swapped_column_names_is_not_materialized_at_stale_positions() {
+            let case = published_case(
+                &[("b", Type::INT4), ("a", Type::INT4)],
+                &[("a", Type::INT4), ("b", Type::INT4)],
+            );
+
+            check_relation_agreement(&case).unwrap();
+        }
+
+        // Minimal counterexample: `alter table root alter column a type int8`
+        // reaches a partition leaf with no DDL message, so its stored
+        // snapshot still decodes `a` as `int4`.
+        #[test]
+        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
+        fn relation_with_changed_column_type_is_not_materialized_with_the_stale_type() {
+            let case = published_case(&[("a", Type::INT8)], &[("a", Type::INT4)]);
+
+            check_relation_agreement(&case).unwrap();
+        }
     }
 }

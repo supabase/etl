@@ -27,6 +27,7 @@ use etl::{
     event::EventPosition,
     schema::ReplicatedTableSchema,
 };
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use metrics::{counter, histogram};
 #[cfg(feature = "test-utils")]
 use parking_lot::Mutex;
@@ -41,10 +42,11 @@ use crate::{
         DUCKLAKE_COLUMN_NAME_MAPPING, DuckLakeTableName, LAKE_CATALOG,
         client::{
             DuckLakeBlockingOperationContext, DuckLakeConnectionManager, format_query_error_detail,
-            is_ducklake_shutdown_requested_error, retryable_until_classified, run_duckdb_blocking,
+            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
             run_duckdb_blocking_with_context,
         },
         core::{DuckLakeWriteGuard, is_create_table_conflict},
+        duckdb_error::{DuckDbErrorType, duckdb_error_retryability, duckdb_error_type},
         encoding::{
             PreparedRows, cell_to_sql_literal_ref, prepare_copy_rows, prepare_rows,
             table_row_to_sql_literal_ref,
@@ -109,28 +111,53 @@ fn format_optional_event_position(event_position: Option<EventPosition>) -> Stri
     event_position.map_or_else(|| "none".to_owned(), format_event_position)
 }
 
-/// Returns whether one DuckDB error is the standard interrupted query error.
-fn is_duckdb_interrupt_error(error: &duckdb::Error) -> bool {
-    error.to_string().contains("INTERRUPT Error: Interrupted")
+/// Sanitized DuckDB query failure for statements that may contain row values.
+///
+/// Keeps the DuckDB exception type and its classification, which carry no row
+/// values, and drops the message.
+#[derive(Debug)]
+struct DuckDbSensitiveQueryError {
+    error_type: Option<DuckDbErrorType>,
+    retryability: Retryability,
 }
 
-/// Sanitized DuckDB query failure for statements that may contain row values.
-#[derive(Debug)]
-struct DuckDbSensitiveQueryError;
+impl DuckDbSensitiveQueryError {
+    /// Sanitizes one failed DuckDB call.
+    fn new(error: &duckdb::Error) -> Self {
+        Self {
+            error_type: duckdb_error_type(error),
+            retryability: duckdb_error_retryability(error),
+        }
+    }
+
+    /// Returns whether DuckDB interrupted the query.
+    fn is_interrupt(&self) -> bool {
+        self.error_type == Some(DuckDbErrorType::Interrupt)
+    }
+}
 
 impl fmt::Display for DuckDbSensitiveQueryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "DuckDB query failed; error message omitted because it may contain row values")
+        match self.error_type {
+            Some(error_type) => write!(
+                f,
+                "DuckDB query failed with a {error_type:?} error; error message omitted because \
+                 it may contain row values"
+            ),
+            None => write!(
+                f,
+                "DuckDB query failed; error message omitted because it may contain row values"
+            ),
+        }
     }
 }
 
 impl error::Error for DuckDbSensitiveQueryError {}
 
-/// Stands in for a DuckDB error, which DuckLake cannot yet classify, so it is
-/// permanent like other DuckDB errors.
+/// Classified like the DuckDB error it replaces.
 impl ClassifiedError for DuckDbSensitiveQueryError {
     fn retryability(&self) -> Retryability {
-        Retryability::Permanent
+        self.retryability
     }
 }
 
@@ -471,7 +498,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake CREATE TABLE failed",
                     format_query_error_detail(&ddl),
-                    error,
+                    RedactedDuckDbError::from(error),
                 ));
             }
         }
@@ -487,7 +514,7 @@ pub(super) async fn ensure_applied_batches_table_exists(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake set_option failed",
                 format_query_error_detail(&set_option_sql),
-                err,
+                RedactedDuckDbError::from(err),
             )
         })?;
 
@@ -540,7 +567,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                     ErrorKind::DestinationQueryFailed,
                     "DuckLake CREATE TABLE failed",
                     format_query_error_detail(&ddl),
-                    err,
+                    RedactedDuckDbError::from(err),
                 ));
             }
         }
@@ -556,7 +583,7 @@ pub(super) async fn ensure_streaming_progress_table_exists(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake set_option failed",
                 format_query_error_detail(&set_option_sql),
-                error,
+                RedactedDuckDbError::from(error),
             )
         })?;
 
@@ -583,7 +610,7 @@ fn ensure_helper_table_replay_epoch_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table migration failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
 
@@ -607,7 +634,7 @@ fn helper_table_has_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table schema lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
     let mut rows = statement.query([]).map_err(|source| {
@@ -615,7 +642,7 @@ fn helper_table_has_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table schema lookup failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })?;
 
@@ -624,7 +651,7 @@ fn helper_table_has_column(
             ErrorKind::DestinationQueryFailed,
             "DuckLake helper table schema row fetch failed",
             format_query_error_detail(&sql),
-            source,
+            RedactedDuckDbError::from(source),
         )
     })
 }
@@ -681,7 +708,6 @@ pub(super) async fn apply_table_batches_with_retry(
                     Ok(())
                 })
                 .await
-                .map_err(retryable_until_classified)
             }
         },
     )
@@ -772,7 +798,6 @@ pub(super) async fn apply_table_batch_with_retry(
                     Ok(())
                 })
                 .await
-                .map_err(retryable_until_classified)
             }
         },
     )
@@ -958,7 +983,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query prepare failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     let mut rows = statement.query([]).map_err(|err| {
@@ -966,7 +991,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress query failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
 
@@ -975,7 +1000,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress row fetch failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?
     else {
@@ -987,7 +1012,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress commit lsn read failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     let last_tx_ordinal: u64 = row.get(1).map_err(|err| {
@@ -995,7 +1020,7 @@ fn read_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress tx ordinal read failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
 
@@ -1658,7 +1683,7 @@ fn applied_batch_marker_id_exists(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query prepare failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     let mut rows = statement.query([]).map_err(|err| {
@@ -1666,7 +1691,7 @@ fn applied_batch_marker_id_exists(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
 
@@ -1675,7 +1700,7 @@ fn applied_batch_marker_id_exists(
             ErrorKind::DestinationQueryFailed,
             "DuckLake marker query row fetch failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })
 }
@@ -1724,7 +1749,7 @@ fn insert_applied_batch_marker_fields(
             ErrorKind::DestinationQueryFailed,
             "DuckLake batch marker insert failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     Ok(())
@@ -1758,7 +1783,7 @@ fn update_table_streaming_progress(
             ErrorKind::DestinationQueryFailed,
             "DuckLake streaming progress update failed",
             format_query_error_detail(&sql),
-            err,
+            RedactedDuckDbError::from(err),
         )
     })?;
     Ok(())
@@ -1812,6 +1837,7 @@ impl ReusableStagingTable {
 
         let staging_table = quote_identifier(&self.staging_name);
         if let Err(error) = conn.execute_batch(&format!("drop table if exists {staging_table}")) {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error drop table staging");
         }
     }
@@ -1845,6 +1871,7 @@ impl ReusableStagingTable {
              select {column_list} from {target_table} limit 0;"
         ))
         .map_err(|error| {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error creating temporary table");
 
             classified_error(
@@ -1866,6 +1893,7 @@ impl ReusableStagingTable {
             "insert into {target_table} ({column_list}) select {column_list} from {staging_table};"
         );
         conn.execute_batch(&sql).map_err(|error| {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error inserting rows");
             classified_error_with_detail(
                 ErrorKind::DestinationQueryFailed,
@@ -1886,6 +1914,7 @@ impl ReusableStagingTable {
         let staging_table = quote_identifier(&self.staging_name);
         let sql = format!("truncate table {staging_table};");
         conn.execute_batch(&sql).map_err(|error| {
+            let error = RedactedDuckDbError::from(error);
             tracing::error!(error = %error, "error clear staging");
             classified_error(
                 ErrorKind::DestinationQueryFailed,
@@ -1901,6 +1930,7 @@ impl ReusableStagingTable {
         match prepared_rows {
             PreparedRows::Appender(all_values) => {
                 let mut appender = conn.appender(&self.staging_name).map_err(|error| {
+                    let error = RedactedDuckDbError::from(error);
                     tracing::error!(error = %error, "error appender");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1911,6 +1941,7 @@ impl ReusableStagingTable {
                 for values in all_values {
                     appender.append_row(duckdb::appender_params_from_iter(values)).map_err(
                         |err| {
+                            let err = RedactedDuckDbError::from(err);
                             tracing::error!(error = %err, "error append row");
                             classified_error(
                                 ErrorKind::DestinationQueryFailed,
@@ -1921,6 +1952,7 @@ impl ReusableStagingTable {
                     )?;
                 }
                 appender.flush().map_err(|err| {
+                    let err = RedactedDuckDbError::from(err);
                     tracing::error!(error = %err, "error flush");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1931,6 +1963,7 @@ impl ReusableStagingTable {
             }
             PreparedRows::ArrowRecordBatch(record_batch) => {
                 let mut appender = conn.appender(&self.staging_name).map_err(|error| {
+                    let error = RedactedDuckDbError::from(error);
                     tracing::error!(error = %error, "error appender");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1939,6 +1972,7 @@ impl ReusableStagingTable {
                     )
                 })?;
                 appender.append_record_batch(record_batch.clone()).map_err(|err| {
+                    let err = RedactedDuckDbError::from(err);
                     tracing::error!(error = %err, "error append record batch");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -1947,6 +1981,7 @@ impl ReusableStagingTable {
                     )
                 })?;
                 appender.flush().map_err(|err| {
+                    let err = RedactedDuckDbError::from(err);
                     tracing::error!(error = %err, "error flush");
                     classified_error(
                         ErrorKind::DestinationQueryFailed,
@@ -2054,7 +2089,7 @@ impl DuckLakeCopyAccumulator {
             classified_error(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake buffered copy BEGIN TRANSACTION failed",
-                error,
+                RedactedDuckDbError::from(error),
             )
         })?;
 
@@ -2092,6 +2127,7 @@ impl DuckLakeCopyAccumulator {
 
         if let Err(error) = result {
             if let Err(rollback_error) = conn.execute_batch("rollback") {
+                let rollback_error = RedactedDuckDbError::from(rollback_error);
                 tracing::error!(error = %rollback_error, "error rollback buffered copy");
             }
             return Err(error);
@@ -2105,7 +2141,7 @@ impl DuckLakeCopyAccumulator {
             classified_error(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake buffered copy COMMIT failed",
-                error,
+                RedactedDuckDbError::from(error),
             )
         })?;
 
@@ -2148,6 +2184,7 @@ fn apply_table_batch(
     let batch_started = Instant::now();
 
     conn.execute_batch("BEGIN TRANSACTION").map_err(|error| {
+        let error = RedactedDuckDbError::from(error);
         tracing::error!(error = %error, "error transaction");
         classified_error(
             ErrorKind::DestinationQueryFailed,
@@ -2187,6 +2224,7 @@ fn apply_table_batch(
     match result {
         Ok(()) => {
             conn.execute_batch("COMMIT").map_err(|error| {
+                let error = RedactedDuckDbError::from(error);
                 tracing::error!(error = %error, "error commit");
                 reusable_staging_table.cleanup(conn);
                 classified_error(ErrorKind::DestinationQueryFailed, "DuckLake COMMIT failed", error)
@@ -2224,6 +2262,7 @@ fn apply_table_batch(
             let rollback = conn.execute_batch("ROLLBACK");
             reusable_staging_table.cleanup(conn);
             if let Err(err) = rollback {
+                let err = RedactedDuckDbError::from(err);
                 tracing::error!(error = %err, "error rollback");
             }
 
@@ -2240,6 +2279,7 @@ fn apply_truncate_batch_action(
     let target_table = qualified_lake_table_name(table_name);
     let sql = format!("TRUNCATE TABLE {target_table};");
     conn.execute_batch(&sql).map_err(|error| {
+        let error = RedactedDuckDbError::from(error);
         tracing::error!(error = %error, "error truncating table");
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
@@ -2327,9 +2367,9 @@ fn apply_delete_mutation(
 
         let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
         conn.execute_batch(&sql_query).map_err(|error| {
-            let duckdb_interrupted = is_duckdb_interrupt_error(&error);
+            let error = DuckDbSensitiveQueryError::new(&error);
             tracing::error!(
-                error = %DuckDbSensitiveQueryError,
+                error = %error,
                 table = %batch.table_name,
                 batch_id = %batch.batch_id,
                 batch_kind = batch.batch_kind.as_str(),
@@ -2342,7 +2382,7 @@ fn apply_delete_mutation(
                 delete_chunk_index = chunk_index,
                 delete_chunk_count = chunk_count,
                 delete_chunk_predicate_count = chunk.len(),
-                duckdb_interrupted,
+                duckdb_interrupted = error.is_interrupt(),
                 ducklake_interrupt_reason = operation_context.interrupt_reason_label(),
                 ducklake_operation_id = operation_context.operation_id(),
                 ducklake_operation_kind = operation_context.operation_kind(),
@@ -2359,7 +2399,7 @@ fn apply_delete_mutation(
                     chunk_count,
                     chunk.len(),
                 ),
-                DuckDbSensitiveQueryError,
+                error,
             )
         })?;
     }
@@ -2381,8 +2421,9 @@ fn apply_update_mutation(
     let set_clause = assignments.join(", ");
     let target_table = qualified_lake_table_name(table_name);
     let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
-    conn.execute_batch(&sql_query).map_err(|_err| {
-        tracing::error!(error = %DuckDbSensitiveQueryError, "error updating rows");
+    conn.execute_batch(&sql_query).map_err(|error| {
+        let error = DuckDbSensitiveQueryError::new(&error);
+        tracing::error!(error = %error, "error updating rows");
         classified_error_with_detail(
             ErrorKind::DestinationQueryFailed,
             "DuckLake UPDATE failed",
@@ -2391,7 +2432,7 @@ fn apply_update_mutation(
                 assignments.len(),
                 !predicate.is_empty(),
             ),
-            DuckDbSensitiveQueryError,
+            error,
         )
     })?;
 
@@ -2469,6 +2510,7 @@ fn insert_rows_into_staging_with_sql(
     for chunk in row_literals.chunks(SQL_INSERT_BATCH_SIZE) {
         conn.execute_batch(&format!("INSERT INTO {staging_table} VALUES {};", chunk.join(", ")))
             .map_err(|err| {
+                let err = RedactedDuckDbError::from(err);
                 tracing::error!(error = %err, "error insert_rows_into_staging_with_sql");
                 classified_error(
                     ErrorKind::DestinationQueryFailed,
@@ -2520,7 +2562,8 @@ pub fn ducklake_staging_table_creations_for_tests(table_name: &str) -> usize {
     STAGING_TABLE_CREATIONS_BY_TABLE.lock().get(table_name).copied().unwrap_or_default()
 }
 
-/// Injects a synthetic failure after commit so retries must rely on the correct
+/// Injects a synthetic retryable failure after commit, like a connection lost
+/// before the commit was acknowledged, so retries must rely on the correct
 /// marker path.
 #[cfg(feature = "test-utils")]
 fn maybe_fail_after_committed_batch_for_tests(
@@ -2547,7 +2590,8 @@ fn maybe_fail_after_atomic_batch_commit_for_tests(table_name: &DuckLakeTableName
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake test hook injected post-commit failure"
-        ));
+        )
+        .with_retryability(Retryability::Retryable));
     }
 
     Ok(())
@@ -2563,7 +2607,8 @@ fn maybe_fail_after_copy_batch_commit_for_tests(table_name: &DuckLakeTableName) 
         return Err(etl_error!(
             ErrorKind::DestinationQueryFailed,
             "DuckLake test hook injected copy post-commit failure"
-        ));
+        )
+        .with_retryability(Retryability::Retryable));
     }
 
     Ok(())
@@ -2647,6 +2692,8 @@ mod tests {
         }
     }
 
+    /// Asserts that a failed query against a missing catalog keeps its DuckDB
+    /// type and classification but not the row values in its statement.
     fn assert_query_failure_omits_sensitive_value(
         error: &etl::error::EtlError,
         description: &'static str,
@@ -2654,11 +2701,16 @@ mod tests {
     ) {
         assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
         assert_eq!(error.description(), Some(description));
+        assert_eq!(error.retryability(), Retryability::Permanent);
         assert!(!error.to_string().contains(sensitive_value));
         assert!(!error.detail().is_some_and(|detail| detail.contains(sensitive_value)));
-        let source = error.source().expect("expected sanitized source");
+        let source = error.source().unwrap();
         assert!(!source.to_string().contains(sensitive_value));
-        assert!(source.to_string().contains("omitted because it may contain row values"));
+        assert_eq!(
+            source.to_string(),
+            "DuckDB query failed with a Binder error; error message omitted because it may \
+             contain row values"
+        );
     }
 
     #[test]
@@ -3657,5 +3709,755 @@ mod tests {
         );
 
         assert_ne!(first.batch_id, second.batch_id);
+    }
+
+    /// Replica-identity predicate and single-row mutation properties.
+    ///
+    /// One source DELETE or UPDATE changes exactly one Postgres tuple, so the
+    /// destination predicate built from its old row must select exactly the
+    /// rows whose identity equals it, and applying the mutation must change
+    /// exactly one destination row.
+    mod identity_properties {
+        use std::str::FromStr;
+
+        use duckdb::types::Value;
+        use etl::{
+            data::{ArrayCell, PgNumeric},
+            test_utils::property::{any_f32, any_f64, run_property},
+        };
+        use proptest::{
+            collection::vec,
+            option,
+            prelude::*,
+            sample::{Index, subsequence},
+        };
+
+        use super::*;
+        use crate::ducklake::{
+            encoding::tests::encoder_properties::{
+                expected_value, json_value, readback_expression, sql_text, values_match,
+            },
+            schema::build_create_table_sql_ducklake,
+        };
+
+        /// How the generated table identifies rows in DELETE and UPDATE
+        /// events.
+        #[derive(Clone, Copy, Debug)]
+        enum IdentityKind {
+            /// `replica identity default` with an `id` primary key.
+            PrimaryKey,
+            /// `replica identity full` on a table without a primary key.
+            Full,
+        }
+
+        /// Payload column type in the generated table.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum PayloadKind {
+            Float8,
+            Float4,
+            Json,
+            Decimal,
+            VarcharNumeric,
+            Int4Array,
+            Text,
+            Bool,
+        }
+
+        /// Every payload kind.
+        const ALL_PAYLOAD_KINDS: [PayloadKind; 8] = [
+            PayloadKind::Float8,
+            PayloadKind::Float4,
+            PayloadKind::Json,
+            PayloadKind::Decimal,
+            PayloadKind::VarcharNumeric,
+            PayloadKind::Int4Array,
+            PayloadKind::Text,
+            PayloadKind::Bool,
+        ];
+
+        impl PayloadKind {
+            /// Returns the Postgres type and modifier of this column.
+            fn pg_type(self) -> (PgType, i32) {
+                match self {
+                    Self::Float8 => (PgType::FLOAT8, -1),
+                    Self::Float4 => (PgType::FLOAT4, -1),
+                    Self::Json => (PgType::JSONB, -1),
+                    // `numeric(10, 2)` maps to DuckDB `decimal(10, 2)`.
+                    Self::Decimal => (PgType::NUMERIC, ((10 << 16) | 2) + 4),
+                    Self::VarcharNumeric => (PgType::NUMERIC, -1),
+                    Self::Int4Array => (PgType::INT4_ARRAY, -1),
+                    Self::Text => (PgType::TEXT, -1),
+                    Self::Bool => (PgType::BOOL, -1),
+                }
+            }
+
+            /// Returns codec-shaped cells for this column, including NULLs.
+            fn cell(self) -> BoxedStrategy<Cell> {
+                let value = match self {
+                    Self::Float8 => any_f64().prop_map(Cell::F64).boxed(),
+                    Self::Float4 => any_f32().prop_map(Cell::F32).boxed(),
+                    Self::Json => json_value().prop_map(Cell::Json).boxed(),
+                    Self::Decimal => (any::<bool>(), 0i64..100_000_000, 0u8..100)
+                        .prop_map(|(negative, integer, fraction)| {
+                            let sign =
+                                if negative && (integer, fraction) != (0, 0) { "-" } else { "" };
+                            let text = format!("{sign}{integer}.{fraction:02}");
+                            Cell::Numeric(PgNumeric::from_str(&text).unwrap())
+                        })
+                        .boxed(),
+                    Self::VarcharNumeric => prop_oneof![
+                        Just("NaN".to_owned()),
+                        Just("-Infinity".to_owned()),
+                        "-?[0-9]{1,30}(\\.[0-9]{1,10})?",
+                    ]
+                    .prop_map(|text| Cell::Numeric(PgNumeric::from_str(&text).unwrap()))
+                    .boxed(),
+                    Self::Int4Array => vec(option::weighted(0.8, -3i32..3), 0..4)
+                        .prop_map(|values| Cell::Array(ArrayCell::I32(values)))
+                        .boxed(),
+                    Self::Text => sql_text().prop_map(Cell::String).boxed(),
+                    Self::Bool => any::<bool>().prop_map(Cell::Bool).boxed(),
+                };
+                prop_oneof![1 => Just(Cell::Null), 5 => value].boxed()
+            }
+        }
+
+        /// Generated table rows plus one DELETE or full UPDATE of a target row.
+        #[derive(Clone, Debug)]
+        struct IdentityCase {
+            identity: IdentityKind,
+            payload: Vec<PayloadKind>,
+            rows: Vec<TableRow>,
+            target: usize,
+            /// Replacement row for an UPDATE, or `None` for a DELETE.
+            update: Option<TableRow>,
+        }
+
+        impl IdentityCase {
+            /// Returns the replicated schema with the case's identity.
+            fn schema(&self) -> ReplicatedTableSchema {
+                let mut id = ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false);
+                if matches!(self.identity, IdentityKind::PrimaryKey) {
+                    id = id.with_primary_key(1);
+                }
+                let mut columns = vec![id];
+                for (index, kind) in self.payload.iter().enumerate() {
+                    let (typ, modifier) = kind.pg_type();
+                    columns.push(ColumnSchema::new(
+                        format!("c{index}"),
+                        typ,
+                        modifier,
+                        index as i32 + 2,
+                        true,
+                    ));
+                }
+                let identity_mask = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        u8::from(index == 0 || matches!(self.identity, IdentityKind::Full))
+                    })
+                    .collect();
+                let table_schema = Arc::new(TableSchema::new(
+                    TableId::new(1),
+                    TableName::new("public".to_owned(), "users".to_owned()),
+                    columns,
+                ));
+                ReplicatedTableSchema::from_masks(
+                    Arc::clone(&table_schema),
+                    ReplicationMask::all(&table_schema),
+                    IdentityMask::from_bytes(identity_mask),
+                )
+            }
+
+            /// Returns the old-row image Postgres sends for `row`.
+            fn old_row(&self, row: &TableRow) -> OldTableRow {
+                match self.identity {
+                    IdentityKind::PrimaryKey => {
+                        OldTableRow::Key(TableRow::new(vec![row.values()[0].clone()]))
+                    }
+                    IdentityKind::Full => OldTableRow::Full(row.clone()),
+                }
+            }
+
+            /// Returns whether two rows have equal replica-identity values
+            /// under Postgres equality.
+            fn identity_equal(&self, left: &TableRow, right: &TableRow) -> bool {
+                match self.identity {
+                    IdentityKind::PrimaryKey => left.values()[0] == right.values()[0],
+                    IdentityKind::Full => left
+                        .values()
+                        .iter()
+                        .zip(right.values())
+                        .all(|(left, right)| postgres_cells_equal(left, right)),
+                }
+            }
+        }
+
+        /// Compares cells like Postgres does: `-0 = 0` and `NaN = NaN` for
+        /// floats, structural equality otherwise.
+        fn postgres_cells_equal(left: &Cell, right: &Cell) -> bool {
+            match (left, right) {
+                (Cell::F64(left), Cell::F64(right)) => {
+                    left == right || (left.is_nan() && right.is_nan())
+                }
+                (Cell::F32(left), Cell::F32(right)) => {
+                    left == right || (left.is_nan() && right.is_nan())
+                }
+                _ => left == right,
+            }
+        }
+
+        /// Generates tables whose rows are drawn from a small pool, so equal
+        /// identities and (for FULL identity) duplicate tuples are common.
+        fn identity_case(
+            identities: Vec<IdentityKind>,
+            kinds: &'static [PayloadKind],
+        ) -> impl Strategy<Value = IdentityCase> {
+            (proptest::sample::select(identities), subsequence(kinds, 1..=4))
+                .prop_flat_map(|(identity, payload)| {
+                    let row = (0i32..3, payload.iter().map(|kind| kind.cell()).collect::<Vec<_>>());
+                    (
+                        Just(identity),
+                        Just(payload),
+                        vec(row.clone(), 1..4),
+                        vec(any::<Index>(), 1..7),
+                        any::<Index>(),
+                        option::of(row),
+                    )
+                })
+                .prop_map(|(identity, payload, pool, picks, target, update)| {
+                    let make_row = |id: i32, values: &[Cell]| {
+                        TableRow::new(
+                            std::iter::once(Cell::I32(id)).chain(values.iter().cloned()).collect(),
+                        )
+                    };
+                    let rows = picks
+                        .iter()
+                        .enumerate()
+                        .map(|(index, pick)| {
+                            let (id, values) = pick.get(&pool);
+                            // Primary keys are unique in Postgres;
+                            // FULL-identity
+                            // tables keep the pooled id so whole tuples repeat.
+                            let id = match identity {
+                                IdentityKind::PrimaryKey => index as i32,
+                                IdentityKind::Full => *id,
+                            };
+                            make_row(id, values)
+                        })
+                        .collect::<Vec<_>>();
+                    let target = target.index(rows.len());
+                    let update = update.map(|(id, values)| {
+                        let id = match identity {
+                            IdentityKind::PrimaryKey => target as i32,
+                            IdentityKind::Full => id,
+                        };
+                        make_row(id, &values)
+                    });
+                    IdentityCase { identity, payload, rows, target, update }
+                })
+        }
+
+        /// Opens an in-memory lake with the streaming progress helper table
+        /// and the case's destination table.
+        pub(super) fn lake_connection(schema: &ReplicatedTableSchema) -> duckdb::Connection {
+            let conn = duckdb::Connection::open_in_memory().unwrap();
+            attach_lake_catalog(&conn);
+            conn.execute_batch(
+                r#"create table lake."__etl_streaming_progress" (
+                     table_name varchar not null,
+                     replay_epoch varchar,
+                     last_commit_lsn ubigint not null,
+                     last_tx_ordinal ubigint not null,
+                     updated_at timestamptz not null
+                   );"#,
+            )
+            .unwrap();
+            let columns =
+                schema.destination_column_schemas(DUCKLAKE_COLUMN_NAME_MAPPING).collect::<Vec<_>>();
+            conn.execute_batch(&build_create_table_sql_ducklake(&ducklake_table_name(), &columns))
+                .unwrap();
+            conn
+        }
+
+        /// Applies mutations at consecutive LSNs starting at `first_lsn`
+        /// through the production batch preparation and apply path.
+        fn apply_mutations(
+            conn: &duckdb::Connection,
+            schema: &ReplicatedTableSchema,
+            first_lsn: u64,
+            mutations: Vec<TableMutation>,
+        ) -> EtlResult<()> {
+            let tracked = mutations
+                .into_iter()
+                .enumerate()
+                .map(|(offset, mutation)| {
+                    TrackedTableMutation::new(
+                        EventPosition::new(PgLsn::from(first_lsn + offset as u64), 0),
+                        mutation,
+                    )
+                })
+                .collect();
+            let batches = prepare_mutation_table_batches(
+                schema,
+                ducklake_table_name(),
+                LEGACY_REPLAY_EPOCH.to_owned(),
+                tracked,
+            )?;
+            apply_table_batches(conn, &batches, &DuckLakeBlockingOperationContext::for_tests())
+        }
+
+        /// Reads the destination table as rows of comparable values.
+        fn read_rows(conn: &duckdb::Connection, schema: &ReplicatedTableSchema) -> Vec<Vec<Value>> {
+            let columns = schema
+                .column_schemas()
+                .map(|column| readback_expression(&column.typ, &column.name))
+                .collect::<Vec<_>>();
+            let mut statement = conn
+                .prepare(&format!(
+                    "select {} from {}",
+                    columns.join(", "),
+                    qualified_lake_table_name(&ducklake_table_name())
+                ))
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    (0..columns.len()).map(|index| row.get::<_, Value>(index)).collect()
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        }
+
+        /// Returns whether the stored rows equal the model rows as multisets.
+        fn rows_match_model(
+            schema: &ReplicatedTableSchema,
+            stored: &[Vec<Value>],
+            model: &[TableRow],
+        ) -> bool {
+            let json_columns = schema
+                .column_schemas()
+                .map(|column| matches!(column.typ, PgType::JSON | PgType::JSONB))
+                .collect::<Vec<_>>();
+            let mut unmatched = stored.iter().collect::<Vec<_>>();
+            stored.len() == model.len()
+                && model.iter().all(|row| {
+                    let expected = row.values().iter().map(expected_value).collect::<Vec<_>>();
+                    let position = unmatched.iter().position(|stored| {
+                        expected.iter().zip(stored.iter()).zip(&json_columns).all(
+                            |((expected, stored), is_json)| {
+                                values_match(expected, stored, *is_json)
+                            },
+                        )
+                    });
+                    position.map(|position| unmatched.swap_remove(position)).is_some()
+                })
+        }
+
+        /// Checks the predicate count law and the single-row mutation law.
+        ///
+        /// With `allow_duplicates` false, the mutation law is skipped when
+        /// several rows share the target identity; that case is pinned by
+        /// `full_identity_changes_exactly_one_row_with_duplicates`.
+        fn check_identity_case(
+            case: &IdentityCase,
+            allow_duplicates: bool,
+        ) -> Result<(), TestCaseError> {
+            let schema = case.schema();
+            let conn = lake_connection(&schema);
+            apply_mutations(
+                &conn,
+                &schema,
+                1,
+                case.rows.iter().cloned().map(TableMutation::Insert).collect(),
+            )
+            .unwrap();
+            prop_assert!(
+                rows_match_model(&schema, &read_rows(&conn, &schema), &case.rows),
+                "inserted rows differ from the model"
+            );
+
+            let target_row = &case.rows[case.target];
+            let old_row = case.old_row(target_row);
+            let matching =
+                case.rows.iter().filter(|row| case.identity_equal(row, target_row)).count();
+            let predicate = delete_predicate_from_row(&schema, &old_row).unwrap();
+            let count: i64 = conn
+                .query_row(
+                    &format!(
+                        "select count(*) from {} where {predicate}",
+                        qualified_lake_table_name(&ducklake_table_name())
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            prop_assert_eq!(
+                count as usize,
+                matching,
+                "predicate {} matched a different number of rows",
+                predicate
+            );
+            if matching > 1 && !allow_duplicates {
+                return Ok(());
+            }
+
+            let mut model = case.rows.clone();
+            model.remove(case.target);
+            let mutation = match &case.update {
+                Some(new_row) => {
+                    model.push(new_row.clone());
+                    TableMutation::Update {
+                        delete_row: old_row,
+                        new_row: UpdatedTableRow::Full(new_row.clone()),
+                    }
+                }
+                None => TableMutation::Delete(old_row),
+            };
+            apply_mutations(&conn, &schema, case.rows.len() as u64 + 1, vec![mutation]).unwrap();
+            let stored = read_rows(&conn, &schema);
+            prop_assert!(
+                rows_match_model(&schema, &stored, &model),
+                "after one mutation the table holds {} rows {:?}, expected {} rows",
+                stored.len(),
+                stored,
+                model.len()
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn identity_predicates_match_and_mutations_change_exactly_one_row() {
+            run_property(
+                "ducklake_identity_predicates_change_one_row",
+                &identity_case(
+                    vec![IdentityKind::PrimaryKey, IdentityKind::Full],
+                    &ALL_PAYLOAD_KINDS,
+                ),
+                |case| check_identity_case(case, false),
+            );
+        }
+
+        #[test]
+        #[ignore = "known defect: replica identity full deletes or updates every duplicate tuple"]
+        fn full_identity_changes_exactly_one_row_with_duplicates() {
+            run_property(
+                "ducklake_full_identity_duplicates_change_one_row",
+                &identity_case(vec![IdentityKind::Full], &ALL_PAYLOAD_KINDS),
+                |case| check_identity_case(case, true),
+            );
+        }
+
+        /// Returns a FULL-identity case over `id int4` plus one text column.
+        fn duplicate_text_case(update: Option<TableRow>) -> IdentityCase {
+            let row = TableRow::new(vec![Cell::I32(1), Cell::String("a".to_owned())]);
+            IdentityCase {
+                identity: IdentityKind::Full,
+                payload: vec![PayloadKind::Text],
+                rows: vec![row.clone(), row],
+                target: 0,
+                update,
+            }
+        }
+
+        #[test]
+        #[ignore = "known defect: replica identity full delete removes every duplicate tuple"]
+        fn full_identity_delete_removes_only_one_of_duplicate_rows() {
+            check_identity_case(&duplicate_text_case(None), true).unwrap();
+        }
+
+        #[test]
+        #[ignore = "known defect: replica identity full update rewrites every duplicate tuple"]
+        fn full_identity_update_changes_only_one_of_duplicate_rows() {
+            let new_row = TableRow::new(vec![Cell::I32(1), Cell::String("b".to_owned())]);
+            check_identity_case(&duplicate_text_case(Some(new_row)), true).unwrap();
+        }
+
+        #[test]
+        fn full_identity_delete_matches_appended_float8_value() {
+            let case = IdentityCase {
+                identity: IdentityKind::Full,
+                payload: vec![PayloadKind::Float8],
+                rows: vec![TableRow::new(vec![Cell::I32(1), Cell::F64(1e-30)])],
+                target: 0,
+                update: None,
+            };
+            check_identity_case(&case, false).unwrap();
+        }
+    }
+
+    /// Batching, crash, and redelivery properties for streaming mutations.
+    ///
+    /// Postgres redelivers from the confirmed flush position after a crash,
+    /// and each attempt may split the stream at different `write_events`
+    /// boundaries. The streaming progress watermark must make the final table
+    /// equal to applying every source event exactly once, in order.
+    mod replay_properties {
+        use std::{collections::BTreeMap, ops::Range};
+
+        use etl::test_utils::property::run_property;
+        use proptest::{collection::vec, prelude::*, sample::Index};
+
+        use super::{identity_properties::lake_connection, *};
+
+        /// Number of events per generated source transaction.
+        const EVENTS_PER_TRANSACTION: usize = 3;
+
+        /// One source event on the `(id primary key, v text)` table.
+        #[derive(Clone, Debug)]
+        enum ModelOp {
+            Insert(i32, String),
+            Delete(i32),
+            Update(i32, String),
+            Replace(i32, String),
+        }
+
+        impl ModelOp {
+            /// Returns the CDC mutation the destination receives for this
+            /// event.
+            fn mutation(&self) -> TableMutation {
+                let row = |id: i32, value: &str| {
+                    TableRow::new(vec![Cell::I32(id), Cell::String(value.to_owned())])
+                };
+                let key = |id: i32| OldTableRow::Key(TableRow::new(vec![Cell::I32(id)]));
+                match self {
+                    Self::Insert(id, value) => TableMutation::Insert(row(*id, value)),
+                    Self::Delete(id) => TableMutation::Delete(key(*id)),
+                    Self::Update(id, value) => TableMutation::Update {
+                        delete_row: key(*id),
+                        new_row: UpdatedTableRow::Full(row(*id, value)),
+                    },
+                    Self::Replace(id, value) => TableMutation::Replace(row(*id, value)),
+                }
+            }
+
+            /// Applies this event to the exactly-once model.
+            fn apply(&self, model: &mut BTreeMap<i32, String>) {
+                match self {
+                    Self::Insert(id, value)
+                    | Self::Update(id, value)
+                    | Self::Replace(id, value) => {
+                        model.insert(*id, value.clone());
+                    }
+                    Self::Delete(id) => {
+                        model.remove(id);
+                    }
+                }
+            }
+        }
+
+        /// A source event stream with two delivery attempts.
+        #[derive(Clone, Debug)]
+        struct ReplayCase {
+            ops: Vec<ModelOp>,
+            /// `write_events` boundaries for the first attempt.
+            first_cuts: Vec<Index>,
+            /// First-attempt call that crashes.
+            crash_call: Index,
+            /// Batches of the crashing call that commit before the crash.
+            committed_batches: Index,
+            /// Whether the crashing call is retried before the redelivery.
+            retry_crashed_call: bool,
+            /// Redelivery start, at or before the crashed call.
+            redelivery_start: Index,
+            /// `write_events` boundaries for the redelivery.
+            second_cuts: Vec<Index>,
+        }
+
+        /// Turns raw choices into events that are valid for a primary-key
+        /// table: inserts only for absent keys, other events only for present
+        /// keys.
+        fn valid_ops(raw: Vec<(u8, i32, String)>) -> Vec<ModelOp> {
+            let mut present = BTreeMap::new();
+            raw.into_iter()
+                .map(|(choice, id, value)| {
+                    if present.insert(id, ()).is_none() {
+                        return ModelOp::Insert(id, value);
+                    }
+                    match choice % 3 {
+                        0 => {
+                            present.remove(&id);
+                            ModelOp::Delete(id)
+                        }
+                        1 => ModelOp::Update(id, value),
+                        _ => ModelOp::Replace(id, value),
+                    }
+                })
+                .collect()
+        }
+
+        /// Generates long event streams over a few colliding keys, so atomic
+        /// batches (capped at `CDC_MUTATION_BATCH_SIZE`) mix every event kind.
+        fn replay_case() -> impl Strategy<Value = ReplayCase> {
+            (
+                vec((any::<u8>(), 0i32..4, "[a-c]{0,2}"), 1..40).prop_map(valid_ops),
+                vec(any::<Index>(), 0..5),
+                any::<Index>(),
+                any::<Index>(),
+                any::<bool>(),
+                any::<Index>(),
+                vec(any::<Index>(), 0..5),
+            )
+                .prop_map(
+                    |(
+                        ops,
+                        first_cuts,
+                        crash_call,
+                        committed_batches,
+                        retry_crashed_call,
+                        redelivery_start,
+                        second_cuts,
+                    )| ReplayCase {
+                        ops,
+                        first_cuts,
+                        crash_call,
+                        committed_batches,
+                        retry_crashed_call,
+                        redelivery_start,
+                        second_cuts,
+                    },
+                )
+        }
+
+        /// Returns the strictly increasing source position of event `index`.
+        fn event_position(index: usize) -> EventPosition {
+            let transaction = (index / EVENTS_PER_TRANSACTION) as u64;
+            EventPosition::new(
+                PgLsn::from(100 + transaction * 10),
+                (index % EVENTS_PER_TRANSACTION) as u64,
+            )
+        }
+
+        /// Splits `range` into consecutive `write_events` calls at `cuts`.
+        fn split(range: Range<usize>, cuts: &[Index]) -> Vec<Range<usize>> {
+            let mut bounds = cuts
+                .iter()
+                .map(|cut| range.start + cut.index(range.len() + 1))
+                .chain([range.start, range.end])
+                .collect::<Vec<_>>();
+            bounds.sort_unstable();
+            bounds.dedup();
+            bounds.windows(2).map(|pair| pair[0]..pair[1]).collect()
+        }
+
+        /// Delivers one `write_events` call like the destination does: read
+        /// the watermark, drop applied events, prepare, and apply.
+        ///
+        /// With `crash_after`, only that many prepared batches commit before
+        /// the simulated crash; `retry` then reapplies the whole call like
+        /// `apply_table_batches_with_retry` does.
+        fn deliver(
+            conn: &duckdb::Connection,
+            schema: &ReplicatedTableSchema,
+            ops: &[ModelOp],
+            range: Range<usize>,
+            crash_after: Option<Index>,
+            retry: bool,
+        ) -> EtlResult<()> {
+            let last_event_position = read_table_streaming_progress_event_position(
+                conn,
+                &ducklake_table_name(),
+                LEGACY_REPLAY_EPOCH,
+            )?;
+            let tracked = range
+                .map(|index| {
+                    TrackedTableMutation::new(event_position(index), ops[index].mutation())
+                })
+                .collect();
+            let pending = retain_mutations_after_event_position(tracked, last_event_position);
+            let batches = prepare_mutation_table_batches(
+                schema,
+                ducklake_table_name(),
+                LEGACY_REPLAY_EPOCH.to_owned(),
+                pending,
+            )?;
+            let context = DuckLakeBlockingOperationContext::for_tests();
+            match crash_after {
+                Some(committed) => {
+                    let committed = committed.index(batches.len() + 1);
+                    apply_table_batches(conn, &batches[..committed], &context)?;
+                    if retry {
+                        apply_table_batches(conn, &batches, &context)?;
+                    }
+                    Ok(())
+                }
+                None => apply_table_batches(conn, &batches, &context),
+            }
+        }
+
+        /// Checks that a crash plus redelivery leaves the exactly-once state.
+        fn check_replay(case: &ReplayCase) -> Result<(), TestCaseError> {
+            let table_schema = Arc::new(TableSchema::new(
+                TableId::new(1),
+                TableName::new("public".to_owned(), "users".to_owned()),
+                vec![
+                    ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false)
+                        .with_primary_key(1),
+                    ColumnSchema::new("v".to_owned(), PgType::TEXT, -1, 2, true),
+                ],
+            ));
+            let schema = ReplicatedTableSchema::from_masks(
+                Arc::clone(&table_schema),
+                ReplicationMask::all(&table_schema),
+                IdentityMask::from_bytes(vec![1, 0]),
+            );
+            let conn = lake_connection(&schema);
+            let ops = &case.ops;
+
+            let first_calls = split(0..ops.len(), &case.first_cuts);
+            let crash_call = case.crash_call.index(first_calls.len());
+            for (call, range) in first_calls.iter().enumerate().take(crash_call + 1) {
+                let crash = (call == crash_call).then_some(case.committed_batches);
+                let result =
+                    deliver(&conn, &schema, ops, range.clone(), crash, case.retry_crashed_call);
+                prop_assert!(result.is_ok(), "first attempt call {call} failed: {result:?}");
+            }
+
+            // Calls before the crash returned, so the slot may confirm up to
+            // the crashed call's start; Postgres resumes at a
+            // transaction start.
+            let confirmed = first_calls[crash_call].start;
+            let start = case.redelivery_start.index(confirmed + 1);
+            let start = start - start % EVENTS_PER_TRANSACTION;
+            for range in split(start..ops.len(), &case.second_cuts) {
+                let result = deliver(&conn, &schema, ops, range.clone(), None, false);
+                prop_assert!(result.is_ok(), "redelivery of {range:?} failed: {result:?}");
+            }
+
+            let mut model = BTreeMap::new();
+            for op in ops {
+                op.apply(&mut model);
+            }
+            let mut statement = conn
+                .prepare(&format!(
+                    "select id, v from {} order by id",
+                    qualified_lake_table_name(&ducklake_table_name())
+                ))
+                .unwrap();
+            let stored = statement
+                .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<Result<BTreeMap<_, _>, _>>()
+                .unwrap();
+            let row_count: i64 = conn
+                .query_row(
+                    &format!(
+                        "select count(*) from {}",
+                        qualified_lake_table_name(&ducklake_table_name())
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            prop_assert_eq!(row_count as usize, stored.len(), "duplicate primary keys stored");
+            prop_assert_eq!(stored, model);
+            Ok(())
+        }
+
+        #[test]
+        fn crash_and_redelivery_at_any_boundary_apply_each_event_once() {
+            run_property("ducklake_crash_redelivery_exactly_once", &replay_case(), check_replay);
+        }
     }
 }

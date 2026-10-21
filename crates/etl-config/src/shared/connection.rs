@@ -19,11 +19,14 @@ use crate::{Config, shared::Validate};
 /// - `client_encoding = "UTF8"`: Supports international character sets
 /// - `timezone = "UTC"`: Eliminates timezone ambiguity in distributed ETL
 ///   systems
+/// - `bytea_output = "hex"`: Matches the hex-only bytea decoder, regardless of
+///   the database or role default
 const COMMON_DATESTYLE: &str = "ISO";
 const COMMON_INTERVALSTYLE: &str = "postgres";
 const COMMON_EXTRA_FLOAT_DIGITS: i32 = 3;
 const COMMON_CLIENT_ENCODING: &str = "UTF8";
 const COMMON_TIMEZONE: &str = "UTC";
+const COMMON_BYTEA_OUTPUT: &str = "hex";
 /// Default statement timeout in milliseconds for bounded ETL queries.
 const DEFAULT_STATEMENT_TIMEOUT: u32 = 30_000;
 /// Default lock timeout in milliseconds for bounded ETL queries.
@@ -47,6 +50,8 @@ pub struct PgConnectionOptions {
     pub client_encoding: String,
     /// Sets the time zone for displaying and interpreting time stamps.
     pub timezone: String,
+    /// Sets the output format for bytea values.
+    pub bytea_output: String,
     /// Aborts any statement that takes more than the specified number of
     /// milliseconds.
     pub statement_timeout: u32,
@@ -74,6 +79,7 @@ impl PgConnectionOptions {
                 extra_float_digits: COMMON_EXTRA_FLOAT_DIGITS,
                 client_encoding: COMMON_CLIENT_ENCODING.to_owned(),
                 timezone: COMMON_TIMEZONE.to_owned(),
+                bytea_output: COMMON_BYTEA_OUTPUT.to_owned(),
                 statement_timeout: DEFAULT_STATEMENT_TIMEOUT,
                 lock_timeout: DEFAULT_LOCK_TIMEOUT,
                 idle_in_transaction_session_timeout: DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT,
@@ -89,13 +95,14 @@ impl PgConnectionOptions {
     pub fn to_options_string(&self) -> String {
         format!(
             "-c datestyle={} -c intervalstyle={} -c extra_float_digits={} -c client_encoding={} \
-             -c timezone={} -c statement_timeout={} -c lock_timeout={} -c \
+             -c timezone={} -c bytea_output={} -c statement_timeout={} -c lock_timeout={} -c \
              idle_in_transaction_session_timeout={} -c application_name={}",
             self.datestyle,
             self.intervalstyle,
             self.extra_float_digits,
             self.client_encoding,
             self.timezone,
+            self.bytea_output,
             self.statement_timeout,
             self.lock_timeout,
             self.idle_in_transaction_session_timeout,
@@ -113,6 +120,7 @@ impl PgConnectionOptions {
             ("extra_float_digits".to_owned(), self.extra_float_digits.to_string()),
             ("client_encoding".to_owned(), self.client_encoding.clone()),
             ("timezone".to_owned(), self.timezone.clone()),
+            ("bytea_output".to_owned(), self.bytea_output.clone()),
             ("statement_timeout".to_owned(), self.statement_timeout.to_string()),
             ("lock_timeout".to_owned(), self.lock_timeout.to_string()),
             (
@@ -442,8 +450,8 @@ mod tests {
         assert_eq!(
             options_string,
             "-c datestyle=ISO -c intervalstyle=postgres -c extra_float_digits=3 -c \
-             client_encoding=UTF8 -c timezone=UTC -c statement_timeout=0 -c lock_timeout=0 -c \
-             idle_in_transaction_session_timeout=0 -c \
+             client_encoding=UTF8 -c timezone=UTC -c bytea_output=hex -c statement_timeout=0 -c \
+             lock_timeout=0 -c idle_in_transaction_session_timeout=0 -c \
              application_name=supabase_etl_replicator_streaming"
         );
     }
@@ -453,12 +461,13 @@ mod tests {
         let options = PgConnectionOptions::builder("supabase_etl_replicator_out_of_band").build();
         let pairs = options.to_key_value_pairs();
 
-        assert_eq!(pairs.len(), 9);
+        assert_eq!(pairs.len(), 10);
         assert!(pairs.contains(&("datestyle".to_owned(), "ISO".to_owned())));
         assert!(pairs.contains(&("intervalstyle".to_owned(), "postgres".to_owned())));
         assert!(pairs.contains(&("extra_float_digits".to_owned(), "3".to_owned())));
         assert!(pairs.contains(&("client_encoding".to_owned(), "UTF8".to_owned())));
         assert!(pairs.contains(&("timezone".to_owned(), "UTC".to_owned())));
+        assert!(pairs.contains(&("bytea_output".to_owned(), "hex".to_owned())));
         assert!(pairs.contains(&("statement_timeout".to_owned(), "30000".to_owned())));
         assert!(pairs.contains(&("lock_timeout".to_owned(), "10000".to_owned())));
         assert!(
@@ -482,6 +491,7 @@ mod tests {
         assert_eq!(options.extra_float_digits, 3);
         assert_eq!(options.client_encoding, "UTF8");
         assert_eq!(options.timezone, "UTC");
+        assert_eq!(options.bytea_output, "hex");
         assert_eq!(options.statement_timeout, 45_000);
         assert_eq!(options.lock_timeout, 6_000);
         assert_eq!(options.idle_in_transaction_session_timeout, 60_000);

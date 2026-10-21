@@ -15,6 +15,10 @@ on:
         description: Compile instrumented tests instead of consuming the regular test archive.
         type: boolean
         default: false
+      runner-vcpus:
+        description: Blacksmith runner size in vCPUs; the Postgres shard count follows the provisioned machine.
+        type: number
+        default: 8
     secrets:
       TESTS_BIGQUERY_PROJECT_ID:
         required: false
@@ -27,7 +31,7 @@ permissions:
 jobs:
   test:
     name: Run tests
-    runs-on: ${{ inputs.coverage && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    runs-on: ${{ format('blacksmith-{0}vcpu-ubuntu-2404', inputs.runner-vcpus) }}
     timeout-minutes: 90
     env:
       POSTGRES_USER: postgres
@@ -41,7 +45,6 @@ jobs:
       TESTS_DATABASE_REPLICA_HOST: localhost
       TESTS_DATABASE_REPLICA_PORT: 6430
       TESTS_DATABASE_START_PORT: 5430
-      NUM_LOCAL_DATABASES: 4
       TESTS_DATABASE_USERNAME: postgres
       TESTS_DATABASE_PASSWORD: postgres
       TESTS_DATABASE_TLS_ENABLED: "true"
@@ -99,6 +102,25 @@ jobs:
       - name: Extract test runner
         if: '!inputs.coverage'
         run: tar -xzf target/ci/test-tools.tar.gz -C target/ci
+      - name: Size Postgres shards
+        # Postgres-backed tests run serially per shard, so wall time follows the
+        # shard count. Size from the provisioned machine because Blacksmith may
+        # upgrade a runner. One shard per vCPU keeps the measured 4 vCPU/4 shard
+        # ratio. The memory budget covers a primary, a replica, and the lane's
+        # test process. The cap bounds load on the single ClickHouse, MinIO,
+        # Lakekeeper, and BigQuery backends that every shard shares.
+        run: |
+          max_shards=16
+          shard_memory_kib=$((3 * 1024 * 1024))
+          cpus="$(nproc)"
+          memory_kib="$(awk '/^MemTotal:/ { print $2 }' /proc/meminfo)"
+          memory_shards=$((memory_kib / shard_memory_kib))
+          shards=$((cpus < memory_shards ? cpus : memory_shards))
+          shards=$((shards < max_shards ? shards : max_shards))
+          shards=$((shards > 0 ? shards : 1))
+          free -g
+          echo "runner has ${cpus} vCPUs and $((memory_kib / 1024)) MiB memory; using ${shards} Postgres shards."
+          echo "NUM_LOCAL_DATABASES=${shards}" >> "$GITHUB_ENV"
       - name: Start test services
         env:
           POSTGRES_IMAGE: ${{ inputs.postgres-image }}

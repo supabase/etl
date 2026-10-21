@@ -104,7 +104,7 @@ pub enum DestinationType {
 mod tests {
     use clap::ValueEnum;
 
-    use crate::common::DestinationType;
+    use crate::common::{DestinationType, parse_clickhouse_database_prefix};
 
     #[test]
     fn bigquery_destination_uses_bigquery_for_cli() {
@@ -115,6 +115,17 @@ mod tests {
     fn bigquery_destination_uses_snake_case_for_serde() {
         let value = serde_json::to_value(DestinationType::BigQuery).unwrap();
         assert_eq!(value, "big_query");
+    }
+
+    #[test]
+    fn clickhouse_database_prefix_accepts_only_unquoted_identifiers() {
+        for value in ["bench", "_bench", "Bench_2"] {
+            assert_eq!(parse_clickhouse_database_prefix(value).as_deref(), Ok(value));
+        }
+
+        for value in ["", "123", "1bench", "a`b", "x\\x41", "bench-1", "bé", "a b", "bench;drop"] {
+            assert!(parse_clickhouse_database_prefix(value).is_err(), "{value:?}");
+        }
     }
 }
 
@@ -164,6 +175,25 @@ pub struct PipelineTuningArgs {
     pub disable_memory_backpressure: bool,
 }
 
+/// Parses a ClickHouse database prefix for `--clickhouse-database`.
+///
+/// Each run appends `_<pipeline_id>` and uses the result as an unquoted
+/// ClickHouse identifier, so the prefix must start with an ASCII letter or
+/// underscore and contain only ASCII letters, digits, and underscores. An
+/// all-digit name such as `123_456` would parse as a number.
+fn parse_clickhouse_database_prefix(value: &str) -> Result<String, String> {
+    let mut bytes = value.bytes();
+    let starts_like_identifier =
+        bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_');
+    if starts_like_identifier && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
+        Ok(value.to_owned())
+    } else {
+        Err("Must start with an ASCII letter or underscore and contain only ASCII letters, \
+             digits, and underscores"
+            .to_owned())
+    }
+}
+
 /// Destination arguments shared by benchmark commands.
 #[derive(Args, Debug, Clone)]
 pub struct DestinationArgs {
@@ -194,8 +224,11 @@ pub struct DestinationArgs {
     /// ClickHouse password.
     #[arg(long)]
     pub clickhouse_password: Option<String>,
-    /// ClickHouse database. Must already exist.
-    #[arg(long)]
+    /// ClickHouse database prefix. Each run writes to a new
+    /// `<database>_<pipeline_id>` database, dropped when the run cleans up.
+    /// Must start with an ASCII letter or underscore and contain only ASCII
+    /// letters, digits, and underscores.
+    #[arg(long, value_parser = parse_clickhouse_database_prefix)]
     pub clickhouse_database: Option<String>,
     /// DuckLake PostgreSQL catalog URL.
     #[arg(long)]
@@ -516,8 +549,11 @@ impl BenchDestination {
         expect(clippy::unused_async)
     )]
     #[cfg_attr(
-        not(any(feature = "bigquery", feature = "snowflake")),
-        expect(unused_variables, reason = "pipeline_id is only used by BigQuery and Snowflake")
+        not(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake")),
+        expect(
+            unused_variables,
+            reason = "pipeline_id is only used by BigQuery, ClickHouse and Snowflake"
+        )
     )]
     pub async fn new(
         destination_args: &DestinationArgs,
@@ -585,6 +621,13 @@ impl BenchDestination {
                     .context("ClickHouse database is required for ClickHouse benchmarks")?;
                 let password =
                     destination_args.clickhouse_password.clone().filter(|p| !p.is_empty());
+
+                let database = clickhouse_run_database(&database, pipeline_id);
+                clickhouse_root_client(&url, &user, password.as_deref())
+                    .query(&format!("create database if not exists {database}"))
+                    .execute()
+                    .await
+                    .with_context(|| format!("failed to create ClickHouse database {database}"))?;
 
                 let destination = ClickHouseDestination::new(
                     url,
@@ -953,6 +996,7 @@ pub fn pipeline_config(
         invalidated_slot_behavior: InvalidatedSlotBehavior::Error,
         max_copy_connections_per_table: tuning.max_copy_connections_per_table,
         run_source_migrations: true,
+        drain_on_shutdown: true,
     }
 }
 
@@ -972,6 +1016,56 @@ pub async fn cleanup_replication_slots(
 
     pool.close().await;
     Ok(())
+}
+
+/// Drops the destination state created by a benchmark run.
+#[cfg_attr(
+    not(feature = "clickhouse"),
+    expect(unused_variables, reason = "only ClickHouse runs create destination state")
+)]
+pub async fn cleanup_destination(
+    destination_args: &DestinationArgs,
+    pipeline_id: u64,
+) -> Result<()> {
+    #[cfg(feature = "clickhouse")]
+    if matches!(destination_args.destination, DestinationType::ClickHouse) {
+        let url = destination_args
+            .clickhouse_url
+            .as_deref()
+            .context("ClickHouse URL is required for ClickHouse benchmarks")?;
+        let url = Url::parse(url).context("invalid ClickHouse URL")?;
+        let user = destination_args
+            .clickhouse_user
+            .as_deref()
+            .context("ClickHouse user is required for ClickHouse benchmarks")?;
+        let database = destination_args
+            .clickhouse_database
+            .as_deref()
+            .context("ClickHouse database is required for ClickHouse benchmarks")?;
+        let password = destination_args.clickhouse_password.as_deref().filter(|p| !p.is_empty());
+        let database = clickhouse_run_database(database, pipeline_id);
+        clickhouse_root_client(&url, user, password)
+            .query(&format!("drop database if exists {database}"))
+            .execute()
+            .await
+            .with_context(|| format!("failed to drop ClickHouse database {database}"))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "clickhouse")]
+fn clickhouse_run_database(database: &str, pipeline_id: u64) -> String {
+    format!("{database}_{pipeline_id}")
+}
+
+#[cfg(feature = "clickhouse")]
+fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clickhouse::Client {
+    let client = clickhouse::Client::default().with_url(url.as_str()).with_user(user);
+    match password {
+        Some(password) => client.with_password(password),
+        None => client,
+    }
 }
 
 /// Writes a machine-readable benchmark report.

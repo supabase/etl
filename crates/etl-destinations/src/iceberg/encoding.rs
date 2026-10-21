@@ -1055,12 +1055,24 @@ fn append_array_cell_as_strings(
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Array;
-    use etl::data::{
-        ArrayCell, DATE_FORMAT, Date, PgTime, TIME_FORMAT, TIMESTAMP_FORMAT, Timestamp,
+    use arrow::array::{Array, AsArray};
+    use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, TimeZone, Utc};
+    use etl::{
+        data::{
+            ArrayCell, DATE_FORMAT, Date, PgNumeric, PgTime, PgTimeTz, TIME_FORMAT,
+            TIMESTAMP_FORMAT, Timestamp,
+        },
+        schema::{ColumnSchema, Type, is_array_type},
+        test_utils::property::{
+            any_f32, any_f64, f32_matches, f64_matches, opt_f32_matches, opt_f64_matches, pg_text,
+            pg_time, run_property,
+        },
     };
+    use proptest::{collection, prelude::*, prop_oneof};
+    use uuid::Uuid;
 
     use super::*;
+    use crate::iceberg::schema::postgres_to_iceberg_schema;
 
     #[test]
     fn cell_to_bool_fn() {
@@ -3104,5 +3116,456 @@ mod tests {
                 rows_to_record_batch(&[TableRow::new(vec![Cell::Array(array)])], schema).is_err()
             );
         }
+    }
+
+    /// Postgres types the Iceberg schema maps, plus string-fallback types the
+    /// codec carries as text.
+    const ROUNDTRIP_TYPES: [Type; 42] = [
+        Type::BOOL,
+        Type::INT2,
+        Type::INT4,
+        Type::INT8,
+        Type::OID,
+        Type::FLOAT4,
+        Type::FLOAT8,
+        Type::NUMERIC,
+        Type::TEXT,
+        Type::VARCHAR,
+        Type::BPCHAR,
+        Type::NAME,
+        Type::INTERVAL,
+        Type::INET,
+        Type::BYTEA,
+        Type::DATE,
+        Type::TIME,
+        Type::TIMETZ,
+        Type::TIMESTAMP,
+        Type::TIMESTAMPTZ,
+        Type::UUID,
+        Type::JSON,
+        Type::JSONB,
+        Type::BOOL_ARRAY,
+        Type::INT2_ARRAY,
+        Type::INT4_ARRAY,
+        Type::INT8_ARRAY,
+        Type::OID_ARRAY,
+        Type::FLOAT4_ARRAY,
+        Type::FLOAT8_ARRAY,
+        Type::NUMERIC_ARRAY,
+        Type::TEXT_ARRAY,
+        Type::INTERVAL_ARRAY,
+        Type::BYTEA_ARRAY,
+        Type::DATE_ARRAY,
+        Type::TIME_ARRAY,
+        Type::TIMETZ_ARRAY,
+        Type::TIMESTAMP_ARRAY,
+        Type::TIMESTAMPTZ_ARRAY,
+        Type::UUID_ARRAY,
+        Type::JSON_ARRAY,
+        Type::JSONB_ARRAY,
+    ];
+
+    /// Dates across Postgres's lower bound (4713 BC) and chrono's upper bound,
+    /// biased toward the epoch and the BC/AD and four-digit-year edges.
+    fn roundtrip_date() -> impl Strategy<Value = NaiveDate> {
+        let days = |year| NaiveDate::from_ymd_opt(year, 1, 1).unwrap().num_days_from_ce();
+        let near = |year| (days(year) - 400)..(days(year) + 400);
+        prop_oneof![
+            2 => days(-4712)..=NaiveDate::MAX.num_days_from_ce(),
+            1 => near(1970),
+            1 => near(1),
+            1 => near(10_000),
+            1 => days(-4712)..days(-4710),
+            1 => (NaiveDate::MAX.num_days_from_ce() - 400)..=NaiveDate::MAX.num_days_from_ce(),
+        ]
+        .prop_map(|days| NaiveDate::from_num_days_from_ce_opt(days).unwrap())
+    }
+
+    /// Dates, including the infinities Iceberg must reject loudly.
+    fn roundtrip_pg_date() -> impl Strategy<Value = Date<NaiveDate>> {
+        prop_oneof![
+            20 => roundtrip_date().prop_map(Date::Value),
+            1 => Just(Date::PosInfinity),
+            1 => Just(Date::NegInfinity),
+        ]
+    }
+
+    /// Times, including the end-of-day value Iceberg must reject loudly.
+    fn roundtrip_pg_time() -> impl Strategy<Value = PgTime> {
+        prop_oneof![20 => pg_time().prop_map(PgTime::Value), 1 => Just(PgTime::EndOfDay)]
+    }
+
+    /// Naive timestamps, including the infinities.
+    fn roundtrip_timestamp() -> impl Strategy<Value = Timestamp<NaiveDateTime>> {
+        prop_oneof![
+            20 => (roundtrip_date(), pg_time())
+                .prop_map(|(date, time)| Timestamp::Value(NaiveDateTime::new(date, time))),
+            1 => Just(Timestamp::PosInfinity),
+            1 => Just(Timestamp::NegInfinity),
+        ]
+    }
+
+    /// UTC timestamps, including pre-1970 instants and the infinities.
+    fn roundtrip_timestamptz() -> impl Strategy<Value = Timestamp<DateTime<Utc>>> {
+        prop_oneof![
+            20 => (roundtrip_date(), pg_time()).prop_map(|(date, time)| {
+                Timestamp::Value(Utc.from_utc_datetime(&NaiveDateTime::new(date, time)))
+            }),
+            1 => Just(Timestamp::PosInfinity),
+            1 => Just(Timestamp::NegInfinity),
+        ]
+    }
+
+    /// Times with the UTC offsets Postgres accepts, including end of day.
+    fn roundtrip_timetz() -> impl Strategy<Value = PgTimeTz> {
+        (roundtrip_pg_time(), -57_599i32..=57_599)
+            .prop_map(|(time, offset)| PgTimeTz::new(time, FixedOffset::east_opt(offset).unwrap()))
+    }
+
+    /// Canonical numeric values: integers, decimals, and the specials.
+    fn roundtrip_numeric() -> impl Strategy<Value = PgNumeric> {
+        prop_oneof![
+            8 => "-?(0|[1-9][0-9]{0,30})(\\.[0-9]{1,20})?",
+            1 => Just("NaN".to_owned()),
+            1 => Just("Infinity".to_owned()),
+            1 => Just("-Infinity".to_owned()),
+        ]
+        .prop_map(|text| text.parse().unwrap())
+    }
+
+    /// JSON documents, including JSON null and high-precision numbers.
+    fn roundtrip_json() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::from),
+            any::<i64>().prop_map(serde_json::Value::from),
+            "-?[1-9][0-9]{0,40}(\\.[0-9]{1,30})?(e-?[1-9][0-9]{0,2})?"
+                .prop_map(|number| serde_json::from_str(&number).unwrap()),
+            pg_text().prop_map(serde_json::Value::from),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop_oneof![
+                collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::from),
+                collection::btree_map("[a-z]{0,3}", inner, 0..4)
+                    .prop_map(|map| { serde_json::Value::Object(map.into_iter().collect()) }),
+            ]
+        })
+    }
+
+    /// Wraps array element values into a nullable-element array cell.
+    fn array_of<T: std::fmt::Debug + Clone + 'static>(
+        element: impl Strategy<Value = T> + 'static,
+        wrap: fn(Vec<Option<T>>) -> ArrayCell,
+    ) -> BoxedStrategy<Cell> {
+        collection::vec(proptest::option::of(element), 0..5)
+            .prop_map(move |values| Cell::Array(wrap(values)))
+            .boxed()
+    }
+
+    /// Cells the Postgres codec produces for a non-null value of `typ`.
+    fn roundtrip_value(typ: &Type) -> BoxedStrategy<Cell> {
+        let uuid = || any::<u128>().prop_map(Uuid::from_u128);
+        let bytes = || collection::vec(any::<u8>(), 0..24);
+        let oid = || prop_oneof![any::<u32>(), Just(u32::MAX), Just(0)];
+        match *typ {
+            Type::BOOL => any::<bool>().prop_map(Cell::Bool).boxed(),
+            Type::INT2 => any::<i16>().prop_map(Cell::I16).boxed(),
+            Type::INT4 => any::<i32>().prop_map(Cell::I32).boxed(),
+            Type::INT8 => any::<i64>().prop_map(Cell::I64).boxed(),
+            Type::OID => oid().prop_map(Cell::U32).boxed(),
+            Type::FLOAT4 => any_f32().prop_map(Cell::F32).boxed(),
+            Type::FLOAT8 => any_f64().prop_map(Cell::F64).boxed(),
+            Type::NUMERIC => roundtrip_numeric().prop_map(Cell::Numeric).boxed(),
+            Type::BYTEA => bytes().prop_map(Cell::Bytes).boxed(),
+            Type::DATE => roundtrip_pg_date().prop_map(Cell::Date).boxed(),
+            Type::TIME => roundtrip_pg_time().prop_map(Cell::Time).boxed(),
+            Type::TIMETZ => roundtrip_timetz().prop_map(Cell::TimeTz).boxed(),
+            Type::TIMESTAMP => roundtrip_timestamp().prop_map(Cell::Timestamp).boxed(),
+            Type::TIMESTAMPTZ => roundtrip_timestamptz().prop_map(Cell::TimestampTz).boxed(),
+            Type::UUID => uuid().prop_map(Cell::Uuid).boxed(),
+            Type::JSON | Type::JSONB => roundtrip_json().prop_map(Cell::Json).boxed(),
+            Type::BOOL_ARRAY => array_of(any::<bool>(), ArrayCell::Bool),
+            Type::INT2_ARRAY => array_of(any::<i16>(), ArrayCell::I16),
+            Type::INT4_ARRAY => array_of(any::<i32>(), ArrayCell::I32),
+            Type::INT8_ARRAY => array_of(any::<i64>(), ArrayCell::I64),
+            Type::OID_ARRAY => array_of(oid(), ArrayCell::U32),
+            Type::FLOAT4_ARRAY => array_of(any_f32(), ArrayCell::F32),
+            Type::FLOAT8_ARRAY => array_of(any_f64(), ArrayCell::F64),
+            Type::NUMERIC_ARRAY => array_of(roundtrip_numeric(), ArrayCell::Numeric),
+            Type::BYTEA_ARRAY => array_of(bytes(), ArrayCell::Bytes),
+            Type::DATE_ARRAY => array_of(roundtrip_pg_date(), ArrayCell::Date),
+            Type::TIME_ARRAY => array_of(roundtrip_pg_time(), ArrayCell::Time),
+            Type::TIMETZ_ARRAY => array_of(roundtrip_timetz(), ArrayCell::TimeTz),
+            Type::TIMESTAMP_ARRAY => array_of(roundtrip_timestamp(), ArrayCell::Timestamp),
+            Type::TIMESTAMPTZ_ARRAY => array_of(roundtrip_timestamptz(), ArrayCell::TimestampTz),
+            Type::UUID_ARRAY => array_of(uuid(), ArrayCell::Uuid),
+            Type::JSON_ARRAY | Type::JSONB_ARRAY => array_of(roundtrip_json(), ArrayCell::Json),
+            _ if is_array_type(typ) => array_of(pg_text(), ArrayCell::String),
+            _ => pg_text().prop_map(Cell::String).boxed(),
+        }
+    }
+
+    /// One generated column: its type, nullability and one cell per row.
+    type RoundtripColumn = (Type, bool, Vec<Cell>);
+
+    /// Tables of one to five random columns and zero to five rows; nullable
+    /// columns mix in SQL NULL.
+    fn roundtrip_table() -> impl Strategy<Value = Vec<RoundtripColumn>> {
+        (collection::vec((0..ROUNDTRIP_TYPES.len(), any::<bool>()), 1..=5), 0usize..=5)
+            .prop_flat_map(|(columns, row_count)| {
+                columns
+                    .into_iter()
+                    .map(|(index, nullable)| {
+                        let typ = ROUNDTRIP_TYPES[index].clone();
+                        let value = roundtrip_value(&typ);
+                        let cell = if nullable {
+                            prop_oneof![1 => Just(Cell::Null), 4 => value].boxed()
+                        } else {
+                            value
+                        };
+                        collection::vec(cell, row_count)
+                            .prop_map(move |cells| (typ.clone(), nullable, cells))
+                    })
+                    .collect::<Vec<_>>()
+            })
+    }
+
+    /// Returns whether `cell` holds an infinity or end-of-day in a column
+    /// Iceberg stores as a temporal type, which must fail the batch.
+    fn has_unrepresentable_temporal(typ: &Type, cell: &Cell) -> bool {
+        let special_date = |date: &Date<NaiveDate>| !matches!(date, Date::Value(_));
+        let special_time = |time: &PgTime| *time == PgTime::EndOfDay;
+        match (typ, cell) {
+            (_, Cell::Date(date)) => special_date(date),
+            (_, Cell::Time(time)) => special_time(time),
+            (_, Cell::Timestamp(ts)) => !matches!(ts, Timestamp::Value(_)),
+            (_, Cell::TimestampTz(ts)) => !matches!(ts, Timestamp::Value(_)),
+            (_, Cell::Array(ArrayCell::Date(values))) => values.iter().flatten().any(special_date),
+            (_, Cell::Array(ArrayCell::Time(values))) => values.iter().flatten().any(special_time),
+            (_, Cell::Array(ArrayCell::Timestamp(values))) => {
+                values.iter().flatten().any(|ts| !matches!(ts, Timestamp::Value(_)))
+            }
+            (_, Cell::Array(ArrayCell::TimestampTz(values))) => {
+                values.iter().flatten().any(|ts| !matches!(ts, Timestamp::Value(_)))
+            }
+            _ => false,
+        }
+    }
+
+    /// Decodes nullable list elements with `decode`.
+    fn decode_elements<T>(values: &ArrayRef, decode: impl Fn(usize) -> T) -> Vec<Option<T>> {
+        (0..values.len()).map(|index| (!values.is_null(index)).then(|| decode(index))).collect()
+    }
+
+    /// Inverse of the Iceberg time encoding.
+    fn decode_time(micros: i64) -> PgTime {
+        let seconds = u32::try_from(micros.div_euclid(1_000_000)).unwrap();
+        let nanos = u32::try_from(micros.rem_euclid(1_000_000) * 1_000).unwrap();
+        PgTime::Value(NaiveTime::from_num_seconds_from_midnight_opt(seconds, nanos).unwrap())
+    }
+
+    /// Inverse of the Iceberg date encoding.
+    fn decode_date(days: i32) -> Date<NaiveDate> {
+        Date::Value(UNIX_EPOCH + chrono::Duration::days(i64::from(days)))
+    }
+
+    /// Inverse of the Iceberg timestamp encodings.
+    fn decode_timestamptz(micros: i64) -> Timestamp<DateTime<Utc>> {
+        Timestamp::Value(DateTime::from_timestamp_micros(micros).unwrap())
+    }
+
+    /// Inverse of the string fallback for a scalar of Postgres type `typ`.
+    fn decode_text(typ: &Type, text: &str) -> Cell {
+        match *typ {
+            Type::NUMERIC => Cell::Numeric(text.parse().unwrap()),
+            Type::TIMETZ => Cell::TimeTz(text.parse().unwrap()),
+            Type::JSON | Type::JSONB => Cell::Json(serde_json::from_str(text).unwrap()),
+            _ => Cell::String(text.to_owned()),
+        }
+    }
+
+    /// Inverse of the string fallback for the elements of Postgres array type
+    /// `typ`.
+    fn decode_text_array(typ: &Type, values: &ArrayRef) -> ArrayCell {
+        let strings = values.as_string::<i32>();
+        match *typ {
+            Type::NUMERIC_ARRAY => {
+                ArrayCell::Numeric(decode_elements(values, |i| strings.value(i).parse().unwrap()))
+            }
+            Type::TIMETZ_ARRAY => {
+                ArrayCell::TimeTz(decode_elements(values, |i| strings.value(i).parse().unwrap()))
+            }
+            Type::JSON_ARRAY | Type::JSONB_ARRAY => ArrayCell::Json(decode_elements(values, |i| {
+                serde_json::from_str(strings.value(i)).unwrap()
+            })),
+            _ => ArrayCell::String(decode_elements(values, |i| strings.value(i).to_owned())),
+        }
+    }
+
+    /// Decodes the list elements of a Postgres array type.
+    fn decode_array(typ: &Type, values: &ArrayRef) -> ArrayCell {
+        match *typ {
+            Type::BOOL_ARRAY => {
+                ArrayCell::Bool(decode_elements(values, |i| values.as_boolean().value(i)))
+            }
+            Type::INT2_ARRAY => ArrayCell::I16(decode_elements(values, |i| {
+                i16::try_from(values.as_primitive::<Int32Type>().value(i)).unwrap()
+            })),
+            Type::INT4_ARRAY => ArrayCell::I32(decode_elements(values, |i| {
+                values.as_primitive::<Int32Type>().value(i)
+            })),
+            Type::INT8_ARRAY => ArrayCell::I64(decode_elements(values, |i| {
+                values.as_primitive::<Int64Type>().value(i)
+            })),
+            Type::OID_ARRAY => ArrayCell::U32(decode_elements(values, |i| {
+                u32::try_from(values.as_primitive::<Int64Type>().value(i)).unwrap()
+            })),
+            Type::FLOAT4_ARRAY => ArrayCell::F32(decode_elements(values, |i| {
+                values.as_primitive::<Float32Type>().value(i)
+            })),
+            Type::FLOAT8_ARRAY => ArrayCell::F64(decode_elements(values, |i| {
+                values.as_primitive::<Float64Type>().value(i)
+            })),
+            Type::BYTEA_ARRAY => ArrayCell::Bytes(decode_elements(values, |i| {
+                values.as_binary::<i64>().value(i).to_vec()
+            })),
+            Type::DATE_ARRAY => ArrayCell::Date(decode_elements(values, |i| {
+                decode_date(values.as_primitive::<Date32Type>().value(i))
+            })),
+            Type::TIME_ARRAY => ArrayCell::Time(decode_elements(values, |i| {
+                decode_time(values.as_primitive::<Time64MicrosecondType>().value(i))
+            })),
+            Type::TIMESTAMP_ARRAY => ArrayCell::Timestamp(decode_elements(values, |i| {
+                let micros = values.as_primitive::<TimestampMicrosecondType>().value(i);
+                Timestamp::Value(DateTime::from_timestamp_micros(micros).unwrap().naive_utc())
+            })),
+            Type::TIMESTAMPTZ_ARRAY => ArrayCell::TimestampTz(decode_elements(values, |i| {
+                decode_timestamptz(values.as_primitive::<TimestampMicrosecondType>().value(i))
+            })),
+            Type::UUID_ARRAY => ArrayCell::Uuid(decode_elements(values, |i| {
+                Uuid::from_slice(values.as_fixed_size_binary().value(i)).unwrap()
+            })),
+            _ => decode_text_array(typ, values),
+        }
+    }
+
+    /// Decodes row `row` of `column`, the Arrow array for Postgres type `typ`,
+    /// back into the cell the codec would have produced.
+    fn decode_arrow_cell(typ: &Type, column: &ArrayRef, row: usize) -> Cell {
+        if column.is_null(row) {
+            return Cell::Null;
+        }
+        if is_array_type(typ) {
+            return Cell::Array(decode_array(typ, &column.as_list::<i32>().value(row)));
+        }
+        match *typ {
+            Type::BOOL => Cell::Bool(column.as_boolean().value(row)),
+            Type::INT2 => {
+                Cell::I16(i16::try_from(column.as_primitive::<Int32Type>().value(row)).unwrap())
+            }
+            Type::INT4 => Cell::I32(column.as_primitive::<Int32Type>().value(row)),
+            Type::INT8 => Cell::I64(column.as_primitive::<Int64Type>().value(row)),
+            Type::OID => {
+                Cell::U32(u32::try_from(column.as_primitive::<Int64Type>().value(row)).unwrap())
+            }
+            Type::FLOAT4 => Cell::F32(column.as_primitive::<Float32Type>().value(row)),
+            Type::FLOAT8 => Cell::F64(column.as_primitive::<Float64Type>().value(row)),
+            Type::BYTEA => Cell::Bytes(column.as_binary::<i64>().value(row).to_vec()),
+            Type::DATE => Cell::Date(decode_date(column.as_primitive::<Date32Type>().value(row))),
+            Type::TIME => {
+                Cell::Time(decode_time(column.as_primitive::<Time64MicrosecondType>().value(row)))
+            }
+            Type::TIMESTAMP => {
+                let micros = column.as_primitive::<TimestampMicrosecondType>().value(row);
+                Cell::Timestamp(Timestamp::Value(
+                    DateTime::from_timestamp_micros(micros).unwrap().naive_utc(),
+                ))
+            }
+            Type::TIMESTAMPTZ => Cell::TimestampTz(decode_timestamptz(
+                column.as_primitive::<TimestampMicrosecondType>().value(row),
+            )),
+            Type::UUID => {
+                Cell::Uuid(Uuid::from_slice(column.as_fixed_size_binary().value(row)).unwrap())
+            }
+            _ => decode_text(typ, column.as_string::<i32>().value(row)),
+        }
+    }
+
+    /// Compares cells exactly, floats bit for bit with NaN payloads equal.
+    fn cells_match(expected: &Cell, actual: &Cell) -> bool {
+        let f32s = |a: &[Option<f32>], b: &[Option<f32>]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| opt_f32_matches(*a, *b))
+        };
+        let f64s = |a: &[Option<f64>], b: &[Option<f64>]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| opt_f64_matches(*a, *b))
+        };
+        match (expected, actual) {
+            (Cell::F32(a), Cell::F32(b)) => f32_matches(*a, *b),
+            (Cell::F64(a), Cell::F64(b)) => f64_matches(*a, *b),
+            (Cell::Array(ArrayCell::F32(a)), Cell::Array(ArrayCell::F32(b))) => f32s(a, b),
+            (Cell::Array(ArrayCell::F64(a)), Cell::Array(ArrayCell::F64(b))) => f64s(a, b),
+            _ => expected == actual,
+        }
+    }
+
+    /// Cells reach Arrow losslessly through the production schema path: the
+    /// decoded value equals the cell and `is_null` matches, element by element
+    /// for arrays. Values Iceberg cannot represent fail the whole batch.
+    #[test]
+    fn cells_roundtrip_through_production_arrow_schema() {
+        run_property("iceberg cell arrow roundtrip", &roundtrip_table(), |columns| {
+            let column_schemas = columns
+                .iter()
+                .enumerate()
+                .map(|(index, (typ, nullable, _))| {
+                    ColumnSchema::new(
+                        format!("c{index}"),
+                        typ.clone(),
+                        -1,
+                        index as i32 + 1,
+                        *nullable,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let iceberg_schema = postgres_to_iceberg_schema(&column_schemas).unwrap();
+            let arrow_schema = ::iceberg::arrow::schema_to_arrow_schema(&iceberg_schema).unwrap();
+            let row_count = columns[0].2.len();
+            let rows = (0..row_count)
+                .map(|row| {
+                    TableRow::new(columns.iter().map(|(_, _, cells)| cells[row].clone()).collect())
+                })
+                .collect::<Vec<_>>();
+            let must_fail = columns.iter().any(|(typ, _, cells)| {
+                cells.iter().any(|cell| has_unrepresentable_temporal(typ, cell))
+            });
+
+            let batch = match rows_to_record_batch(&rows, arrow_schema) {
+                Ok(batch) => batch,
+                Err(error) => {
+                    prop_assert!(must_fail, "representable cells were rejected: {error}");
+                    return Ok(());
+                }
+            };
+            prop_assert!(!must_fail, "unrepresentable temporal value was encoded");
+            prop_assert_eq!(batch.num_rows(), row_count);
+            for (index, (typ, _, cells)) in columns.iter().enumerate() {
+                let column = batch.column(index);
+                for (row, cell) in cells.iter().enumerate() {
+                    prop_assert_eq!(
+                        column.is_null(row),
+                        matches!(cell, Cell::Null),
+                        "{} row {}",
+                        typ,
+                        row
+                    );
+                    let decoded = decode_arrow_cell(typ, column, row);
+                    prop_assert!(
+                        cells_match(cell, &decoded),
+                        "{typ} row {row}: wrote {cell:?}, read {decoded:?}"
+                    );
+                }
+            }
+            Ok(())
+        });
     }
 }

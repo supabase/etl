@@ -1007,6 +1007,8 @@ mod tests {
     use postgres_replication::protocol::{
         LogicalReplicationMessage, ReplicationMessage, TupleData,
     };
+    #[cfg(feature = "test-utils")]
+    use proptest::{arbitrary::any, collection, prop_assert_eq, strategy::Strategy};
     use tokio_postgres::types::{PgLsn, Type};
 
     use super::{
@@ -1016,6 +1018,8 @@ mod tests {
         parse_event_from_delete_message, parse_event_from_update_message,
         schema_snapshot_id_from_message, update_message_payload_bytes,
     };
+    #[cfg(feature = "test-utils")]
+    use crate::test_utils::property::{pg_text, run_property};
     use crate::{
         data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
         error::ErrorKind,
@@ -1902,6 +1906,513 @@ mod tests {
                 Cell::String("alice".to_owned()),
                 Cell::String("smith".to_owned()),
             ])))
+        );
+    }
+
+    /// Column type drawn by the update/delete tuple property.
+    ///
+    /// `int8` is fixed width and can never be TOASTed; `text` is varlena and is
+    /// the type that can show up as an unchanged TOAST marker.
+    #[cfg(feature = "test-utils")]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ModelColumnType {
+        Int8,
+        Text,
+    }
+
+    /// Non-null source value of one generated column.
+    #[cfg(feature = "test-utils")]
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum ModelValue {
+        Int8(i64),
+        Text(String),
+    }
+
+    #[cfg(feature = "test-utils")]
+    impl ModelValue {
+        /// Renders the value as pgoutput's text-format tuple payload.
+        fn to_pg_text(&self) -> String {
+            match self {
+                Self::Int8(value) => value.to_string(),
+                Self::Text(value) => value.clone(),
+            }
+        }
+    }
+
+    /// Returns the cell etl must decode for an optional model value.
+    #[cfg(feature = "test-utils")]
+    fn model_cell(value: Option<&ModelValue>) -> Cell {
+        match value {
+            None => Cell::Null,
+            Some(ModelValue::Int8(value)) => Cell::I64(*value),
+            Some(ModelValue::Text(value)) => Cell::String(value.clone()),
+        }
+    }
+
+    /// One column of a generated table, plus its value before and after one
+    /// `UPDATE` of one row.
+    #[cfg(feature = "test-utils")]
+    #[derive(Debug, Clone)]
+    struct ModelColumn {
+        typ: ModelColumnType,
+        nullable: bool,
+        replicated: bool,
+        identity: bool,
+        old: Option<ModelValue>,
+        new: Option<ModelValue>,
+        /// Whether pgoutput sends this column as `u` in the new tuple, which
+        /// it does for unchanged values stored out of line in TOAST.
+        unchanged_toast: bool,
+    }
+
+    #[cfg(feature = "test-utils")]
+    impl ModelColumn {
+        /// Returns the expected decoded cell for the old value.
+        fn old_cell(&self) -> Cell {
+            model_cell(self.old.as_ref())
+        }
+
+        /// Returns the expected decoded cell for the new value.
+        fn new_cell(&self) -> Cell {
+            model_cell(self.new.as_ref())
+        }
+    }
+
+    /// Generated table schema, publication masks, replica identity, and one
+    /// row update, constrained to what PostgreSQL can publish.
+    #[cfg(feature = "test-utils")]
+    #[derive(Debug, Clone)]
+    struct UpdateDeleteCase {
+        /// `REPLICA IDENTITY FULL` when set; otherwise a key identity
+        /// (`DEFAULT` with a primary key, or `USING INDEX`).
+        full_identity: bool,
+        columns: Vec<ModelColumn>,
+    }
+
+    /// Raw per-column draw before [`UpdateDeleteCase`] normalization:
+    /// `(is_text, nullable, replicated, identity)`, `(old_null, old_int,
+    /// old_text)`, `(changed, new_null, new_int, new_text)`, `toasted`.
+    #[cfg(feature = "test-utils")]
+    type RawModelColumn =
+        ((bool, bool, bool, bool), (bool, i64, String), (bool, bool, i64, String), bool);
+
+    /// One field of a tuple as the model encodes it on the wire.
+    #[cfg(feature = "test-utils")]
+    #[derive(Debug, Clone)]
+    enum ModelTupleCell {
+        Null,
+        UnchangedToast,
+        Text(String),
+    }
+
+    #[cfg(feature = "test-utils")]
+    impl ModelTupleCell {
+        /// Encodes an optional model value as a text or null field.
+        fn from_value(value: Option<&ModelValue>) -> Self {
+            value.map_or(Self::Null, |value| Self::Text(value.to_pg_text()))
+        }
+    }
+
+    #[cfg(feature = "test-utils")]
+    impl UpdateDeleteCase {
+        /// Builds a case that PostgreSQL could publish from raw draws.
+        ///
+        /// The rules mirror source constraints rather than narrowing the
+        /// envelope: an update/delete publication must replicate every
+        /// replica-identity column, a key identity has at least one column and
+        /// its columns are `NOT NULL`, `FULL` flags every replicated column as
+        /// identity, and only a non-null, unchanged varlena value can be sent
+        /// as unchanged TOAST.
+        fn from_raw(full_identity: bool, raw_columns: Vec<RawModelColumn>) -> Self {
+            let mut columns: Vec<ModelColumn> = raw_columns
+                .iter()
+                .map(|((is_text, nullable, replicated, identity), ..)| ModelColumn {
+                    typ: if *is_text { ModelColumnType::Text } else { ModelColumnType::Int8 },
+                    nullable: *nullable,
+                    replicated: *replicated,
+                    identity: *replicated && (full_identity || *identity),
+                    old: None,
+                    new: None,
+                    unchanged_toast: false,
+                })
+                .collect();
+
+            if !columns.iter().any(|column| column.replicated) {
+                columns[0].replicated = true;
+                columns[0].identity = full_identity;
+            }
+            if !columns.iter().any(|column| column.identity) {
+                columns.iter_mut().find(|column| column.replicated).unwrap().identity = true;
+            }
+
+            for (column, raw_column) in columns.iter_mut().zip(&raw_columns) {
+                let (
+                    _,
+                    (old_null, old_int, old_text),
+                    (changed, new_null, new_int, new_text),
+                    toasted,
+                ) = raw_column;
+                // Key identities come from a primary key or a unique index over
+                // `NOT NULL` columns.
+                if column.identity && !full_identity {
+                    column.nullable = false;
+                }
+
+                let typ = column.typ;
+                let value = |int: &i64, text: &String| match typ {
+                    ModelColumnType::Int8 => ModelValue::Int8(*int),
+                    ModelColumnType::Text => ModelValue::Text(text.clone()),
+                };
+                column.old = (!(column.nullable && *old_null)).then(|| value(old_int, old_text));
+                column.new = if !changed {
+                    column.old.clone()
+                } else if column.nullable && *new_null {
+                    None
+                } else {
+                    Some(value(new_int, new_text))
+                };
+                column.unchanged_toast = *toasted
+                    && typ == ModelColumnType::Text
+                    && column.replicated
+                    && column.old.is_some()
+                    && column.new == column.old;
+            }
+
+            Self { full_identity, columns }
+        }
+
+        /// Builds the replicated schema etl would hold for this table.
+        fn replicated_table_schema(&self) -> ReplicatedTableSchema {
+            let mut primary_key_position = 0;
+            let column_schemas = self
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    let typ = match column.typ {
+                        ModelColumnType::Int8 => Type::INT8,
+                        ModelColumnType::Text => Type::TEXT,
+                    };
+                    let column_schema = ColumnSchema::new(
+                        format!("c{index}"),
+                        typ,
+                        -1,
+                        i32::try_from(index + 1).unwrap(),
+                        column.nullable,
+                    );
+                    if column.identity && !self.full_identity {
+                        primary_key_position += 1;
+                        column_schema.with_primary_key(primary_key_position)
+                    } else {
+                        column_schema
+                    }
+                })
+                .collect();
+            let table_schema = Arc::new(TableSchema::new(
+                TableId::new(42),
+                TableName::new("public".to_owned(), "model".to_owned()),
+                column_schemas,
+            ));
+            let mask = |flag: fn(&ModelColumn) -> bool| {
+                self.columns.iter().map(|column| u8::from(flag(column))).collect::<Vec<_>>()
+            };
+
+            ReplicatedTableSchema::from_masks(
+                table_schema,
+                ReplicationMask::from_bytes(mask(|column| column.replicated)),
+                crate::schema::IdentityMask::from_bytes(mask(|column| column.identity)),
+            )
+        }
+
+        /// Returns the replicated columns in table order.
+        fn replicated_columns(&self) -> impl Iterator<Item = &ModelColumn> {
+            self.columns.iter().filter(|column| column.replicated)
+        }
+
+        /// Returns whether pgoutput attaches a `K` tuple to the update.
+        ///
+        /// `heap_update` logs the old key when a key column changed or when a
+        /// key column is stored externally, which is the case for every key
+        /// column the new tuple sends as unchanged TOAST.
+        fn sends_key_tuple(&self) -> bool {
+            !self.full_identity
+                && self.replicated_columns().any(|column| {
+                    column.identity && (column.old != column.new || column.unchanged_toast)
+                })
+        }
+
+        /// Encodes the `O` tuple: the detoasted old row over replicated
+        /// columns.
+        fn full_old_tuple(&self) -> Vec<ModelTupleCell> {
+            self.replicated_columns()
+                .map(|column| ModelTupleCell::from_value(column.old.as_ref()))
+                .collect()
+        }
+
+        /// Encodes the `K` tuple the way pgoutput writes it.
+        ///
+        /// `ExtractReplicaIdentity` forms a full-width heap tuple with nulls
+        /// outside the key, and `logicalrep_write_tuple` writes every published
+        /// column of it.
+        fn key_tuple(&self) -> Vec<ModelTupleCell> {
+            self.replicated_columns()
+                .map(|column| {
+                    if column.identity {
+                        ModelTupleCell::from_value(column.old.as_ref())
+                    } else {
+                        ModelTupleCell::Null
+                    }
+                })
+                .collect()
+        }
+
+        /// Encodes the `N` tuple, with `u` for unchanged TOAST columns.
+        fn new_tuple(&self) -> Vec<ModelTupleCell> {
+            self.replicated_columns()
+                .map(|column| {
+                    if column.unchanged_toast {
+                        ModelTupleCell::UnchangedToast
+                    } else {
+                        ModelTupleCell::from_value(column.new.as_ref())
+                    }
+                })
+                .collect()
+        }
+
+        /// Returns the old-side tuple for an update, or `None` when pgoutput
+        /// sends neither `O` nor `K`.
+        fn update_old_side_tuple(&self) -> Option<Vec<ModelTupleCell>> {
+            if self.full_identity {
+                Some(self.full_old_tuple())
+            } else if self.sends_key_tuple() {
+                Some(self.key_tuple())
+            } else {
+                None
+            }
+        }
+
+        /// Returns the old-side tuple pgoutput sends for a delete.
+        fn delete_old_side_tuple(&self) -> Vec<ModelTupleCell> {
+            if self.full_identity { self.full_old_tuple() } else { self.key_tuple() }
+        }
+
+        /// Returns the old row etl must decode from a delete.
+        fn expected_delete_old_row(&self) -> OldTableRow {
+            if self.full_identity {
+                OldTableRow::Full(TableRow::new(
+                    self.replicated_columns().map(ModelColumn::old_cell).collect(),
+                ))
+            } else {
+                OldTableRow::Key(TableRow::new(
+                    self.replicated_columns()
+                        .filter(|column| column.identity)
+                        .map(ModelColumn::old_cell)
+                        .collect(),
+                ))
+            }
+        }
+
+        /// Returns the old row etl must decode from an update.
+        fn expected_update_old_row(&self) -> Option<OldTableRow> {
+            (self.full_identity || self.sends_key_tuple()).then(|| self.expected_delete_old_row())
+        }
+
+        /// Returns the new row etl must decode from an update.
+        ///
+        /// An unchanged TOAST column is recoverable from a full old row, or
+        /// from a key row when it is a key column; every other one is missing.
+        fn expected_new_row(&self) -> UpdatedTableRow {
+            let sends_key_tuple = self.sends_key_tuple();
+            let mut present_values = Vec::new();
+            let mut missing_column_indexes = Vec::new();
+            for (index, column) in self.replicated_columns().enumerate() {
+                let recoverable = self.full_identity || (sends_key_tuple && column.identity);
+                if column.unchanged_toast && !recoverable {
+                    missing_column_indexes.push(index);
+                } else {
+                    present_values.push(column.new_cell());
+                }
+            }
+
+            if missing_column_indexes.is_empty() {
+                UpdatedTableRow::Full(TableRow::new(present_values))
+            } else {
+                UpdatedTableRow::Partial(PartialTableRow::new(
+                    self.replicated_columns().count(),
+                    TableRow::new(present_values),
+                    missing_column_indexes,
+                ))
+            }
+        }
+    }
+
+    /// Borrows model tuple fields as the shared test encoder's input.
+    #[cfg(feature = "test-utils")]
+    fn test_tuple(cells: &[ModelTupleCell]) -> Vec<TestTupleData<'_>> {
+        cells
+            .iter()
+            .map(|cell| match cell {
+                ModelTupleCell::Null => TestTupleData::Null,
+                ModelTupleCell::UnchangedToast => TestTupleData::UnchangedToast,
+                ModelTupleCell::Text(value) => TestTupleData::Text(value),
+            })
+            .collect()
+    }
+
+    /// Truncates `cells` to `width` or pads it with nulls.
+    #[cfg(feature = "test-utils")]
+    fn resize_tuple(cells: &[ModelTupleCell], width: usize) -> Vec<ModelTupleCell> {
+        let mut resized = cells.to_vec();
+        resized.resize(width, ModelTupleCell::Null);
+        resized
+    }
+
+    /// Encodes an update whose old side is `O` for full identity and `K`
+    /// otherwise.
+    #[cfg(feature = "test-utils")]
+    fn model_update_body(
+        full_identity: bool,
+        old_side: Option<&[ModelTupleCell]>,
+        new_tuple: &[ModelTupleCell],
+    ) -> postgres_replication::protocol::UpdateBody {
+        let old_side = old_side.map(test_tuple);
+        let new_tuple = test_tuple(new_tuple);
+        if full_identity {
+            parse_update_body_from_parts(42, old_side.as_deref(), None, &new_tuple)
+        } else {
+            parse_update_body_from_parts(42, None, old_side.as_deref(), &new_tuple)
+        }
+    }
+
+    /// Encodes a delete whose old side is `O` for full identity and `K`
+    /// otherwise.
+    #[cfg(feature = "test-utils")]
+    fn model_delete_body(
+        full_identity: bool,
+        old_side: &[ModelTupleCell],
+    ) -> postgres_replication::protocol::DeleteBody {
+        let old_side = test_tuple(old_side);
+        if full_identity {
+            parse_delete_body_from_parts(42, Some(&old_side), None)
+        } else {
+            parse_delete_body_from_parts(42, None, Some(&old_side))
+        }
+    }
+
+    /// Generates tables of 1 to 10 `int8`/`text` columns with random
+    /// nullability, publication column list, replica identity, and one row
+    /// update.
+    #[cfg(feature = "test-utils")]
+    fn update_delete_case() -> impl Strategy<Value = UpdateDeleteCase> {
+        let raw_column = (
+            (any::<bool>(), any::<bool>(), any::<bool>(), any::<bool>()),
+            (any::<bool>(), any::<i64>(), pg_text()),
+            (any::<bool>(), any::<bool>(), any::<i64>(), pg_text()),
+            any::<bool>(),
+        );
+
+        (any::<bool>(), collection::vec(raw_column, 1..=10)).prop_map(
+            |(full_identity, raw_columns)| UpdateDeleteCase::from_raw(full_identity, raw_columns),
+        )
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn update_and_delete_tuples_decode_like_pgoutput_reference_model() {
+        run_property(
+            "update_and_delete_tuples_decode_like_pgoutput_reference_model",
+            &update_delete_case(),
+            |case| {
+                let update_body = model_update_body(
+                    case.full_identity,
+                    case.update_old_side_tuple().as_deref(),
+                    &case.new_tuple(),
+                );
+                let update = parse_event_from_update_message(
+                    case.replicated_table_schema(),
+                    PgLsn::from(20),
+                    0,
+                    &update_body,
+                )
+                .unwrap();
+                prop_assert_eq!(update.old_table_row, case.expected_update_old_row());
+                prop_assert_eq!(update.updated_table_row, case.expected_new_row());
+
+                let delete_body =
+                    model_delete_body(case.full_identity, &case.delete_old_side_tuple());
+                let delete = parse_event_from_delete_message(
+                    case.replicated_table_schema(),
+                    PgLsn::from(20),
+                    0,
+                    &delete_body,
+                )
+                .unwrap();
+                prop_assert_eq!(delete.old_table_row, Some(case.expected_delete_old_row()));
+
+                Ok(())
+            },
+        );
+    }
+
+    #[cfg(feature = "test-utils")]
+    #[test]
+    fn update_and_delete_tuples_with_wrong_width_are_rejected() {
+        run_property(
+            "update_and_delete_tuples_with_wrong_width_are_rejected",
+            &update_delete_case(),
+            |case| {
+                let replicated_count = case.replicated_columns().count();
+                let identity_count =
+                    case.replicated_columns().filter(|column| column.identity).count();
+                let new_tuple = case.new_tuple();
+                let old_side = case.delete_old_side_tuple();
+
+                for width in 0..=replicated_count + 1 {
+                    // Key images are accepted dense or full width; any other
+                    // width must fail rather than yield a short or shifted row.
+                    let accepted = width == replicated_count
+                        || (!case.full_identity && width == identity_count);
+                    if !accepted {
+                        let resized = resize_tuple(&old_side, width);
+
+                        let update_body =
+                            model_update_body(case.full_identity, Some(&resized), &new_tuple);
+                        let update = parse_event_from_update_message(
+                            case.replicated_table_schema(),
+                            PgLsn::from(20),
+                            0,
+                            &update_body,
+                        );
+                        prop_assert_eq!(update.unwrap_err().kind(), ErrorKind::ConversionError);
+
+                        let delete_body = model_delete_body(case.full_identity, &resized);
+                        let delete = parse_event_from_delete_message(
+                            case.replicated_table_schema(),
+                            PgLsn::from(20),
+                            0,
+                            &delete_body,
+                        );
+                        prop_assert_eq!(delete.unwrap_err().kind(), ErrorKind::ConversionError);
+                    }
+
+                    if width != replicated_count {
+                        let update_body = model_update_body(
+                            case.full_identity,
+                            case.update_old_side_tuple().as_deref(),
+                            &resize_tuple(&new_tuple, width),
+                        );
+                        let update = parse_event_from_update_message(
+                            case.replicated_table_schema(),
+                            PgLsn::from(20),
+                            0,
+                            &update_body,
+                        );
+                        prop_assert_eq!(update.unwrap_err().kind(), ErrorKind::ConversionError);
+                    }
+                }
+
+                Ok(())
+            },
         );
     }
 }
