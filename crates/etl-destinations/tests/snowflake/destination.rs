@@ -593,6 +593,9 @@ async fn fresh_generation_rejects_existing_table_without_destination_metadata() 
         let detail = error.detail().expect("ownership rejection should explain the conflict");
         assert!(detail.contains(&sf_table));
         assert!(detail.contains("is not registered to this source table"));
+        assert!(detail.contains("If you previously deleted a pipeline"));
+        assert!(detail.contains("Choose an unused destination schema"));
+        assert!(detail.contains("another pipeline is not using it"));
         assert!(detail.contains("resynchronize that table first"));
         assert!(detail.contains("deletes previous destination data and history"));
         assert!(second.store.get_destination_table_metadata(table_id).await.unwrap().is_none());

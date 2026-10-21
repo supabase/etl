@@ -111,6 +111,12 @@ fn manual_solution(kind: ErrorKind) -> &'static str {
         ErrorKind::SourceSnapshotTooOld => {
             "Check replication slot status and database configuration."
         }
+        ErrorKind::DestinationTableAlreadyExists => {
+            "A destination table already exists. If you previously deleted a pipeline, its \
+             replicated data was preserved. Choose an unused destination location, or remove the \
+             conflicting table only after confirming its data is no longer needed and another \
+             pipeline is not using it."
+        }
         ErrorKind::DestinationLayoutUnsupported => {
             "Use a supported Snowflake source and CDC table layout. Resynchronize after \
              incompatible key, schema, publication, or history changes; restarting alone does not \
@@ -223,6 +229,26 @@ mod tests {
         assert!(denied.is_some());
         assert_ne!(denied, solution(ErrorKind::DestinationAuthenticationError));
         assert_ne!(denied, solution(ErrorKind::Unknown));
+    }
+
+    /// Destination conflicts require manual resolution, including when wrapped
+    /// with a transient failure.
+    #[test]
+    fn destination_table_conflicts_have_specific_manual_remediation() {
+        let conflict =
+            EtlError::from((ErrorKind::DestinationTableAlreadyExists, "Destination table exists"));
+        let connection_error =
+            EtlError::from((ErrorKind::DestinationConnectionFailed, "Connection failed"));
+
+        for error in [conflict.clone(), EtlError::from(vec![connection_error, conflict])] {
+            let policy = build_error_handling_policy(&error);
+
+            assert_eq!(policy.retry_directive(), RetryDirective::Manual);
+            let solution = policy.solution().unwrap();
+            assert!(solution.contains("If you previously deleted a pipeline"));
+            assert!(solution.contains("Choose an unused destination location"));
+            assert!(solution.contains("another pipeline is not using it"));
+        }
     }
 
     /// A classification made where the error happened decides the directive,
