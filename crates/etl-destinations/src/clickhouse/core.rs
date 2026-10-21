@@ -1097,9 +1097,12 @@ where
                     ErrorKind::DestinationTableAlreadyExists,
                     "ClickHouse destination table already exists",
                     format!(
-                        "Table '{name}' exists, but this pipeline has no destination metadata \
-                         proving ownership. Drop the table or use another database before \
-                         retrying."
+                        "Destination object '{name}' already exists, but this pipeline has no \
+                         destination metadata proving ownership. If you previously deleted a \
+                         pipeline, its replicated data was preserved. Choose an unused \
+                         destination database, or remove the conflicting object only after \
+                         confirming its data is no longer needed and another pipeline is not \
+                         using it."
                     )
                 ));
             }
