@@ -3763,22 +3763,7 @@ mod tests {
             Bool,
         }
 
-        /// Payload kinds whose identity predicates DuckLake matches today.
-        ///
-        /// Floats are excluded because SQL float literals can parse one ULP
-        /// away from the stored value; that defect is pinned by
-        /// `identity_predicates_match_rows_with_float_columns` and
-        /// `full_identity_delete_matches_appended_float8_value`.
-        const EXACT_PAYLOAD_KINDS: [PayloadKind; 6] = [
-            PayloadKind::Json,
-            PayloadKind::Decimal,
-            PayloadKind::VarcharNumeric,
-            PayloadKind::Int4Array,
-            PayloadKind::Text,
-            PayloadKind::Bool,
-        ];
-
-        /// Every payload kind, including floats.
+        /// Every payload kind.
         const ALL_PAYLOAD_KINDS: [PayloadKind; 8] = [
             PayloadKind::Float8,
             PayloadKind::Float4,
@@ -4148,7 +4133,7 @@ mod tests {
                 "ducklake_identity_predicates_change_one_row",
                 &identity_case(
                     vec![IdentityKind::PrimaryKey, IdentityKind::Full],
-                    &EXACT_PAYLOAD_KINDS,
+                    &ALL_PAYLOAD_KINDS,
                 ),
                 |case| check_identity_case(case, false),
             );
@@ -4159,18 +4144,8 @@ mod tests {
         fn full_identity_changes_exactly_one_row_with_duplicates() {
             run_property(
                 "ducklake_full_identity_duplicates_change_one_row",
-                &identity_case(vec![IdentityKind::Full], &EXACT_PAYLOAD_KINDS),
-                |case| check_identity_case(case, true),
-            );
-        }
-
-        #[test]
-        #[ignore = "known defect: float sql literals drift one ulp, corrupting float rows"]
-        fn identity_predicates_match_rows_with_float_columns() {
-            run_property(
-                "ducklake_identity_predicates_match_floats",
                 &identity_case(vec![IdentityKind::Full], &ALL_PAYLOAD_KINDS),
-                |case| check_identity_case(case, false),
+                |case| check_identity_case(case, true),
             );
         }
 
@@ -4200,7 +4175,6 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: float8 delete literal 1e-30 misses the appended value"]
         fn full_identity_delete_matches_appended_float8_value() {
             let case = IdentityCase {
                 identity: IdentityKind::Full,
