@@ -2,8 +2,9 @@ name: CodeQL
 
 on:
   schedule:
-    # 11:00 and 19:00 JST.
-    - cron: "0 2,10 * * *"
+    # 02:41 and 10:41 UTC (11:41 and 19:41 JST), off the whole hour because
+    # GitHub delays scheduled runs at peak times. Runs against the default branch.
+    - cron: "41 2,10 * * *"
   workflow_dispatch:
 
 concurrency:
