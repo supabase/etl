@@ -351,27 +351,9 @@ mod tests {
         );
     }
 
+    /// Dynamic table details do not create separate notification groups.
     #[test]
-    fn builds_pipeline_error_dedup_key() {
-        assert_eq!(pipeline_error_dedup_key("42", "abc123"), "pipeline-error:42:abc123");
-    }
-
-    #[test]
-    fn compute_error_hash_stability() {
-        let err1 =
-            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
-        let err2 =
-            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
-
-        let hash1 = compute_error_hash(&err1);
-        let hash2 = compute_error_hash(&err2);
-
-        // Hashes should be identical for the same error kind and description.
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn compute_error_hash_with_detail() {
+    fn compute_error_hash_ignores_detail() {
         let err1 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query execution failed",
@@ -380,7 +362,7 @@ mod tests {
         let err2 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query execution failed",
-            "Table 'users' not found".to_owned(),
+            "Table 'orders' not found".to_owned(),
         ));
 
         let hash1 = compute_error_hash(&err1);

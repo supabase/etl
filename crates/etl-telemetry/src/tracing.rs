@@ -20,13 +20,11 @@ use tracing_appender::{
 use tracing_log::{LogTracer, NormalizeEvent, log_tracer::SetLoggerError};
 use tracing_subscriber::{
     EnvFilter,
-    filter::filter_fn,
     fmt::{
         self as tracing_fmt, FmtContext, FormattedFields, MakeWriter, fmt,
         format::{self, FormatEvent, FormatFields, Writer},
         time::FormatTime,
     },
-    layer::SubscriberExt,
     registry::{LookupSpan, SpanRef},
 };
 
@@ -34,21 +32,6 @@ use tracing_subscriber::{
 const PROJECT_KEY_IN_LOG: &str = "project";
 /// JSON field name for pipeline identification in logs.
 const PIPELINE_KEY_IN_LOG: &str = "pipeline_id";
-/// Dependencies whose verbose diagnostics can contain credentials or SQL
-/// values.
-const SENSITIVE_LOG_TARGETS: &[&str] = &[
-    "tokio_postgres",
-    "sqlx",
-    "reqsign",
-    "yup_oauth2",
-    "opendal",
-    "iceberg",
-    "iceberg_catalog_rest",
-    "reqwest",
-    "hyper",
-    "hyper_util",
-    "h2",
-];
 
 /// Global item to make sure that test tracing is initialized only once.
 static INIT_TEST_TRACING: Once = Once::new();
@@ -275,21 +258,6 @@ fn normalize_field_name(field_name: &str) -> String {
     field_name.strip_prefix("r#").unwrap_or(field_name).to_owned()
 }
 
-/// Caps sensitive dependency diagnostics even when `RUST_LOG` enables nested
-/// targets.
-fn allow_log_metadata(metadata: &tracing::Metadata<'_>) -> bool {
-    // ConfigCat's fetcher logs credential-bearing request URLs even at ERROR.
-    if metadata.target() == "configcat::fetch::fetcher" {
-        return false;
-    }
-
-    *metadata.level() <= tracing::Level::INFO
-        || !SENSITIVE_LOG_TARGETS.iter().any(|target| {
-            metadata.target() == *target
-                || metadata.target().strip_prefix(target).is_some_and(|rest| rest.starts_with("::"))
-        })
-}
-
 /// Initializes tracing for an explicitly selected environment.
 ///
 /// Production and staging environments log to rotating JSON files; development
@@ -378,8 +346,7 @@ fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlushe
         .fmt_fields(format::JsonFields::new())
         .event_format(JsonContextFormatter::new(tracing_fmt::time::SystemTime))
         .with_writer(move || file_appender.make_writer())
-        .finish()
-        .with(filter_fn(allow_log_metadata));
+        .finish();
 
     set_global_default(subscriber)?;
 
@@ -398,12 +365,8 @@ fn configure_dev_tracing(filter: EnvFilter) -> Result<LogFlusher, TracingError> 
         .with_file(false)
         .with_target(true);
 
-    let subscriber = fmt()
-        .with_env_filter(filter)
-        .event_format(format)
-        .with_writer(io::stdout)
-        .finish()
-        .with(filter_fn(allow_log_metadata));
+    let subscriber =
+        fmt().with_env_filter(filter).event_format(format).with_writer(io::stdout).finish();
 
     set_global_default(subscriber)?;
 
