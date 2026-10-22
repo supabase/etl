@@ -13,6 +13,7 @@ pub(crate) use child::ChildPgReplicationClient;
 pub use raw::PgReplicationClient;
 #[cfg(not(any(test, feature = "test-utils")))]
 pub(crate) use raw::PgReplicationClient;
+pub(crate) use raw::{spawn_postgres_connection, start_replication_stream};
 #[cfg(any(test, feature = "test-utils"))]
 pub use transaction::{PgChildReplicationTransaction, PgReplicationTransaction};
 #[cfg(not(any(test, feature = "test-utils")))]

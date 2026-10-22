@@ -240,6 +240,7 @@ pub mod postgres;
 #[cfg(not(any(test, feature = "test-utils")))]
 mod postgres;
 mod replication;
+pub use replication::scope;
 mod runtime;
 pub mod schema;
 mod source_payload_metadata;
@@ -248,3 +249,6 @@ pub mod task;
 #[doc(hidden)]
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
+
+/// Scope-consistent capture with host-owned transport and durable receipts.
+pub mod schema_capture;

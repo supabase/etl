@@ -17,3 +17,7 @@ pub use stream::{FeedbackHandle, ReplicationMessageStream};
 #[cfg(not(any(test, feature = "test-utils")))]
 pub(crate) use stream::{FeedbackHandle, ReplicationMessageStream};
 pub(crate) use stream::{TableCopyRow, TableCopyStream};
+
+pub(crate) mod transport;
+
+pub(crate) use stream::decode_message;

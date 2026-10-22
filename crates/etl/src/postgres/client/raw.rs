@@ -15,8 +15,8 @@ use rustls::{
 };
 use tokio::sync::watch;
 use tokio_postgres::{
-    Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Socket, Transaction,
-    config::ReplicationMode, error::SqlState, tls::MakeTlsConnect, types::PgLsn,
+    Client, Config, Connection, IsolationLevel, NoTls, SimpleQueryMessage, Transaction,
+    config::ReplicationMode, error::SqlState, types::PgLsn,
 };
 use tracing::{Instrument, debug, error, info};
 
@@ -172,12 +172,12 @@ impl fmt::Debug for PgReplicationConnectionConfig {
 
 /// Spawns a background task to monitor a Postgres connection until it
 /// terminates.
-fn spawn_postgres_connection<T>(
-    connection: Connection<Socket, T::Stream>,
+pub(crate) fn spawn_postgres_connection<S, T>(
+    connection: Connection<S, T>,
 ) -> watch::Receiver<PostgresConnectionUpdate>
 where
-    T: MakeTlsConnect<Socket>,
-    T::Stream: Send + 'static,
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     // We use this watch channel to send connection updates without relying on
     // the errors/terminations propagated by the active connection consumers.
@@ -324,7 +324,7 @@ impl PgReplicationClient {
         let server_version =
             connection.parameter("server_version").and_then(extract_server_version);
 
-        let connection_updates_rx = spawn_postgres_connection::<NoTls>(connection);
+        let connection_updates_rx = spawn_postgres_connection(connection);
 
         info!("connected to postgres without tls");
 
@@ -349,7 +349,7 @@ impl PgReplicationClient {
         let server_version =
             connection.parameter("server_version").and_then(extract_server_version);
 
-        let connection_updates_rx = spawn_postgres_connection::<MakeRustlsConnect>(connection);
+        let connection_updates_rx = spawn_postgres_connection(connection);
 
         info!("connected to postgres with tls");
 
@@ -798,21 +798,8 @@ impl PgReplicationClient {
     )> {
         info!(publication_name, slot_name, %start_lsn, "starting logical replication");
 
-        // PostgreSQL requires uppercase keywords in replication protocol
-        // commands.
-        let options = format!(
-            r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
-            quote_literal(quote_identifier(publication_name).as_ref()),
-        );
-
-        let query = format!(
-            r#"START_REPLICATION SLOT {} LOGICAL {} {}"#,
-            quote_identifier(slot_name),
-            start_lsn,
-            options
-        );
-
-        let copy_stream = self.client.copy_both_simple::<bytes::Bytes>(&query).await?;
+        let copy_stream =
+            start_replication_stream(&self.client, publication_name, slot_name, start_lsn).await?;
 
         Ok(ReplicationMessageStream::create(copy_stream, keep_alive_deadline_duration))
     }
@@ -937,7 +924,7 @@ mod tests {
             .connect(NoTls)
             .await
             .unwrap();
-        let observer = spawn_postgres_connection::<NoTls>(connection);
+        let observer = spawn_postgres_connection(connection);
         let mut query = Box::pin(client.simple_query("select 1"));
         tokio::select! {
             result = &mut query => panic!("Query completed without a server response: {result:?}"),
@@ -977,4 +964,24 @@ mod tests {
         assert!(name.len() <= 63, "worker application_name '{name}' exceeds Postgres limit");
         assert!(name.starts_with(APP_NAME_REPLICATOR_REPLICATION));
     }
+}
+
+/// One replication command builder for all synchronization modes.
+pub(crate) async fn start_replication_stream(
+    client: &Client,
+    publication_name: &str,
+    slot_name: &str,
+    start_lsn: PgLsn,
+) -> Result<tokio_postgres::CopyBothDuplex<bytes::Bytes>, tokio_postgres::Error> {
+    let options = format!(
+        r#"("proto_version" '1', "publication_names" {}, "messages" 'true')"#,
+        quote_literal(quote_identifier(publication_name).as_ref())
+    );
+    let query = format!(
+        r#"START_REPLICATION SLOT {} LOGICAL {} {}"#,
+        quote_identifier(slot_name),
+        start_lsn,
+        options
+    );
+    Ok(client.copy_both_simple::<bytes::Bytes>(&query).await?)
 }

@@ -442,3 +442,8 @@ where
         Ok(())
     }
 }
+
+/// Whole-scope capture backed by the same source transport and codecs.
+pub use crate::replication::scope::pipeline::{
+    CaptureDestination, ScopeCheckpoint, ScopeConfig, ScopePipeline, SourceFactory,
+};

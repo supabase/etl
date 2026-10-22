@@ -17,3 +17,5 @@ pub(crate) use decoding_state::{PreviousRelationMasks, TableDecodingState};
 pub(crate) use lag::{ReplicationLagMetrics, ReplicationLagMonitor};
 pub(crate) use table_sync::{TableSyncResult, start_table_sync};
 pub use worker_type::WorkerType;
+
+pub mod scope;
