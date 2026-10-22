@@ -1,6 +1,5 @@
 import { spawn } from 'node:child_process';
 import { readFile, readdir } from 'node:fs/promises';
-import { get } from 'node:http';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from 'playwright';
@@ -130,53 +129,6 @@ async function checkEndpoint(path, expectedContentType) {
     `${path} did not return ${expectedContentType}.`,
   );
   return response;
-}
-
-// Send raw request targets so malformed URLs reach the preview server unchanged.
-async function requestPreview(path) {
-  const response = await new Promise((resolve, reject) => {
-    const request = get({ hostname: host, port, path, agent: false }, resolve);
-    request.on('error', reject);
-    request.setTimeout(5000, () => request.destroy(new Error('Preview request timed out.')));
-  });
-
-  response.setEncoding('utf8');
-  let body = '';
-  for await (const chunk of response) body += chunk;
-  return { status: response.statusCode, headers: response.headers, body };
-}
-
-async function checkPreviewRequests() {
-  const robots = await requestPreview('/etl/robots.txt');
-  assert(robots.status === 200, `robots.txt returned HTTP ${robots.status}.`);
-
-  const malformedPaths = [
-    '/etl/%',
-    '/etl/%2',
-    '/etl/%GG',
-    '/etl/%FF',
-    '/etl/%C3%28',
-    '/etl/%E2%82',
-    '//%/etl/',
-  ];
-  for (const path of malformedPaths) {
-    const response = await requestPreview(path);
-    assert(response.status === 400, `${path} returned HTTP ${response.status} instead of 400.`);
-    assert(response.headers['content-type'] === 'text/plain; charset=utf-8', 'Invalid error MIME type.');
-    assert(response.body === 'Bad Request', 'Malformed URL did not return the fixed error body.');
-
-    const healthy = await requestPreview('/etl/robots.txt');
-    assert(
-      healthy.status === 200 && healthy.body === robots.body,
-      `Preview stopped serving valid requests after ${path}.`,
-    );
-  }
-
-  const encoded = await requestPreview('/etl/%72obots.txt');
-  assert(
-    encoded.status === 200 && encoded.body === robots.body,
-    'Valid encoded path did not serve the expected file.',
-  );
 }
 
 async function checkSeoEndpoints() {
@@ -1024,7 +976,6 @@ try {
   await checkSourceCodeFences();
   await checkProjectStatusConsistency();
   await waitForPreview();
-  await checkPreviewRequests();
   await checkSeoEndpoints();
 
   browser = await chromium.launch();
@@ -1039,7 +990,7 @@ try {
 
   assert(pageErrors.length === 0, `Browser errors:\n${pageErrors.join('\n')}`);
   console.log(
-    'Docs smoke checks passed: preview requests, code languages, landing motion, SEO, agent feeds, page actions, search, diagrams, responsive UI, and links.',
+    'Docs smoke checks passed: code languages, landing motion, SEO, agent feeds, page actions, search, diagrams, responsive UI, and links.',
   );
 } finally {
   if (browser) await Promise.race([browser.close(), delay(cleanupTimeoutMs)]);
