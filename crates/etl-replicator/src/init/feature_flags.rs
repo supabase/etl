@@ -1,4 +1,5 @@
-use etl_config::shared::ReplicatorConfig;
+use etl_config::shared::{ReplicatorConfig, ValidationError};
+use secrecy::ExposeSecret;
 use tracing::debug;
 
 use crate::error::{ReplicatorError, ReplicatorResult};
@@ -14,7 +15,8 @@ pub(crate) fn init(
     let configcat_sdk_key = replicator_config
         .supabase
         .as_ref()
-        .and_then(|supabase_config| supabase_config.configcat_sdk_key.as_deref());
+        .and_then(|supabase_config| supabase_config.configcat_sdk_key.as_ref())
+        .map(ExposeSecret::expose_secret);
 
     let Some(configcat_sdk_key) = configcat_sdk_key else {
         debug!("configcat not configured for replicator, skipping initialization");
@@ -34,6 +36,13 @@ pub(crate) fn init(
         builder
     };
 
-    let client = builder.build().map_err(ReplicatorError::config)?;
+    // ConfigCat includes an invalid SDK key verbatim in its build error.
+    let client = builder.build().map_err(|_| {
+        ReplicatorError::config(ValidationError::InvalidFieldValue {
+            field: "supabase.configcat_sdk_key".to_owned(),
+            constraint: "must be a valid ConfigCat SDK key".to_owned(),
+        })
+    })?;
+
     Ok(Some(client))
 }

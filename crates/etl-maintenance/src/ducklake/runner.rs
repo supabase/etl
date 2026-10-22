@@ -162,7 +162,7 @@ impl ReplayHelperCleanupOutcome {
 }
 
 /// S3-compatible storage credentials for DuckDB's httpfs extension.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S3Config {
     /// S3 access key id.
     pub access_key_id: String,
@@ -176,6 +176,20 @@ pub struct S3Config {
     pub url_style: String,
     /// Whether to use HTTPS.
     pub use_ssl: bool,
+}
+
+impl fmt::Debug for S3Config {
+    /// Formats storage options without access keys.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Config")
+            .field("access_key_id", &"[redacted]")
+            .field("secret_access_key", &"[redacted]")
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("url_style", &self.url_style)
+            .field("use_ssl", &self.use_ssl)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1477,7 +1491,7 @@ fn format_query_error_detail(sql: &str) -> String {
 }
 
 /// Configuration for one external DuckLake maintenance run.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DuckLakeMaintenanceConfig {
     /// DuckLake PostgreSQL catalog URL.
     pub catalog_url: Url,
@@ -1499,6 +1513,17 @@ pub struct DuckLakeMaintenanceConfig {
     pub expire_snapshots: ExpireSnapshotsMaintenanceConfig,
     /// Old-file cleanup operation config.
     pub cleanup_old_files: CleanupOldFilesMaintenanceConfig,
+}
+
+impl fmt::Debug for DuckLakeMaintenanceConfig {
+    /// Omits catalog credentials and storage keys from debug reports.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DuckLakeMaintenanceConfig")
+            .field("catalog_url", &"[redacted]")
+            .field("s3", &self.s3)
+            .field("metadata_schema", &self.metadata_schema)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Inline flush operation config.

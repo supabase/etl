@@ -27,7 +27,7 @@ pub struct SupabaseConfig {
     ///
     /// If provided, enables ConfigCat feature flag evaluation. If `None`, the
     /// replicator operates without feature flag support.
-    pub configcat_sdk_key: Option<String>,
+    pub configcat_sdk_key: Option<SecretString>,
 }
 
 impl Validate for SupabaseConfig {}

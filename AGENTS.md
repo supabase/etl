@@ -124,6 +124,25 @@ implementation details private.
   or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
   own `--locked` flag.
 
+### Deprecated destination scope
+
+Iceberg is deprecated. Unless the user explicitly requests Iceberg work,
+exclude it from non-security refactoring scans, test-improvement reviews,
+and cross-destination bug investigations or fixes. Requests covering
+"all destinations" or the whole repository do not override this exclusion.
+
+When applying this exclusion to a cross-destination or repository-wide
+request, state in the result that Iceberg was excluded.
+
+This exclusion does not apply to security scans: include Iceberg whenever
+it falls within the requested security scope.
+
+Keep existing Iceberg code, tests, features and CI coverage intact. If a
+shared change requires an Iceberg adjustment to prevent a runtime
+regression or keep existing builds and checks passing, make only the
+necessary compatibility adjustment.
+Do not expand that work into Iceberg-specific cleanup.
+
 ### Destination compatibility
 
 | Situation | Do |
@@ -313,6 +332,23 @@ counts, lengths, LSNs, IDs, operations). Production errors: `error = %err` or
 Prefer `Display` (`%`) over `Debug` (`?`) unless the type is known not to
 contain sensitive values. Table state: `table_state_type` (one) and
 `table_state_types` (list).
+
+The same rule applies to `Debug`/`Display` implementations, error messages and
+source chains, panics/assertions, Sentry events, and any other diagnostic output
+that can be printed, captured, or sent to telemetry. `SecretString` redacts
+itself; inspect plain strings, byte arrays, URLs, nested types, and third-party
+errors before formatting them. Use custom formatting only where the contained
+types do not already redact secrets.
+
+Prefer `SecretString` for owned credentials; use `SerializableSecretString` only
+when serialization is required. Use `Zeroizing` for temporary cryptographic keys
+and plaintext encryption buffers. Expose secrets only at protocol or storage
+boundaries.
+
+Keep useful structural context, status/error codes, and retry classifications;
+omit credentials, payload values, and raw provider text that can echo them.
+Prefer redaction at the output boundary over removing validation or changing
+runtime behavior.
 
 ## Tests
 
