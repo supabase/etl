@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use async_trait::async_trait;
 use iceberg::{
@@ -10,6 +10,7 @@ use iceberg::{
 };
 use iceberg_catalog_rest::RestCatalog;
 use reqwest::{Client, Response, StatusCode};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 /// A REST catalog implementation that handles Supabase-specific API
@@ -24,7 +25,6 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 /// The catalog maintains both a standard REST catalog instance and a
 /// Supabase-specific client to provide seamless operation across different
 /// endpoint types.
-#[derive(Debug)]
 pub(crate) struct SupabaseCatalog {
     /// Standard REST catalog for compatible endpoints.
     inner: RestCatalog,
@@ -39,6 +39,14 @@ impl SupabaseCatalog {
     /// handle both compatible and incompatible API endpoints.
     pub(super) fn new(inner: RestCatalog, client: SupabaseClient) -> Self {
         SupabaseCatalog { inner, client }
+    }
+}
+
+impl fmt::Debug for SupabaseCatalog {
+    /// Formats the client without the underlying catalog's authentication
+    /// properties.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SupabaseCatalog").field("client", &self.client).finish_non_exhaustive()
     }
 }
 
@@ -186,7 +194,7 @@ pub(crate) struct SupabaseClient {
     /// Warehouse identifier for scoping operations.
     warehouse: String,
     /// Bearer token for authentication.
-    auth_token: String,
+    auth_token: SecretString,
 }
 
 impl SupabaseClient {
@@ -196,7 +204,7 @@ impl SupabaseClient {
     /// communicating with Supabase catalog REST endpoints.
     pub(super) fn new(base_uri: String, warehouse: String, auth_token: String) -> Self {
         let client = Client::new();
-        Self { client, base_uri, warehouse, auth_token }
+        Self { client, base_uri, warehouse, auth_token: auth_token.into() }
     }
 
     /// Constructs the API URL for a specific table.
@@ -245,7 +253,7 @@ impl SupabaseClient {
         let url = self.tables_url(&namespace_path);
 
         let body = serde_json::to_value(supabase_request).map_err(|e| {
-            Error::new(ErrorKind::DataInvalid, format!("JSON serialization failed: {e}"))
+            Error::new(ErrorKind::DataInvalid, "JSON serialization failed").with_source(e)
         })?;
 
         let http_response =
@@ -264,7 +272,7 @@ impl SupabaseClient {
             StatusCode::CONFLICT => {
                 return Err(Error::new(ErrorKind::Unexpected, "The table already exists"));
             }
-            _ => return Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => return Err(deserialize_unexpected_catalog_error(http_response)),
         };
 
         let metadata_location = response.metadata_location.as_ref().ok_or(Error::new(
@@ -312,7 +320,7 @@ impl SupabaseClient {
             StatusCode::NOT_FOUND => {
                 Err(Error::new(ErrorKind::Unexpected, "Tried to drop a table that does not exist"))
             }
-            _ => Err(deserialize_unexpected_catalog_error(http_response).await),
+            _ => Err(deserialize_unexpected_catalog_error(http_response)),
         }
     }
 
@@ -359,7 +367,7 @@ impl SupabaseClient {
         let mut request = self
             .client
             .request(method, url)
-            .header("Authorization", format!("Bearer {}", self.auth_token))
+            .bearer_auth(self.auth_token.expose_secret())
             .header("Content-Type", "application/json");
 
         if let Some(body) = body {
@@ -370,18 +378,14 @@ impl SupabaseClient {
             request = request.query(query);
         }
 
-        let response = request
-            .send()
-            .await
-            .map_err(|e| Error::new(ErrorKind::Unexpected, format!("HTTP request failed: {e}")))?;
+        let response = request.send().await.map_err(|e| {
+            Error::new(ErrorKind::Unexpected, "HTTP request failed").with_source(e.without_url())
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            return Err(Error::new(
-                ErrorKind::Unexpected,
-                format!("HTTP {status} error: {error_text}"),
-            ));
+            return Err(Error::new(ErrorKind::Unexpected, "Catalog HTTP request failed")
+                .with_context("status", status.to_string()));
         }
 
         Ok(response)
@@ -391,39 +395,28 @@ impl SupabaseClient {
 /// Deserializes a catalog HTTP response into the specified type.
 ///
 /// Reads the response body bytes and attempts to parse them as JSON into the
-/// target type. Provides detailed error context including the raw response
-/// content if deserialization fails.
+/// target type. Parse failures retain their position and category, since
+/// response bodies and serde error messages can contain credentials.
 pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
     response: Response,
 ) -> Result<R> {
-    let bytes = response.bytes().await?;
+    let bytes = response.bytes().await.map_err(reqwest::Error::without_url)?;
 
     serde_json::from_slice::<R>(&bytes).map_err(|e| {
         Error::new(ErrorKind::Unexpected, "Failed to parse response from rest catalog server")
-            .with_context("json", String::from_utf8_lossy(&bytes))
-            .with_source(e)
+            .with_context("line", e.line().to_string())
+            .with_context("column", e.column().to_string())
+            .with_context("category", format!("{:?}", e.classify()))
     })
 }
 
 /// Converts an unexpected HTTP response into a detailed error.
 ///
-/// Extracts status code, headers, and response body to create a comprehensive
-/// error message for debugging failed catalog operations. Handles empty
-/// response bodies gracefully.
-pub(crate) async fn deserialize_unexpected_catalog_error(response: Response) -> Error {
-    let err = Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
+/// Retains only the status: response headers and bodies can contain temporary
+/// storage credentials, cookies, or echoed request data.
+pub(crate) fn deserialize_unexpected_catalog_error(response: Response) -> Error {
+    Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
         .with_context("status", response.status().to_string())
-        .with_context("headers", format!("{:?}", response.headers()));
-
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(err) => return err.into(),
-    };
-
-    if bytes.is_empty() {
-        return err;
-    }
-    err.with_context("json", String::from_utf8_lossy(&bytes))
 }
 
 /// Request structure for Supabase table creation endpoint.
@@ -479,4 +472,78 @@ struct LoadTableResponse {
     metadata: TableMetadata,
     /// Additional configuration properties for the table.
     config: Option<HashMap<String, String>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error as _;
+
+    use tokio::{
+        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+        net::TcpListener,
+    };
+    use tokio_util::task::AbortOnDropHandle;
+
+    use crate::iceberg::catalog::{
+        deserialize_catalog_response, deserialize_unexpected_catalog_error,
+    };
+
+    /// Returns a catalog response carrying deliberately sensitive placeholder
+    /// data.
+    async fn catalog_response(status: u16) -> reqwest::Response {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = AbortOnDropHandle::new(tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+
+            loop {
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+
+                if line == "\r\n" {
+                    break;
+                }
+
+                line.clear();
+            }
+
+            let body = "\"placeholder-response-secret\"";
+            let response = format!(
+                "HTTP/1.1 {status} Test\r\ncontent-length: {}\r\nset-cookie: \
+                 placeholder-cookie\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }));
+        let response =
+            reqwest::Client::builder().no_proxy().build().unwrap().get(url).send().await.unwrap();
+        server.await.unwrap();
+
+        response
+    }
+
+    /// Catalog errors retain structural diagnostics without exposing response
+    /// data.
+    #[tokio::test]
+    async fn catalog_errors_omit_sensitive_responses() {
+        for status in [401, 500] {
+            let error = deserialize_unexpected_catalog_error(catalog_response(status).await);
+
+            assert!(error.to_string().contains(&status.to_string()));
+            assert!(!error.to_string().contains("placeholder"));
+            assert!(!format!("{error:?}").contains("placeholder"));
+        }
+
+        let error =
+            deserialize_catalog_response::<bool>(catalog_response(200).await).await.unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains("line: 1"));
+        assert!(message.contains("column: 29"));
+        assert!(message.contains("category: Data"));
+        assert!(!format!("{error:?}").contains("placeholder"));
+        assert!(!error.to_string().contains("placeholder"));
+        assert!(error.source().is_none());
+    }
 }

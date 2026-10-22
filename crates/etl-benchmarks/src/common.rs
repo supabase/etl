@@ -130,7 +130,7 @@ mod tests {
 }
 
 /// Postgres connection arguments shared by benchmark commands.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Clone)]
 pub struct PgConnectionArgs {
     /// Postgres host.
     #[arg(long, default_value = "localhost")]
@@ -195,7 +195,7 @@ fn parse_clickhouse_database_prefix(value: &str) -> Result<String, String> {
 }
 
 /// Destination arguments shared by benchmark commands.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Clone)]
 pub struct DestinationArgs {
     /// Destination type to use.
     #[arg(long, value_enum, default_value = "null")]
