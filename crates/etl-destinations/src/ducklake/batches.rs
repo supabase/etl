@@ -462,6 +462,16 @@ struct TableStreamingProgress {
     last_event_position: EventPosition,
 }
 
+/// Replay progress retained while the sequence's table write guard is held.
+#[derive(Clone, Debug, Default)]
+struct TableStreamingProgressCache {
+    /// `None` requires a catalog read; `Some(None)` records an empty catalog.
+    progress: Option<Option<TableStreamingProgress>>,
+    /// Counts real catalog reads across successful and failed test attempts.
+    #[cfg(test)]
+    reads: Arc<std::sync::atomic::AtomicUsize>,
+}
+
 /// Ensures the ETL-managed replay marker table exists.
 pub(super) async fn ensure_applied_batches_table_exists(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
@@ -682,6 +692,7 @@ pub(super) async fn apply_table_batches_with_retry(
         batch_retry_policy(),
     )
     .await
+    .map(|_| ())
 }
 
 /// Returns the retry policy shared by sequence and standalone atomic batches.
@@ -704,9 +715,10 @@ async fn apply_table_batches_with_policy(
     write_guard: DuckLakeWriteGuard,
     timeout: Duration,
     retry_policy: RetryPolicy,
-) -> EtlResult<()> {
+) -> EtlResult<TableStreamingProgressCache> {
     let batch_count = batches.len();
     let sequence_started = Instant::now();
+    let mut streaming_progress = TableStreamingProgressCache::default();
     for (batch_index, batch) in batches.into_iter().enumerate() {
         let span = tracing::info_span!(
             "ducklake_table_batch",
@@ -723,6 +735,7 @@ async fn apply_table_batches_with_policy(
             write_guard.clone(),
             timeout,
             retry_policy,
+            streaming_progress,
         )
         .instrument(span.clone())
         .await;
@@ -739,9 +752,9 @@ async fn apply_table_batches_with_policy(
                 "ducklake table batch sequence advanced"
             );
         }
-        result?;
+        streaming_progress = result?;
     }
-    Ok(())
+    Ok(streaming_progress)
 }
 
 /// Applies one atomic per-table batch and retries on failure.
@@ -758,8 +771,10 @@ pub(super) async fn apply_table_batch_with_retry(
         write_guard,
         FOREGROUND_QUERY_TIMEOUT,
         batch_retry_policy(),
+        TableStreamingProgressCache::default(),
     )
     .await
+    .map(|_| ())
 }
 
 /// Retries one atomic batch, giving each attempt a new bounded native
@@ -771,12 +786,14 @@ async fn apply_table_batch_with_policy(
     write_guard: DuckLakeWriteGuard,
     timeout: Duration,
     retry_policy: RetryPolicy,
-) -> EtlResult<()> {
+    streaming_progress: TableStreamingProgressCache,
+) -> EtlResult<TableStreamingProgressCache> {
     let batch_started = Instant::now();
     let table_name = batch.table_name.clone();
     let batch_id = batch.batch_id.clone();
     let batch_kind = batch.batch_kind;
     let batch = Arc::new(batch);
+    let mut first_attempt = true;
 
     retry_with_backoff(
         retry_policy,
@@ -800,6 +817,13 @@ async fn apply_table_batch_with_policy(
             );
         },
         move || {
+            let mut streaming_progress = streaming_progress.clone();
+            if !first_attempt {
+                // An interrupted commit can have reached durable storage.
+                // Resolve its outcome from the catalog before replaying it.
+                streaming_progress.progress = None;
+            }
+            first_attempt = false;
             let attempt_batch = Arc::clone(&batch);
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
@@ -818,19 +842,20 @@ async fn apply_table_batch_with_policy(
                             crate::ducklake::core::wait_if_copy_append_paused_for_tests();
                             if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
                                 record_replayed_batch_skip(attempt_batch.as_ref());
-                                return Ok(());
+                                return Ok(streaming_progress);
                             }
 
                             apply_table_batch(conn, attempt_batch.as_ref(), context)?;
-                            return Ok(());
+                            return Ok(streaming_progress);
                         }
 
                         apply_table_batches(
                             conn,
                             std::slice::from_ref(attempt_batch.as_ref()),
                             context,
+                            &mut streaming_progress,
                         )?;
-                        Ok(())
+                        Ok(streaming_progress)
                     },
                 )
                 .await
@@ -1172,16 +1197,21 @@ fn apply_table_batches(
     conn: &duckdb::Connection,
     batches: &[PreparedDuckLakeTableBatch],
     operation_context: &DuckLakeBlockingOperationContext,
+    streaming_progress: &mut TableStreamingProgressCache,
 ) -> EtlResult<()> {
     if batches.is_empty() {
         return Ok(());
     }
 
-    let mut streaming_progress = if batches[0].uses_streaming_progress() {
-        read_table_streaming_progress(conn, batches[0].table_name(), &batches[0].replay_epoch)?
-    } else {
-        None
-    };
+    if batches[0].uses_streaming_progress() && streaming_progress.progress.is_none() {
+        #[cfg(test)]
+        streaming_progress.reads.fetch_add(1, Ordering::Relaxed);
+        streaming_progress.progress = Some(read_table_streaming_progress(
+            conn,
+            batches[0].table_name(),
+            &batches[0].replay_epoch,
+        )?);
+    }
 
     for batch in batches {
         if !batch.uses_streaming_progress() {
@@ -1208,7 +1238,7 @@ fn apply_table_batches(
             continue;
         }
 
-        if let Some(progress) = streaming_progress {
+        if let Some(Some(progress)) = streaming_progress.progress {
             match streaming_replay_decision(progress, batch)? {
                 StreamingReplayDecision::Skip => {
                     record_replayed_batch_skip(batch);
@@ -1232,9 +1262,11 @@ fn apply_table_batches(
             )
         })?;
 
-        streaming_progress = batch
-            .last_event_position
-            .map(|last_event_position| TableStreamingProgress { last_event_position });
+        streaming_progress.progress = Some(
+            batch
+                .last_event_position
+                .map(|last_event_position| TableStreamingProgress { last_event_position }),
+        );
     }
 
     Ok(())
@@ -2899,13 +2931,14 @@ mod tests {
             tokio::time::advance(Duration::from_secs(100)).await;
             event.release.send(false).unwrap();
         }
-        task.await.unwrap().unwrap();
+        let progress = task.await.unwrap().unwrap();
+        assert_eq!(progress.reads.load(Ordering::Relaxed), 1);
         assert_ne!(operation_ids[0], operation_ids[1]);
         assert!(started.elapsed() > FOREGROUND_QUERY_TIMEOUT);
         fixture.assert_committed(17, 2);
         // Replay the complete input through the same async path, without
         // duplicating rows.
-        apply_table_batches_with_policy(
+        let replay_progress = apply_table_batches_with_policy(
             Arc::clone(&fixture.pool),
             Arc::clone(&fixture.slots),
             deadline_test_batches(None),
@@ -2915,6 +2948,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(replay_progress.reads.load(Ordering::Relaxed), 1);
         fixture.assert_committed(17, 2);
     }
 
@@ -2951,7 +2985,8 @@ mod tests {
         assert_ne!(interrupted.operation_id, retry.operation_id);
         assert!(retry.remaining_timeout_ms > 170_000);
         retry.release.send(false).unwrap();
-        task.await.unwrap().unwrap();
+        let progress = task.await.unwrap().unwrap();
+        assert_eq!(progress.reads.load(Ordering::Relaxed), 2);
         fixture.assert_committed(17, 2);
     }
 
@@ -4359,7 +4394,12 @@ mod tests {
                 LEGACY_REPLAY_EPOCH.to_owned(),
                 tracked,
             )?;
-            apply_table_batches(conn, &batches, &DuckLakeBlockingOperationContext::for_tests())
+            apply_table_batches(
+                conn,
+                &batches,
+                &DuckLakeBlockingOperationContext::for_tests(),
+                &mut TableStreamingProgressCache::default(),
+            )
         }
 
         /// Reads the destination table as rows of comparable values.
@@ -4730,13 +4770,28 @@ mod tests {
             match crash_after {
                 Some(committed) => {
                     let committed = committed.index(batches.len() + 1);
-                    apply_table_batches(conn, &batches[..committed], &context)?;
+                    apply_table_batches(
+                        conn,
+                        &batches[..committed],
+                        &context,
+                        &mut TableStreamingProgressCache::default(),
+                    )?;
                     if retry {
-                        apply_table_batches(conn, &batches, &context)?;
+                        apply_table_batches(
+                            conn,
+                            &batches,
+                            &context,
+                            &mut TableStreamingProgressCache::default(),
+                        )?;
                     }
                     Ok(())
                 }
-                None => apply_table_batches(conn, &batches, &context),
+                None => apply_table_batches(
+                    conn,
+                    &batches,
+                    &context,
+                    &mut TableStreamingProgressCache::default(),
+                ),
             }
         }
 
