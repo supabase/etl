@@ -333,7 +333,7 @@ mod tests {
                 "DuckLake data path must use the s3:// scheme",
             ),
         ] {
-            let error = AppArgs::try_parse_from(["ducklake", flag, value]).unwrap_err();
+            let error = AppArgs::try_parse_from(["ducklake", flag, value]).err().unwrap();
             assert_eq!(error.kind(), ErrorKind::ValueValidation);
             let message = error.to_string();
             assert!(!message.contains("placeholder-password"));
