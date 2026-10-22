@@ -124,6 +124,21 @@ implementation details private.
   or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
   own `--locked` flag.
 
+### Deprecated destination scope
+
+Iceberg is deprecated. Unless the user explicitly requests Iceberg work,
+exclude it from non-security refactoring scans, test-improvement reviews,
+and cross-destination bug investigations or fixes. Requests covering
+"all destinations" or the whole repository do not override this exclusion.
+
+This exclusion does not apply to security scans: include Iceberg whenever
+it falls within the requested security scope.
+
+Keep existing Iceberg code, tests, features and CI coverage intact. If a
+shared change requires an Iceberg adjustment to keep existing builds or
+checks passing, make only the necessary compatibility adjustment.
+Do not expand that work into Iceberg-specific cleanup.
+
 ### Destination compatibility
 
 | Situation | Do |
