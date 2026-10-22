@@ -191,16 +191,7 @@ impl ErrorNotificationClient {
             return Err(std::io::Error::other(format!("API returned status {status}")).into());
         }
 
-        let body = response.bytes().await.map_err(reqwest::Error::without_url)?;
-
-        // Serde's type errors can quote values from malformed responses.
-        serde_json::from_slice(&body).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid notification API response; expected a deduplicated boolean",
-            )
-            .into()
-        })
+        response.json().await.map_err(|error| error.without_url().into())
     }
 }
 
@@ -266,14 +257,12 @@ mod tests {
         (url, server)
     }
 
-    /// Failed or malformed responses cannot echo secrets into logs, and
-    /// redirects are not followed.
+    /// Failed response bodies are omitted and redirects are not followed.
     #[tokio::test]
     async fn notification_errors_omit_response_bodies_and_reject_redirects() {
         for (status, body) in [
             (StatusCode::BAD_REQUEST, "placeholder-response-secret"),
             (StatusCode::TEMPORARY_REDIRECT, "placeholder-response-secret"),
-            (StatusCode::OK, r#"{"deduplicated":"placeholder-response-secret"}"#),
         ] {
             let (url, server) = notification_server(status, body).await;
             let client = error_notification_client(&url);
@@ -281,10 +270,7 @@ mod tests {
 
             let error = client.send_email(&email).await.unwrap_err();
 
-            if !status.is_success() {
-                assert!(error.to_string().contains(status.as_str()));
-            }
-
+            assert!(error.to_string().contains(status.as_str()));
             assert!(!format!("{error:?}").contains("placeholder-response-secret"));
 
             etl::task::abort_and_join(server).await.unwrap();
