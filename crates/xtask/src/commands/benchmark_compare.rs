@@ -811,18 +811,22 @@ mod tests {
         CodeCompare, Reports, WorkflowRun, compare_reports, config_changes, regression_failures,
     };
 
-    /// Checks that previous report directories are private and usable.
-    #[cfg(unix)]
+    /// Checks directory usability and Unix owner-only permissions.
     #[test]
-    fn previous_reports_dir_is_private() {
-        use std::{fs, os::unix::fs::PermissionsExt};
+    fn previous_reports_dir_is_usable() {
+        use std::fs;
 
         use crate::commands::benchmark_compare::create_previous_reports_dir;
 
         let temp_dir = create_previous_reports_dir().unwrap();
-        let permissions = temp_dir.path().metadata().unwrap().permissions();
 
-        assert_eq!(permissions.mode() & 0o077, 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let permissions = temp_dir.path().metadata().unwrap().permissions();
+            assert_eq!(permissions.mode() & 0o077, 0);
+        }
 
         let report_path = temp_dir.path().join("report.json");
         let report_contents = br#"{"benchmark":"test"}"#;
