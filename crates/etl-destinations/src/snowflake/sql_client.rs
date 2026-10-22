@@ -106,6 +106,16 @@ struct ResultColumnMetadata {
     nullable: Option<bool>,
 }
 
+/// Borrowed metadata fields for one physical table column.
+struct ShowColumn<'a> {
+    /// Exact, case-sensitive column identifier.
+    name: &'a str,
+    /// Provider type metadata, interpreted only for columns we validate.
+    data_type: &'a str,
+    /// Default expression or SQL NULL returned by Snowflake.
+    default: &'a serde_json::Value,
+}
+
 impl<T: TokenProvider> SqlClient<T> {
     pub fn new(config: Config, auth: Arc<T>, http: Client) -> Self {
         Self { config: config.without_credentials(), http, auth }
@@ -151,10 +161,12 @@ impl<T: TokenProvider> SqlClient<T> {
         let fqn = self.fully_qualified_name(table_name);
         let show_columns = format!("show columns in table {fqn}");
         let response = self.execute_statement(&show_columns).await?;
-        let columns = parse_show_columns(&response)?;
-        validate_column_names(table_name, expected_column_names, &columns)?;
-        validate_cdc_metadata(&response, &columns)?;
-        let defaults = json_columns_with_defaults(&response, json_column_names)?;
+        let defaults = validate_table_response(
+            &response,
+            table_name,
+            expected_column_names,
+            json_column_names,
+        )?;
         if defaults.is_empty() {
             return Ok(());
         }
@@ -169,10 +181,14 @@ impl<T: TokenProvider> SqlClient<T> {
         // Do not open the channel unless its omission contract is established.
         // A failed migration can safely be retried on the next preparation.
         let response = self.execute_statement(&show_columns).await?;
-        let columns = parse_show_columns(&response)?;
-        validate_column_names(table_name, expected_column_names, &columns)?;
-        validate_cdc_metadata(&response, &columns)?;
-        if !json_columns_with_defaults(&response, json_column_names)?.is_empty() {
+        if !validate_table_response(
+            &response,
+            table_name,
+            expected_column_names,
+            json_column_names,
+        )?
+        .is_empty()
+        {
             return Err(Error::Config(format!(
                 "Snowflake table '{table_name}' still has defaults on JSON columns after migration"
             )));
@@ -197,14 +213,12 @@ impl<T: TokenProvider> SqlClient<T> {
 
         let fqn = self.fully_qualified_name(table_name);
         let response = self.execute_statement(&format!("SHOW COLUMNS IN TABLE {fqn}")).await?;
-        let actual = parse_show_columns(&response)?;
         let expected = columns
             .iter()
             .map(|column| column.name.as_str())
             .chain([CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN])
             .collect::<Vec<_>>();
-        validate_column_names(table_name, &expected, &actual)?;
-        validate_cdc_metadata(&response, &actual)?;
+        validate_table_response(&response, table_name, &expected, &[])?;
         // TODO: Remove after table migration coverage and the
         // supported self-hosted upgrade path no longer require legacy
         // format upgrades.
@@ -579,21 +593,19 @@ fn parse_named_show_column<'a>(
 /// Check the physical type before changing defaults so an incompatible table
 /// is not silently adapted as if it had the expected JSON storage contract.
 fn json_columns_with_defaults<'a>(
-    response: &'a StatementResponse,
+    response: &StatementResponse,
+    columns: &[ShowColumn<'a>],
     json_column_names: &[&str],
 ) -> Result<Vec<&'a str>> {
     if json_column_names.is_empty() {
         return Ok(Vec::new());
     }
-    let names = parse_show_columns(response)?;
-    let types = parse_named_show_column(response, "SHOW COLUMNS", "data_type")?;
-    let defaults = parse_named_show_values(response, "SHOW COLUMNS", "default")?;
     let mut conflicts = Vec::new();
-    for ((name, typ), default) in names.into_iter().zip(types).zip(defaults) {
+    for &ShowColumn { name, data_type, default } in columns {
         if !json_column_names.contains(&name) {
             continue;
         }
-        let typ = serde_json::from_str::<serde_json::Value>(typ).ok();
+        let typ = serde_json::from_str::<serde_json::Value>(data_type).ok();
         let typ = typ
             .as_ref()
             .and_then(|typ| typ.get("type"))
@@ -634,29 +646,25 @@ fn parse_show_table_names(response: &StatementResponse) -> Result<Vec<&str>> {
     parse_named_show_column(response, "SHOW TERSE TABLES", "name")
 }
 
-/// Validates the CDC fields using the existing SHOW response.
-fn validate_cdc_metadata(response: &StatementResponse, names: &[&str]) -> Result<()> {
+/// Validates the type, nullability, and default contracts of CDC columns.
+fn validate_cdc_metadata(columns: &[ShowColumn<'_>]) -> Result<()> {
     use crate::snowflake::schema::{
         CDC_MISSING_COLUMNS_COLUMN, CDC_OPERATION_COLUMN, CDC_SEQUENCE_COLUMN,
     };
 
-    let types = parse_named_show_column(response, "SHOW COLUMNS", "data_type")?;
-    let defaults = parse_named_show_values(response, "SHOW COLUMNS", "default")?;
-    // Names, types, and defaults come from the same SHOW rows in the same
-    // order.
-    for ((name, typ), default) in names.iter().zip(types).zip(defaults) {
-        let expected = match *name {
+    for &ShowColumn { name, data_type, default } in columns {
+        let expected = match name {
             CDC_OPERATION_COLUMN | CDC_SEQUENCE_COLUMN => "TEXT",
             CDC_MISSING_COLUMNS_COLUMN => "ARRAY",
             _ => continue,
         };
-        let metadata: serde_json::Value = serde_json::from_str(typ).map_err(|_| {
+        let metadata: serde_json::Value = serde_json::from_str(data_type).map_err(|_| {
             Error::UnsupportedLayout(format!("Column '{name}' has malformed type metadata"))
         })?;
         if metadata.get("type").and_then(serde_json::Value::as_str) != Some(expected)
             || metadata.get("nullable").and_then(serde_json::Value::as_bool)
-                != Some(*name == CDC_MISSING_COLUMNS_COLUMN)
-            || (*name == CDC_MISSING_COLUMNS_COLUMN
+                != Some(name == CDC_MISSING_COLUMNS_COLUMN)
+            || (name == CDC_MISSING_COLUMNS_COLUMN
                 && !(default.is_null() || default.as_str() == Some("")))
         {
             return Err(Error::UnsupportedLayout(format!(
@@ -691,6 +699,31 @@ fn validate_column_names(
     }
 
     Ok(())
+}
+
+/// Validates a table response and returns scalar JSON columns with defaults.
+fn validate_table_response<'a>(
+    response: &'a StatementResponse,
+    table_name: &str,
+    expected_column_names: &[&str],
+    json_column_names: &[&str],
+) -> Result<Vec<&'a str>> {
+    let names = parse_show_columns(response)?;
+    // Missing column errors must precede metadata validation so callers can
+    // recognize the legacy layout and attempt its supported upgrade.
+    validate_column_names(table_name, expected_column_names, &names)?;
+    let types = parse_named_show_column(response, "SHOW COLUMNS", "data_type")?;
+    let defaults = parse_named_show_values(response, "SHOW COLUMNS", "default")?;
+
+    // Each parser reads every row of the same complete response in order.
+    let columns = names
+        .into_iter()
+        .zip(types)
+        .zip(defaults)
+        .map(|((name, data_type), default)| ShowColumn { name, data_type, default })
+        .collect::<Vec<_>>();
+    validate_cdc_metadata(&columns)?;
+    json_columns_with_defaults(response, &columns, json_column_names)
 }
 
 #[cfg(test)]
@@ -806,12 +839,23 @@ mod tests {
             ("empty", r#"{"type":"VARIANT"}"#, json!("")),
             ("absent", r#"{"type":"VARIANT"}"#, json!(null)),
         ]);
+        let expected = ["payload", "label", "empty", "absent"];
         assert_eq!(
-            json_columns_with_defaults(&response, &["payload", "empty", "absent"]).unwrap(),
+            validate_table_response(
+                &response,
+                "events",
+                &expected,
+                &["payload", "empty", "absent"]
+            )
+            .unwrap(),
             vec!["payload"]
         );
-        assert!(json_columns_with_defaults(&response, &["empty", "absent"]).unwrap().is_empty());
-        assert!(json_columns_with_defaults(&response, &[]).unwrap().is_empty());
+        assert!(
+            validate_table_response(&response, "events", &expected, &["empty", "absent"])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(validate_table_response(&response, "events", &expected, &[]).unwrap().is_empty());
     }
 
     /// Malformed metadata and incompatible types cannot authorize migration.
@@ -820,26 +864,26 @@ mod tests {
         for typ in [r#"{"type":"TEXT"}"#, r#"{"type":"ARRAY"}"#] {
             let response = column_response(&[("payload", typ, json!("'text'"))]);
             assert!(matches!(
-                json_columns_with_defaults(&response, &["payload"]),
+                validate_table_response(&response, "events", &["payload"], &["payload"]),
                 Err(Error::Config(_))
             ));
         }
         for typ in ["not-json", "{}", r#"{"type":null}"#, r#"{"type":1}"#] {
             let response = column_response(&[("payload", typ, json!(null))]);
             assert!(
-                matches!(json_columns_with_defaults(&response, &["payload"]), Err(Error::Sql { statement_handle: Some(handle), .. }) if handle == "test-statement")
+                matches!(validate_table_response(&response, "events", &["payload"], &["payload"]), Err(Error::Sql { statement_handle: Some(handle), .. }) if handle == "test-statement")
             );
         }
         for default in [json!(false), json!({})] {
             let response = column_response(&[("payload", r#"{"type":"VARIANT"}"#, default)]);
             assert!(matches!(
-                json_columns_with_defaults(&response, &["payload"]),
+                validate_table_response(&response, "events", &["payload"], &["payload"]),
                 Err(Error::Sql { .. })
             ));
         }
         let missing =
             statement_response(&["column_name"], vec![vec![serde_json::json!("payload")]]);
-        assert!(json_columns_with_defaults(&missing, &["payload"]).is_err());
+        assert!(validate_table_response(&missing, "events", &["payload"], &["payload"]).is_err());
     }
 
     #[test]
@@ -910,7 +954,7 @@ mod tests {
     fn malformed_show_metadata_is_a_structural_sql_error() {
         let response = statement_response(&["ignored"], vec![vec![serde_json::Value::Null]]);
 
-        let error = parse_show_columns(&response).expect_err("column_name metadata is required");
+        let error = validate_table_response(&response, "events", &["id"], &[]).unwrap_err();
 
         assert!(matches!(
             error,
@@ -932,13 +976,99 @@ mod tests {
             response.result_set_meta_data.as_mut().expect("test response should contain metadata");
         metadata.num_rows = Some(2);
 
-        let error = parse_show_columns(&response).expect_err("incomplete SHOW must fail closed");
+        let error = validate_table_response(&response, "events", &["id"], &[]).unwrap_err();
 
         assert!(matches!(
             error,
             Error::Sql { message, .. }
                 if message == "SHOW COLUMNS returned 1 rows, but metadata declared 2 total rows"
         ));
+    }
+
+    /// Missing mask errors remain available to the legacy-upgrade dispatcher.
+    #[test]
+    fn table_response_checks_names_before_type_metadata() {
+        let response = column_response(&[
+            ("_cdc_operation", "not-json", json!(null)),
+            ("_cdc_sequence_number", "not-json", json!(null)),
+        ]);
+        let expected = ["_cdc_operation", "_cdc_sequence_number", "_cdc_missing_columns"];
+
+        assert!(matches!(
+            validate_table_response(&response, "events", &expected, &[]),
+            Err(Error::MissingTableColumn { table_name, column_name })
+                if table_name == "events" && column_name == "_cdc_missing_columns"
+        ));
+    }
+
+    /// Legacy validation ignores unrelated type JSON and default expressions.
+    #[test]
+    fn table_response_interprets_only_selected_column_metadata() {
+        let mut response = column_response(&[
+            ("payload", r#"{"type":"VARIANT"}"#, json!("PARSE_JSON('{}')")),
+            ("unrelated", "not-json", json!(false)),
+            ("_cdc_sequence_number", r#"{"type":"TEXT","nullable":false}"#, json!(null)),
+            ("_cdc_operation", r#"{"type":"TEXT","nullable":false}"#, json!(null)),
+        ]);
+        for column in &mut response.result_set_meta_data.as_mut().unwrap().row_type {
+            column.name.make_ascii_uppercase();
+        }
+        let expected = ["_cdc_operation", "_cdc_sequence_number", "payload", "unrelated"];
+
+        assert!(validate_table_response(&response, "events", &expected, &[]).unwrap().is_empty());
+        assert_eq!(
+            validate_table_response(&response, "events", &expected, &["payload"]).unwrap(),
+            vec!["payload"]
+        );
+        assert!(
+            validate_table_response(&response, "events", &expected, &["Payload"])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// Incomplete or mistyped selected fields retain structural SQL errors.
+    #[test]
+    fn table_response_rejects_malformed_selected_fields() {
+        let response = json!({
+            "statementHandle": "test-statement",
+            "resultSetMetaData": {
+                "numRows": 1,
+                "rowType": [
+                    {"name": "column_name"},
+                    {"name": "data_type"},
+                    {"name": "default"}
+                ]
+            },
+            "data": [["payload", r#"{"type":"VARIANT"}"#, null]]
+        });
+        for (pointer, value, message) in [
+            ("/resultSetMetaData", json!(null), "SHOW COLUMNS omitted result metadata"),
+            ("/data", json!(null), "SHOW COLUMNS omitted result data"),
+            (
+                "/resultSetMetaData/numRows",
+                json!(null),
+                "SHOW COLUMNS result metadata omitted numRows",
+            ),
+            ("/data/0", json!([]), "SHOW COLUMNS row 0 omitted column_name"),
+            ("/data/0", json!(["payload"]), "SHOW COLUMNS row 0 omitted data_type"),
+            ("/data/0", json!(["payload", "{}"]), "SHOW COLUMNS row 0 omitted default"),
+            ("/data/0/0", json!(false), "SHOW COLUMNS row 0 has no string column_name"),
+            ("/data/0/1", json!(false), "SHOW COLUMNS row 0 has no string data_type"),
+        ] {
+            let mut malformed = response.clone();
+            *malformed.pointer_mut(pointer).unwrap() = value;
+            let malformed = serde_json::from_value(malformed).unwrap();
+
+            assert!(
+                matches!(
+                    validate_table_response(&malformed, "events", &["payload"], &["payload"]),
+                    Err(Error::Sql { statement_handle: Some(handle), message: actual })
+                        if handle == "test-statement" && actual == message
+                ),
+                "{pointer}: {message}"
+            );
+        }
     }
 
     /// Request-aware statement URLs carry Snowflake's retry parameters.
@@ -995,30 +1125,27 @@ mod tests {
                 ],
             )
         };
+        let expected = ["id", "_cdc_operation", "_cdc_sequence_number", "_cdc_missing_columns"];
         for default in [serde_json::Value::Null, "".into()] {
             let response = response("ARRAY", true, default);
-            let names = parse_show_columns(&response).unwrap();
-            validate_cdc_metadata(&response, &names).unwrap();
+            validate_table_response(&response, "events", &expected, &[]).unwrap();
         }
         for (typ, nullable, default) in
             [("TEXT", true, ""), ("ARRAY", false, ""), ("ARRAY", true, "ARRAY_CONSTRUCT()")]
         {
             let response = response(typ, nullable, default.into());
-            let names = parse_show_columns(&response).unwrap();
             assert!(matches!(
-                validate_cdc_metadata(&response, &names),
+                validate_table_response(&response, "events", &expected, &[]),
                 Err(Error::UnsupportedLayout(_))
             ));
         }
         let malformed = response("ARRAY", false, "".into());
         let mut malformed = malformed;
         malformed.data.as_mut().unwrap()[0][1] = "{invalid".into();
-        assert!(
-            validate_cdc_metadata(&malformed, &parse_show_columns(&malformed).unwrap()).is_err()
-        );
+        assert!(validate_table_response(&malformed, "events", &expected, &[]).is_err());
         let mut response = response("ARRAY", true, "".into());
         response.data.as_mut().unwrap()[1][1] =
             serde_json::json!({"type": "TEXT", "nullable": true}).to_string().into();
-        assert!(validate_cdc_metadata(&response, &parse_show_columns(&response).unwrap()).is_err());
+        assert!(validate_table_response(&response, "events", &expected, &[]).is_err());
     }
 }
