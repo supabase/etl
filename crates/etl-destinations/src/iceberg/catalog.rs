@@ -13,8 +13,6 @@ use reqwest::{Client, Response, StatusCode};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::iceberg::error::CatalogErrorContext;
-
 /// A REST catalog implementation that handles Supabase-specific API
 /// incompatibilities.
 ///
@@ -387,7 +385,7 @@ impl SupabaseClient {
         if !response.status().is_success() {
             let status = response.status();
             return Err(Error::new(ErrorKind::Unexpected, "Catalog HTTP request failed")
-                .with_source(CatalogErrorContext::HttpStatus(status)));
+                .with_context("status", status.to_string()));
         }
 
         Ok(response)
@@ -406,11 +404,9 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
 
     serde_json::from_slice::<R>(&bytes).map_err(|e| {
         Error::new(ErrorKind::Unexpected, "Failed to parse response from rest catalog server")
-            .with_source(CatalogErrorContext::Json {
-                line: e.line(),
-                column: e.column(),
-                category: e.classify(),
-            })
+            .with_context("line", e.line().to_string())
+            .with_context("column", e.column().to_string())
+            .with_context("category", format!("{:?}", e.classify()))
     })
 }
 
@@ -420,7 +416,7 @@ pub(crate) async fn deserialize_catalog_response<R: DeserializeOwned>(
 /// storage credentials, cookies, or echoed request data.
 pub(crate) fn deserialize_unexpected_catalog_error(response: Response) -> Error {
     Error::new(ErrorKind::Unexpected, "Received response with unexpected status code")
-        .with_source(CatalogErrorContext::HttpStatus(response.status()))
+        .with_context("status", response.status().to_string())
 }
 
 /// Request structure for Supabase table creation endpoint.
@@ -488,9 +484,8 @@ mod tests {
     };
     use tokio_util::task::AbortOnDropHandle;
 
-    use crate::iceberg::{
-        catalog::{deserialize_catalog_response, deserialize_unexpected_catalog_error},
-        error::iceberg_error_to_etl_error,
+    use crate::iceberg::catalog::{
+        deserialize_catalog_response, deserialize_unexpected_catalog_error,
     };
 
     /// Returns a catalog response carrying deliberately sensitive placeholder
@@ -528,13 +523,12 @@ mod tests {
         response
     }
 
-    /// Catalog errors retain typed diagnostics through ETL conversion without
-    /// exposing headers, response bodies, or serde messages.
+    /// Catalog errors retain structural diagnostics without exposing response
+    /// data.
     #[tokio::test]
     async fn catalog_errors_omit_sensitive_responses() {
         for status in [401, 500] {
             let error = deserialize_unexpected_catalog_error(catalog_response(status).await);
-            let error = iceberg_error_to_etl_error(error);
 
             assert!(error.to_string().contains(&status.to_string()));
             assert!(!error.to_string().contains("placeholder"));
@@ -543,11 +537,13 @@ mod tests {
 
         let error =
             deserialize_catalog_response::<bool>(catalog_response(200).await).await.unwrap_err();
-        let error = iceberg_error_to_etl_error(error);
+        let message = error.to_string();
 
-        assert!(error.to_string().contains("Catalog JSON Data error at line 1, column 29"));
+        assert!(message.contains("line: 1"));
+        assert!(message.contains("column: 29"));
+        assert!(message.contains("category: Data"));
         assert!(!format!("{error:?}").contains("placeholder"));
         assert!(!error.to_string().contains("placeholder"));
-        assert!(error.source().unwrap().source().unwrap().source().is_none());
+        assert!(error.source().is_none());
     }
 }
