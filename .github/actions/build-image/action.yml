@@ -47,5 +47,6 @@ runs:
         context: ${{ inputs.context }}
         file: ${{ inputs.context }}/crates/etl-replicator/Dockerfile
         platforms: ${{ inputs.platform }}
+        pull: true
         build-args: ENABLE_EGRESS=true
         outputs: ${{ inputs.push == 'true' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', inputs.image) || 'type=cacheonly' }}
