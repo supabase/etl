@@ -121,7 +121,7 @@ reqwest = { version = "0.12.22", default-features = false }
 rust_decimal = { version = "1.42.0", default-features = false }
 rustls = { version = "0.23.46", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }
-sentry = { version = "0.42.0" }
+sentry = { version = "0.42.0", default-features = false, features = ["backtrace", "contexts", "debug-images", "panic", "release-health", "reqwest", "rustls"] }
 serde = { version = "1.0.219", default-features = false }
 serde_json = { version = "1.0.141", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
