@@ -131,12 +131,16 @@ exclude it from non-security refactoring scans, test-improvement reviews,
 and cross-destination bug investigations or fixes. Requests covering
 "all destinations" or the whole repository do not override this exclusion.
 
+When applying this exclusion to a cross-destination or repository-wide
+request, state in the result that Iceberg was excluded.
+
 This exclusion does not apply to security scans: include Iceberg whenever
 it falls within the requested security scope.
 
 Keep existing Iceberg code, tests, features and CI coverage intact. If a
-shared change requires an Iceberg adjustment to keep existing builds or
-checks passing, make only the necessary compatibility adjustment.
+shared change requires an Iceberg adjustment to prevent a runtime
+regression or keep existing builds and checks passing, make only the
+necessary compatibility adjustment.
 Do not expand that work into Iceberg-specific cleanup.
 
 ### Destination compatibility
