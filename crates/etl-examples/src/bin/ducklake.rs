@@ -28,14 +28,18 @@ Usage:
 
 */
 
-use std::{error::Error, sync::Once};
+use std::{error::Error, ffi::OsStr, sync::Once};
 
-use clap::{Args, Parser};
+use clap::{
+    Args, Parser,
+    builder::TypedValueParser,
+    error::{ContextKind, ContextValue},
+};
 use etl::{
     config::{
-        BatchConfig, InvalidatedSlotBehavior, PgConnectionConfig, PipelineConfig,
-        TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig, parse_ducklake_s3_data_path,
-        parse_ducklake_url,
+        BatchConfig, InvalidatedSlotBehavior, ParseDucklakeUrlError, PgConnectionConfig,
+        PipelineConfig, TableSyncCopyConfig, TcpKeepaliveConfig, TlsConfig,
+        parse_ducklake_s3_data_path, parse_ducklake_url,
     },
     pipeline::Pipeline,
     store::PostgresStore,
@@ -56,6 +60,34 @@ fn install_crypto_provider() {
             .install_default()
             .expect("failed to install default crypto provider");
     });
+}
+
+/// Keeps credential-bearing URLs out of Clap's rejected-value diagnostics.
+#[derive(Clone)]
+struct RedactedUrlParser(
+    /// The existing catalog or storage URL parser.
+    fn(&str) -> Result<Url, ParseDucklakeUrlError>,
+);
+
+impl TypedValueParser for RedactedUrlParser {
+    type Value = Url;
+
+    fn parse_ref(
+        &self,
+        command: &clap::Command,
+        argument: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        self.0.parse_ref(command, argument, value).map_err(|mut error| {
+            if error.get(ContextKind::InvalidValue).is_some() {
+                error.insert(
+                    ContextKind::InvalidValue,
+                    ContextValue::String("[redacted]".to_owned()),
+                );
+            }
+            error
+        })
+    }
 }
 
 #[derive(Parser)]
@@ -93,10 +125,10 @@ struct DbArgs {
 #[derive(Args)]
 struct DuckLakeArgs {
     /// DuckLake catalog URL (e.g., postgres://user:pass@host/db)
-    #[arg(long, value_parser = parse_ducklake_url)]
+    #[arg(long, value_parser = RedactedUrlParser(parse_ducklake_url))]
     catalog_url: Url,
     /// S3 / S3-compatible URI for Parquet files (e.g., s3://bucket/)
-    #[arg(long, value_parser = parse_ducklake_s3_data_path)]
+    #[arg(long, value_parser = RedactedUrlParser(parse_ducklake_s3_data_path))]
     data_path: Url,
     /// DuckDB connection pool size
     #[arg(long, default_value = "4")]
@@ -278,4 +310,64 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     info!("pipeline stopped, all resources cleaned up");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{Parser, error::ErrorKind};
+
+    use crate::AppArgs;
+
+    /// URL validation retains the flag and reason without echoing credentials.
+    #[test]
+    fn rejected_urls_do_not_print_credentials() {
+        for (flag, value, reason) in [
+            (
+                "--catalog-url",
+                "postgres://example:placeholder-password@[invalid/db",
+                "invalid IPv6 address",
+            ),
+            (
+                "--data-path",
+                "postgres://example:placeholder-password@127.0.0.1/db",
+                "DuckLake data path must use the s3:// scheme",
+            ),
+        ] {
+            let error = AppArgs::try_parse_from(["ducklake", flag, value]).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ValueValidation);
+            let message = error.to_string();
+            assert!(!message.contains("placeholder-password"));
+            assert!(message.contains("[redacted]"));
+            assert!(message.contains(flag));
+            assert!(message.contains(reason));
+        }
+    }
+
+    /// Redaction does not change accepted catalog or storage URLs.
+    #[test]
+    fn accepted_urls_preserve_credentials() {
+        let args = AppArgs::try_parse_from([
+            "ducklake",
+            "--db-host",
+            "127.0.0.1",
+            "--db-name",
+            "example",
+            "--db-username",
+            "postgres",
+            "--publication",
+            "example_publication",
+            "--catalog-url",
+            "postgres://example:placeholder-password@127.0.0.1/db",
+            "--data-path",
+            "s3://example-bucket/data",
+            "--s3-access-key-id",
+            "placeholder-key-id",
+            "--s3-secret-access-key",
+            "placeholder-secret-key",
+        ])
+        .unwrap();
+
+        assert!(args.ducklake_args.catalog_url.password() == Some("placeholder-password"));
+        assert_eq!(args.ducklake_args.data_path.as_str(), "s3://example-bucket/data");
+    }
 }

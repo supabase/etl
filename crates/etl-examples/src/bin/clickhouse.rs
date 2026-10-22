@@ -111,7 +111,7 @@ struct DbArgs {
 #[derive(Args)]
 struct ClickHouseArgs {
     /// ClickHouse HTTP(S) endpoint.
-    #[arg(long, env = "TESTS_CLICKHOUSE_URL")]
+    #[arg(long, env = "TESTS_CLICKHOUSE_URL", hide_env_values = true)]
     clickhouse_url: String,
     /// ClickHouse user name.
     #[arg(long, env = "TESTS_CLICKHOUSE_USER")]

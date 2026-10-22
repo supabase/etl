@@ -21,6 +21,7 @@ use etl::{
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
 };
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
@@ -97,6 +98,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
         quote_identifier("lake"),
         quote_literal(data.as_str())
     ))
+    .map_err(RedactedDuckDbError::from)
     .unwrap();
 
     conn
@@ -116,7 +118,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 /// `run_duckdb_blocking`.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("checkpoint").unwrap();
+    conn.execute_batch("checkpoint").map_err(RedactedDuckDbError::from).unwrap();
 }
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
@@ -141,7 +143,7 @@ fn count_applied_batches(
         quote_literal(&table_name.id()),
         quote_literal(batch_kind),
     );
-    conn.query_row(&sql, [], |row| row.get(0)).unwrap()
+    conn.query_row(&sql, [], |row| row.get(0)).map_err(RedactedDuckDbError::from).unwrap()
 }
 
 /// Summarizes copied payload rows without loading their contents into the test
@@ -151,7 +153,9 @@ fn query_payload_summary(conn: &Connection, table_name: &DuckLakeTableName) -> (
         "select count(*), count(distinct payload), min(length(payload)) from {}",
         qualified_lake_table_name(table_name)
     );
-    conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+    conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(RedactedDuckDbError::from)
+        .unwrap()
 }
 
 /// Queries replicated user rows using blocking DuckDB APIs.
@@ -161,11 +165,11 @@ fn query_payload_summary(conn: &Connection, table_name: &DuckLakeTableName) -> (
 fn query_user_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i64, String, i32)> {
     let sql =
         format!("select id, name, age from {} order by id", qualified_lake_table_name(table_name));
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
     }
 
@@ -181,11 +185,11 @@ fn query_order_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i
         "select id, description from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap()));
     }
 
@@ -204,11 +208,11 @@ fn query_table_columns(conn: &Connection, table_name: &DuckLakeTableName) -> Vec
         quote_literal(table_name.schema()),
         quote_literal(table_name.table())
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(row.get(0).unwrap());
     }
 
@@ -221,11 +225,11 @@ fn query_case_mapped_rows(conn: &Connection, table_name: &DuckLakeTableName) -> 
         "select id, display_name from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap()));
     }
 
@@ -241,11 +245,11 @@ fn query_schema_add_rows(conn: &Connection, table_name: &DuckLakeTableName) -> V
         "select id, name, age, email, score from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(SchemaAddRow {
             id: row.get(0).unwrap(),
             name: row.get(1).unwrap(),
@@ -267,11 +271,11 @@ fn query_publication_add_rows(
         "select id, name, status from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
     }
 
@@ -291,11 +295,11 @@ fn query_schema_multi_rows(
         "select id, status, name, age from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(SchemaMultiRow {
             id: row.get(0).unwrap(),
             status: row.get(1).unwrap(),
@@ -320,11 +324,11 @@ fn query_schema_mutation_rows(
         "select id, full_name, visits, email from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(SchemaMutationRow {
             id: row.get(0).unwrap(),
             full_name: row.get(1).unwrap(),
@@ -349,11 +353,11 @@ fn query_ddl_rotation_rows(
         "select id, text_col, ddl_col_0_0 from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(DdlRotationRow {
             id: row.get(0).unwrap(),
             text_col: row.get(1).unwrap(),
@@ -375,7 +379,7 @@ fn query_ddl_type_row(conn: &Connection, table_name: &DuckLakeTableName) -> DdlT
          ddl_col_4_0 from {} where id = 5",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
     let row = statement.query_row([], |row| {
         Ok(DdlTypeRow {
             id: row.get(0)?,
@@ -388,7 +392,7 @@ fn query_ddl_type_row(conn: &Connection, table_name: &DuckLakeTableName) -> DdlT
         })
     });
 
-    row.unwrap()
+    row.map_err(RedactedDuckDbError::from).unwrap()
 }
 
 async fn build_destination(
@@ -1993,6 +1997,7 @@ async fn special_temporal_values_survive_copy_and_cdc() {
         qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
     let total: i64 = conn
         .query_row(&format!("select count(*) from {destination_table}"), [], |row| row.get(0))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(total, 2);
     for (name, predicate) in [
@@ -2019,7 +2024,31 @@ async fn special_temporal_values_survive_copy_and_cdc() {
                 [],
                 |row| row.get(0),
             )
+            .map_err(RedactedDuckDbError::from)
             .unwrap();
         assert_eq!(valid, 2, "{name}");
     }
+}
+
+/// Keeps credentials out of verification panics while preserving the DuckDB
+/// error.
+#[test]
+fn verification_query_errors_redact_credentials() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("attach ':memory:' as lake").unwrap();
+    let table_name = DuckLakeTableName::new("main", "password='placeholder-password'");
+    let sql =
+        format!("select id, name, age from {} order by id", qualified_lake_table_name(&table_name));
+    let error = conn.prepare(&sql).err().unwrap();
+    assert!(error.to_string().contains("placeholder-password"));
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        query_user_rows(&conn, &table_name)
+    }))
+    .unwrap_err();
+
+    let message = panic.downcast_ref::<String>().unwrap();
+    assert!(!message.contains("placeholder-password"));
+    assert!(message.contains("[redacted]"));
+    assert!(message.contains("Catalog Error"));
 }
