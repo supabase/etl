@@ -38,7 +38,7 @@ use crate::common::{
 };
 
 /// Command-line arguments for the table-copy benchmark.
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// Where to send log output.
@@ -48,14 +48,14 @@ pub struct Args {
     command: Commands,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand)]
 enum Commands {
     /// Run the table-copy benchmark.
     Run(RunArgs),
 }
 
 /// Table-copy benchmark options.
-#[derive(clap::Args, Debug)]
+#[derive(clap::Args)]
 pub struct RunArgs {
     /// Postgres connection options.
     #[command(flatten)]

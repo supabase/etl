@@ -6,7 +6,7 @@
 
 ARG RUST_VERSION=1.95.0
 # Fetch DuckDB extensions at build time instead of vendoring them in the repository.
-FROM debian:bookworm-slim AS duckdb-extensions
+FROM debian:trixie-slim AS duckdb-extensions
 ARG TARGETPLATFORM
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -25,7 +25,7 @@ RUN chmod +x /usr/local/bin/vendor-duckdb-extensions.sh && \
       --output-root /duckdb_extensions \
       --platform "$DUCKDB_PLATFORM"
 
-FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+FROM rust:${RUST_VERSION}-slim-trixie AS builder
 ARG RUST_VERSION
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -74,7 +74,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/release/etl-replicator target/release/etl-ducklake-maintenance /app/bin/ && \
     strip /app/bin/etl-replicator /app/bin/etl-ducklake-maintenance
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 WORKDIR /app
 
 USER nonroot:nonroot

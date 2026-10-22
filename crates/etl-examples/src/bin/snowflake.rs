@@ -46,7 +46,7 @@ fn install_crypto_provider() {
 }
 
 // Main application arguments combining database and Snowflake configurations
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "snowflake", version, about, arg_required_else_help = true)]
 struct AppArgs {
     // Postgres connection parameters
@@ -62,7 +62,7 @@ struct AppArgs {
 }
 
 // Postgres database connection configuration
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct DbArgs {
     /// Host on which Postgres is running (e.g., localhost or IP address)
     #[arg(long)]
@@ -82,7 +82,7 @@ struct DbArgs {
 }
 
 // Snowflake pipeline tuning.
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct SnowflakeArgs {
     /// Maximum time to wait for a batch to fill in milliseconds (lower values =
     /// lower latency, less throughput)

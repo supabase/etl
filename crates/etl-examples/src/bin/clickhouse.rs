@@ -72,7 +72,7 @@ fn install_crypto_provider() {
 }
 
 /// Main application arguments combining database and ClickHouse configurations.
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "clickhouse", version, about, arg_required_else_help = true)]
 struct AppArgs {
     /// Postgres connection parameters
@@ -88,7 +88,7 @@ struct AppArgs {
 }
 
 /// Postgres database connection configuration.
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct DbArgs {
     /// Host on which Postgres is running (e.g., localhost or IP address)
     #[arg(long)]
@@ -108,7 +108,7 @@ struct DbArgs {
 }
 
 /// ClickHouse destination configuration.
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct ClickHouseArgs {
     /// ClickHouse HTTP(S) endpoint.
     #[arg(long, env = "TESTS_CLICKHOUSE_URL")]

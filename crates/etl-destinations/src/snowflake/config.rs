@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use etl_config::shared::{ValidationError, validate_snowflake_account_id};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::snowflake;
 
@@ -185,11 +185,11 @@ impl Config {
         })?;
 
         for (name, value) in [
-            ("account", &connection.account),
-            ("user", &connection.user),
-            ("database", &connection.database),
-            ("schema", &connection.schema),
-            ("private_key", &connection.private_key),
+            ("account", connection.account.as_str()),
+            ("user", connection.user.as_str()),
+            ("database", connection.database.as_str()),
+            ("schema", connection.schema.as_str()),
+            ("private_key", connection.private_key.expose_secret()),
         ] {
             if value.trim().is_empty() {
                 return Err(snowflake::Error::Config(format!(
@@ -199,7 +199,9 @@ impl Config {
         }
 
         connection.role = normalize_optional(connection.role);
-        connection.private_key_passphrase = normalize_optional(connection.private_key_passphrase);
+        connection.private_key_passphrase = connection
+            .private_key_passphrase
+            .filter(|passphrase| !passphrase.expose_secret().trim().is_empty());
 
         let mut config = Self::new(
             &connection.account,
@@ -215,10 +217,7 @@ impl Config {
             config = config.with_role(&role);
         }
 
-        Ok(config.with_private_key(
-            connection.private_key,
-            connection.private_key_passphrase.map(Into::into),
-        ))
+        Ok(config.with_private_key(connection.private_key, connection.private_key_passphrase))
     }
 
     /// Load and parse a JSON Snowflake connection string from `env_name`.
@@ -252,9 +251,9 @@ struct ConnectionJson {
     /// Snowflake role to assume after connecting.
     role: Option<String>,
     /// PEM-encoded private key.
-    private_key: String,
+    private_key: SecretString,
     /// Passphrase for encrypted private keys.
-    private_key_passphrase: Option<String>,
+    private_key_passphrase: Option<SecretString>,
 }
 
 /// Normalize optional connection fields by treating empty strings as absent.
@@ -289,29 +288,33 @@ mod tests {
 
     #[test]
     fn parses_connection_json() {
-        let config = Config::parse_connection_json(
-            &format!(
-                r#"{{
-                    "account": "org-account",
-                    "user": "etl_user",
-                    "database": "ETL_DEV",
-                    "schema": "PUBLIC",
-                    "role": "ETL_TEST_ROLE",
-                    "private_key_passphrase": "secret",
-                    "private_key": {PRIVATE_KEY:?}
-                }}"#,
-            ),
-            "Snowflake connection string",
-        )
-        .expect("connection should parse");
+        for passphrase in [None, Some(""), Some(" \t"), Some("placeholder-passphrase")] {
+            let connection = serde_json::json!({
+                "account": "org-account",
+                "user": "etl_user",
+                "database": "ETL_DEV",
+                "schema": "PUBLIC",
+                "role": "ETL_TEST_ROLE",
+                "private_key_passphrase": passphrase,
+                "private_key": PRIVATE_KEY
+            });
+            let config = Config::parse_connection_json(
+                &connection.to_string(),
+                "Snowflake connection string",
+            )
+            .unwrap();
 
-        assert_eq!(config.account(), "org-account");
-        assert_eq!(config.user(), "etl_user");
-        assert_eq!(config.database(), "ETL_DEV");
-        assert_eq!(config.schema(), "PUBLIC");
-        assert_eq!(config.role(), Some("ETL_TEST_ROLE"));
-        assert_eq!(config.private_key().unwrap().expose_secret(), PRIVATE_KEY);
-        assert_eq!(config.private_key_passphrase().unwrap().expose_secret(), "secret");
+            assert_eq!(config.account(), "org-account");
+            assert_eq!(config.user(), "etl_user");
+            assert_eq!(config.database(), "ETL_DEV");
+            assert_eq!(config.schema(), "PUBLIC");
+            assert_eq!(config.role(), Some("ETL_TEST_ROLE"));
+            assert_eq!(config.private_key().unwrap().expose_secret(), PRIVATE_KEY);
+            assert_eq!(
+                config.private_key_passphrase().map(ExposeSecret::expose_secret),
+                passphrase.filter(|passphrase| !passphrase.trim().is_empty())
+            );
+        }
     }
 
     #[test]

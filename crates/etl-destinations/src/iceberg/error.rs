@@ -3,6 +3,13 @@ use etl::error::{ErrorKind, EtlError, Retryability};
 
 use crate::retry::{ClassifiedError, classified_error};
 
+/// Removes provider response data while retaining the error kind and retry
+/// flag.
+pub(super) fn redact_iceberg_error(error: iceberg::Error) -> iceberg::Error {
+    iceberg::Error::new(error.kind(), "Iceberg operation failed; provider details omitted")
+        .with_retryable(error.retryable())
+}
+
 /// Iceberg marks the errors that may succeed when retried, such as commit
 /// conflicts. It leaves a commit whose outcome is unknown unmarked, because
 /// retrying that commit could apply it twice.
@@ -51,7 +58,7 @@ pub(crate) fn iceberg_error_to_etl_error(err: iceberg::Error) -> EtlError {
         _ => (ErrorKind::Unknown, "Unknown iceberg error"),
     };
 
-    classified_error(kind, description, err)
+    classified_error(kind, description, redact_iceberg_error(err))
 }
 
 /// Converts Arrow errors to ETL errors with appropriate classification.
@@ -94,9 +101,32 @@ pub(crate) fn arrow_error_to_etl_error(err: ArrowError) -> EtlError {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as _;
+
     use etl::error::{ErrorKind, Retryability};
 
     use crate::iceberg::error::iceberg_error_to_etl_error;
+
+    /// Upstream response context and nested sources cannot escape conversion.
+    #[test]
+    fn iceberg_errors_omit_upstream_credentials() {
+        let source = iceberg::Error::new(iceberg::ErrorKind::Unexpected, "placeholder-message")
+            .with_context("json", "placeholder-response-secret")
+            .with_context("headers", "placeholder-cookie")
+            .with_source(std::io::Error::other("placeholder-nested-secret"))
+            .with_retryable(true);
+
+        let error = iceberg_error_to_etl_error(source);
+
+        assert_eq!(error.retryability(), Retryability::Retryable);
+        assert!(!format!("{error:?}").contains("placeholder"));
+        assert!(!error.to_string().contains("placeholder"));
+
+        let source = error.source().unwrap();
+
+        assert!(!source.to_string().contains("placeholder"));
+        assert!(source.source().is_none());
+    }
 
     /// Errors iceberg marks retryable, such as commit conflicts, are retryable
     /// after conversion; unmarked errors are permanent.

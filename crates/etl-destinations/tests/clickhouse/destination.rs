@@ -211,10 +211,10 @@ async fn boundary_underscore_names_survive_lifecycle_replacing_merge_tree() {
     boundary_underscore_names_survive_lifecycle(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-/// Preserves ClickHouse's native length error without truncating or hashing a
-/// length-prefixed name to fit the database's metadata filename budget.
+/// Preserves ClickHouse's native length rejection without truncating or hashing
+/// a length-prefixed name to fit the database's metadata filename budget.
 #[tokio::test(flavor = "multi_thread")]
-async fn overlong_encoded_names_preserve_native_clickhouse_error() {
+async fn overlong_encoded_names_preserve_native_clickhouse_error_code() {
     init_test_tracing();
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
@@ -235,7 +235,9 @@ async fn overlong_encoded_names_preserve_native_clickhouse_error() {
             .await
             .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
-    assert!(error.source().unwrap().to_string().contains("max length of table name"));
+    assert_eq!(error.retryability(), Retryability::Permanent);
+    assert!(error.source().unwrap().to_string().contains("Code: 69."));
+
     destination.shutdown().await.unwrap();
     assert!(
         database
