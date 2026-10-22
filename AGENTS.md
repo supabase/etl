@@ -320,6 +320,12 @@ that can be printed, captured, or sent to telemetry. `SecretString` redacts
 itself; inspect plain strings, byte arrays, URLs, nested types, and third-party
 errors before formatting them. Use custom formatting only where the contained
 types do not already redact secrets.
+
+Prefer `SecretString` for owned credentials; use `SerializableSecretString` only
+when serialization is required. Use `Zeroizing` for temporary cryptographic keys
+and plaintext encryption buffers. Expose secrets only at protocol or storage
+boundaries.
+
 Keep useful structural context, status/error codes, and retry classifications;
 omit credentials, payload values, and raw provider text that can echo them.
 Prefer redaction at the output boundary over removing validation or changing

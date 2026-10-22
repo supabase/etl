@@ -84,12 +84,10 @@ impl ErrorNotificationClient {
     /// send error notifications to the Supabase API.
     pub(crate) fn new(
         api_url: String,
-        api_key: String,
+        api_key: SecretString,
         project_ref: String,
         pipeline_id: String,
     ) -> Result<Self, reqwest::Error> {
-        // Custom authentication headers must never follow redirects to another
-        // host.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
@@ -98,7 +96,7 @@ impl ErrorNotificationClient {
         Ok(Self {
             client,
             api_url: api_url.trim_end_matches('/').to_owned(),
-            api_key: api_key.into(),
+            api_key,
             project_ref,
             pipeline_id,
         })
@@ -235,7 +233,7 @@ mod tests {
     fn error_notification_client(api_url: &str) -> ErrorNotificationClient {
         ErrorNotificationClient::new(
             api_url.to_owned(),
-            "fake-api-key".to_owned(),
+            "fake-api-key".into(),
             "abcdefghijklmnopqrst".to_owned(),
             "42".to_owned(),
         )

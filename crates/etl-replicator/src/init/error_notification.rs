@@ -36,7 +36,7 @@ pub(crate) fn init(
 
     let client = ErrorNotificationClient::new(
         api_url.clone(),
-        api_key.expose_secret().to_owned(),
+        api_key.clone(),
         supabase_config.project_ref.clone(),
         replicator_config.pipeline.id.to_string(),
     )

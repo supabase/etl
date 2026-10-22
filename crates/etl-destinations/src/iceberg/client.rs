@@ -400,7 +400,6 @@ impl IcebergClient {
 impl fmt::Debug for IcebergClient {
     /// Omits catalog authentication properties.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Catalog debug output includes unredacted authentication properties.
         f.debug_struct("IcebergClient").finish_non_exhaustive()
     }
 }

@@ -138,7 +138,7 @@ r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
 reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 rustls = { workspace = true, optional = true, features = ["aws-lc-rs"] }
-secrecy = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true, features = ["serde"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
 sha2 = { workspace = true, optional = true }

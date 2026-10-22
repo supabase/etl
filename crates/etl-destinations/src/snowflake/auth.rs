@@ -21,7 +21,7 @@ use aws_lc_rs::{encoding::AsDer, signature::KeyPair as _};
 use base64::{Engine as _, engine::general_purpose as base64_engine};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::StatusCode;
-use secrecy::ExposeSecret as _;
+use secrecy::{ExposeSecret as _, SecretString, zeroize::Zeroizing};
 use sha2::Digest as _;
 use tokio::{sync::Mutex, time::Instant};
 use tracing::warn;
@@ -44,7 +44,7 @@ const TOKEN_REFRESH_BUFFER: Duration = Duration::from_secs(60);
 /// restricted derivative of the raw JWT, not the `scope` request parameter
 /// (which controls host restriction and is optional; see module docs).
 pub struct ScopedToken {
-    pub(crate) access_token: String,
+    pub(crate) access_token: SecretString,
     pub(crate) expires_at: Instant,
 }
 
@@ -78,7 +78,7 @@ pub(crate) async fn send_with_token_refresh<T: TokenProvider>(
 ) -> Result<reqwest::Response> {
     let mut refreshed = false;
     loop {
-        let token = auth.get_token().await?;
+        let token = Zeroizing::new(auth.get_token().await?);
         let response = request(&token).send().await.map_err(Error::HttpTransport)?;
         if response.status() != StatusCode::UNAUTHORIZED || refreshed {
             return Ok(response);
@@ -128,8 +128,8 @@ impl TokenExchanger for HttpExchanger {
         }
 
         // Snowflake returns the scoped token as a raw JWT (RFC 7519).
-        let body_text = response.text().await?;
-        let expires_at = decode_token_expiry(&body_text)?;
+        let body_text: SecretString = response.text().await?.into();
+        let expires_at = decode_token_expiry(body_text.expose_secret())?;
 
         Ok(ScopedToken { access_token: body_text, expires_at })
     }
@@ -209,7 +209,7 @@ impl<E: TokenExchanger> AuthManager<E> {
     }
 
     /// Create a short-lived JWT (1 hour) used to request a scoped OAuth token.
-    fn generate_jwt(&self) -> Result<String> {
+    fn generate_jwt(&self) -> Result<SecretString> {
         #[derive(serde::Serialize)]
         struct JwtClaims {
             iss: String,
@@ -227,6 +227,7 @@ impl<E: TokenExchanger> AuthManager<E> {
         };
 
         jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &self.encoding_key)
+            .map(Into::into)
             .map_err(|e| Error::Auth(format!("failed to sign JWT: {e}")))
     }
 }
@@ -239,14 +240,15 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
         if let Some(ref token) = *cached
             && token.expires_at > Instant::now() + TOKEN_REFRESH_BUFFER
         {
-            return Ok(token.access_token.clone());
+            return Ok(token.access_token.expose_secret().to_owned());
         }
 
         tracing::debug!("refreshing snowflake scoped token");
 
         let jwt = self.generate_jwt()?;
-        let scoped = self.exchanger.exchange(self.config.account_url(), &jwt).await?;
-        let access_token = scoped.access_token.clone();
+        let scoped =
+            self.exchanger.exchange(self.config.account_url(), jwt.expose_secret()).await?;
+        let access_token = scoped.access_token.expose_secret().to_owned();
         *cached = Some(scoped);
 
         Ok(access_token)
@@ -268,10 +270,10 @@ impl<E: TokenExchanger> TokenProvider for AuthManager<E> {
 fn decode_and_load_rsa_key(
     pem_text: &str,
     passphrase: Option<&secrecy::SecretString>,
-) -> Result<(Vec<u8>, aws_lc_rs::rsa::KeyPair)> {
+) -> Result<(Zeroizing<Vec<u8>>, aws_lc_rs::rsa::KeyPair)> {
     use pkcs8::der::{Decode as _, SecretDocument};
 
-    let der_bytes = if let Some(pass) = passphrase {
+    let der_bytes = Zeroizing::new(if let Some(pass) = passphrase {
         let (_, doc) = SecretDocument::from_pem(pem_text)
             .map_err(|e| Error::Auth(format!("failed to parse encrypted PEM: {e}")))?;
         let enc = pkcs8::EncryptedPrivateKeyInfoRef::try_from(doc.as_bytes())
@@ -284,14 +286,15 @@ fn decode_and_load_rsa_key(
         let (_, doc) = SecretDocument::from_pem(pem_text)
             .map_err(|e| Error::Auth(format!("failed to parse private key PEM: {e}")))?;
         doc.as_bytes().to_vec()
-    };
+    });
 
     // Try PKCS#8: extract the inner RSA key for jsonwebtoken, load via
     // from_pkcs8.
     if let Ok(pki) = pkcs8::PrivateKeyInfoRef::from_der(&der_bytes) {
         let key_pair = aws_lc_rs::rsa::KeyPair::from_pkcs8(&der_bytes)
             .map_err(|e| Error::Auth(format!("failed to load RSA key: {e}")))?;
-        return Ok((pki.private_key.as_bytes().to_vec(), key_pair));
+
+        return Ok((Zeroizing::new(pki.private_key.as_bytes().to_vec()), key_pair));
     }
 
     // Raw PKCS#1 DER: use directly.
@@ -385,7 +388,7 @@ P23pIjtEtEPNpGkXj0aB1RDq
     impl TokenExchanger for TestExchanger {
         async fn exchange(&self, _account_url: &str, _jwt: &str) -> Result<ScopedToken> {
             Ok(ScopedToken {
-                access_token: "fresh-token-from-exchange".to_owned(),
+                access_token: "fresh-token-from-exchange".into(),
                 expires_at: Instant::now() + Duration::from_secs(3600),
             })
         }
@@ -393,8 +396,10 @@ P23pIjtEtEPNpGkXj0aB1RDq
 
     impl<E: TokenExchanger> AuthManager<E> {
         fn inject_token_for_test(&self, access_token: String, ttl: std::time::Duration) {
-            *self.cached_token.try_lock().unwrap() =
-                Some(ScopedToken { access_token, expires_at: Instant::now() + ttl });
+            *self.cached_token.try_lock().unwrap() = Some(ScopedToken {
+                access_token: access_token.into(),
+                expires_at: Instant::now() + ttl,
+            });
         }
 
         fn fingerprint(&self) -> &str {
@@ -443,7 +448,7 @@ P23pIjtEtEPNpGkXj0aB1RDq
         for (account, user, expect_account, expect_user) in cases {
             let manager = make_test_manager_with_account(account, user);
             let jwt = manager.generate_jwt().expect("generate_jwt");
-            let claims = decode_jwt_claims(&jwt);
+            let claims = decode_jwt_claims(jwt.expose_secret());
 
             // Issuer must be ACCOUNT.USER.FINGERPRINT.
             let iss = claims["iss"].as_str().expect("iss");
@@ -515,7 +520,7 @@ P23pIjtEtEPNpGkXj0aB1RDq
         {
             let cached = manager.cached_token.try_lock().unwrap();
             let entry = cached.as_ref().expect("cache should not be empty");
-            assert_eq!(entry.access_token, "fresh-token-from-exchange");
+            assert_eq!(entry.access_token.expose_secret(), "fresh-token-from-exchange");
         }
 
         // Second call should return the cached fresh token without

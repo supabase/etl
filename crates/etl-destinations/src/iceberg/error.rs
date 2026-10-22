@@ -3,12 +3,8 @@ use etl::error::{ErrorKind, EtlError, Retryability};
 
 use crate::retry::{ClassifiedError, classified_error};
 
-/// Keeps the Iceberg kind and retry flag without retaining provider response
-/// data.
-///
-/// The upstream REST catalog attaches raw bodies, headers, and authentication
-/// responses to errors. Keeping the original as a source would expose them
-/// again.
+/// Removes provider response data while retaining the error kind and retry
+/// flag.
 pub(super) fn redact_iceberg_error(error: iceberg::Error) -> iceberg::Error {
     iceberg::Error::new(error.kind(), "Iceberg operation failed; provider details omitted")
         .with_retryable(error.retryable())

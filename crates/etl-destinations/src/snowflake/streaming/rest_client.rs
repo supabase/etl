@@ -2,6 +2,7 @@ use std::{string::String, sync::Arc, time::Duration};
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode};
+use secrecy::zeroize::Zeroizing;
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
 use tracing::{debug, warn};
@@ -102,7 +103,7 @@ async fn send_authenticated<T: TokenProvider>(
 ) -> Result<reqwest::Response> {
     let mut refreshed = false;
     loop {
-        let token = auth.get_token().await?;
+        let token = Zeroizing::new(auth.get_token().await?);
         let response = request(&token).send().await.map_err(Error::HttpTransport)?;
         let status = response.status();
         if status == StatusCode::OK {

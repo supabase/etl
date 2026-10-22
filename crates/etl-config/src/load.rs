@@ -100,11 +100,8 @@ pub enum LoadConfigError {
     Builder(#[source] config::ConfigError),
 }
 
-/// Removes configuration values from errors before they enter logs or source
-/// chains.
-///
-/// Parser and serde messages can quote passwords or entire configuration lines.
-/// Keep structural context, but never retain those messages as nested sources.
+/// Redacts parser errors that can quote configuration values, retaining
+/// structural context.
 fn redact_config_error(error: config::ConfigError) -> config::ConfigError {
     match error {
         config::ConfigError::Type { expected, key, .. } => {
