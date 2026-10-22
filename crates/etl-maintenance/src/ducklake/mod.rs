@@ -1,9 +1,11 @@
 //! DuckLake maintenance runner.
 
 mod duckdb_error;
+mod rewrite;
 mod runner;
 
 pub use duckdb_error::{RedactedDuckDbError, redact_credentials};
+pub use rewrite::DataFileRewriteReason;
 pub use runner::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, DuckLakeMaintenanceOutcome,
     ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,

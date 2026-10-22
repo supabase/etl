@@ -31,7 +31,7 @@ use etl_config::{
         DuckLakeSortNulls, DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
     },
 };
-use etl_maintenance::ducklake::RedactedDuckDbError;
+use etl_maintenance::ducklake::{DataFileRewriteReason, RedactedDuckDbError};
 use metrics::gauge;
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -197,17 +197,25 @@ fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }
 
-/// Returns whether file maintenance should run for a table.
+/// Returns why file maintenance should run for a table.
 ///
 /// Initial COPY deliberately creates Parquet files in each batch. Deferring
 /// rewrites and compaction until every copy completes keeps maintenance from
 /// competing with the writer and avoids repeatedly compacting a growing table.
-fn should_request_file_maintenance(
+fn file_maintenance_reason(
     copy_phase_active: bool,
     active_data_files: i64,
+    deleted_row_ratio: f64,
     rewrite_data_files_min_active_data_files: i64,
-) -> bool {
-    !copy_phase_active && active_data_files > rewrite_data_files_min_active_data_files
+) -> Option<DataFileRewriteReason> {
+    if copy_phase_active {
+        return None;
+    }
+    DataFileRewriteReason::for_table(
+        active_data_files,
+        deleted_row_ratio,
+        rewrite_data_files_min_active_data_files,
+    )
 }
 
 /// One active sort key read from the DuckLake metadata catalog.
@@ -746,6 +754,8 @@ pub(super) struct ExternalMaintenanceOperationSample {
     pub operations: ExternalMaintenanceOperations,
     /// Whether any table is currently in initial copy.
     pub copy_phase_active: bool,
+    /// First table-selection reason that triggered a data-file rewrite request.
+    pub rewrite_data_files_reason: Option<DataFileRewriteReason>,
 }
 
 /// Runtime backend used for DuckLake external maintenance coordination.
@@ -4027,6 +4037,7 @@ where
         );
         let copy_phase_active = self.has_active_table_copy().await?;
         let mut operations = ExternalMaintenanceOperations::default();
+        let mut rewrite_data_files_reason = None;
         let catalog_metrics = query_catalog_maintenance_metrics(
             &self.metadata_pg_pool,
             self.metadata_schema.as_ref(),
@@ -4084,11 +4095,13 @@ where
                     &table_name,
                 )
                 .await?;
-                operations.rewrite_data_files = should_request_file_maintenance(
+                rewrite_data_files_reason = file_maintenance_reason(
                     copy_phase_active,
                     metrics.active_data_files,
+                    metrics.deleted_row_ratio(),
                     rewrite_data_files_min_active_data_files,
                 );
+                operations.rewrite_data_files = rewrite_data_files_reason.is_some();
             }
 
             if operations.inline_flush && operations.rewrite_data_files {
@@ -4101,7 +4114,11 @@ where
             operations.cleanup_old_files = true;
         }
 
-        Ok(ExternalMaintenanceOperationSample { operations, copy_phase_active })
+        Ok(ExternalMaintenanceOperationSample {
+            operations,
+            copy_phase_active,
+            rewrite_data_files_reason,
+        })
     }
 
     /// Returns whether any table is currently in initial copy.
@@ -4428,9 +4445,38 @@ mod tests {
     /// files during an initial copy.
     #[test]
     fn file_maintenance_is_deferred_during_copy() {
-        assert!(!should_request_file_maintenance(true, 41, 40));
-        assert!(!should_request_file_maintenance(false, 40, 40));
-        assert!(should_request_file_maintenance(false, 41, 40));
+        assert_eq!(file_maintenance_reason(true, 41, 0.0, 40), None);
+        assert_eq!(file_maintenance_reason(true, 1, 0.98, 40), None);
+        assert_eq!(file_maintenance_reason(true, 41, 0.98, 40), None);
+    }
+
+    /// Preserves the strict file-count threshold independently of deletion
+    /// pressure.
+    #[test]
+    fn file_maintenance_preserves_file_count_threshold() {
+        assert_eq!(file_maintenance_reason(false, 40, 0.0, 40), None);
+        assert_eq!(
+            file_maintenance_reason(false, 41, 0.0, 40),
+            Some(DataFileRewriteReason::ActiveDataFiles)
+        );
+        assert_eq!(
+            file_maintenance_reason(false, 41, 0.98, 40),
+            Some(DataFileRewriteReason::ActiveDataFiles)
+        );
+    }
+
+    /// Requests rewrites for heavily deleted files even in a small table.
+    #[test]
+    fn file_maintenance_requests_heavily_deleted_small_tables() {
+        for (files, ratio) in [(1, 0.98), (2, 0.96), (1, 1.0)] {
+            assert_eq!(
+                file_maintenance_reason(false, files, ratio, 40),
+                Some(DataFileRewriteReason::DeletedRowRatio)
+            );
+        }
+        assert_eq!(file_maintenance_reason(false, 1, 0.95, 40), None);
+        assert_eq!(file_maintenance_reason(false, 1, 0.0, 40), None);
+        assert_eq!(file_maintenance_reason(false, 0, 1.0, 40), None);
     }
 
     #[test]
