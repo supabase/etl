@@ -1,9 +1,10 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -189,8 +190,16 @@ struct GitHubClient {
     repo: String,
 }
 
-struct TempDir {
-    path: PathBuf,
+/// Creates a temporary directory for downloading and extracting previous
+/// reports.
+fn create_previous_reports_dir() -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("etl-benchmark-previous-");
+    // Other users must not be able to plant archive or extraction paths.
+    #[cfg(unix)]
+    builder.permissions(fs::Permissions::from_mode(0o700));
+
+    builder.tempdir().context("Failed to create previous benchmark reports directory")
 }
 
 impl BenchmarkCompareArgs {
@@ -280,9 +289,9 @@ impl BenchmarkCompareArgs {
                 continue;
             };
 
-            let temp_dir = TempDir::new("etl-benchmark-previous")?;
-            let archive_path = temp_dir.path.join("benchmark-results.zip");
-            let extract_dir = temp_dir.path.join("extract");
+            let temp_dir = create_previous_reports_dir()?;
+            let archive_path = temp_dir.path().join("benchmark-results.zip");
+            let extract_dir = temp_dir.path().join("extract");
             fs::create_dir_all(&extract_dir)
                 .with_context(|| format!("failed to create {}", extract_dir.display()))?;
             client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
@@ -380,25 +389,6 @@ impl GitHubClient {
         let bytes = response.bytes().await.context("failed to read benchmark artifact")?;
         fs::write(output_path, bytes)
             .with_context(|| format!("failed to write {}", output_path.display()))
-    }
-}
-
-impl TempDir {
-    fn new(prefix: &str) -> Result<Self> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before Unix epoch")?
-            .as_millis();
-        let path = env::temp_dir().join(format!("{prefix}-{timestamp}-{}", std::process::id()));
-        fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create {}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -820,6 +810,27 @@ mod tests {
     use crate::commands::benchmark_compare::{
         CodeCompare, Reports, WorkflowRun, compare_reports, config_changes, regression_failures,
     };
+
+    /// Checks that previous report directories are private and usable.
+    #[cfg(unix)]
+    #[test]
+    fn previous_reports_dir_is_private() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        use crate::commands::benchmark_compare::create_previous_reports_dir;
+
+        let temp_dir = create_previous_reports_dir().unwrap();
+        let permissions = temp_dir.path().metadata().unwrap().permissions();
+
+        assert_eq!(permissions.mode() & 0o077, 0);
+
+        let report_path = temp_dir.path().join("report.json");
+        let report_contents = br#"{"benchmark":"test"}"#;
+
+        fs::write(&report_path, report_contents).unwrap();
+
+        assert_eq!(fs::read(&report_path).unwrap(), report_contents);
+    }
 
     #[test]
     fn config_changes_detects_changed_and_missing_fields() {
