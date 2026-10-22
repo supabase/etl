@@ -1,6 +1,7 @@
 mod client;
 mod core;
 mod encoding;
+mod error;
 mod metrics;
 mod query;
 mod schema;

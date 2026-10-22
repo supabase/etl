@@ -39,6 +39,7 @@ use crate::{
     bigquery::{
         BIGQUERY_COLUMN_NAME_MAPPING,
         encoding::BigQueryTableRow,
+        error::{RedactedBigQueryError, bigquery_error_summary},
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
@@ -77,7 +78,7 @@ const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const STORAGE_WRITE_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
-const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &[
+pub(super) const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &[
     "backendError",
     "internalError",
     "badGateway",
@@ -635,6 +636,7 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
         None
     };
 
+    let err = RedactedBigQueryError::from(err);
     match detail {
         Some(detail) => classified_error_with_detail(kind, description, detail, err),
         None => classified_error(kind, description, err),
@@ -642,7 +644,7 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
 }
 
 /// Decodes BigQuery Storage error codes from gRPC status details when present.
-fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
+pub(super) fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
     let Ok(rpc_status) = GoogleRpcStatus::decode(status.details()) else {
         return Vec::new();
     };
@@ -701,7 +703,7 @@ fn is_storage_write_not_found(error: &BQError) -> bool {
 /// Returns retry detail for Storage Write schema update propagation errors.
 fn retryable_storage_write_schema_update_detail(error: &BQError) -> Option<String> {
     if is_retryable_schema_propagation_error(error) {
-        return Some(error.to_string());
+        return Some(bigquery_error_summary(error));
     }
 
     None
@@ -719,7 +721,7 @@ async fn retryable_storage_write_not_found_detail(
     }
 
     if client.table_exists(&request.dataset_id, &request.table_id).await? {
-        return Ok(Some(error.to_string()));
+        return Ok(Some(bigquery_error_summary(error)));
     }
 
     Ok(None)
@@ -751,8 +753,10 @@ async fn retryable_storage_write_error_detail(
 
 /// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
 fn is_missing_column_default_error(error: &EtlError) -> bool {
-    let Some(BQError::ResponseError { error }) =
-        error.source().and_then(|source| source.downcast_ref::<BQError>())
+    let Some(BQError::ResponseError { error }) = error
+        .source()
+        .and_then(|source| source.downcast_ref::<RedactedBigQueryError>())
+        .map(RedactedBigQueryError::inner)
     else {
         return false;
     };
@@ -1443,7 +1447,7 @@ impl BigQueryClient {
                     let error_code = error_code_label(&request_error);
                     warn!(
                         request_index,
-                        error = %request_error,
+                        error = %bigquery_error_summary(&request_error),
                         "append request failed after library retries"
                     );
 
@@ -1922,7 +1926,7 @@ mod tests {
         ] {
             let mut rpc_status = GoogleRpcStatus {
                 code: i32::from(Code::InvalidArgument),
-                message: message.to_owned(),
+                message: format!("{message} placeholder-provider-detail"),
                 details: vec![Default::default()],
             };
             rpc_status.details[0].type_url =
@@ -1935,11 +1939,12 @@ mod tests {
                 rpc_status.encode_to_vec().into(),
             ));
 
-            assert_eq!(
-                retryable_storage_write_schema_update_detail(&error).is_some(),
-                retryable,
-                "{code:?}"
-            );
+            let detail = retryable_storage_write_schema_update_detail(&error);
+            assert_eq!(detail.is_some(), retryable, "{code:?}");
+            if let Some(detail) = detail {
+                assert!(detail.contains(code.as_str_name()));
+                assert!(!detail.contains("placeholder-provider-detail"));
+            }
         }
     }
 
@@ -1947,10 +1952,14 @@ mod tests {
     fn schema_update_detail_classifies_extra_proto_fields_schema_lag() {
         let error = BQError::from(tonic::Status::invalid_argument(
             "Found incompatible fields: 'id' and/or mismatch fields, extra proto fields: \
-             'ddl_col_1_0' extra bq fields: ''",
+             'ddl_col_1_0' extra bq fields: '' placeholder-row-value",
         ));
 
-        assert!(retryable_storage_write_schema_update_detail(&error).is_some());
+        let detail = retryable_storage_write_schema_update_detail(&error).unwrap();
+        assert!(detail.contains("InvalidArgument"));
+        assert!(!detail.contains("placeholder-row-value"));
+        let timeout = storage_write_retry_timeout_error(&detail);
+        assert!(!timeout.to_string().contains("placeholder-row-value"));
     }
 
     #[test]

@@ -19,7 +19,12 @@ use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{BigQueryDestination, query::execute_query, table_name_to_bigquery_table_id},
+    bigquery::{
+        BigQueryDestination,
+        error::{RedactedBigQueryError, bigquery_error_summary},
+        query::execute_query,
+        table_name_to_bigquery_table_id,
+    },
     retry::{RetryPolicy, retry_with_backoff},
 };
 
@@ -54,7 +59,7 @@ const BIGQUERY_TEST_RETRY_POLICY: RetryPolicy = RetryPolicy {
 async fn retry_bigquery_test_operation<T, AttemptFn, AttemptFut>(
     operation: &'static str,
     attempt_fn: AttemptFn,
-) -> Result<T, BQError>
+) -> Result<T, RedactedBigQueryError>
 where
     AttemptFn: FnMut() -> AttemptFut,
     AttemptFut: Future<Output = Result<T, BQError>>,
@@ -67,19 +72,25 @@ where
             eprintln!(
                 "bigquery {operation} failed with transient error (attempt {}/{}), retrying in \
                  {:?}: {}",
-                attempt.retry_index, attempt.max_retries, attempt.sleep_delay, attempt.error,
+                attempt.retry_index,
+                attempt.max_retries,
+                attempt.sleep_delay,
+                bigquery_error_summary(attempt.error),
             );
         },
         attempt_fn,
     )
     .await
-    .map_err(|failure| failure.last_error)
+    .map_err(|failure| RedactedBigQueryError::from(failure.last_error))
 }
 
-/// Recognizes a missing table while preserving the query's typed error chain.
+/// Recognizes a missing table using the original typed provider error.
 fn is_missing_table_query_error(error: &EtlError) -> bool {
     matches!(
-        error.source().and_then(|source| source.downcast_ref::<BQError>()),
+        error
+            .source()
+            .and_then(|source| source.downcast_ref::<RedactedBigQueryError>())
+            .map(RedactedBigQueryError::inner),
         Some(BQError::ResponseError { error }) if error.error.code == 404
     )
 }
@@ -398,7 +409,10 @@ impl BigQueryDatabase {
         .await
         {
             Ok(table) => table,
-            Err(BQError::ResponseError { error }) if error.error.code == 404 => return None,
+            Err(error) if matches!(error.inner(), BQError::ResponseError { error } if error.error.code == 404) =>
+            {
+                return None;
+            }
             Err(err) => panic!("Failed to get BigQuery table metadata: {err:?}"),
         };
 
@@ -673,4 +687,55 @@ where
     parsed_table_rows.sort();
 
     parsed_table_rows
+}
+
+#[cfg(test)]
+mod tests {
+    use gcp_bigquery_client::error::{BQError, NestedResponseError, ResponseError};
+
+    use crate::bigquery::{
+        client::bq_error_to_etl_error,
+        test_utils::{is_missing_table_query_error, retry_bigquery_test_operation},
+    };
+
+    /// Builds a provider response containing a synthetic credential marker.
+    fn response_error(code: i64) -> BQError {
+        BQError::ResponseError {
+            error: ResponseError {
+                error: NestedResponseError {
+                    code,
+                    errors: vec![],
+                    message: "placeholder-response-token".to_owned(),
+                    status: String::new(),
+                },
+            },
+        }
+    }
+
+    /// Test setup retries the same failures, but its final panic cannot print
+    /// provider credentials.
+    #[tokio::test(start_paused = true)]
+    async fn operation_errors_redact_credentials_after_retries() {
+        for (code, expected_attempts) in [(503, 5), (401, 1)] {
+            let mut attempts = 0;
+            let error = retry_bigquery_test_operation("test operation", || {
+                attempts += 1;
+                std::future::ready(Err::<(), _>(response_error(code)))
+            })
+            .await
+            .unwrap_err();
+
+            assert_eq!(attempts, expected_attempts);
+            assert!(!format!("{error:?}").contains("placeholder-response-token"));
+            assert!(error.to_string().contains(&code.to_string()));
+        }
+    }
+
+    /// Missing-table propagation remains distinguishable from other failures
+    /// after the public error source is redacted.
+    #[test]
+    fn redacted_query_errors_preserve_missing_table_detection() {
+        assert!(is_missing_table_query_error(&bq_error_to_etl_error(response_error(404))));
+        assert!(!is_missing_table_query_error(&bq_error_to_etl_error(response_error(403))));
+    }
 }
