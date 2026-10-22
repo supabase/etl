@@ -68,7 +68,7 @@ impl SeedArgs {
             println!(
                 "[seed] keeping existing database {database} (use --force to drop and recreate)"
             );
-            println!("[seed] connect with: psql -h {host} -p {port} -U {user} -d {database}");
+            println!("[seed] connect with: psql -h {host} -p {port} -U <user> -d {database}");
             return Ok(());
         }
 
@@ -117,7 +117,7 @@ impl SeedArgs {
             }
         }
         println!("[seed] publication: {publication}");
-        println!("[seed] connect with: psql -h {host} -p {port} -U {user} -d {database}");
+        println!("[seed] connect with: psql -h {host} -p {port} -U <user> -d {database}");
 
         Ok(())
     }
