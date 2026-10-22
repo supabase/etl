@@ -28,8 +28,11 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     pipeline::PipelineId,
-    postgres::{OutOfBandSourcePool, client::PgReplicationClient},
-    replication::state::{TableState, TableStateType},
+    postgres::client::PgReplicationClient,
+    replication::{
+        ReplicationLagMonitor,
+        state::{TableState, TableStateType},
+    },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerState,
         concurrency::{ShutdownResult, with_shutdown},
@@ -106,7 +109,7 @@ pub(crate) async fn start_table_sync<S, D>(
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
     destination: D,
-    out_of_band_source_pool: OutOfBandSourcePool,
+    replication_lag_monitor: ReplicationLagMonitor,
     shutdown_token: CancellationToken,
     memory_monitor: MemoryMonitor,
     batch_memory_governor: BatchMemoryGovernor,
@@ -182,7 +185,7 @@ where
     //   no further `RELATION` message arrives.
     //
     // In case the state is any other state, we will return an error.
-    let (start_lsn, replicated_table_schema) = match state_type {
+    let (start_lsn, replicated_table_schema, _copy_lag) = match state_type {
         TableStateType::Init | TableStateType::DataSync | TableStateType::FinishedCopy => {
             // We must drop the destination table before starting a copy to
             // avoid data inconsistencies when there is a previous table.
@@ -260,13 +263,14 @@ where
                 replication_client.create_table_copy_slot(
                     &slot_name,
                     table_id,
-                    config.replication_slot.failover
+                    &config.replication_slot
                 ),
                 shutdown_token,
             ) else {
                 return Ok(TableSyncResult::Stopped);
             };
             let (replication_transaction, slot) = created?;
+            let _copy_lag = replication_lag_monitor.register_copy(table_id, slot.consistent_point);
 
             let activity_registration =
                 ActivityRegistration::register(ActivityKind::InitialTableCopy);
@@ -336,8 +340,7 @@ where
                     Some(&config.publication_name),
                     slot_name.clone(),
                     config.max_copy_connections_per_table,
-                    slot.consistent_point,
-                    out_of_band_source_pool.clone(),
+                    replication_lag_monitor.clone(),
                     Duration::from_millis(config.table_sync_monitor_refresh_interval_ms),
                     config.batch.clone(),
                     shutdown_token.clone(),
@@ -424,7 +427,7 @@ where
             #[cfg(feature = "failpoints")]
             fail_point!(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
 
-            (slot.consistent_point, replicated_table_schema)
+            (slot.consistent_point, replicated_table_schema, _copy_lag)
         }
         _ => unreachable!("state type already validated above"),
     };

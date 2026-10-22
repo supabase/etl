@@ -124,6 +124,25 @@ implementation details private.
   or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
   own `--locked` flag.
 
+### Deprecated destination scope
+
+Iceberg is deprecated. Unless the user explicitly requests Iceberg work,
+exclude it from non-security refactoring scans, test-improvement reviews,
+and cross-destination bug investigations or fixes. Requests covering
+"all destinations" or the whole repository do not override this exclusion.
+
+When applying this exclusion to a cross-destination or repository-wide
+request, state in the result that Iceberg was excluded.
+
+This exclusion does not apply to security scans: include Iceberg whenever
+it falls within the requested security scope.
+
+Keep existing Iceberg code, tests, features and CI coverage intact. If a
+shared change requires an Iceberg adjustment to prevent a runtime
+regression or keep existing builds and checks passing, make only the
+necessary compatibility adjustment.
+Do not expand that work into Iceberg-specific cleanup.
+
 ### Destination compatibility
 
 | Situation | Do |
@@ -266,8 +285,10 @@ cleanup. Recovery correctness still applies: never checkpoint unfinished work.
   alive when requesting shutdown, then await it to finish cleanup.
 - **Apply:** stop intake and drain buffered batches and pending write results
   under existing deadlines, durability, and error policies. Do not force early
-  flushes or cancel in-flight apply writes. Coordination waits must observe
-  shutdown when a stopping worker may never publish the awaited state.
+  flushes or cancel in-flight apply writes. `drain_on_shutdown = false` is the
+  one opt-out: it abandons that work unacknowledged, for replay after restart.
+  Coordination waits must observe shutdown when a stopping worker may never
+  publish the awaited state.
 - **Copy and startup:** initial sync is replayable. Keep copy waits, including
   the final empty write and its result, cancellable. On controlled shutdown,
   abort and join copy children before releasing the snapshot. Cancel startup

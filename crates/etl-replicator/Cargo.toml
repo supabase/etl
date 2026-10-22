@@ -33,7 +33,7 @@ etl-maintenance = { workspace = true, features = ["tls-rustls-ring"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 metrics = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls", "json"] }
+reqwest = { workspace = true, features = ["rustls-tls", "rustls-tls-native-roots", "json"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 secrecy = { workspace = true }
 sentry = { workspace = true }

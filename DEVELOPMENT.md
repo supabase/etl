@@ -111,22 +111,22 @@ Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
 `cargo xtask postgres start` starts only the test Postgres clusters.
 `cargo xtask multigres --help` covers the optional Multigres cluster.
 
-### DuckDB prerelease
+### DuckDB version
 
 DuckLake uses the Git-pinned `duckdb-rs` revision in `Cargo.toml`, which bundles
-DuckDB **v2.0.0-alpha43678** (`d591bb1da2`). Upstream labels this 2.0 build as
-alpha. The destination and maintenance runner must load extensions for that
-exact engine version; update their extension-version constants, the test
-helpers, and `scripts/bin/vendor-duckdb-extensions.sh` together when changing
+stable DuckDB **v2.0.0** (`d54cbbe3df`). A matching crates.io release is
+not yet available. The destination and maintenance runner must load extensions
+for that exact engine version; update their extension-version constants, the
+test helpers, and `scripts/bin/vendor-duckdb-extensions.sh` together when changing
 the dependency.
 
 The destination and maintenance runner attach with `AUTOMATIC_MIGRATION false`
 and `DUCKLAKE_VERSION '1.0'`. Existing catalogs stay on format `1.0`, and new
-catalogs are created in that format so the previous DuckDB 1.5.3 extension can
+catalogs are created in that format so the previous DuckDB 1.5.6 extension can
 still read them after a rollback. Disabling migration alone is insufficient:
-this prerelease defaults new catalogs to `1.1-dev1`. Catalogs already upgraded
-to `1.1-dev1` cannot be downgraded and are rejected by the format pin. Other
-clients sharing the catalog must also avoid migrating it.
+DuckDB 2.0 defaults new catalogs to `1.1`. Catalogs already upgraded to `1.1`
+cannot be downgraded and are rejected by the format pin. Other clients sharing
+the catalog must also avoid migrating it.
 
 This upstream revision stamps its bundled sources with a development version
 instead of the published release label. `.cargo/config.toml` supplies the
@@ -136,9 +136,15 @@ or consume these crates from another workspace, include both definitions from
 that config; Cargo does not inherit dependency workspaces' configuration.
 The runtime version test also checks the source hash to catch a stale override.
 
+The `libduckdb-sys` profile overrides in `Cargo.toml` keep the bundled C++ engine
+compatible with the published release extensions during development, tests, and
+benchmarks. This revision enables DuckDB's debug allocator bookkeeping when
+Cargo requests debug information, which conflicts with release extensions.
+Other workspaces consuming these crates must also apply those overrides.
+
 Run `cargo x vendor-duckdb --platform osx_arm64` for local Apple Silicon testing
 and set `ETL_DUCKDB_EXTENSION_ROOT` to the absolute path of
-`vendor/duckdb/extensions`. The pinned prerelease publishes extensions for
+`vendor/duckdb/extensions`. The stable release publishes extensions for
 `linux_amd64`, `linux_arm64`, `osx_amd64`, and `osx_arm64`.
 
 ## Migrations
@@ -189,7 +195,9 @@ ClickHouse tests also need `TESTS_CLICKHOUSE_URL`, `TESTS_CLICKHOUSE_USER`, and
 `TESTS_BIGQUERY_SA_KEY_PATH`.
 
 Debug a failing test with `ENABLE_TRACING=1` and a focused `RUST_LOG`.
-Parser fuzz targets live in `fuzz/`.
+Parser fuzz targets live in `fuzz/`. The nightly `Fuzz` workflow fuzzes each
+target for two minutes, and every CI run replays the committed `fuzz/corpus/`
+seeds once.
 
 Use cargo-nextest 0.9.148 or newer; CI pins 0.9.148. The repository requires
 this version to include the [capture-pipe inheritance fix](https://github.com/nextest-rs/nextest/pull/3553)
@@ -202,13 +210,19 @@ Multigres; coverage uses a separate instrumented build. Every Postgres and
 OrioleDB lane runs the full regular suite, including destination tests and
 BigQuery integration tests when credentials are available. Credentialed
 Snowflake tests and Multigres tests run separately. Postgres shards start
-concurrently and must all pass readiness checks before tests run. Nextest
-distributes Postgres-backed tests across those clusters in round-robin slices;
-tests sharing a cluster remain serial. BigQuery destination-only tests use
-isolated datasets and an in-memory store. They run serially in the non-Postgres
-lane, with priority over short unit tests to overlap remote work. BigQuery
-pipeline tests remain on the Postgres shards. This scheduling is the same
-locally and in every compatibility and coverage job. To reuse a local build:
+concurrently and must all pass readiness checks before tests run. All
+Postgres-backed tests run in one nextest invocation with the `pg-sharded`
+profile and one test thread per cluster: each free thread takes the next test,
+and the test connects to the cluster at its `NEXTEST_TEST_GLOBAL_SLOT`, so no
+two running tests share a cluster. The slowest tests start first; the rest are
+ordered by test-name length mod 40, a fixed pseudo-random order that keeps
+DuckLake and ClickHouse tests from all running at once. A plain
+`cargo nextest run` keeps them serial on one cluster. BigQuery
+destination-only tests use isolated datasets and an in-memory store. They run
+serially in the non-Postgres lane, with priority over short unit tests to
+overlap remote work. BigQuery pipeline tests remain on the Postgres shards.
+This scheduling is the same locally and in every compatibility and coverage
+job. To reuse a local build:
 
 ```bash
 mkdir -p target/ci
@@ -233,14 +247,17 @@ docker buildx build --load --build-arg ENABLE_EGRESS=true \
 ```
 
 When a workspace dependency disables default features, consumers that need them
-request `features = ["default"]`. This also lets cargo-chef preserve the feature
-selection without modifying its generated recipe.
+request `features = ["default"]`.
 
 CI builds AMD64 and ARM64 on separate native workers, pushes each image by
 digest, and verifies the combined manifest before tagging it at
 `public.ecr.aws/supabase/etl-replicator`. Both builds check out the same resolved
-source SHA. CI image checks and publishing share the build action and persistent
-Blacksmith layer cache. Pulling these images requires no private registry access. Only a merged-main PR at the current main tip can promote
+source SHA. CI image checks and publishing share the build action but use
+separate persistent Blacksmith caches: one for CI, one for manual experimental
+publishes, and one for merged-main publishes. State written by pull-request or
+experimental builds never reaches a stable image. The Dockerfile keeps Cargo's
+registry and target directory in BuildKit cache mounts, so a lockfile change
+rebuilds only the crates it affects; workspace crates always recompile. Pulling these images requires no private registry access. Only a merged-main PR at the current main tip can promote
 `latest`; manual builds never do. Require `CI passed` in branch protection
 after its first run, replacing old required job names including `Snowflake Gate`.
 

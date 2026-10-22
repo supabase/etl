@@ -177,7 +177,11 @@ pub trait Destination {
     /// shutdown while it polls `async_result` separately. Performing the write
     /// inline stalls that loop until the method returns, even if the write
     /// yields to the async runtime. Shutdown does not cancel the method call;
-    /// it waits for dispatch and pending write results to finish.
+    /// it waits for dispatch and pending write results to finish, unless
+    /// [`crate::config::PipelineConfig::drain_on_shutdown`] is disabled. ETL
+    /// then stops observing the pending result at shutdown, and the
+    /// destination may complete or drop it, but [`Destination::shutdown`] must
+    /// not wait for it.
     ///
     /// Implementations report asynchronous write status through `async_result`.
     /// The method return value is reserved for immediate dispatch/setup

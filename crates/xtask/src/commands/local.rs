@@ -46,9 +46,8 @@ pub(crate) fn prepare_local_databases() -> Result<InitConfig> {
     if compose.is_some() {
         println!(
             "🧪 Postgres test env: TESTS_DATABASE_HOST={} TESTS_DATABASE_PORT={} \
-             TESTS_DATABASE_REPLICA_HOST={} TESTS_DATABASE_REPLICA_PORT={} \
-             TESTS_DATABASE_USERNAME={}",
-            config.db_host, config.db_port, config.db_host, config.db_replica_port, config.db_user,
+             TESTS_DATABASE_REPLICA_HOST={} TESTS_DATABASE_REPLICA_PORT={}",
+            config.db_host, config.db_port, config.db_host, config.db_replica_port,
         );
     }
 
@@ -213,8 +212,8 @@ fn wait_for_docker_services(compose: &DockerCompose, config: &InitConfig) -> Res
     println!("✅ ClickHouse is up and running on port {}", config.clickhouse_http_port);
     println!("🔗 ClickHouse HTTP URL: http://localhost:{}", config.clickhouse_http_port);
     println!(
-        "🧪 ClickHouse test env: TESTS_CLICKHOUSE_URL=http://localhost:{} TESTS_CLICKHOUSE_USER={}",
-        config.clickhouse_http_port, config.clickhouse_user,
+        "🧪 ClickHouse test env: TESTS_CLICKHOUSE_URL=http://localhost:{}",
+        config.clickhouse_http_port,
     );
 
     Ok(())

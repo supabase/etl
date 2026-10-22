@@ -21,7 +21,7 @@ use crate::{ducklake::LAKE_CATALOG, retry::classified_error};
 
 const DUCKDB_EXTENSION_ROOT_ENV_VAR: &str = "ETL_DUCKDB_EXTENSION_ROOT";
 const CONTAINER_DUCKDB_EXTENSION_ROOT: &str = "/app/duckdb_extensions";
-const DUCKDB_EXTENSION_VERSION: &str = "2.0.0-alpha43678";
+const DUCKDB_EXTENSION_VERSION: &str = "2.0.0";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const HTTPFS_EXTENSION_FILE: &str = "httpfs.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
@@ -739,16 +739,18 @@ fn build_setup_plan_with_strategy(
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
 
-    // Keep existing and newly created catalogs readable after a DuckDB
-    // rollback.
+    // Keep catalogs readable after a DuckDB rollback and expose the metadata
+    // catalog for schema discovery.
     steps.push(DuckLakeSetupStep {
         label: "attach_catalog",
         sql: format!(
             "ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, \
-             AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0'{metadata_schema_clause});",
+             AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0', METADATA_CATALOG \
+             {}{metadata_schema_clause});",
             quote_literal(&format!("ducklake:{catalog_target}")),
             quote_literal(data_path),
-            data_inlining_row_limit
+            data_inlining_row_limit,
+            quote_literal(&format!("__ducklake_metadata_{LAKE_CATALOG}")),
         ),
     });
     steps.push(DuckLakeSetupStep {
@@ -763,6 +765,7 @@ fn build_setup_plan_with_strategy(
 mod tests {
     use std::fs;
 
+    use duckdb::Connection;
     use tempfile::TempDir;
 
     use super::*;
@@ -784,7 +787,7 @@ mod tests {
     /// sources.
     #[test]
     fn extension_version_matches_linked_duckdb() {
-        let connection = duckdb::Connection::open_in_memory().unwrap();
+        let connection = Connection::open_in_memory().unwrap();
         let (version, source_id): (String, String) = connection
             .query_row("select library_version, source_id from pragma_version()", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -792,7 +795,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(version, format!("v{DUCKDB_EXTENSION_VERSION}"));
-        assert_eq!(source_id, "d591bb1da2");
+        assert_eq!(source_id, "d54cbbe3df");
     }
 
     #[test]
@@ -1310,6 +1313,7 @@ mod tests {
         assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
         assert!(plan.steps()[3].sql.contains("ATTACH"));
         assert!(plan.steps()[3].sql.contains("METADATA_SCHEMA 'ducklake'"));
+        assert!(plan.steps()[3].sql.contains("METADATA_CATALOG '__ducklake_metadata_lake'"));
         assert_eq!(
             plan.steps()[4].sql,
             configure_parquet_settings_sql(&DuckLakeWriterConfig::default())

@@ -34,7 +34,6 @@ ducklake = [
     "dep:pg_escape",
     "dep:r2d2",
     "dep:rand",
-    "dep:regex",
     "dep:serde",
     "dep:serde_json",
     "dep:sqlx",
@@ -136,8 +135,7 @@ pkcs8 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
-regex = { workspace = true, optional = true }
-reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 rustls = { workspace = true, optional = true, features = ["aws-lc-rs"] }
 secrecy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
