@@ -116,19 +116,19 @@ impl TokenExchanger for HttpExchanger {
             .await?;
 
         let status = response.status();
-        let body_text = response.text().await?;
 
         // Likely wrong key, non-retriable.
         if status == StatusCode::UNAUTHORIZED {
-            return Err(Error::Auth(format!("token exchange rejected (401): {body_text}")));
+            return Err(Error::Auth("Token exchange rejected (401)".to_owned()));
         }
 
         // Transient failure, probably retriable error.
         if status.is_client_error() || status.is_server_error() {
-            return Err(Error::HttpStatus { status, body: body_text });
+            return Err(Error::HttpStatus { status, body: String::new() });
         }
 
         // Snowflake returns the scoped token as a raw JWT (RFC 7519).
+        let body_text = response.text().await?;
         let expires_at = decode_token_expiry(&body_text)?;
 
         Ok(ScopedToken { access_token: body_text, expires_at })
@@ -198,7 +198,7 @@ impl<E: TokenExchanger> AuthManager<E> {
             user,
             encoding_key,
             key_fingerprint,
-            cached_token: tokio::sync::Mutex::new(None),
+            cached_token: Mutex::new(None),
             exchanger,
         })
     }
@@ -329,6 +329,26 @@ fn decode_token_expiry(token: &str) -> Result<Instant> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Failed OAuth exchanges must not retain a provider's echoed token.
+    #[tokio::test]
+    async fn token_exchange_errors_omit_response_body() {
+        use crate::snowflake::test_server::serve_responses;
+
+        for status in [401, 500] {
+            let (url, server) =
+                serve_responses(vec![(status, "placeholder-response-secret")]).await;
+            let exchanger =
+                HttpExchanger::new(reqwest::Client::builder().no_proxy().build().unwrap());
+
+            let error = exchanger.exchange(&url, "placeholder-jwt").await.err().unwrap();
+
+            assert!(!format!("{error:?}").contains("placeholder-response-secret"));
+            assert!(!error.to_string().contains("placeholder-response-secret"));
+
+            server.await.unwrap();
+        }
+    }
 
     // Non-secret RSA key generated only for hermetic auth unit tests.
     const TEST_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----

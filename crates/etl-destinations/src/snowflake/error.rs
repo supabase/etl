@@ -34,7 +34,9 @@ pub enum Error {
     #[error("HTTP transport error: {0}")]
     HttpTransport(#[from] reqwest::Error),
 
-    #[error("HTTP status {status}: {body}")]
+    /// The response body is omitted because providers may echo credentials or
+    /// rows.
+    #[error("HTTP status {status}")]
     HttpStatus { status: StatusCode, body: String },
 
     #[error("Authentication error: {0}")]

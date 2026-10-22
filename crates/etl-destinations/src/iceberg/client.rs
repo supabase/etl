@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use arrow::array::RecordBatch;
 use etl::{data::TableRow, error::EtlResult, schema::ColumnSchema};
@@ -28,7 +28,7 @@ use tracing::debug;
 use crate::iceberg::{
     catalog::{SupabaseCatalog, SupabaseClient},
     encoding::rows_to_record_batch,
-    error::{arrow_error_to_etl_error, iceberg_error_to_etl_error},
+    error::{arrow_error_to_etl_error, iceberg_error_to_etl_error, redact_iceberg_error},
     schema::postgres_to_iceberg_schema,
 };
 
@@ -45,7 +45,7 @@ const CATALOG_TOKEN: &str = "token";
 ///
 /// The client maintains a thread-safe reference to the catalog implementation,
 /// allowing for concurrent operations across multiple threads.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IcebergClient {
     /// The underlying Iceberg catalog implementation.
     catalog: Arc<dyn Catalog>,
@@ -66,7 +66,7 @@ impl IcebergClient {
         props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name);
 
         let builder = RestCatalogBuilder::default();
-        let catalog = builder.load("RestCatalog", props).await?;
+        let catalog = builder.load("RestCatalog", props).await.map_err(redact_iceberg_error)?;
 
         Ok(IcebergClient { catalog: Arc::new(catalog) })
     }
@@ -109,7 +109,7 @@ impl IcebergClient {
         props.insert(REST_CATALOG_PROP_WAREHOUSE.to_owned(), warehouse_name.clone());
 
         let builder = RestCatalogBuilder::default();
-        let inner = builder.load("SupabaseCatalog", props).await?;
+        let inner = builder.load("SupabaseCatalog", props).await.map_err(redact_iceberg_error)?;
         let client = SupabaseClient::new(catalog_uri, warehouse_name, catalog_token);
         let catalog = SupabaseCatalog::new(inner, client);
 
@@ -394,5 +394,13 @@ impl IcebergClient {
         let _updated_table = updated_transaction.commit(&*self.catalog).await?;
 
         Ok(())
+    }
+}
+
+impl fmt::Debug for IcebergClient {
+    /// Omits catalog authentication properties.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Catalog debug output includes unredacted authentication properties.
+        f.debug_struct("IcebergClient").finish_non_exhaustive()
     }
 }

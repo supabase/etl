@@ -60,8 +60,7 @@ impl<T: TokenProvider> RestStreamClient<T> {
 
                 let status = resp.status();
                 if status != StatusCode::OK {
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(Error::HttpStatus { status, body });
+                    return Err(Error::HttpStatus { status, body: String::new() });
                 }
 
                 // Actual server returns plain text (even with Accept:

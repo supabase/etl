@@ -1,3 +1,5 @@
+use std::fmt;
+
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +9,7 @@ use crate::shared::Validate;
 ///
 /// Contains Supabase-specific settings for ETL applications that integrate with
 /// Supabase services.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct SupabaseConfig {
     /// Supabase project reference identifier.
     pub project_ref: String,
@@ -28,6 +30,17 @@ pub struct SupabaseConfig {
     /// If provided, enables ConfigCat feature flag evaluation. If `None`, the
     /// replicator operates without feature flag support.
     pub configcat_sdk_key: Option<String>,
+}
+
+impl fmt::Debug for SupabaseConfig {
+    /// Formats integration settings without authentication keys.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SupabaseConfig")
+            .field("project_ref", &self.project_ref)
+            .field("api_key", &self.api_key)
+            .field("configcat_sdk_key", &self.configcat_sdk_key.as_ref().map(|_| "[redacted]"))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Validate for SupabaseConfig {}

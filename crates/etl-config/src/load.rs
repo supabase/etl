@@ -100,6 +100,32 @@ pub enum LoadConfigError {
     Builder(#[source] config::ConfigError),
 }
 
+/// Removes configuration values from errors before they enter logs or source
+/// chains.
+///
+/// Parser and serde messages can quote passwords or entire configuration lines.
+/// Keep structural context, but never retain those messages as nested sources.
+fn redact_config_error(error: config::ConfigError) -> config::ConfigError {
+    match error {
+        config::ConfigError::Type { expected, key, .. } => {
+            let key = key.unwrap_or_else(|| "<root>".to_owned());
+
+            config::ConfigError::Message(format!(
+                "Invalid configuration value for `{key}`; expected {expected}"
+            ))
+        }
+        config::ConfigError::FileParse { uri, .. } => config::ConfigError::FileParse {
+            uri,
+            cause: io::Error::new(io::ErrorKind::InvalidData, "Invalid configuration file syntax")
+                .into(),
+        },
+        config::ConfigError::Message(_) | config::ConfigError::Foreign(_) => {
+            config::ConfigError::Message("Invalid configuration value".to_owned())
+        }
+        error => error,
+    }
+}
+
 /// Loads hierarchical configuration from base, environment, and
 /// environment-variable sources.
 ///
@@ -158,9 +184,13 @@ where
         .add_source(environment_file_source)
         .add_source(environment_source);
 
-    let settings = builder.build().map_err(LoadConfigError::Builder)?;
+    let settings =
+        builder.build().map_err(redact_config_error).map_err(LoadConfigError::Builder)?;
 
-    settings.try_deserialize::<T>().map_err(LoadConfigError::Deserialization)
+    settings
+        .try_deserialize::<T>()
+        .map_err(redact_config_error)
+        .map_err(LoadConfigError::Deserialization)
 }
 
 /// Finds the configuration file that matches the requested kind and supported
@@ -205,6 +235,54 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Malformed secret fields cannot reach debug output or an error source
+    /// chain.
+    #[test]
+    fn configuration_errors_omit_secret_values() {
+        use std::error::Error as _;
+
+        #[derive(Debug, Deserialize)]
+        struct SecretConfig {
+            #[serde(rename = "password")]
+            _password: crate::SerializableSecretString,
+        }
+
+        for value in [
+            serde_json::json!({"password": {"placeholder-secret": "placeholder-value"}}),
+            serde_json::json!({"password": ["placeholder-secret"]}),
+        ] {
+            let settings = config::Config::builder()
+                .add_source(config::File::from_str(&value.to_string(), config::FileFormat::Json))
+                .build()
+                .unwrap();
+
+            let error = settings.try_deserialize::<SecretConfig>().unwrap_err();
+            let error = LoadConfigError::Deserialization(redact_config_error(error));
+
+            assert!(!format!("{error:?}").contains("placeholder-secret"));
+
+            let mut source = error.source();
+
+            while let Some(error) = source {
+                assert!(!format!("{error:?}").contains("placeholder-secret"));
+                assert!(!error.to_string().contains("placeholder-secret"));
+
+                source = error.source();
+            }
+        }
+
+        let error = config::Config::builder()
+            .add_source(config::File::from_str(
+                "password: [placeholder-secret",
+                config::FileFormat::Yaml,
+            ))
+            .build()
+            .unwrap_err();
+        let error = LoadConfigError::Builder(redact_config_error(error));
+
+        assert!(!format!("{error:?}").contains("placeholder-secret"));
+    }
 
     /// Mutex to serialize tests that modify environment variables or current
     /// directory.

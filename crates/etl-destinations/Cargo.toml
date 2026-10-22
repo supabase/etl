@@ -65,6 +65,7 @@ iceberg = [
     "dep:async-trait",
     "dep:serde",
     "dep:serde_json",
+    "dep:secrecy",
 ]
 clickhouse = [
     "dep:clickhouse",
@@ -135,7 +136,7 @@ pkcs8 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
-reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 rustls = { workspace = true, optional = true, features = ["aws-lc-rs"] }
 secrecy = { workspace = true, optional = true }
 serde = { workspace = true, optional = true, features = ["derive"] }
