@@ -35,7 +35,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
-use crate::ducklake::RedactedDuckDbError;
+use crate::ducklake::{RedactedDuckDbError, duckdb_version_check_sql};
 
 const LAKE_CATALOG: &str = "lake";
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
@@ -681,10 +681,16 @@ fn build_setup_plan_with_strategy(
     let needs_postgres = matches!(catalog_url.scheme(), "postgres" | "postgresql");
     let needs_httpfs = matches!(data_path.split(':').next(), Some("s3" | "gs"));
     let lake_catalog = quote_identifier(LAKE_CATALOG);
-    let mut steps = vec![DuckLakeSetupStep {
-        label: "configure_writer_session",
-        sql: configure_writer_session_sql(),
-    }];
+    let mut steps = vec![
+        DuckLakeSetupStep {
+            label: "validate_duckdb_version",
+            sql: duckdb_version_check_sql(DUCKDB_EXTENSION_VERSION),
+        },
+        DuckLakeSetupStep {
+            label: "configure_writer_session",
+            sql: configure_writer_session_sql(),
+        },
+    ];
     let mut secret_options = BTreeMap::from([
         ("KEY_ID", quote_literal(s3.map(|s| s.access_key_id.as_str()).unwrap_or_default())),
         ("REGION", quote_literal(s3.map(|s| s.region.as_str()).unwrap_or_default())),
@@ -3664,6 +3670,52 @@ mod tests {
         assert_eq!(count_rows(&conn, STREAMING_PROGRESS_TABLE), 2);
     }
 
+    /// Maintenance rejects an older catalog with a clear version mismatch
+    /// before it can migrate or operate on any metadata tables.
+    #[test]
+    fn setup_rejects_legacy_catalog_without_migrating() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let catalog_path = temp.path().join("legacy.duckdb");
+        let catalog_url = Url::from_file_path(&catalog_path).unwrap();
+        let data_url = Url::from_directory_path(temp.path().join("data")).unwrap();
+        {
+            let metadata = duckdb::Connection::open(&catalog_path).unwrap();
+            metadata
+                .execute_batch(
+                    "create table ducklake_metadata (key varchar, value varchar); insert into \
+                     ducklake_metadata values ('version', '0.3');",
+                )
+                .unwrap();
+        }
+
+        let plan =
+            build_setup_plan(&catalog_url, &data_url, None, None, &DuckLakeWriterConfig::default())
+                .unwrap();
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let error = plan
+            .steps()
+            .iter()
+            .find_map(|step| {
+                conn.execute_batch(&step.sql)
+                    .err()
+                    .map(|error| DuckLakeConnectionError::setup_phase(step, error))
+            })
+            .unwrap();
+
+        let message = error.to_string();
+        assert!(message.contains("attach_catalog"));
+        assert!(message.contains("catalog version is 0.3"));
+        assert!(message.contains("requires version 1.0"));
+        drop(conn);
+        let metadata = duckdb::Connection::open(&catalog_path).unwrap();
+        let version: String = metadata
+            .query_row("select value from ducklake_metadata where key = 'version'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, "0.3");
+    }
+
     #[test]
     fn build_setup_plan_configures_scoped_s3_secret() {
         let catalog_url = Url::parse("postgres://user:pass@host/db").unwrap();
@@ -3687,20 +3739,22 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.steps()[2].label, "configure_object_store");
-        assert!(plan.steps()[2].sql.contains("CREATE OR REPLACE SECRET"));
-        assert!(plan.steps()[2].sql.contains("PROVIDER config"));
+        assert_eq!(plan.steps()[0].label, "validate_duckdb_version");
+        duckdb::Connection::open_in_memory().unwrap().execute_batch(&plan.steps()[0].sql).unwrap();
+        assert_eq!(plan.steps()[3].label, "configure_object_store");
+        assert!(plan.steps()[3].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[3].sql.contains("PROVIDER config"));
         assert!(
-            plan.steps()[2].sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str())))
+            plan.steps()[3].sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str())))
         );
-        assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
-        assert!(plan.steps()[2].sql.contains("URL_STYLE 'path'"));
-        assert!(plan.steps()[2].sql.contains("USE_SSL true"));
-        assert!(plan.steps()[3].sql.contains("AUTOMATIC_MIGRATION false"));
-        assert!(plan.steps()[3].sql.contains("DUCKLAKE_VERSION '1.0'"));
-        assert!(plan.steps()[3].sql.contains("METADATA_CATALOG '__ducklake_metadata_lake'"));
-        assert!(plan.steps()[4].sql.contains("'parquet_row_group_size_bytes', '128MiB'"));
-        assert!(plan.steps()[4].sql.contains("'parquet_row_group_size', '2500000'"));
+        assert!(plan.steps()[3].sql.contains("URL_COMPATIBILITY_MODE true"));
+        assert!(plan.steps()[3].sql.contains("URL_STYLE 'path'"));
+        assert!(plan.steps()[3].sql.contains("USE_SSL true"));
+        assert!(plan.steps()[4].sql.contains("AUTOMATIC_MIGRATION false"));
+        assert!(plan.steps()[4].sql.contains("DUCKLAKE_VERSION '1.0'"));
+        assert!(plan.steps()[4].sql.contains("METADATA_CATALOG '__ducklake_metadata_lake'"));
+        assert!(plan.steps()[5].sql.contains("'parquet_row_group_size_bytes', '128MiB'"));
+        assert!(plan.steps()[5].sql.contains("'parquet_row_group_size', '2500000'"));
     }
 
     /// A non-attach step can still surface the catalog conninfo, so redaction

@@ -10,6 +10,7 @@ use etl::{
     etl_error,
 };
 use etl_config::{libpq_tcp_host, shared::DuckLakeWriterConfig};
+use etl_maintenance::ducklake::duckdb_version_check_sql;
 use pg_escape::{quote_identifier, quote_literal};
 use tokio_postgres::{
     Config as PgConfig,
@@ -677,10 +678,16 @@ fn build_setup_plan_with_strategy(
     let needs_postgres = matches!(catalog_url.scheme(), "postgres" | "postgresql");
     let needs_httpfs = matches!(data_path.split(':').next(), Some("s3" | "gs"));
     let lake_catalog = quote_identifier(LAKE_CATALOG);
-    let mut steps = vec![DuckLakeSetupStep {
-        label: "configure_writer_session",
-        sql: configure_writer_session_sql(),
-    }];
+    let mut steps = vec![
+        DuckLakeSetupStep {
+            label: "validate_duckdb_version",
+            sql: duckdb_version_check_sql(DUCKDB_EXTENSION_VERSION),
+        },
+        DuckLakeSetupStep {
+            label: "configure_writer_session",
+            sql: configure_writer_session_sql(),
+        },
+    ];
     let mut secret_options = BTreeMap::from([
         ("KEY_ID", quote_literal(s3.map(|s| s.access_key_id.as_str()).unwrap_or_default())),
         ("REGION", quote_literal(s3.map(|s| s.region.as_str()).unwrap_or_default())),
@@ -810,6 +817,55 @@ mod tests {
 
         assert_eq!(version, format!("v{DUCKDB_EXTENSION_VERSION}"));
         assert_eq!(source_id, "d54cbbe3df");
+    }
+
+    /// An older catalog fails before schema migration, with an actionable
+    /// version mismatch instead of silently changing its format.
+    #[test]
+    fn setup_rejects_legacy_catalog_without_migrating() {
+        let temp = TempDir::new().unwrap();
+        let catalog_path = temp.path().join("legacy.duckdb");
+        let catalog_url = Url::from_file_path(&catalog_path).unwrap();
+        let data_url = Url::from_directory_path(temp.path().join("data")).unwrap();
+        {
+            let metadata = Connection::open(&catalog_path).unwrap();
+            // Only the version record is needed: the format check must happen
+            // before the extension uses or migrates any other metadata tables.
+            metadata
+                .execute_batch(
+                    "create table ducklake_metadata (key varchar, value varchar); insert into \
+                     ducklake_metadata values ('version', '0.3');",
+                )
+                .unwrap();
+        }
+
+        let plan = build_setup_plan(
+            &catalog_url,
+            &data_url,
+            None,
+            None,
+            &DuckLakeWriterConfig::default(),
+            crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT,
+        )
+        .unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        let (phase, error) = plan
+            .steps()
+            .iter()
+            .find_map(|step| conn.execute_batch(&step.sql).err().map(|error| (step.label, error)))
+            .unwrap();
+
+        assert_eq!(phase, "attach_catalog");
+        assert!(error.to_string().contains("catalog version is 0.3"));
+        assert!(error.to_string().contains("requires version 1.0"));
+        drop(conn);
+        let metadata = Connection::open(&catalog_path).unwrap();
+        let version: String = metadata
+            .query_row("select value from ducklake_metadata where key = 'version'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, "0.3");
     }
 
     #[test]
@@ -1309,27 +1365,29 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.steps().len(), 5);
-        assert_eq!(plan.steps()[0].label, "configure_writer_session");
-        assert_eq!(plan.steps()[1].label, "load_extensions");
-        assert_eq!(plan.steps()[2].label, "configure_object_store");
-        assert_eq!(plan.steps()[3].label, "attach_catalog");
-        assert_eq!(plan.steps()[4].label, "configure_parquet");
-        assert!(plan.steps()[3].sql.contains("DATA_INLINING_ROW_LIMIT 0"));
-        assert_eq!(plan.steps()[0].sql, configure_writer_session_sql());
-        assert!(plan.steps()[1].sql.contains(HTTPFS_EXTENSION_FILE));
-        assert!(!plan.steps()[1].sql.contains("json"));
-        assert!(plan.steps()[2].sql.contains("CREATE OR REPLACE SECRET"));
-        assert!(plan.steps()[2].sql.contains("PROVIDER config"));
+        assert_eq!(plan.steps()[0].label, "validate_duckdb_version");
+        duckdb::Connection::open_in_memory().unwrap().execute_batch(&plan.steps()[0].sql).unwrap();
+        assert_eq!(plan.steps().len(), 6);
+        assert_eq!(plan.steps()[1].label, "configure_writer_session");
+        assert_eq!(plan.steps()[2].label, "load_extensions");
+        assert_eq!(plan.steps()[3].label, "configure_object_store");
+        assert_eq!(plan.steps()[4].label, "attach_catalog");
+        assert_eq!(plan.steps()[5].label, "configure_parquet");
+        assert!(plan.steps()[4].sql.contains("DATA_INLINING_ROW_LIMIT 0"));
+        assert_eq!(plan.steps()[1].sql, configure_writer_session_sql());
+        assert!(plan.steps()[2].sql.contains(HTTPFS_EXTENSION_FILE));
+        assert!(!plan.steps()[2].sql.contains("json"));
+        assert!(plan.steps()[3].sql.contains("CREATE OR REPLACE SECRET"));
+        assert!(plan.steps()[3].sql.contains("PROVIDER config"));
         assert!(
-            plan.steps()[2].sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str())))
+            plan.steps()[3].sql.contains(&format!("SCOPE {}", quote_literal(data_url.as_str())))
         );
-        assert!(plan.steps()[2].sql.contains("URL_COMPATIBILITY_MODE true"));
-        assert!(plan.steps()[3].sql.contains("ATTACH"));
-        assert!(plan.steps()[3].sql.contains("METADATA_SCHEMA 'ducklake'"));
-        assert!(plan.steps()[3].sql.contains("METADATA_CATALOG '__ducklake_metadata_lake'"));
+        assert!(plan.steps()[3].sql.contains("URL_COMPATIBILITY_MODE true"));
+        assert!(plan.steps()[4].sql.contains("ATTACH"));
+        assert!(plan.steps()[4].sql.contains("METADATA_SCHEMA 'ducklake'"));
+        assert!(plan.steps()[4].sql.contains("METADATA_CATALOG '__ducklake_metadata_lake'"));
         assert_eq!(
-            plan.steps()[4].sql,
+            plan.steps()[5].sql,
             configure_parquet_settings_sql(&DuckLakeWriterConfig::default())
         );
     }

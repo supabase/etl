@@ -128,13 +128,27 @@ DuckDB 2.0 defaults new catalogs to `1.1`. Catalogs already upgraded to `1.1`
 cannot be downgraded and are rejected by the format pin. Other clients sharing
 the catalog must also avoid migrating it.
 
+Catalogs below `1.0` must be migrated before deploying this build. Startup in
+both the destination and maintenance runner rejects them with a catalog-version
+mismatch showing the existing and required versions; it leaves the catalog
+unchanged. Use the previous DuckDB 1.5.6 build with automatic migration enabled
+to upgrade such catalogs to `1.0`, verify the version, then deploy DuckDB 2.0.
+Do not enable automatic migration under DuckDB 2.0 as a workaround for this
+error. Quaxy attaches with `READ_ONLY`, so it cannot create or migrate catalogs.
+
 This upstream revision stamps its bundled sources with a development version
 instead of the published release label. `.cargo/config.toml` supplies the
 matching `CXXFLAGS` version definitions so signed extensions load. Keep those
 definitions in sync with the Git pin as well. If you supply your own `CXXFLAGS`
 or consume these crates from another workspace, include both definitions from
 that config; Cargo does not inherit dependency workspaces' configuration.
-The runtime version test also checks the source hash to catch a stale override.
+The pinned `cc` build helper also accepts `CXXFLAGS_<target>`,
+`CXXFLAGS_<target_with_underscores>`, and `HOST_CXXFLAGS` or `TARGET_CXXFLAGS`.
+It combines those with `CXXFLAGS`, applying more specific flags last; do not
+redefine or undefine the version macros there. The destination and maintenance
+runner check the linked release label before loading extensions and return a
+rebuild instruction on mismatch. The version unit test also checks the source
+hash to catch a stale override.
 
 The `libduckdb-sys` profile overrides in `Cargo.toml` keep the bundled C++ engine
 compatible with the published release extensions during development, tests, and
