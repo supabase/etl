@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use etl::{
     data::{Cell, TableRow},
+    error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
     schema::{TableId, TableName},
@@ -1774,4 +1775,65 @@ async fn nested_pipeline_leaf_with_partition_root_respects_row_filter_during_ser
         TableCopyMode::Serial,
     )
     .await;
+}
+
+/// A keyless partitioned root published via the root cannot decode an update
+/// its leaf accepts, and the apply worker stops the pipeline.
+///
+/// PostgreSQL enforces the leaf's replica identity, so the `UPDATE` succeeds
+/// and pgoutput emits it against the root. ETL resolves identity from the
+/// published relation, which is the root, so the identity mask is empty and the
+/// arriving key image has no column to map onto.
+///
+/// This drives the real PostgreSQL setup rather than constructing the mask
+/// directly, which is what the codec unit test does. The timeout is only a
+/// safeguard: the assertion is on the error the pipeline returns.
+#[tokio::test(flavor = "multi_thread")]
+async fn keyless_partitioned_root_fails_to_decode_leaf_update() {
+    init_test_tracing();
+
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create table test.decode_root (id integer, value text not null)
+                 partition by range (id);
+             create table test.decode_leaf partition of test.decode_root
+                 for values from (0) to (1000);
+             alter table test.decode_leaf replica identity full;
+             create publication decode_pub for table test.decode_root
+                 with (publish_via_partition_root = true);
+             insert into test.decode_root values (1, 'before');",
+        )
+        .await
+        .unwrap();
+
+    let root_id: TableId =
+        client.query_one("select 'test.decode_root'::regclass::oid", &[]).await.unwrap().get(0);
+
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        "decode_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+
+    let sync_complete = store.notify_on_table_sync_complete(root_id).await;
+
+    pipeline.start().await.unwrap();
+    sync_complete.notified().await;
+
+    // The leaf can identify the row, so PostgreSQL accepts this.
+    client.batch_execute("update test.decode_root set value = 'after' where id = 1").await.unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(60), pipeline.wait())
+        .await
+        .expect("pipeline should fail to decode the update instead of hanging")
+        .unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::ConversionError);
 }
