@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
+    env, fmt,
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -314,7 +314,7 @@ fn vendored_extension_path(extension_dir: &Path, filename: &str) -> EtlResult<St
 /// Used when `data_path` points to an S3 or GCS URI. The `endpoint` field
 /// supports an optional path prefix (e.g. `localhost:5000/s3` for Supabase
 /// Storage or other S3-compatible services mounted at a sub-path).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S3Config {
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -328,6 +328,20 @@ pub struct S3Config {
     pub url_style: String,
     /// Whether to use HTTPS. Set to `false` for local S3-compatible services.
     pub use_ssl: bool,
+}
+
+impl fmt::Debug for S3Config {
+    /// Formats storage options without access keys.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("S3Config")
+            .field("access_key_id", &"[redacted]")
+            .field("secret_access_key", &"[redacted]")
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("url_style", &self.url_style)
+            .field("use_ssl", &self.use_ssl)
+            .finish()
+    }
 }
 
 /// Serializes a PostgreSQL catalog [`Url`] to the libpq key=value format that

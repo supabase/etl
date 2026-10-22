@@ -58,7 +58,7 @@ fn install_crypto_provider() {
     });
 }
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "ducklake", version, about, arg_required_else_help = true)]
 struct AppArgs {
     #[clap(flatten)]
@@ -71,7 +71,7 @@ struct AppArgs {
     publication: String,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct DbArgs {
     /// Host on which Postgres is running (e.g., localhost or IP address)
     #[arg(long)]
@@ -90,7 +90,7 @@ struct DbArgs {
     db_password: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct DuckLakeArgs {
     /// DuckLake catalog URL (e.g., postgres://user:pass@host/db)
     #[arg(long, value_parser = parse_ducklake_url)]

@@ -61,8 +61,6 @@ pub(crate) struct StatementResponse {
     #[serde(default)]
     pub(crate) statement_handle: Option<String>,
     #[serde(default)]
-    pub(crate) message: Option<String>,
-    #[serde(default)]
     pub(crate) data: Option<Vec<Vec<serde_json::Value>>>,
     /// Names and positions for values in each result row.
     #[serde(default)]
@@ -440,14 +438,11 @@ impl<T: TokenProvider> SqlClient<T> {
                     http_resp.json().await.map_err(Error::HttpTransport)?;
                 Err(Error::Sql {
                     statement_handle: resp.statement_handle,
-                    message: resp.message.unwrap_or_default(),
+                    message: "Snowflake rejected the SQL statement".to_owned(),
                 })
             }
 
-            _ => {
-                let body_text = http_resp.text().await.unwrap_or_default();
-                Err(Error::HttpStatus { status, body: body_text })
-            }
+            _ => Err(Error::HttpStatus { status, body: String::new() }),
         }
     }
 
@@ -494,7 +489,7 @@ impl<T: TokenProvider> SqlClient<T> {
                         http_resp.json().await.map_err(Error::HttpTransport)?;
                     return Err(Error::Sql {
                         statement_handle: resp.statement_handle,
-                        message: resp.message.unwrap_or_default(),
+                        message: "Snowflake rejected the SQL statement".to_owned(),
                     });
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
@@ -502,8 +497,7 @@ impl<T: TokenProvider> SqlClient<T> {
                     continue;
                 }
                 other => {
-                    let body_text = http_resp.text().await.unwrap_or_default();
-                    return Err(Error::HttpStatus { status: other, body: body_text });
+                    return Err(Error::HttpStatus { status: other, body: String::new() });
                 }
             }
         }
@@ -759,7 +753,6 @@ mod tests {
         let row_count = u64::try_from(data.len()).expect("test result row count should fit in u64");
         StatementResponse {
             statement_handle: Some("test-statement".to_owned()),
-            message: None,
             data: Some(data),
             result_set_meta_data: Some(ResultSetMetadata {
                 num_rows: Some(row_count),
@@ -805,6 +798,30 @@ mod tests {
             assert_eq!(server.await.unwrap(), vec!["token-0", "token-0", "token-1"]);
             assert_eq!(auth.invalidations(), 1);
         }
+    }
+
+    /// SQL failures retain their handle without copying the provider's message.
+    #[tokio::test]
+    async fn statement_errors_omit_response_message() {
+        let (url, server) = serve_responses(vec![(
+            422,
+            r#"{"statementHandle":"test-statement","message":"placeholder-response-secret"}"#,
+        )])
+        .await;
+        let config = Config::new("example-account", "test-user", "test-db", "test-schema").unwrap();
+        let client = SqlClient::new(
+            config,
+            Arc::new(CountingTokenProvider::default()),
+            Client::builder().no_proxy().build().unwrap(),
+        );
+
+        let error = client.poll_until_complete(&url, "test-statement").await.unwrap_err();
+
+        assert!(error.to_string().contains("test-statement"));
+        assert!(!error.to_string().contains("placeholder-response-secret"));
+        assert!(!format!("{error:?}").contains("placeholder-response-secret"));
+
+        server.await.unwrap();
     }
 
     #[test]
