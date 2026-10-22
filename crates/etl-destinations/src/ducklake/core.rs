@@ -437,7 +437,7 @@ pub(super) struct DuckLakeWriteGuard {
 
 impl DuckLakeWriteGuard {
     /// Shares the caller's guards with an operation that may outlive it.
-    fn new(
+    pub(super) fn new(
         table_write_permit: &Arc<OwnedSemaphorePermit>,
         checkpoint_guard: &Arc<OwnedRwLockReadGuard<()>>,
     ) -> Self {

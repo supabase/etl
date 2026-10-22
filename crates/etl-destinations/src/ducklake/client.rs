@@ -113,6 +113,8 @@ pub(super) struct DuckLakeBlockingOperationContext {
     operation_id: u64,
     operation_kind: &'static str,
     timeout: Duration,
+    /// The original deadline includes admission and pool checkout waits.
+    deadline: Instant,
     interrupt_state: Arc<DuckLakeInterruptState>,
 }
 
@@ -122,9 +124,10 @@ impl DuckLakeBlockingOperationContext {
         operation_id: u64,
         operation_kind: &'static str,
         timeout: Duration,
+        deadline: Instant,
         interrupt_state: Arc<DuckLakeInterruptState>,
     ) -> Self {
-        Self { operation_id, operation_kind, timeout, interrupt_state }
+        Self { operation_id, operation_kind, timeout, deadline, interrupt_state }
     }
 
     /// Returns the operation id assigned to the blocking DuckDB operation.
@@ -142,6 +145,16 @@ impl DuckLakeBlockingOperationContext {
         self.timeout.as_millis() as u64
     }
 
+    /// Returns elapsed time including blocking-slot and connection waits.
+    pub(super) fn elapsed_ms(&self) -> u64 {
+        (Instant::now() - (self.deadline - self.timeout)).as_millis() as u64
+    }
+
+    /// Returns the unused operation budget, saturating at zero after expiry.
+    pub(super) fn remaining_timeout_ms(&self) -> u64 {
+        self.deadline.saturating_duration_since(Instant::now()).as_millis() as u64
+    }
+
     /// Returns the currently recorded interrupt reason label.
     pub(super) fn interrupt_reason_label(&self) -> &'static str {
         self.interrupt_state.reason().as_str()
@@ -155,6 +168,7 @@ impl DuckLakeBlockingOperationContext {
             0,
             DUCKDB_BLOCKING_OPERATION_KIND,
             Duration::ZERO,
+            Instant::now(),
             Arc::new(DuckLakeInterruptState::default()),
         )
     }
@@ -1018,10 +1032,11 @@ where
         .await
 }
 
-/// Runs one DuckDB operation with context for operation-local diagnostics.
-pub(super) async fn run_duckdb_blocking_with_context<R, F>(
+/// Runs one atomic batch attempt with its own deadline and diagnostic context.
+pub(super) async fn run_duckdb_blocking_with_timeout_and_context<R, F>(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
+    timeout: Duration,
     operation: F,
 ) -> EtlResult<R>
 where
@@ -1030,21 +1045,15 @@ where
         + Send
         + 'static,
 {
-    run_duckdb_blocking_with_provider_and_context(
-        pool,
-        blocking_slots,
-        FOREGROUND_QUERY_TIMEOUT,
-        operation,
-    )
-    .await
+    run_duckdb_blocking_with_provider_and_context(pool, blocking_slots, timeout, operation).await
 }
 
 /// Runs one operation on a connection pinned to a multi-call DuckLake session.
 ///
 /// This retains the same timeout, interrupt, and blocking-slot behavior as
-/// [`run_duckdb_blocking_with_context`], but keeps the checked-out connection
-/// until every clone of `session` is dropped. A failed operation marks the
-/// connection broken and all later calls fail without checking out a
+/// [`run_duckdb_blocking_with_timeout_and_context`], but keeps the checked-out
+/// connection until every clone of `session` is dropped. A failed operation
+/// marks the connection broken and all later calls fail without checking out a
 /// replacement connection.
 pub(super) async fn run_duckdb_dedicated_blocking_with_context<R, F>(
     session: DuckLakeDedicatedConnection,
@@ -1195,6 +1204,7 @@ where
                     operation_id,
                     operation_kind,
                     timeout,
+                    deadline,
                     pooled_conn.interrupt_handle.interrupt_state(),
                 );
                 let interrupt_handle: Arc<RegisteredDuckLakeInterrupt> =
@@ -1215,6 +1225,16 @@ where
                     "ducklake blocking operation finished"
                 );
                 if watchdog.timed_out() {
+                    warn!(
+                        operation_id,
+                        operation_kind,
+                        operation_elapsed_ms = operation_context.elapsed_ms(),
+                        wait_elapsed_ms =
+                            timeout.saturating_sub(operation_timeout).as_millis() as u64,
+                        execution_elapsed_ms = operation_started.elapsed().as_millis() as u64,
+                        timeout_ms = operation_context.timeout_ms(),
+                        "ducklake blocking operation timed out"
+                    );
                     pooled_conn.broken = true;
                     return Err(duckdb_blocking_timeout_error(timeout, "query_execution"));
                 }
@@ -1767,6 +1787,27 @@ mod tests {
         assert_eq!(registry.interrupt_all(), 1);
     }
 
+    /// Diagnostics share the watchdog deadline rather than restarting at
+    /// checkout.
+    #[tokio::test(start_paused = true)]
+    async fn operation_timing_includes_waits_and_saturates_remaining_budget() {
+        let timeout = Duration::from_secs(180);
+        let deadline = Instant::now() + timeout;
+        tokio::time::advance(Duration::from_secs(40)).await;
+        let context = DuckLakeBlockingOperationContext::new(
+            42,
+            DUCKDB_BLOCKING_OPERATION_KIND,
+            timeout,
+            deadline,
+            Arc::new(DuckLakeInterruptState::default()),
+        );
+        assert_eq!(context.elapsed_ms(), 40_000);
+        assert_eq!(context.remaining_timeout_ms(), 140_000);
+        tokio::time::advance(Duration::from_secs(145)).await;
+        assert_eq!(context.elapsed_ms(), 185_000);
+        assert_eq!(context.remaining_timeout_ms(), 0);
+    }
+
     #[test]
     fn ducklake_blocking_operation_context_reports_interrupt_reason() {
         let state = Arc::new(DuckLakeInterruptState::default());
@@ -1774,6 +1815,7 @@ mod tests {
             42,
             DUCKDB_BLOCKING_OPERATION_KIND,
             Duration::from_millis(250),
+            Instant::now() + Duration::from_millis(250),
             Arc::clone(&state),
         );
 
