@@ -248,8 +248,10 @@ async fn inheritance_child_without_local_primary_key_has_no_identity() {
     let mut replication_client =
         PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("inheritance_identity");
-    let (transaction, _) =
-        replication_client.create_table_copy_slot(&slot_name, child_id, false).await.unwrap();
+    let (transaction, _) = replication_client
+        .create_table_copy_slot(&slot_name, child_id, &Default::default())
+        .await
+        .unwrap();
     let (parent_schema, _) = transaction.get_table_schema_with_identity(parent_id).await.unwrap();
     let (child_schema, _) = transaction.get_table_schema_with_identity(child_id).await.unwrap();
 
