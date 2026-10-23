@@ -20,7 +20,7 @@ Do this on a fresh clone before tests, examples, or local services.
    cargo install --version 0.9.0 sqlx-cli --no-default-features --features rustls,postgres --locked
    ```
 
-3. Start the local data plane (Postgres, ClickHouse, Iceberg catalog, migrations).
+3. Start the local data plane (Postgres, ClickHouse, migrations).
    This does **not** write app config or apply Kubernetes:
 
    ```bash
@@ -123,36 +123,6 @@ implementation details private.
   manifest pins for reproducible builds. For task aliases, use `cargo --locked x`
   or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
   own `--locked` flag.
-
-### Temporary dependency audit deferral
-
-Iceberg still pulls in `zstd 0.13.3` and `zstd-safe 7.2.4` through its own,
-Apache Avro, and Parquet dependencies. The remaining audit findings
-`RUSTSEC-2026-0391`, `RUSTSEC-2026-0398`, and `RUSTSEC-2026-0403` are deferred to
-[destination removal in PR #1159](https://github.com/supabase/etl/pull/1159).
-Keep the audit enabled; do not add advisory ignores, forks, or vendored patches
-for this deferred chain. When integrating that removal, remove this note and
-verify that the affected versions and findings are gone. Investigate any
-findings that remain after removal or involve another dependency path.
-
-### Deprecated destination scope
-
-Iceberg is deprecated. Unless the user explicitly requests Iceberg work,
-exclude it from non-security refactoring scans, test-improvement reviews,
-and cross-destination bug investigations or fixes. Requests covering
-"all destinations" or the whole repository do not override this exclusion.
-
-When applying this exclusion to a cross-destination or repository-wide
-request, state in the result that Iceberg was excluded.
-
-This exclusion does not apply to security scans: include Iceberg whenever
-it falls within the requested security scope.
-
-Keep existing Iceberg code, tests, features and CI coverage intact. If a
-shared change requires an Iceberg adjustment to prevent a runtime
-regression or keep existing builds and checks passing, make only the
-necessary compatibility adjustment.
-Do not expand that work into Iceberg-specific cleanup.
 
 ### Destination compatibility
 
