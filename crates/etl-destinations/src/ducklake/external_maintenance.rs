@@ -623,16 +623,14 @@ async fn maybe_request_operations<S, M>(
         .sample_external_maintenance_operations(
             config.inline_flush_min_inlined_bytes,
             config.rewrite_data_files_min_active_data_files,
+            state.operation_policy,
         )
         .await
     {
         Ok(sample) => {
             let mut requested = sample.operations;
             requested.inline_flush &= state.operation_policy.inline_flush_enabled;
-            requested.merge_adjacent_files &= state.operation_policy.merge_adjacent_files_enabled;
-            requested.rewrite_data_files &= state.operation_policy.rewrite_data_files_enabled;
             requested.expire_snapshots &= state.operation_policy.expire_snapshots_enabled;
-            requested.cleanup_old_files &= state.operation_policy.cleanup_old_files_enabled;
             if requested.expire_snapshots && expire_snapshots_gate.is_suppressed(Utc::now()) {
                 debug!("ducklake expire-snapshots request suppressed by local daily gate");
                 requested.expire_snapshots = false;
