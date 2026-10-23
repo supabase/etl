@@ -5385,8 +5385,7 @@ mod tests {
         let catalog_attach_target =
             catalog_conninfo_from_url(catalog).expect("invalid catalog url");
         conn.execute_batch(&format!(
-            "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0', \
-             METADATA_CATALOG {});",
+            "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false, METADATA_CATALOG {});",
             ducklake_load_sql(),
             quote_literal(&format!("ducklake:{catalog_attach_target}")),
             quote_identifier(LAKE_CATALOG),

@@ -121,12 +121,13 @@ test helpers, and `scripts/bin/vendor-duckdb-extensions.sh` together when changi
 the dependency.
 
 The destination and maintenance runner attach with `AUTOMATIC_MIGRATION false`
-and `DUCKLAKE_VERSION '1.0'`. Existing catalogs stay on format `1.0`, and new
-catalogs are created in that format so the previous DuckDB 1.5.6 extension can
-still read them after a rollback. Disabling migration alone is insufficient:
-DuckDB 2.0 defaults new catalogs to `1.1`. Catalogs already upgraded to `1.1`
-cannot be downgraded and are rejected by the format pin. Other clients sharing
-the catalog must also avoid migrating it.
+and omit `DUCKLAKE_VERSION`. Existing `1.0` catalogs stay on that format, while
+new catalogs use the DuckLake extension's default format, currently `1.1`.
+Existing `1.1` catalogs also remain unchanged. Do not set a global
+`ducklake_default_version` override: it also affects existing catalogs.
+The previous DuckDB 1.5.6 extension can still read existing `1.0` catalogs
+after a rollback, but new `1.1` catalogs require compatible clients and cannot
+be downgraded. Other clients sharing a `1.0` catalog must also avoid migrating it.
 
 Catalogs below `1.0` must be migrated before deploying this build. Startup in
 both the destination and maintenance runner rejects them with a catalog-version

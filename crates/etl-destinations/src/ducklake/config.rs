@@ -760,14 +760,13 @@ fn build_setup_plan_with_strategy(
         .map(|schema| format!(", METADATA_SCHEMA {}", quote_literal(schema)))
         .unwrap_or_default();
 
-    // Keep catalogs readable after a DuckDB rollback and expose the metadata
-    // catalog for schema discovery.
+    // Preserve existing catalog versions while new catalogs use the extension's
+    // default format. Expose the metadata catalog for schema discovery.
     steps.push(DuckLakeSetupStep {
         label: "attach_catalog",
         sql: format!(
             "ATTACH {} AS {lake_catalog} (DATA_PATH {}, DATA_INLINING_ROW_LIMIT {}, \
-             AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0', METADATA_CATALOG \
-             {}{metadata_schema_clause});",
+             AUTOMATIC_MIGRATION false, METADATA_CATALOG {}{metadata_schema_clause});",
             quote_literal(&format!("ducklake:{catalog_target}")),
             quote_literal(data_path),
             data_inlining_row_limit,
@@ -819,6 +818,77 @@ mod tests {
         assert_eq!(source_id, "d54cbbe3df");
     }
 
+    /// Setup creates the current format but preserves existing catalog versions
+    /// and data.
+    #[test]
+    fn setup_creates_v1_1_and_preserves_existing_catalog_versions() {
+        for (initial_version, expected_version) in
+            [(None, "1.1"), (Some("1.0"), "1.0"), (Some("1.1"), "1.1")]
+        {
+            let temp = TempDir::new().unwrap();
+            let catalog_url = Url::from_file_path(temp.path().join("catalog.duckdb")).unwrap();
+            let data_url = Url::from_directory_path(temp.path().join("data")).unwrap();
+            let plan = build_setup_plan(
+                &catalog_url,
+                &data_url,
+                None,
+                None,
+                &DuckLakeWriterConfig::default(),
+                crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT,
+            )
+            .unwrap();
+            let conn = Connection::open_in_memory().unwrap();
+
+            for step in plan.steps() {
+                if step.label == "attach_catalog"
+                    && let Some(version) = initial_version
+                {
+                    // Seed an existing catalog after loading the matching
+                    // extension.
+                    conn.execute_batch(&format!(
+                        "attach {} as seed (data_path {}, ducklake_version {}); create table \
+                         seed.items (id integer); insert into seed.items values (7); detach seed;",
+                        quote_literal(&format!("ducklake:{}", catalog_url.as_str())),
+                        quote_literal(data_url.as_str()),
+                        quote_literal(version),
+                    ))
+                    .unwrap();
+                }
+                conn.execute_batch(&step.sql).unwrap();
+            }
+
+            let version: String = conn
+                .query_row(
+                    &format!(
+                        "select value from {LAKE_CATALOG}.options() where option_name = 'version'"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, expected_version);
+
+            if initial_version.is_some() {
+                let id: i32 = conn
+                    .query_row(&format!("select id from {LAKE_CATALOG}.items"), [], |row| {
+                        row.get(0)
+                    })
+                    .unwrap();
+                assert_eq!(id, 7);
+            } else {
+                conn.execute_batch(&format!("create table {LAKE_CATALOG}.items (id integer)"))
+                    .unwrap();
+            }
+            conn.execute_batch(&format!("insert into {LAKE_CATALOG}.items values (8)")).unwrap();
+            let count: i64 = conn
+                .query_row(&format!("select count(*) from {LAKE_CATALOG}.items"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, if initial_version.is_some() { 2 } else { 1 });
+        }
+    }
+
     /// An older catalog fails before schema migration, with an actionable
     /// version mismatch instead of silently changing its format.
     #[test]
@@ -857,7 +927,7 @@ mod tests {
 
         assert_eq!(phase, "attach_catalog");
         assert!(error.to_string().contains("catalog version is 0.3"));
-        assert!(error.to_string().contains("requires version 1.0"));
+        assert!(error.to_string().contains("requires version 1.1"));
         drop(conn);
         let metadata = Connection::open(&catalog_path).unwrap();
         let version: String = metadata
@@ -1203,7 +1273,7 @@ mod tests {
             crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
         assert!(sql.contains("AUTOMATIC_MIGRATION false"));
-        assert!(sql.contains("DUCKLAKE_VERSION '1.0'"));
+        assert!(!sql.contains("DUCKLAKE_VERSION"));
     }
 
     #[test]
@@ -1288,7 +1358,7 @@ mod tests {
             crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
         assert!(sql.contains("AUTOMATIC_MIGRATION false"));
-        assert!(sql.contains("DUCKLAKE_VERSION '1.0'"));
+        assert!(!sql.contains("DUCKLAKE_VERSION"));
     }
 
     #[test]
@@ -1334,7 +1404,7 @@ mod tests {
             crate::ducklake::ATTACH_DATA_INLINING_ROW_LIMIT
         )));
         assert!(sql.contains("AUTOMATIC_MIGRATION false"));
-        assert!(sql.contains("DUCKLAKE_VERSION '1.0'"));
+        assert!(!sql.contains("DUCKLAKE_VERSION"));
     }
 
     #[test]

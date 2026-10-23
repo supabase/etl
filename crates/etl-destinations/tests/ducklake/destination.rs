@@ -297,7 +297,7 @@ fn try_open_lake_conn(catalog: &Url, data: &Url) -> Result<Connection, duckdb::E
     let conn = open_verification_connection();
     let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
-        "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false, DUCKLAKE_VERSION '1.0');",
+        "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false);",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),
@@ -629,7 +629,7 @@ fn checkpoint_lake(catalog: &Url, data: &Url) {
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// `write_table_rows` inserts rows that can be queried back through the
-/// DuckLake catalog using a separate DuckDB connection, retaining format 1.0
+/// DuckLake catalog using a separate DuckDB connection, retaining format 1.1
 /// when creating and reopening the catalog.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_basic() {
@@ -671,12 +671,12 @@ async fn write_table_rows_basic() {
 
     destination.shutdown().await.unwrap();
     drop(destination);
-    assert_eq!(lake.catalog_version().await, "1.0");
+    assert_eq!(lake.catalog_version().await, "1.1");
 
     let restarted_destination = new_test_destination(&catalog_url, &data_url, store).await;
     restarted_destination.shutdown().await.unwrap();
     drop(restarted_destination);
-    assert_eq!(lake.catalog_version().await, "1.0");
+    assert_eq!(lake.catalog_version().await, "1.1");
 
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 3);
@@ -696,15 +696,20 @@ async fn write_table_rows_basic() {
 }
 
 /// Maintenance discovers the PostgreSQL metadata schema through its named
-/// DuckDB catalog and flushes inline rows without upgrading the format.
+/// DuckDB catalog and flushes inline rows without upgrading an existing 1.0
+/// catalog.
 #[tokio::test(flavor = "multi_thread")]
 async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
     let lake = create_test_lake("maintenance_discovers_metadata_schema_and_flushes_rows").await;
-    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
-    conn.execute_batch(
-        "create table lake.main.maintenance_rows (id bigint); insert into \
-         lake.main.maintenance_rows values (1), (2);",
-    )
+    let conn = open_verification_connection();
+    conn.execute_batch(&format!(
+        "{} attach {} as lake (data_path {}, ducklake_version '1.0'); create table \
+         lake.main.maintenance_rows (id bigint); insert into lake.main.maintenance_rows values \
+         (1), (2);",
+        ducklake_load_sql(),
+        quote_literal(&format!("ducklake:{}", catalog_attach_target(&lake.catalog_url))),
+        quote_literal(lake.data_url.as_str()),
+    ))
     .unwrap();
     drop(conn);
     assert_eq!(lake.catalog_version().await, "1.0");
