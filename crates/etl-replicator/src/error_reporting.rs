@@ -127,7 +127,8 @@ where
 
         self.inner.update_table_states(updates).await?;
 
-        // We optimistically report the error updates without blocking the method.
+        // We optimistically report the error updates without blocking the
+        // method.
         self.report_errored_updates(reportable_errors).await?;
 
         Ok(())
