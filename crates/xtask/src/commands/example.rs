@@ -1,8 +1,34 @@
-use anyhow::{Result, bail};
+use std::path::PathBuf;
+
+use anyhow::{Context, Result, bail};
 use clap::Args;
+use serde_json::Value;
 use xshell::{Shell, cmd};
 
 const KNOWN_EXAMPLES: &[&str] = &["clickhouse", "bigquery", "ducklake", "snowflake"];
+
+/// Finds the requested binary in Cargo's build messages without assuming a
+/// target directory or executable suffix.
+fn example_executable(messages: &str, name: &str) -> Result<PathBuf> {
+    for line in messages.lines() {
+        let message: Value =
+            serde_json::from_str(line).context("Failed to parse Cargo build output")?;
+        if message["reason"] != "compiler-artifact"
+            || message["target"]["name"] != name
+            || !message["target"]["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind == "bin"))
+        {
+            continue;
+        }
+
+        if let Some(executable) = message["executable"].as_str() {
+            return Ok(PathBuf::from(executable));
+        }
+    }
+
+    bail!("Cargo did not report an executable for example '{name}'")
+}
 
 #[derive(Args)]
 pub(crate) struct ExampleArgs {
@@ -59,9 +85,13 @@ impl ExampleArgs {
         extra.extend(self.args.iter().cloned());
 
         let sh = Shell::new()?;
-        let feature = name;
-        cmd!(sh, "cargo run --bin {name} -p etl-examples --features {feature} -- {extra...}")
-            .run()?;
+        // Cargo can print executable arguments even when xshell hides its
+        // command.
+        let messages = cmd!(sh, "cargo build --bin {name} -p etl-examples --features {name}")
+            .arg("--message-format=json-render-diagnostics")
+            .read()?;
+        let executable = example_executable(&messages, name)?;
+        cmd!(sh, "{executable} {extra...}").secret().run()?;
 
         Ok(())
     }

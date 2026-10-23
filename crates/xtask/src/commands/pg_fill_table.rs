@@ -45,7 +45,7 @@ pub(crate) struct PgFillTableArgs {
     #[arg(long, env = "POSTGRES_USER", default_value = DEFAULT_DB_USER)]
     username: String,
     /// Postgres password.
-    #[arg(long, env = "POSTGRES_PASSWORD", default_value = DEFAULT_DB_PASSWORD)]
+    #[arg(long, env = "POSTGRES_PASSWORD", default_value = DEFAULT_DB_PASSWORD, hide_env_values = true)]
     password: String,
     /// Extra Postgres connection parameters passed to psql.
     #[arg(long, default_value = DEFAULT_CONN_PARAMS)]

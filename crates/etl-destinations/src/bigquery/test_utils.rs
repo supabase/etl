@@ -19,7 +19,10 @@ use tokio::{runtime::Handle, time::sleep};
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{BigQueryDestination, query::execute_query, table_name_to_bigquery_table_id},
+    bigquery::{
+        BigQueryDestination, client::read_service_account_key, query::execute_query,
+        table_name_to_bigquery_table_id,
+    },
     retry::{RetryPolicy, retry_with_backoff},
 };
 
@@ -185,8 +188,9 @@ impl BigQueryDatabase {
     /// set or if client creation fails.
     pub async fn new(sa_key_path: &str) -> Self {
         let project_id = get_project_id();
+        let sa_key = read_service_account_key(sa_key_path).await.unwrap();
         let client = retry_bigquery_test_operation("client creation", || async {
-            ClientBuilder::new().build_from_service_account_key_file(sa_key_path).await
+            ClientBuilder::new().build_from_service_account_key(sa_key.clone(), false).await
         })
         .await
         .expect("Failed to create BigQuery client");

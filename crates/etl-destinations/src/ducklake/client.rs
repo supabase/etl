@@ -971,13 +971,29 @@ impl<G> DuckLakeBlockingGuard<G> {
 /// The manager's shutdown flag must be set and async producers stopped first.
 /// Holding every permit proves no blocking operation still owns native work.
 /// A closed semaphore means an earlier or concurrent shutdown already drained
-/// it.
+/// it. Native cleanup gets at most [`BLOCKING_ABORT_GRACE`] after interruption;
+/// exceeding that deadline aborts the process so unacknowledged WAL can replay.
 pub(super) async fn drain_duckdb_blocking_operations(
     blocking_slots: Arc<Semaphore>,
     pool_size: u32,
 ) {
-    if let Ok(_permits) = Arc::clone(&blocking_slots).acquire_many_owned(pool_size).await {
-        blocking_slots.close();
+    match tokio::time::timeout(
+        BLOCKING_ABORT_GRACE,
+        Arc::clone(&blocking_slots).acquire_many_owned(pool_size),
+    )
+    .await
+    {
+        Ok(Ok(_permits)) => blocking_slots.close(),
+        Ok(Err(_)) => {} // A previous shutdown already closed admission.
+        Err(_) => {
+            // Started spawn_blocking tasks cannot be aborted safely. Do not
+            // return success or let runtime drop wait forever after interrupt.
+            tracing::error!(
+                cleanup_timeout_ms = BLOCKING_ABORT_GRACE.as_millis() as u64,
+                "ducklake native work did not stop after shutdown interrupt; aborting process"
+            );
+            process::abort();
+        }
     }
 }
 
@@ -1257,6 +1273,34 @@ mod tests {
     use tokio::sync::{Barrier, Semaphore, oneshot};
 
     use super::*;
+
+    /// A process with uninterruptible native work must fail at the cleanup
+    /// deadline rather than report successful shutdown or hang in runtime drop.
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_native_cleanup_deadline_aborts_process() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "ETL_TEST_NATIVE_SHUTDOWN_DEADLINE";
+        if std::env::var_os(CHILD).is_some() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            runtime.block_on(drain_duckdb_blocking_operations(Arc::new(Semaphore::new(0)), 1));
+            panic!("native cleanup returned without owning every permit");
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ducklake::client::tests::shutdown_native_cleanup_deadline_aborts_process",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.signal(), Some(6), "child must terminate with SIGABRT");
+    }
 
     const WATCHDOG_DEADLINE: Duration = Duration::from_millis(20);
     const WATCHDOG_JOIN_TIMEOUT: Duration = Duration::from_secs(1);

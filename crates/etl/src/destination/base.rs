@@ -31,11 +31,13 @@ pub trait Destination {
 
     /// Finishes destination-owned work and releases resources during shutdown.
     ///
-    /// Called after workers complete successfully; stop writer loops and finish
-    /// owned work here. Worker failures skip this hook, so resources also need
-    /// drop-based cancellation or explicit owner cleanup. Accept requested task
-    /// cancellations; propagate panics and task errors without awaiting
-    /// remaining tasks. The default implementation is a no-op.
+    /// Called after workers complete successfully or are cancelled and joined
+    /// at the shutdown drain deadline. Stop writer loops, cancel abandoned
+    /// writes, and join native work here. Worker failures skip this hook, so
+    /// resources also need drop-based cancellation or explicit owner
+    /// cleanup. Accept requested task cancellations; propagate panics and
+    /// task errors without awaiting remaining tasks. The default
+    /// implementation is a no-op.
     fn shutdown(&self) -> impl Future<Output = EtlResult<()>> + Send {
         async { Ok(()) }
     }
@@ -176,12 +178,14 @@ pub trait Destination {
     /// promptly. The loop can then continue processing WAL and observing
     /// shutdown while it polls `async_result` separately. Performing the write
     /// inline stalls that loop until the method returns, even if the write
-    /// yields to the async runtime. Shutdown does not cancel the method call;
-    /// it waits for dispatch and pending write results to finish, unless
-    /// [`crate::config::PipelineConfig::drain_on_shutdown`] is disabled. ETL
-    /// then stops observing the pending result at shutdown, and the
-    /// destination may complete or drop it, but [`Destination::shutdown`] must
-    /// not wait for it.
+    /// yields to the async runtime. Shutdown waits for dispatch and pending
+    /// results within
+    /// [`crate::config::PipelineConfig::shutdown_drain_timeout_ms`].
+    /// At expiry ETL cancels workers, including inline calls, without advancing
+    /// the checkpoint for unacknowledged writes. Disabling
+    /// [`crate::config::PipelineConfig::drain_on_shutdown`] skips draining the
+    /// pending result. In either case [`Destination::shutdown`] must stop
+    /// abandoned tasks and join native work within its own cleanup bounds.
     ///
     /// Implementations report asynchronous write status through `async_result`.
     /// The method return value is reserved for immediate dispatch/setup

@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use etl_config::shared::PipelineConfig;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -612,7 +613,7 @@ spec:
       labels:
         app.kubernetes.io/name: {name}
     spec:
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {termination_grace_period_seconds}
       containers:
       - name: replicator
         image: {image}
@@ -649,6 +650,9 @@ spec:
         memory_request = config.memory_request,
         name = config.name,
         stateful_set_name = config.stateful_set_name(),
+        // Allow 30 seconds for native cleanup and 30 seconds of scheduling headroom.
+        termination_grace_period_seconds =
+            PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS.div_ceil(1000) + 60,
     )
 }
 

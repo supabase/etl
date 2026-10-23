@@ -18,7 +18,12 @@ pub(crate) struct SeedArgs {
     user: String,
 
     /// PostgreSQL password.
-    #[arg(long, env = "TESTS_DATABASE_PASSWORD", default_value = "postgres")]
+    #[arg(
+        long,
+        env = "TESTS_DATABASE_PASSWORD",
+        default_value = "postgres",
+        hide_env_values = true
+    )]
     password: String,
 
     /// Database name to create and seed.

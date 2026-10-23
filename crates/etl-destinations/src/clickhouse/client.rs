@@ -79,7 +79,7 @@ fn escape_query_text(sql: &str) -> String {
 
 /// Removes response text that can quote source values, retaining classification
 /// codes.
-fn redact_clickhouse_error(error: clickhouse::error::Error) -> clickhouse::error::Error {
+pub(super) fn redact_clickhouse_error(error: clickhouse::error::Error) -> clickhouse::error::Error {
     match error {
         clickhouse::error::Error::BadResponse(message) => {
             let message = if let Some(code) = clickhouse_error_code(&message) {

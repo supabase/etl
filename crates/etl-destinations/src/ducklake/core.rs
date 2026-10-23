@@ -850,8 +850,9 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        // The pipeline drains apply writes before requesting destination
-        // teardown.
+        // The pipeline either drained apply writes or joined cancelled workers
+        // after its drain deadline. Stop new native work and interrupt any
+        // abandoned transaction before joining the destination-owned tasks.
         let interrupted_connections = self.manager.interrupt_all_connections_for_shutdown();
         info!(
             interrupted_connections,
@@ -5527,7 +5528,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for root in candidate_roots {
-            let extension_dir = root.join("1.5.6").join(platform_dir);
+            let extension_dir = root.join("2.0.0").join(platform_dir);
             let ducklake_extension = extension_dir.join("ducklake.duckdb_extension");
             let postgres_scanner_extension = extension_dir.join(POSTGRES_SCANNER_EXTENSION_FILE);
 
@@ -5585,13 +5586,14 @@ mod tests {
         let catalog_attach_target =
             catalog_conninfo_from_url(catalog).expect("invalid catalog url");
         conn.execute_batch(&format!(
-            "{} ATTACH {} AS {} (DATA_PATH {}, metadata_catalog {});",
+            "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false, METADATA_CATALOG {});",
             ducklake_load_sql(),
             quote_literal(&format!("ducklake:{catalog_attach_target}")),
             quote_identifier(LAKE_CATALOG),
             quote_literal(data.as_str()),
             quote_literal(&format!("__ducklake_metadata_{LAKE_CATALOG}")),
         ))
+        .map_err(RedactedDuckDbError::from)
         .expect("failed to attach DuckLake catalog");
         conn
     }
@@ -5684,7 +5686,9 @@ mod tests {
             let password =
                 catalog.password().expect("TESTS_DATABASE_PASSWORD must be set").to_owned();
             let conn = open_lake_conn(&catalog, &data);
-            conn.execute_batch("create table lake.main.t (id integer);").unwrap();
+            conn.execute_batch("create table lake.main.t (id integer);")
+                .map_err(RedactedDuckDbError::from)
+                .unwrap();
 
             // Refuse new catalog connections and drop the open ones.
             let (admin, _) = etl_postgres::tokio::test_utils::connect_to_pg_database(
