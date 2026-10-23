@@ -111,7 +111,16 @@ It carries these labels:
 - `operation`: `flush_inlined_data`, `rewrite_data_files`, or
   `expire_snapshots`
 - `reason`: `pending_inlined_data_bytes_threshold`,
-  `active_data_files_threshold`, or `snapshot_retention_threshold`
+  `active_data_files_threshold`, `deleted_row_ratio_threshold`, or
+  `snapshot_retention_threshold`
+
+File rewrites are requested when a table exceeds the configured active data-file
+count or more than 95% of its active data-file rows are deleted. The same policy
+selects tables in the maintenance runner, so a heavily deleted table with only
+one or two files is eligible. The ratio threshold matches DuckLake's default
+`rewrite_delete_threshold`. The reason label records the first table that
+triggers the request; file-count pressure takes precedence when that table meets
+both conditions. Initial-copy deferral still applies to both triggers.
 
 ### Table-health sampling metrics
 

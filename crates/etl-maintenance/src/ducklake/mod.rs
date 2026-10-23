@@ -2,10 +2,12 @@
 
 mod compatibility;
 mod duckdb_error;
+mod rewrite;
 mod runner;
 
 pub use compatibility::duckdb_version_check_sql;
 pub use duckdb_error::{RedactedDuckDbError, redact_credentials};
+pub use rewrite::DataFileRewriteReason;
 pub use runner::{
     CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, DuckLakeMaintenanceOutcome,
     ExpireSnapshotsMaintenanceConfig, InlineFlushMaintenanceConfig,

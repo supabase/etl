@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use etl::{error::EtlResult, store::DestinationStore};
+use etl_maintenance::ducklake::DataFileRewriteReason;
 pub use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
     ExternalMaintenanceOperationRequest, ExternalMaintenanceOperationRun,
@@ -42,7 +43,6 @@ const ALL_PAUSE_OPERATION_LABELS: [&str; 6] = [
     OPERATION_UNKNOWN,
 ];
 const REASON_PENDING_INLINED_DATA_BYTES_THRESHOLD: &str = "pending_inlined_data_bytes_threshold";
-const REASON_ACTIVE_DATA_FILES_THRESHOLD: &str = "active_data_files_threshold";
 const REASON_SNAPSHOT_RETENTION_THRESHOLD: &str = "snapshot_retention_threshold";
 
 struct HeldPause {
@@ -619,25 +619,23 @@ async fn maybe_request_operations<S, M>(
         return;
     }
 
-    let (requested, copy_phase_active) = match destination
+    let (requested, copy_phase_active, rewrite_data_files_reason) = match destination
         .sample_external_maintenance_operations(
             config.inline_flush_min_inlined_bytes,
             config.rewrite_data_files_min_active_data_files,
+            state.operation_policy,
         )
         .await
     {
         Ok(sample) => {
             let mut requested = sample.operations;
             requested.inline_flush &= state.operation_policy.inline_flush_enabled;
-            requested.merge_adjacent_files &= state.operation_policy.merge_adjacent_files_enabled;
-            requested.rewrite_data_files &= state.operation_policy.rewrite_data_files_enabled;
             requested.expire_snapshots &= state.operation_policy.expire_snapshots_enabled;
-            requested.cleanup_old_files &= state.operation_policy.cleanup_old_files_enabled;
             if requested.expire_snapshots && expire_snapshots_gate.is_suppressed(Utc::now()) {
                 debug!("ducklake expire-snapshots request suppressed by local daily gate");
                 requested.expire_snapshots = false;
             }
-            (requested, sample.copy_phase_active)
+            (requested, sample.copy_phase_active, sample.rewrite_data_files_reason)
         }
         Err(error) => {
             warn!(
@@ -689,6 +687,7 @@ async fn maybe_request_operations<S, M>(
         inline_flush_min_inlined_bytes = config.inline_flush_min_inlined_bytes,
         copy_phase_active,
         rewrite_data_files_min_active_data_files = config.rewrite_data_files_min_active_data_files,
+        rewrite_data_files_reason = rewrite_data_files_reason.map(DataFileRewriteReason::as_str),
         "ducklake external maintenance requesting operations"
     );
 
@@ -705,7 +704,11 @@ async fn maybe_request_operations<S, M>(
             if requested.expire_snapshots && !already_requested.expire_snapshots {
                 expire_snapshots_gate.record_requested(Utc::now());
             }
-            record_external_maintenance_triggers(requested, already_requested);
+            record_external_maintenance_triggers(
+                requested,
+                already_requested,
+                rewrite_data_files_reason,
+            );
         }
         Ok(Ok(ExternalMaintenanceRequestOutcome::AlreadyCovered)) => {
             debug!("ducklake external maintenance request became already covered");
@@ -830,6 +833,7 @@ fn completed_run_in_cooldown(state: &ExternalMaintenanceState, cooldown: Duratio
 fn record_external_maintenance_triggers(
     requested: ExternalMaintenanceOperations,
     already_requested: ExternalMaintenanceOperations,
+    rewrite_data_files_reason: Option<DataFileRewriteReason>,
 ) {
     if requested.inline_flush && !already_requested.inline_flush {
         counter!(
@@ -840,11 +844,14 @@ fn record_external_maintenance_triggers(
         .increment(1);
     }
 
-    if requested.rewrite_data_files && !already_requested.rewrite_data_files {
+    if requested.rewrite_data_files
+        && !already_requested.rewrite_data_files
+        && let Some(reason) = rewrite_data_files_reason
+    {
         counter!(
             ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL,
             MAINTENANCE_OPERATION_LABEL => OPERATION_REWRITE_DATA_FILES,
-            MAINTENANCE_REASON_LABEL => REASON_ACTIVE_DATA_FILES_THRESHOLD,
+            MAINTENANCE_REASON_LABEL => reason.as_str(),
         )
         .increment(1);
     }
@@ -862,6 +869,7 @@ fn record_external_maintenance_triggers(
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, TimeZone, Utc};
+    use etl_maintenance::ducklake::DataFileRewriteReason;
     use etl_telemetry::metrics::init_metrics_handle;
 
     use super::{
@@ -872,8 +880,12 @@ mod tests {
         OPERATION_UNKNOWN, active_pause_operations, bounded_active_pause_request,
         record_external_maintenance_pause_active, successful_maintenance_run,
     };
-    use crate::ducklake::metrics::{
-        ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE, register_metrics,
+    use crate::ducklake::{
+        external_maintenance::record_external_maintenance_triggers,
+        metrics::{
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_PAUSE_ACTIVE,
+            ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL, register_metrics,
+        },
     };
 
     fn state_with_expire_snapshots_completed_at(
@@ -958,6 +970,40 @@ mod tests {
         let rendered = handle.render();
         assert_eq!(pause_active_gauge_value(&rendered, OPERATION_INLINE_FLUSH), Some(0.0));
         assert_eq!(pause_active_gauge_value(&rendered, OPERATION_EXPIRE_SNAPSHOTS), Some(0.0));
+    }
+
+    /// Reports deletion pressure accurately without counting already pending
+    /// requests twice.
+    #[tokio::test]
+    async fn recording_rewrite_triggers_preserves_reason_and_deduplicates() {
+        let handle = init_metrics_handle().unwrap();
+        register_metrics();
+        let requested = ExternalMaintenanceOperations {
+            rewrite_data_files: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+        for reason in
+            [DataFileRewriteReason::ActiveDataFiles, DataFileRewriteReason::DeletedRowRatio]
+        {
+            record_external_maintenance_triggers(
+                requested,
+                ExternalMaintenanceOperations::default(),
+                Some(reason),
+            );
+            record_external_maintenance_triggers(requested, requested, Some(reason));
+
+            let rendered = handle.render();
+            let reason_label = format!("reason=\"{}\"", reason.as_str());
+            let sample = rendered
+                .lines()
+                .find(|line| {
+                    line.starts_with(ETL_DUCKLAKE_EXTERNAL_MAINTENANCE_TRIGGERED_TOTAL)
+                        && line.contains("operation=\"rewrite_data_files\"")
+                        && line.contains(&reason_label)
+                })
+                .unwrap();
+            assert_eq!(sample.split_whitespace().last(), Some("1"));
+        }
     }
 
     #[test]

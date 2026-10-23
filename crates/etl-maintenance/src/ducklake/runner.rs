@@ -35,7 +35,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace, warn};
 use url::Url;
 
-use crate::ducklake::{RedactedDuckDbError, duckdb_version_check_sql};
+use crate::ducklake::{DataFileRewriteReason, RedactedDuckDbError, duckdb_version_check_sql};
 
 const LAKE_CATALOG: &str = "lake";
 const APPLIED_BATCHES_TABLE: &str = "__etl_applied_table_batches";
@@ -1560,7 +1560,8 @@ pub struct MergeAdjacentFilesMaintenanceConfig {
 pub struct RewriteDataFilesMaintenanceConfig {
     /// Whether rewrite-data-files is enabled.
     pub enabled: bool,
-    /// Minimum active data-file count before rewrite is attempted.
+    /// File-count threshold for rewrite; deletion pressure can also select a
+    /// table.
     pub min_active_data_files: i64,
     /// Maximum tables selected in one run.
     pub max_tables_per_run: u32,
@@ -2412,7 +2413,12 @@ async fn select_rewrite_tables(
 
 /// Returns whether a table should be rewritten.
 fn should_rewrite(metrics: &DuckLakeTableStorageMetrics, min_active_data_files: i64) -> bool {
-    metrics.active_data_files > min_active_data_files
+    DataFileRewriteReason::for_table(
+        metrics.active_data_files,
+        metrics.deleted_row_ratio(),
+        min_active_data_files,
+    )
+    .is_some()
 }
 
 /// Flushes inlined user data for one table.
@@ -3901,10 +3907,32 @@ mod tests {
     }
 
     #[test]
-    fn should_rewrite_requires_only_file_count() {
+    fn should_rewrite_preserves_file_count_threshold() {
         assert!(!should_rewrite(&metrics(39, 1, 50), 40));
         assert!(!should_rewrite(&metrics(40, 1, 50), 40));
         assert!(should_rewrite(&metrics(41, 0, 0), 40));
+    }
+
+    /// Small tables with mostly deleted rows must not wait for file-count
+    /// pressure.
+    #[test]
+    fn should_rewrite_heavily_deleted_small_tables() {
+        assert!(should_rewrite(&metrics(1, 1, 98), 40));
+        assert!(should_rewrite(&metrics(2, 2, 96), 40));
+        assert!(should_rewrite(&metrics(1, 1, 100), 40));
+    }
+
+    /// Excludes tables below the deletion threshold or without materialized
+    /// rows.
+    #[test]
+    fn should_rewrite_respects_deleted_row_ratio_boundary() {
+        assert!(!should_rewrite(&metrics(1, 1, 95), 40));
+        assert!(!should_rewrite(&metrics(1, 0, 0), 40));
+        assert!(!should_rewrite(&metrics(0, 1, 100), 40));
+
+        let mut empty = metrics(1, 1, 100);
+        empty.active_data_rows = 0;
+        assert!(!should_rewrite(&empty, 40));
     }
 
     #[test]
