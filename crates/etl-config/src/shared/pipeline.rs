@@ -475,8 +475,9 @@ pub struct PipelineConfig {
     ///
     /// Defaults to `true`: a shutdown request stops new intake, then the apply
     /// loop flushes its buffered batch and waits for the pending destination
-    /// write result under the usual deadlines and error policies, so the best
-    /// durable position is known before the loop exits.
+    /// write result under the usual error policies, up to
+    /// [`Self::shutdown_drain_timeout_ms`]. At expiry the pipeline cancels and
+    /// joins workers, preserving the last durable checkpoint for replay.
     ///
     /// Set to `false` when the destination stops together with the process
     /// that embeds ETL and cannot complete writes once shutdown is requested.
@@ -489,6 +490,15 @@ pub struct PipelineConfig {
     /// it, or the wait only moves there.
     #[serde(default = "default_drain_on_shutdown")]
     pub drain_on_shutdown: bool,
+    /// Maximum time in milliseconds to drain workers after the first shutdown
+    /// request. Defaults to 30 seconds. Zero skips the drain phase.
+    ///
+    /// At expiry the owner cancels and joins workers before shutting down the
+    /// destination. Unacknowledged work replays from the last durable source
+    /// checkpoint. Destination teardown has its own native-operation bounds;
+    /// this budget does not include that cleanup time.
+    #[serde(default = "default_shutdown_drain_timeout_ms")]
+    pub shutdown_drain_timeout_ms: u64,
 }
 
 impl PipelineConfig {
@@ -528,6 +538,9 @@ impl PipelineConfig {
 
     /// Default for whether shutdown drains buffered apply work.
     pub const DEFAULT_DRAIN_ON_SHUTDOWN: bool = true;
+
+    /// Default maximum worker drain time after shutdown, in milliseconds.
+    pub const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS: u64 = 30_000;
 
     /// Default interval in milliseconds between pipeline-wide lag samples.
     pub const DEFAULT_REPLICATION_LAG_REFRESH_INTERVAL_MS: u64 = 10_000;
@@ -721,6 +734,11 @@ const fn default_run_source_migrations() -> bool {
     true
 }
 
+/// Returns the default bound on graceful worker draining.
+const fn default_shutdown_drain_timeout_ms() -> u64 {
+    PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS
+}
+
 const fn default_drain_on_shutdown() -> bool {
     PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN
 }
@@ -832,6 +850,15 @@ pub struct PipelineConfigWithoutSecrets {
     /// name on [`PipelineConfig`].
     #[serde(default = "default_drain_on_shutdown")]
     pub drain_on_shutdown: bool,
+    /// Maximum time in milliseconds to drain workers after the first shutdown
+    /// request. Defaults to 30 seconds. Zero skips the drain phase.
+    ///
+    /// At expiry the owner cancels and joins workers before shutting down the
+    /// destination. Unacknowledged work replays from the last durable source
+    /// checkpoint. Destination teardown has its own native-operation bounds;
+    /// this budget does not include that cleanup time.
+    #[serde(default = "default_shutdown_drain_timeout_ms")]
+    pub shutdown_drain_timeout_ms: u64,
 }
 
 impl Validate for PipelineConfigWithoutSecrets {
@@ -878,6 +905,7 @@ impl From<PipelineConfig> for PipelineConfigWithoutSecrets {
             invalidated_slot_behavior: value.invalidated_slot_behavior,
             run_source_migrations: value.run_source_migrations,
             drain_on_shutdown: value.drain_on_shutdown,
+            shutdown_drain_timeout_ms: value.shutdown_drain_timeout_ms,
         }
     }
 }
@@ -1317,7 +1345,22 @@ mod tests {
         let json = format!(r#"{{"id": 1, "publication_name": "publication", {pg_connection}}}"#);
         let config: PipelineConfig = serde_json::from_str(&json).unwrap();
         assert!(config.drain_on_shutdown);
-        assert!(PipelineConfigWithoutSecrets::from(config).drain_on_shutdown);
+        assert_eq!(config.shutdown_drain_timeout_ms, 30_000);
+        let public = PipelineConfigWithoutSecrets::from(config);
+        assert!(public.drain_on_shutdown);
+        assert_eq!(public.shutdown_drain_timeout_ms, 30_000);
+
+        for timeout in [0, 250, 60_000] {
+            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value["shutdown_drain_timeout_ms"] = timeout.into();
+            let config: PipelineConfig = serde_json::from_value(value).unwrap();
+            assert_eq!(config.shutdown_drain_timeout_ms, timeout);
+            let public = PipelineConfigWithoutSecrets::from(config);
+            assert_eq!(public.shutdown_drain_timeout_ms, timeout);
+            let roundtrip: PipelineConfigWithoutSecrets =
+                serde_json::from_str(&serde_json::to_string(&public).unwrap()).unwrap();
+            assert_eq!(roundtrip.shutdown_drain_timeout_ms, timeout);
+        }
 
         let json = format!(
             r#"{{"id": 1, "publication_name": "publication", {pg_connection},
@@ -1381,6 +1424,7 @@ mod tests {
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
             run_source_migrations: true,
             drain_on_shutdown: true,
+            shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
         };
 
         assert_eq!(config.store_pg_connection().host, "replica.local");
@@ -1411,6 +1455,7 @@ mod tests {
             invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
             run_source_migrations: true,
             drain_on_shutdown: true,
+            shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
         };
 
         assert_eq!(config.store_pg_connection().host, "primary.local");

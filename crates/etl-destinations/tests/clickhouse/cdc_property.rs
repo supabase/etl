@@ -36,7 +36,7 @@ use etl::{
 use etl_config::shared::ClickHouseEngine;
 use etl_destinations::clickhouse::{
     ClickHouseDestination, ClickHouseInserterConfig,
-    test_utils::{ClickHouseTestDatabase, setup_clickhouse_database},
+    test_utils::{ClickHouseTestDatabase, redact_clickhouse_error, setup_clickhouse_database},
 };
 use etl_telemetry::tracing::init_test_tracing;
 use proptest::{option, prelude::*, sample::select};
@@ -834,6 +834,7 @@ async fn quoted_names_and_defaults_roundtrip(engine: ClickHouseEngine) {
                     .query(&format!("insert into \"{clickhouse_table}\" (id) values (2)"))
                     .execute()
                     .await
+                    .map_err(redact_clickhouse_error)
                     .unwrap();
 
                 let mut expected_names = vec!["id".to_owned()];
@@ -922,6 +923,7 @@ async fn create_text_column_and_read_default(
         .query(&format!("insert into \"{clickhouse_table}\" (id) values (1)"))
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     let names = database.column_names(&clickhouse_table).await;
     let stored = database

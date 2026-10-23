@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use iceberg::io::{S3_ACCESS_KEY_ID, S3_ENDPOINT, S3_SECRET_ACCESS_KEY};
 use uuid::Uuid;
 
+pub use crate::iceberg::error::redact_iceberg_error;
+
 const LAKEKEEPER_ADDR: &str = "localhost:8182";
 
 /// Default Lakekeeper URL for local testing.

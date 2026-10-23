@@ -284,9 +284,10 @@ cleanup. Recovery correctness still applies: never checkpoint unfinished work.
   cancellation-safe waits. Keep a running pipeline's pinned completion future
   alive when requesting shutdown, then await it to finish cleanup.
 - **Apply:** stop intake and drain buffered batches and pending write results
-  under existing deadlines, durability, and error policies. Do not force early
-  flushes or cancel in-flight apply writes. `drain_on_shutdown = false` is the
-  one opt-out: it abandons that work unacknowledged, for replay after restart.
+  under existing durability and error policies within `shutdown_drain_timeout_ms`.
+  At that deadline, cancel and join workers before destination teardown; never
+  checkpoint abandoned work. Do not force early flushes. `drain_on_shutdown = false`
+  skips the apply drain and leaves unacknowledged work for replay after restart.
   Coordination waits must observe shutdown when a stopping worker may never
   publish the awaited state.
 - **Copy and startup:** initial sync is replayable. Keep copy waits, including

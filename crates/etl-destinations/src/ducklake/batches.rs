@@ -728,6 +728,8 @@ async fn apply_table_batches_with_policy(
             batch_count,
             completed_batches = batch_index,
         );
+        #[cfg(feature = "test-utils")]
+        let table_name = batch.table_name.id();
         let result = apply_table_batch_with_policy(
             Arc::clone(&pool),
             Arc::clone(&blocking_slots),
@@ -753,6 +755,8 @@ async fn apply_table_batches_with_policy(
             );
         }
         streaming_progress = result?;
+        #[cfg(feature = "test-utils")]
+        wait_after_atomic_batch_commit_for_tests(&table_name).await;
     }
     Ok(streaming_progress)
 }
@@ -2634,6 +2638,50 @@ fn insert_rows_into_staging_with_sql(
     Ok(())
 }
 
+/// One-shot asynchronous barrier after a real atomic commit, before the
+/// remaining sequence can run or acknowledge the upstream write.
+#[cfg(feature = "test-utils")]
+struct PausedAtomicCommit {
+    table_name: String,
+    reached: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "test-utils")]
+static PAUSED_ATOMIC_COMMIT: LazyLock<Mutex<Option<PausedAtomicCommit>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Pauses one table's next committed atomic batch without blocking a native
+/// thread. Dropping the returned sender releases the barrier.
+#[cfg(feature = "test-utils")]
+pub fn pause_after_atomic_batch_commit_for_tests(
+    table_name: &str,
+) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+    let (reached, receiver) = tokio::sync::oneshot::channel();
+    let (sender, resume) = tokio::sync::oneshot::channel();
+    *PAUSED_ATOMIC_COMMIT.lock() =
+        Some(PausedAtomicCommit { table_name: table_name.to_owned(), reached, resume });
+    (receiver, sender)
+}
+
+/// Waits outside the transaction so shutdown can cancel a partially committed
+/// sequence while its replay watermark remains durable.
+#[cfg(feature = "test-utils")]
+async fn wait_after_atomic_batch_commit_for_tests(table_name: &str) {
+    let hook = {
+        let mut hook = PAUSED_ATOMIC_COMMIT.lock();
+        if hook.as_ref().is_some_and(|hook| hook.table_name == table_name) {
+            hook.take()
+        } else {
+            None
+        }
+    };
+    if let Some(PausedAtomicCommit { reached, resume, .. }) = hook {
+        let _ = reached.send(());
+        let _ = resume.await;
+    }
+}
+
 #[cfg(feature = "test-utils")]
 static FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -2661,6 +2709,7 @@ pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
 /// Clears DuckLake destination test hooks.
 #[cfg(feature = "test-utils")]
 pub fn reset_ducklake_test_hooks() {
+    PAUSED_ATOMIC_COMMIT.lock().take();
     *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = None;
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = None;
     STAGING_TABLE_CREATIONS_BY_TABLE.lock().clear();
@@ -3097,7 +3146,7 @@ mod tests {
         assert!(!source.to_string().contains(sensitive_value));
         assert_eq!(
             source.to_string(),
-            "DuckDB query failed with a Binder error; error message omitted because it may \
+            "DuckDB query failed with a Catalog error; error message omitted because it may \
              contain row values"
         );
     }

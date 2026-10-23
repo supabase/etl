@@ -111,7 +111,7 @@ struct DbArgs {
 #[derive(Args)]
 struct ClickHouseArgs {
     /// ClickHouse HTTP(S) endpoint.
-    #[arg(long, env = "TESTS_CLICKHOUSE_URL")]
+    #[arg(long, env = "TESTS_CLICKHOUSE_URL", hide_env_values = true)]
     clickhouse_url: String,
     /// ClickHouse user name.
     #[arg(long, env = "TESTS_CLICKHOUSE_USER")]
@@ -213,6 +213,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         publication_name: args.publication,
         run_source_migrations: true,
         drain_on_shutdown: true,
+        shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
         replication_slot: Default::default(),
         pg_connection: pg_connection_config,
         store_pg_connection: None,

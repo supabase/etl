@@ -9,5 +9,5 @@ async fn authenticate_against_snowflake() {
     assert!(!token.is_empty(), "token should not be empty");
 
     let token2 = auth.get_token().await.expect("second get_token failed");
-    assert_eq!(token, token2, "expected cached token on second call");
+    assert!(token == token2, "expected cached token on second call");
 }
