@@ -8,6 +8,7 @@ use tokio::{
     sync::{Mutex, RwLock},
     task::{JoinError, JoinSet},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::{
@@ -151,10 +152,30 @@ impl TableSyncWorkerPool {
     ///
     /// The first supervision error returns immediately and drops remaining
     /// task handles to request cancellation without waiting.
-    pub(crate) async fn wait_all(&self) -> EtlResult<()> {
+    ///
+    /// When the drain budget expires, aborts and joins remaining workers.
+    /// Only owner-requested cancellations are accepted; failures still
+    /// propagate.
+    pub(crate) async fn wait_all(&self, force_stop: &CancellationToken) -> EtlResult<()> {
         let mut workers_join_set = self.workers_join_set.lock().await;
+        let mut stopping = false;
 
-        while let Some(result) = workers_join_set.join_next().await {
+        loop {
+            let result = tokio::select! {
+                biased;
+
+                result = workers_join_set.join_next() => result,
+
+                () = force_stop.cancelled(), if !stopping => {
+                    stopping = true;
+                    workers_join_set.abort_all();
+                    continue;
+                }
+            };
+            let Some(result) = result else { break };
+            if stopping && matches!(&result, Err(error) if error.is_cancelled()) {
+                continue;
+            }
             let mut workers = self.workers.write().await;
             if let Err(err) = Self::handle_worker_result(&mut workers, result) {
                 *workers_join_set = JoinSet::new();
@@ -164,6 +185,7 @@ impl TableSyncWorkerPool {
             }
         }
 
+        self.workers.write().await.clear();
         Ok(())
     }
 
@@ -210,5 +232,43 @@ impl TableSyncWorkerPool {
 impl Default for TableSyncWorkerPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    /// The escalation path joins every cancelled worker and preserves genuine
+    /// failures instead of treating them as successful cancellation.
+    #[tokio::test]
+    async fn shutdown_deadline_joins_workers_and_preserves_errors() {
+        let pool = TableSyncWorkerPool::new();
+        let (lifetime, dropped) = oneshot::channel::<()>();
+        pool.workers_join_set.lock().await.spawn(async move {
+            let _lifetime = lifetime;
+            std::future::pending().await
+        });
+        let force_stop = CancellationToken::new();
+        force_stop.cancel();
+        pool.wait_all(&force_stop).await.unwrap();
+        assert!(dropped.await.is_err());
+        assert!(pool.workers_join_set.lock().await.is_empty());
+
+        let task = pool.workers_join_set.lock().await.spawn(async {
+            (
+                TableSyncWorkerId { table_id: TableId::new(1), run_id: 1 },
+                Err(etl_error!(ErrorKind::DestinationError, "Test worker failure")),
+            )
+        });
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            pool.wait_all(&force_stop).await.unwrap_err().kind(),
+            ErrorKind::DestinationError
+        );
     }
 }

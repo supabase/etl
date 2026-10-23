@@ -229,6 +229,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         publication_name: args.publication,
         run_source_migrations: true,
         drain_on_shutdown: true,
+        shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
         replication_slot: Default::default(),
         pg_connection: pg_connection_config,
         store_pg_connection: None,

@@ -363,3 +363,49 @@ Blacksmith before increasing runner sizes; local rebuild timings do not measure
 Blacksmith performance. See [Docker caching](https://docs.blacksmith.sh/blacksmith-caching/docker-builds),
 [dependency caching](https://docs.blacksmith.sh/blacksmith-caching/dependencies-actions),
 and [sticky disk protection](https://docs.blacksmith.sh/blacksmith-caching/dependencies-sticky-disks).
+
+## Shutdown and replay validation
+
+`pipeline.shutdown_drain_timeout_ms` defaults to `30000`. The first shutdown
+request stops intake and starts one shared drain budget for apply and table-sync
+workers. Repeated shutdown calls and late completion waiters do not extend it.
+When it expires, the owner cancels and joins workers, then tears down the
+destination. `drain_on_shutdown = false` still skips the apply drain; setting the
+timeout to zero skips the worker grace period altogether.
+
+DuckLake teardown stops admission, interrupts active connections, cancels its
+async tasks, and waits for native work to release its permits. If native cleanup
+still has not finished after 30 seconds, it aborts the process instead of
+returning success or hanging in runtime teardown. Keep the container termination
+grace above the drain budget plus native cleanup time and scheduling headroom.
+`cargo x deploy-local` reserves the default drain budget plus 60 seconds for
+cleanup and scheduling headroom, giving pods 90 seconds with the current default.
+Custom manifests must set `terminationGracePeriodSeconds` explicitly; Kubernetes'
+30-second default is too short for both phases. Increase the pod grace when
+increasing the drain budget. Other destinations retain their own teardown
+contracts and limits.
+
+Only acknowledged durable work can advance source checkpoints. DuckLake commits
+its row changes and replay watermark atomically, so a restarted instance can
+replay an interrupted sequence without duplicating its already committed prefix.
+Shutdown logs identify forced draining, destination cleanup duration, and total
+shutdown duration.
+
+Run the local regression with the test Postgres service from `cargo x init`:
+
+```bash
+TESTS_DATABASE_HOST=127.0.0.1 TESTS_DATABASE_PORT=5430 \
+TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres \
+TESTS_DATABASE_TLS_ENABLED=false \
+cargo nextest run --locked -p etl-destinations --features ducklake,test-utils \
+  --test main -E 'test(bounded_shutdown_replays_partial_commits_under_mixed_traffic)' \
+  --success-output immediate
+```
+
+This uses synthetic data, a temporary local DuckLake data directory, and isolated
+source and catalog databases. It stops after a real partial commit, continues
+mixed insert/update/delete traffic across shutdown, recreates the Postgres state
+store and DuckDB instance, and compares every row after two restarts. It also
+checks that the old source slot is released and unfinished writes were not
+checkpointed. The test uses a 250 ms drain budget to exercise escalation quickly;
+unit coverage checks the default 30-second deadline using a paused clock.

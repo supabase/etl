@@ -803,8 +803,9 @@ where
     }
 
     async fn shutdown(&self) -> EtlResult<()> {
-        // The pipeline drains apply writes before requesting destination
-        // teardown.
+        // The pipeline either drained apply writes or joined cancelled workers
+        // after its drain deadline. Stop new native work and interrupt any
+        // abandoned transaction before joining the destination-owned tasks.
         let interrupted_connections = self.manager.interrupt_all_connections_for_shutdown();
         info!(
             interrupted_connections,

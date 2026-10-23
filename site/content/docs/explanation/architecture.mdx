@@ -147,7 +147,7 @@ before ETL saves the corresponding checkpoint. Destinations can use idempotent
 writes or deduplication to keep replay from changing the final result.
 ETL also limits replay through:
 
-- **Controlled shutdown**: The pipeline stops intake, drains apply work (or abandons it for replay when `drain_on_shutdown` is disabled), and joins tasks. Interrupted initial copies restart from a fresh snapshot. Failures return immediately and request abort of remaining owned tasks; persisted checkpoints still govern recovery
+- **Controlled shutdown**: The pipeline stops intake and drains apply work within `shutdown_drain_timeout_ms` (30 seconds by default), then cancels and joins remaining workers before destination cleanup. Disabling `drain_on_shutdown` skips the apply drain and leaves unacknowledged work for replay. Interrupted initial copies restart from a fresh snapshot. Failures return immediately and request abort of remaining owned tasks; persisted checkpoints still govern recovery
 - **Frequent status updates**: Progress is reported to Postgres regularly, reducing the replay window after restarts
 
 ### Handling Duplicates
