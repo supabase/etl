@@ -47,8 +47,6 @@
   --etl-grid: rgba(10, 10, 10, 0.05);
   --etl-status-public-alpha: #3b5fa1;
   --etl-status-public-alpha-background: rgb(59 95 161 / 8%);
-  --etl-status-deprecated: #a13b3b;
-  --etl-status-deprecated-background: rgb(161 59 59 / 8%);
   /* Explicit tones down the bore rather than white washes, so the channel reads
      as a curved recess instead of a flat bar. */
   --etl-tube-top: oklch(0.902 0 0);
@@ -96,8 +94,6 @@
   --etl-grid: rgba(255, 255, 255, 0.045);
   --etl-status-public-alpha: #8fb0ef;
   --etl-status-public-alpha-background: rgb(143 176 239 / 9%);
-  --etl-status-deprecated: #ef8d8d;
-  --etl-status-deprecated-background: rgb(239 141 141 / 8%);
   --etl-tube-top: oklch(0.093 0 0);
   --etl-tube-mid: oklch(0.134 0 0);
   --etl-tube-gloss: oklch(0.258 0 0);
@@ -1469,11 +1465,6 @@ button {
 .prose .etl-destination-status[data-status='public-alpha'] {
   color: var(--etl-status-public-alpha);
   background: var(--etl-status-public-alpha-background);
-}
-
-.prose .etl-destination-status[data-status='deprecated'] {
-  color: var(--etl-status-deprecated);
-  background: var(--etl-status-deprecated-background);
 }
 
 .doc-path-grid {

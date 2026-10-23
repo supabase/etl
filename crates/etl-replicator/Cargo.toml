@@ -26,7 +26,7 @@ egress = ["etl/egress"]
 axum = { workspace = true, features = ["http1", "tokio"] }
 configcat = { workspace = true }
 etl = { workspace = true, features = ["tls-rustls-ring"] }
-etl-config = { workspace = true, features = ["supabase"] }
+etl-config = { workspace = true }
 etl-destinations = { workspace = true, features = ["tls-rustls-ring"] }
 etl-maintenance = { workspace = true, features = ["tls-rustls-ring"] }
 etl-telemetry = { workspace = true }

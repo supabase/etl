@@ -1183,29 +1183,17 @@ mod tests {
         }
     }
 
-    /// Retired catalog configurations must fail before a pipeline can start.
+    /// Unsupported destination configurations must fail before a pipeline can
+    /// start.
     #[test]
-    fn iceberg_destination_configs_are_rejected() {
-        for catalog in ["rest", "supabase"] {
-            let value = serde_json::json!({
-                "iceberg": {
-                    catalog: {
-                        "project_ref": "example-project",
-                        "catalog_uri": "https://example.com/catalog",
-                        "warehouse_name": "example-warehouse",
-                        "catalog_token": "placeholder-token",
-                        "s3_access_key_id": "placeholder-access-key",
-                        "s3_secret_access_key": "placeholder-secret-key",
-                        "s3_region": "example-region",
-                        "s3_endpoint": "https://example.com/storage"
-                    }
-                }
-            });
-            let error = serde_json::from_value::<DestinationConfig>(value.clone()).unwrap_err();
-            assert!(error.to_string().contains("unknown variant `iceberg`"));
-            assert!(serde_json::from_value::<DestinationConfigWithoutSecrets>(value).is_err());
-        }
-        assert!(serde_json::from_str::<DestinationKind>("\"iceberg\"").is_err());
+    fn unsupported_destination_configs_are_rejected() {
+        let value = serde_json::json!({ "unsupported": {} });
+        let error = serde_json::from_value::<DestinationConfig>(value.clone()).unwrap_err();
+        assert!(error.to_string().contains("unknown variant `unsupported`"));
+        let error = serde_json::from_value::<DestinationConfigWithoutSecrets>(value).unwrap_err();
+        assert!(error.to_string().contains("unknown variant `unsupported`"));
+        let error = serde_json::from_str::<DestinationKind>("\"unsupported\"").unwrap_err();
+        assert!(error.to_string().contains("unknown variant `unsupported`"));
     }
 
     #[test]
