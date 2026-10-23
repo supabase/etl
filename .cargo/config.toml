@@ -4,3 +4,9 @@
 [alias]
 xtask = "run --target-dir target/xtask --package xtask --"
 x = "run --quiet --target-dir target/xtask --package xtask --"
+
+[env]
+# duckdb-rs bundles commit d54cbbe3df with a generated dev version label.
+# Stamp its actual release label so signed extensions for that commit load.
+# Remove this workaround once upstream preserves .duckdb-release in bundled builds.
+CXXFLAGS = '-DDUCKDB_VERSION="v2.0.0" -DDUCKDB_PATCH_VERSION="0"'

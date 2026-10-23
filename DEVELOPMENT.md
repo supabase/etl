@@ -111,6 +111,57 @@ Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
 `cargo xtask postgres start` starts only the test Postgres clusters.
 `cargo xtask multigres --help` covers the optional Multigres cluster.
 
+### DuckDB version
+
+DuckLake uses the Git-pinned `duckdb-rs` revision in `Cargo.toml`, which bundles
+stable DuckDB **v2.0.0** (`d54cbbe3df`). A matching crates.io release is
+not yet available. The destination and maintenance runner must load extensions
+for that exact engine version; update their extension-version constants, the
+test helpers, and `scripts/bin/vendor-duckdb-extensions.sh` together when changing
+the dependency.
+
+The destination and maintenance runner attach with `AUTOMATIC_MIGRATION false`
+and omit `DUCKLAKE_VERSION`. Existing `1.0` catalogs stay on that format, while
+new catalogs use the DuckLake extension's default format, currently `1.1`.
+Existing `1.1` catalogs also remain unchanged. Do not set a global
+`ducklake_default_version` override: it also affects existing catalogs.
+The previous DuckDB 1.5.6 extension can still read existing `1.0` catalogs
+after a rollback, but new `1.1` catalogs require compatible clients and cannot
+be downgraded. Other clients sharing a `1.0` catalog must also avoid migrating it.
+
+Catalogs below `1.0` must be migrated before deploying this build. Startup in
+both the destination and maintenance runner rejects them with a catalog-version
+mismatch showing the existing and required versions; it leaves the catalog
+unchanged. Use the previous DuckDB 1.5.6 build with automatic migration enabled
+to upgrade such catalogs to `1.0`, verify the version, then deploy DuckDB 2.0.
+Do not enable automatic migration under DuckDB 2.0 as a workaround for this
+error. Quaxy attaches with `READ_ONLY`, so it cannot create or migrate catalogs.
+
+This upstream revision stamps its bundled sources with a development version
+instead of the published release label. `.cargo/config.toml` supplies the
+matching `CXXFLAGS` version definitions so signed extensions load. Keep those
+definitions in sync with the Git pin as well. If you supply your own `CXXFLAGS`
+or consume these crates from another workspace, include both definitions from
+that config; Cargo does not inherit dependency workspaces' configuration.
+The pinned `cc` build helper also accepts `CXXFLAGS_<target>`,
+`CXXFLAGS_<target_with_underscores>`, and `HOST_CXXFLAGS` or `TARGET_CXXFLAGS`.
+It combines those with `CXXFLAGS`, applying more specific flags last; do not
+redefine or undefine the version macros there. The destination and maintenance
+runner check the linked release label before loading extensions and return a
+rebuild instruction on mismatch. The version unit test also checks the source
+hash to catch a stale override.
+
+The `libduckdb-sys` profile overrides in `Cargo.toml` keep the bundled C++ engine
+compatible with the published release extensions during development, tests, and
+benchmarks. This revision enables DuckDB's debug allocator bookkeeping when
+Cargo requests debug information, which conflicts with release extensions.
+Other workspaces consuming these crates must also apply those overrides.
+
+Run `cargo x vendor-duckdb --platform osx_arm64` for local Apple Silicon testing
+and set `ETL_DUCKDB_EXTENSION_ROOT` to the absolute path of
+`vendor/duckdb/extensions`. The stable release publishes extensions for
+`linux_amd64`, `linux_arm64`, `osx_amd64`, and `osx_arm64`.
+
 ## Migrations
 
 SQL is grouped by its owning subsystem:

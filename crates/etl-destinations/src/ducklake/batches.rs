@@ -3097,7 +3097,7 @@ mod tests {
         assert!(!source.to_string().contains(sensitive_value));
         assert_eq!(
             source.to_string(),
-            "DuckDB query failed with a Binder error; error message omitted because it may \
+            "DuckDB query failed with a Catalog error; error message omitted because it may \
              contain row values"
         );
     }
