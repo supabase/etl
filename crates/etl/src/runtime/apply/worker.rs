@@ -48,8 +48,25 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    pub(crate) async fn wait(self) -> EtlResult<()> {
-        self.handle.await.map_err(|err| {
+    ///
+    /// The owner's force-stop token escalates a graceful drain to cancellation.
+    /// Requested cancellation succeeds only after the worker has been joined;
+    /// completed errors and panics still propagate.
+    pub(crate) async fn wait(mut self, force_stop: &CancellationToken) -> EtlResult<()> {
+        let result = tokio::select! {
+            biased;
+
+            result = &mut self.handle => result,
+
+            () = force_stop.cancelled() => {
+                self.handle.abort();
+                match self.handle.await {
+                    Err(error) if error.is_cancelled() => return Ok(()),
+                    result => result,
+                }
+            }
+        };
+        result.map_err(|err| {
             if err.is_cancelled() {
                 etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", source: err)
             } else {

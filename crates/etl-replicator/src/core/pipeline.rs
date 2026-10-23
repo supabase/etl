@@ -68,8 +68,9 @@ where
     match pipeline_result {
         Some(result) => result?,
         None => {
-            // Kubernetes enforces the grace period with SIGKILL. Do not drop
-            // the completion future while transactions and writes drain.
+            // The pipeline owns bounded draining and escalation. Keep its
+            // completion future alive so cancelled workers and native writes
+            // are joined before the process exits.
             pipeline.shutdown();
             pipeline_wait.await?;
         }
