@@ -45,12 +45,14 @@ ducklake = [
 bigquery = [
     "dep:uuid",
     "dep:gcp-bigquery-client",
+    "dep:serde",
     "dep:serde_json",
     "dep:prost",
     "dep:rand",
     "dep:tonic",
     "dep:tracing",
     "dep:tokio",
+    "tokio/fs",
     "dep:metrics",
 ]
 iceberg = [

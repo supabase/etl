@@ -2,7 +2,7 @@
 # `cargo x ...` and `cargo build`/`cargo run` stops invalidating shared crates.io
 # deps whose unified feature sets differ between the two graphs.
 [alias]
-xtask = "run --target-dir target/xtask --package xtask --"
+xtask = "run --quiet --target-dir target/xtask --package xtask --"
 x = "run --quiet --target-dir target/xtask --package xtask --"
 
 [env]

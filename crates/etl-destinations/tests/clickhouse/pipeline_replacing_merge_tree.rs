@@ -16,7 +16,9 @@ use etl::{
     },
 };
 use etl_config::shared::ClickHouseEngine;
-use etl_destinations::clickhouse::test_utils::setup_clickhouse_database;
+use etl_destinations::clickhouse::test_utils::{
+    redact_clickhouse_error, setup_clickhouse_database,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
@@ -629,7 +631,12 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
 
     // --- WHEN: operator runs OPTIMIZE ... FINAL CLEANUP ---
     let optimize_sql = optimize_final_cleanup_sql("test_final__cleanup");
-    let optimize_result = clickhouse_db.db_client().query(&optimize_sql).execute().await;
+    let optimize_result = clickhouse_db
+        .db_client()
+        .query(&optimize_sql)
+        .execute()
+        .await
+        .map_err(redact_clickhouse_error);
 
     pipeline.shutdown_and_wait().await.unwrap();
 

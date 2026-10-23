@@ -6,7 +6,7 @@ use arrow::{
     datatypes::TimeUnit,
 };
 use etl::data::{ArrayCell, Cell, Date, PgTime, TableRow, Timestamp};
-use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH};
+use etl_destinations::iceberg::{IcebergClient, UNIX_EPOCH, test_utils::redact_iceberg_error};
 use futures::StreamExt;
 
 /// Converts a RecordBatch back to a vector of TableRows.
@@ -332,16 +332,18 @@ pub(crate) async fn read_all_rows(
         .snapshot_id(current_snapshot)
         .select_all()
         .build()
+        .map_err(redact_iceberg_error)
         .unwrap()
         .to_arrow()
         .await
+        .map_err(redact_iceberg_error)
         .unwrap();
 
     let mut all_rows = Vec::new();
 
     // Iterate over the stream of RecordBatch results
     while let Some(batch_result) = table_rows_stream.next().await {
-        let rows = record_batch_to_table_rows(&batch_result.unwrap());
+        let rows = record_batch_to_table_rows(&batch_result.map_err(redact_iceberg_error).unwrap());
         all_rows.extend(rows);
     }
 

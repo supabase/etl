@@ -5393,6 +5393,7 @@ mod tests {
             quote_literal(data.as_str()),
             quote_literal(&format!("__ducklake_metadata_{LAKE_CATALOG}")),
         ))
+        .map_err(RedactedDuckDbError::from)
         .expect("failed to attach DuckLake catalog");
         conn
     }
@@ -5485,7 +5486,9 @@ mod tests {
             let password =
                 catalog.password().expect("TESTS_DATABASE_PASSWORD must be set").to_owned();
             let conn = open_lake_conn(&catalog, &data);
-            conn.execute_batch("create table lake.main.t (id integer);").unwrap();
+            conn.execute_batch("create table lake.main.t (id integer);")
+                .map_err(RedactedDuckDbError::from)
+                .unwrap();
 
             // Refuse new catalog connections and drop the open ones.
             let (admin, _) = etl_postgres::tokio::test_utils::connect_to_pg_database(
