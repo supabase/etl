@@ -115,7 +115,7 @@ pub(crate) async fn start_replicator_with_config(
     let health_server_task =
         spawn_health_server(replicator_config.health, replicator_health.clone())?;
 
-    let replicator_result = async {
+    let replicator_result: ReplicatorResult<()> = async {
         let pipeline_id = replicator_config.pipeline.id;
 
         // We initialize the store, using the optional store connection when the
@@ -127,15 +127,20 @@ pub(crate) async fn start_replicator_with_config(
         ) else {
             return Ok(());
         };
+
         let replicator_store = result?;
 
         destinations::start(
             replicator_config,
-            replicator_store,
+            replicator_store.clone(),
             &mut shutdown_signal,
             &replicator_health,
         )
-        .await
+        .await?;
+
+        replicator_store.shutdown().await?;
+
+        Ok(())
     }
     .await;
 
