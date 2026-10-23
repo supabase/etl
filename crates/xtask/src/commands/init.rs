@@ -24,7 +24,7 @@ impl InitArgs {
         require_command("psql", &["--version"], "Postgres client (psql) is not installed")?;
 
         println!("== Local development environment ==");
-        println!("This starts Postgres, ClickHouse, and the Iceberg catalog, and runs migrations.");
+        println!("This starts Postgres and ClickHouse, and runs migrations.");
         println!("It does not write replicator configuration or apply Kubernetes resources.");
         println!();
 

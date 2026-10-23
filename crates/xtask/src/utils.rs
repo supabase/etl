@@ -123,9 +123,6 @@ pub(crate) enum DestinationPreset {
     /// DuckLake destination.
     #[value(name = "ducklake")]
     DuckLake,
-    /// Iceberg destination.
-    #[value(name = "iceberg")]
-    Iceberg,
     /// Snowflake destination.
     #[value(name = "snowflake")]
     Snowflake,
@@ -139,8 +136,8 @@ impl DestinationPreset {
     }
 
     /// Returns every destination preset, local-first.
-    pub(crate) const fn all() -> [Self; 5] {
-        [Self::ClickHouse, Self::BigQuery, Self::DuckLake, Self::Snowflake, Self::Iceberg]
+    pub(crate) const fn all() -> [Self; 4] {
+        [Self::ClickHouse, Self::BigQuery, Self::DuckLake, Self::Snowflake]
     }
 
     /// Returns the Cargo feature for this destination.
@@ -149,7 +146,6 @@ impl DestinationPreset {
             DestinationPreset::BigQuery => "bigquery",
             DestinationPreset::ClickHouse => "clickhouse",
             DestinationPreset::DuckLake => "ducklake",
-            DestinationPreset::Iceberg => "iceberg",
             DestinationPreset::Snowflake => "snowflake",
         }
     }
@@ -160,7 +156,6 @@ impl DestinationPreset {
             Self::ClickHouse => "local default, Docker from cargo x init, no cloud credentials",
             Self::BigQuery => "stable cloud destination, needs GCP credentials",
             Self::DuckLake => "in progress, needs catalog + object storage",
-            Self::Iceberg => "deprecated; REST uses local Docker, supabase needs cloud credentials",
             Self::Snowflake => "in progress, needs key-pair credentials",
         }
     }
@@ -171,8 +166,8 @@ impl DestinationPreset {
             Ok(destination) => Ok(destination),
             Err(_) => {
                 bail!(
-                    "Unknown destination `{name}`. Use bigquery, clickhouse, ducklake, iceberg, \
-                     or snowflake."
+                    "Unknown destination `{name}`. Use bigquery, clickhouse, ducklake, or \
+                     snowflake."
                 )
             }
         }
