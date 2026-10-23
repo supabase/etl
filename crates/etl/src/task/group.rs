@@ -91,6 +91,7 @@ impl<T: 'static> TaskGroup<T> {
     /// Classifies one completion and drops remaining tasks on failure.
     fn handle_result(&mut self, result: Result<EtlResult<T>, JoinError>) -> EtlResult<T> {
         let result = result.map_err(EtlError::from).and_then(std::convert::identity);
+
         if result.is_err() {
             // The group may remain owned by a registry after this call returns.
             // Drop its tasks now rather than waiting for the owner to

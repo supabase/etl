@@ -116,6 +116,8 @@ pub struct PipelineBuilder<S, D> {
     /// Whether shutdown drains buffered apply work. Default:
     /// [`PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN`].
     drain_on_shutdown: bool,
+    /// Maximum graceful drain duration in milliseconds.
+    shutdown_drain_timeout_ms: u64,
 }
 
 impl<S, D> PipelineBuilder<S, D>
@@ -178,6 +180,7 @@ where
             },
             replication_slot: ReplicationSlotConfig::default(),
             drain_on_shutdown: PipelineConfig::DEFAULT_DRAIN_ON_SHUTDOWN,
+            shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
         }
     }
 
@@ -185,6 +188,12 @@ where
     /// exits, or abandons it for replay on the next start.
     pub fn with_drain_on_shutdown(mut self, drain_on_shutdown: bool) -> Self {
         self.drain_on_shutdown = drain_on_shutdown;
+        self
+    }
+
+    /// Sets the maximum time workers may drain after shutdown.
+    pub fn with_shutdown_drain_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.shutdown_drain_timeout_ms = timeout_ms;
         self
     }
 
@@ -291,6 +300,7 @@ where
             memory_backpressure: Some(self.memory_backpressure),
             run_source_migrations: true,
             drain_on_shutdown: self.drain_on_shutdown,
+            shutdown_drain_timeout_ms: self.shutdown_drain_timeout_ms,
         };
 
         Pipeline::new(config, self.store, self.destination)

@@ -79,8 +79,9 @@ clickhouse = { version = "0.14.0", default-features = false }
 config = { version = "0.14.0", default-features = false }
 configcat = { version = "0.1.3", default-features = false }
 const-oid = { version = "0.9.6", default-features = false }
-# Includes the zip 9 build dependency fixes for RUSTSEC-2026-0367 through 0369.
-duckdb = { version = "1.10506.1", default-features = false }
+# Bundles DuckDB v2.0.0 (d54cbbe3df); no crates.io release yet.
+# Keep the destination, maintenance, test, and extension-download pins in sync.
+duckdb = { git = "https://github.com/duckdb/duckdb-rs", rev = "e1b0940dfddd575c43fe4e2f070d47ee53d419cd", default-features = false }
 etl = { path = "crates/etl", default-features = false }
 etl-config = { path = "crates/etl-config", default-features = false }
 etl-destinations = { path = "crates/etl-destinations", default-features = false }
@@ -150,8 +151,16 @@ uuid = { version = "1.17.0", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
 zstd = { version = "0.13.0", default-features = false }
 
+[profile.dev.package.libduckdb-sys]
+# The published C++ extensions use release allocator bookkeeping. The bundled
+# build selects DEBUG from this setting, so match the extensions even in tests.
+debug = false
+
 [profile.bench]
 debug = true
+
+[profile.bench.package.libduckdb-sys]
+debug = false
 
 [profile.release]
 # Link-time optimization: enables better cross-crate optimizations

@@ -4,14 +4,21 @@
 //! replication with destination systems. Manages worker lifecycles, shutdown
 //! coordination, and error handling.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use etl_config::shared::{
     Validate, validate_copy_concurrency, validate_refresh_intervals, validate_source_tls_config,
     validate_table_error_retry_delay_ms,
 };
 use etl_postgres::slots::EtlReplicationSlot;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::{
+    sync::{Mutex, Semaphore},
+    time::Instant,
+};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, info, warn};
 
@@ -93,6 +100,8 @@ pub struct Pipeline<S, D> {
     destination: D,
     state: PipelineState,
     shutdown_token: CancellationToken,
+    /// Time of the first shutdown request; repeated requests cannot extend it.
+    shutdown_started: OnceLock<Instant>,
 }
 
 impl<S, D> Pipeline<S, D>
@@ -121,6 +130,7 @@ where
             destination,
             state: PipelineState::NotStarted,
             shutdown_token: CancellationToken::new(),
+            shutdown_started: OnceLock::new(),
         }
     }
 
@@ -273,6 +283,12 @@ where
     /// request abort on drop without awaiting further cleanup.
     /// Destination-owned resources, including ownership cycles, may still
     /// require explicit teardown.
+    ///
+    /// Once shutdown is requested, workers get at most
+    /// [`PipelineConfig::shutdown_drain_timeout_ms`] to drain. At the deadline
+    /// they are cancelled and joined, then destination teardown runs with the
+    /// last durable checkpoint intact. Destination implementations must stop
+    /// abandoned writes and join their native work in that hook.
     pub async fn wait(&self) -> EtlResult<()> {
         let PipelineState::Started { tasks } = &self.state else {
             warn!("pipeline was not started, skipping wait");
@@ -295,18 +311,45 @@ where
         // waiter skips the successful teardown sequence.
         let _shutdown_guard = self.shutdown_token.clone().drop_guard();
 
-        debug!("waiting for apply worker to complete");
+        let force_stop = CancellationToken::new();
+        let workers = async {
+            debug!("waiting for apply worker to complete");
+            apply_worker.wait(&force_stop).await?;
+            self.shutdown();
 
-        apply_worker.wait().await?;
-        self.shutdown();
+            debug!("waiting for table sync workers to complete");
+            pool.wait_all(&force_stop).await
+        };
+        tokio::pin!(workers);
 
-        debug!("waiting for table sync workers to complete");
+        // Keep ownership of the completion future through escalation. Dropping
+        // it would request abort without joining the workers, and could skip
+        // destination cleanup while native writes are still running.
+        let forced = tokio::select! {
+            biased;
 
-        pool.wait_all().await?;
+            result = &mut workers => {
+                result?;
+                false
+            }
 
-        debug!("waiting for destination shutdown to complete");
-
+            () = self.wait_for_drain_deadline() => {
+                warn!(
+                    drain_timeout_ms = self.config.shutdown_drain_timeout_ms,
+                    "pipeline shutdown drain deadline reached, cancelling workers for replay"
+                );
+                force_stop.cancel();
+                workers.await?;
+                true
+            }
+        };
+        info!(forced, "pipeline workers stopped, starting destination teardown");
+        let cleanup_started = Instant::now();
         self.destination.shutdown().await?;
+        info!(
+            cleanup_elapsed_ms = cleanup_started.elapsed().as_millis() as u64,
+            "pipeline destination teardown completed"
+        );
 
         // Optional monitors must not turn successful replication into failure.
         for (task_name, task) in [
@@ -320,16 +363,24 @@ where
             }
         }
 
+        info!(
+            forced,
+            shutdown_elapsed_ms =
+                self.shutdown_started.get().map(|start| start.elapsed().as_millis() as u64),
+            "pipeline shutdown completed"
+        );
         Ok(())
     }
 
     /// Initiates graceful shutdown of the pipeline.
     ///
     /// Cancels the shared shutdown token. Apply loops stop new intake and
-    /// drain pending destination writes, or abandon them for replay when
-    /// [`PipelineConfig::drain_on_shutdown`] is disabled; initial sync workers
-    /// interrupt their copy waits and stop. The request is retained even if no
-    /// workers have started yet. Repeated requests are harmless.
+    /// drain pending destination writes within
+    /// [`PipelineConfig::shutdown_drain_timeout_ms`], or abandon them for
+    /// replay when [`PipelineConfig::drain_on_shutdown`] is disabled;
+    /// initial sync workers interrupt their copy waits and stop. The
+    /// request is retained even if no workers have started yet. Repeated
+    /// requests are harmless.
     ///
     /// This method returns immediately without waiting for workers to stop.
     ///
@@ -338,9 +389,23 @@ where
     pub fn shutdown(&self) {
         info!("initiating pipeline shutdown");
 
+        self.shutdown_started.get_or_init(Instant::now);
         self.shutdown_token.cancel();
 
         info!("shutdown signal sent to all workers");
+    }
+
+    /// Waits for the drain budget measured from the first shutdown request,
+    /// even when the completion waiter starts later.
+    async fn wait_for_drain_deadline(&self) {
+        self.shutdown_token.cancelled().await;
+        // An internal drop guard may cancel the token without a public
+        // shutdown request. It still must not leave a live waiter unbounded.
+        let started = *self.shutdown_started.get_or_init(Instant::now);
+        tokio::time::sleep_until(
+            started + Duration::from_millis(self.config.shutdown_drain_timeout_ms),
+        )
+        .await;
     }
 
     /// Initiates shutdown and waits for complete pipeline termination.
@@ -440,5 +505,44 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{
+        memory_destination::MemoryDestination, notifying_store::NotifyingStore,
+        pipeline::PipelineBuilder,
+    };
+
+    /// A late waiter and repeated stop requests share the original deadline.
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_deadline_starts_at_first_request() {
+        let config = serde_json::from_value(serde_json::json!({
+            "host": "localhost", "port": 5430, "name": "test", "username": "postgres",
+            "password": null, "tls": { "enabled": false, "trusted_root_certs": "" }
+        }))
+        .unwrap();
+        let store = NotifyingStore::new();
+        let pipeline = PipelineBuilder::new(
+            config,
+            1,
+            "test".to_owned(),
+            store.clone(),
+            MemoryDestination::new(store),
+        )
+        .with_shutdown_drain_timeout_ms(30_000)
+        .build();
+        let started = Instant::now();
+        pipeline.shutdown();
+        tokio::time::advance(Duration::from_secs(20)).await;
+        pipeline.shutdown();
+        pipeline.wait_for_drain_deadline().await;
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+        // A waiter started after expiry must not receive another budget.
+        tokio::time::advance(Duration::from_secs(5)).await;
+        pipeline.wait_for_drain_deadline().await;
+        assert_eq!(started.elapsed(), Duration::from_secs(35));
     }
 }

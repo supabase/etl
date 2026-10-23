@@ -8,6 +8,7 @@ use etl::{
         CachedStore, SchemaStore, StateStore, TableRetryPolicy, TableState,
         TableStateLifecycleStore, TableStateOperation, TableStates, WorkerType,
     },
+    task::TaskRegistry,
 };
 use tracing::info;
 
@@ -16,14 +17,17 @@ use crate::{error_notification::ErrorNotificationClient, sentry};
 /// State store decorator that reports persisted table replication errors.
 ///
 /// After [`StateStore::update_table_states`] succeeds, this wrapper reports
-/// each terminal [`TableState::Errored`] update to Sentry and, when configured,
-/// to the Supabase error-notification endpoint. Errors with a timed retry
-/// remain visible in the state store but are not reported while automatic
-/// recovery is still in progress.
+/// each terminal [`TableState::Errored`] update in a background task to Sentry
+/// and, when configured, to the Supabase error-notification endpoint. Errors
+/// with a timed retry remain visible in the state store but are not reported
+/// while automatic recovery is still in progress.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorReportingStateStore<S> {
     inner: S,
+    /// Client used for sending notifications.
     notification_client: Option<Arc<ErrorNotificationClient>>,
+    /// Owned error-reporting tasks shared by all store clones.
+    reporting_tasks: TaskRegistry,
 }
 
 /// Persisted table error waiting to be reported.
@@ -38,23 +42,42 @@ struct ReportableTableError {
 impl<S> ErrorReportingStateStore<S> {
     /// Creates a reporting wrapper around `inner`.
     pub(crate) fn new(inner: S, notification_client: Option<ErrorNotificationClient>) -> Self {
-        Self { inner, notification_client: notification_client.map(Arc::new) }
+        Self {
+            inner,
+            notification_client: notification_client.map(Arc::new),
+            reporting_tasks: TaskRegistry::new(),
+        }
     }
 
-    /// Reports persisted errored table state updates.
-    async fn report_errored_updates(&self, updates: Vec<ReportableTableError>) {
-        let notification_client = self.notification_client.as_ref();
+    /// Aborts and joins best-effort reporting after pipeline workers stop.
+    pub(crate) async fn shutdown(&self) -> EtlResult<()> {
+        self.reporting_tasks.shutdown().await
+    }
+
+    /// Reports persisted errors without waiting for email delivery.
+    async fn report_errored_updates(&self, updates: Vec<ReportableTableError>) -> EtlResult<()> {
+        self.reporting_tasks.try_reap().await?;
 
         for update in updates {
             info!(table_id = update.table_id.0, "reporting table replication error");
 
-            sentry::capture_table_error(update.table_id, &update.source_err);
-            if let Some(notification_client) = notification_client {
-                notification_client
-                    .notify_error(update.source_err.to_string(), &update.source_err)
-                    .await;
-            }
+            // Capture only the client, never the store that owns the task
+            // registry.
+            let notification_client = self.notification_client.clone();
+            self.reporting_tasks
+                .spawn(async move {
+                    sentry::capture_table_error(update.table_id, &update.source_err);
+
+                    if let Some(notification_client) = notification_client {
+                        notification_client
+                            .notify_error(update.source_err.to_string(), &update.source_err)
+                            .await;
+                    }
+                })
+                .await;
         }
+
+        Ok(())
     }
 
     /// Extracts only the errored state updates that need post-persistence
@@ -104,11 +127,9 @@ where
 
         self.inner.update_table_states(updates).await?;
 
-        // This operation must be infallible or at least not propagate failures,
-        // otherwise the error thrown here, will be caught and handled by the
-        // core of etl itself. There is no infinite recursion problem, but it
-        // might make the system harder to understand.
-        self.report_errored_updates(reportable_errors).await;
+        // We optimistically report the error updates without blocking the
+        // method.
+        self.report_errored_updates(reportable_errors).await?;
 
         Ok(())
     }

@@ -19,6 +19,11 @@ pub const CLICKHOUSE_USER_ENV: &str = "TESTS_CLICKHOUSE_USER";
 /// access).
 pub const CLICKHOUSE_PASSWORD_ENV: &str = "TESTS_CLICKHOUSE_PASSWORD";
 
+/// Removes provider response text before ClickHouse test errors are reported.
+pub fn redact_clickhouse_error(error: clickhouse::error::Error) -> clickhouse::error::Error {
+    crate::clickhouse::client::redact_clickhouse_error(error)
+}
+
 /// Returns the ClickHouse HTTP URL from the environment.
 ///
 /// # Panics
@@ -97,7 +102,7 @@ impl ClickHouseTestDatabase {
         let database = quote_identifier(&self.database);
         let query = format!("CREATE DATABASE IF NOT EXISTS {database}");
         for attempt in 1..=5 {
-            match self.root_client.query(&query).execute().await {
+            match self.root_client.query(&query).execute().await.map_err(redact_clickhouse_error) {
                 Ok(()) => return,
                 Err(e) if attempt < 5 => {
                     eprintln!(
@@ -117,6 +122,7 @@ impl ClickHouseTestDatabase {
             .query(&format!("DROP DATABASE IF EXISTS {database}"))
             .execute()
             .await
+            .map_err(redact_clickhouse_error)
             .expect("Failed to drop test ClickHouse database");
     }
 
@@ -138,6 +144,7 @@ impl ClickHouseTestDatabase {
             ))
             .execute()
             .await
+            .map_err(redact_clickhouse_error)
             .expect("Failed to create test ClickHouse user");
         // Record the user before granting so `Drop` removes it if the grant
         // fails.
@@ -146,6 +153,7 @@ impl ClickHouseTestDatabase {
             .query(&format!("grant all on {}.* to {quoted_user}", quote_identifier(&self.database)))
             .execute()
             .await
+            .map_err(redact_clickhouse_error)
             .expect("Failed to grant test ClickHouse user access");
         self.user = user;
         self.password = Some(password);
@@ -216,7 +224,12 @@ impl ClickHouseTestDatabase {
     where
         T: for<'a> clickhouse::Row<Value<'a> = T> + serde::de::DeserializeOwned + 'static,
     {
-        self.db_client.query(sql).fetch_all::<T>().await.expect("ClickHouse query failed")
+        self.db_client
+            .query(sql)
+            .fetch_all::<T>()
+            .await
+            .map_err(redact_clickhouse_error)
+            .expect("ClickHouse query failed")
     }
 
     /// Returns the underlying ClickHouse client for fallible queries.
@@ -249,6 +262,7 @@ impl ClickHouseTestDatabase {
             .bind(table_name)
             .fetch_all::<Col>()
             .await
+            .map_err(redact_clickhouse_error)
             .expect("failed to query system.columns")
             .into_iter()
             .map(|c| (c.name, c.type_name))
@@ -269,6 +283,7 @@ impl Drop for ClickHouseTestDatabase {
                         .query(&format!("DROP DATABASE IF EXISTS {database}"))
                         .execute()
                         .await
+                        .map_err(redact_clickhouse_error)
                     {
                         eprintln!("warning: failed to drop test ClickHouse database: {error}");
                     }
@@ -277,6 +292,7 @@ impl Drop for ClickHouseTestDatabase {
                             .query(&format!("drop user if exists {user}"))
                             .execute()
                             .await
+                            .map_err(redact_clickhouse_error)
                     {
                         eprintln!("warning: failed to drop test ClickHouse user: {error}");
                     }

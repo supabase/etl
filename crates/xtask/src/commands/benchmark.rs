@@ -42,7 +42,7 @@ pub(crate) struct BenchmarkArgs {
     #[arg(long, env = "POSTGRES_USER", default_value = DEFAULT_DB_USER)]
     username: String,
     /// Postgres password.
-    #[arg(long, env = "POSTGRES_PASSWORD", default_value = DEFAULT_DB_PASSWORD)]
+    #[arg(long, env = "POSTGRES_PASSWORD", default_value = DEFAULT_DB_PASSWORD, hide_env_values = true)]
     password: String,
     /// Number of TPC-C warehouses to prepare.
     #[arg(long, env = "TPCC_WAREHOUSES", default_value_t = 1)]
@@ -79,13 +79,13 @@ pub(crate) struct BenchmarkArgs {
     #[arg(long, env = "BQ_SA_KEY_FILE")]
     bq_sa_key_file: Option<PathBuf>,
     /// ClickHouse HTTP URL (for example, `http://localhost:8123`).
-    #[arg(long, env = "BENCH_CLICKHOUSE_URL")]
+    #[arg(long, env = "BENCH_CLICKHOUSE_URL", hide_env_values = true)]
     clickhouse_url: Option<String>,
     /// ClickHouse username.
     #[arg(long, env = "BENCH_CLICKHOUSE_USER")]
     clickhouse_user: Option<String>,
     /// ClickHouse password.
-    #[arg(long, env = "BENCH_CLICKHOUSE_PASSWORD")]
+    #[arg(long, env = "BENCH_CLICKHOUSE_PASSWORD", hide_env_values = true)]
     clickhouse_password: Option<String>,
     /// ClickHouse database prefix. Each run creates and drops its own
     /// `<prefix>_<pipeline_id>` database.

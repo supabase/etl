@@ -182,6 +182,7 @@ fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
         invalidated_slot_behavior: InvalidatedSlotBehavior::default(),
         run_source_migrations: true,
         drain_on_shutdown: true,
+        shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
     }
 }
 

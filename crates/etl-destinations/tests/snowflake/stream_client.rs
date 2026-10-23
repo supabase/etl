@@ -532,8 +532,8 @@ async fn continuation_token() {
             .await
             .expect("insert batch 2 failed");
 
-        assert_ne!(
-            insert1.continuation_token, insert2.continuation_token,
+        assert!(
+            insert1.continuation_token != insert2.continuation_token,
             "continuation_token must advance after each batch"
         );
         wait_for_offset(&stream, &config, &table, &channel, &offset2).await;
@@ -558,8 +558,8 @@ async fn continuation_token() {
             .expect("insert with stale token should not error");
 
         // Same continuation token returned.
-        assert_eq!(
-            insert3.continuation_token, insert2.continuation_token,
+        assert!(
+            insert3.continuation_token == insert2.continuation_token,
             "stale token should not advance the sequencer"
         );
         // Still 2 rows, offset token is not advanced to offset3.
@@ -579,8 +579,8 @@ async fn continuation_token() {
             .await
             .expect("insert batch 3 with correct token failed");
 
-        assert_ne!(
-            insert3_retry.continuation_token, insert2.continuation_token,
+        assert!(
+            insert3_retry.continuation_token != insert2.continuation_token,
             "correct token should advance the sequencer"
         );
         wait_for_offset(&stream, &config, &table, &channel, &offset3).await;
