@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt,
     sync::Arc,
     time::Instant,
@@ -38,6 +38,8 @@ struct Inner<D> {
     tables_dropped_for_copy: HashSet<TableId>,
     event_notifications: Vec<(EventsCheckFn, Arc<Notify>)>,
     all_event_notifications: Vec<(AllEventsCheckFn, Arc<Notify>)>,
+    /// Faults that fire on the first `write_events` call whose events match.
+    conditional_write_events_faults: VecDeque<(EventsCheckFn, FaultAction)>,
     write_table_rows_called: u64,
     shutdown_called: bool,
 }
@@ -78,11 +80,13 @@ impl<D> Inner<D> {
 /// expected to satisfy it.
 ///
 /// Faults from [`crate::test_utils::faults`] can be scripted per operation
-/// through [`TestDestinationWrapper::inject_fault`]. The wrapper records what
-/// was acknowledged to the apply loop: on an injected failure after write the
-/// inner destination has applied the write but the wrapper does not record it,
-/// so ground truth for what the destination actually holds is read from the
-/// inner destination directly.
+/// through [`TestDestinationWrapper::inject_fault`], or aimed at the first
+/// matching batch through
+/// [`TestDestinationWrapper::inject_write_events_fault_when`]. The wrapper
+/// records what was acknowledged to the apply loop: on an injected failure
+/// after write the inner destination has applied the write but the wrapper
+/// does not record it, so ground truth for what the destination actually
+/// holds is read from the inner destination directly.
 #[derive(Clone)]
 pub struct TestDestinationWrapper<D> {
     inner: Arc<RwLock<Inner<D>>>,
@@ -116,6 +120,7 @@ impl<D> TestDestinationWrapper<D> {
             tables_dropped_for_copy: HashSet::new(),
             event_notifications: Vec::new(),
             all_event_notifications: Vec::new(),
+            conditional_write_events_faults: VecDeque::new(),
             write_table_rows_called: 0,
             shutdown_called: false,
         };
@@ -237,6 +242,21 @@ impl<D> TestDestinationWrapper<D> {
         self.faults.inject(op, action).await;
     }
 
+    /// Queues a fault for the first later `write_events` call whose events
+    /// satisfy `condition`.
+    ///
+    /// Calls whose events do not match pass through, so a test can target one
+    /// batch without depending on how the apply loop splits events into
+    /// batches. A matching conditional fault takes precedence over faults
+    /// queued with [`TestDestinationWrapper::inject_fault`].
+    pub async fn inject_write_events_fault_when<F>(&self, condition: F, action: FaultAction)
+    where
+        F: Fn(&[Event]) -> bool + Send + Sync + 'static,
+    {
+        let mut inner = self.inner.write().await;
+        inner.conditional_write_events_faults.push_back((Box::new(condition), action));
+    }
+
     /// Holds the next call of the given operation and returns the handle that
     /// observes and releases it.
     pub async fn hold_next(&self, op: FaultyOp) -> HoldHandle {
@@ -250,6 +270,31 @@ impl<D> TestDestinationWrapper<D> {
         match self.faults.next(op).await {
             Some(FaultAction::Reject(injected)) => Err(injected.to_etl_error()),
             fault => Ok(fault),
+        }
+    }
+
+    /// Consumes the fault for a `write_events` call, applying rejections here.
+    ///
+    /// The oldest conditional fault fires when `events` match it; otherwise
+    /// the call takes the next queued [`FaultyOp::WriteEvents`] fault.
+    async fn take_write_events_fault(&self, events: &[Event]) -> EtlResult<Option<FaultAction>> {
+        let conditional_fault = {
+            let mut inner = self.inner.write().await;
+            let matches = inner
+                .conditional_write_events_faults
+                .front()
+                .is_some_and(|(condition, _)| condition(events));
+            if matches {
+                inner.conditional_write_events_faults.pop_front().map(|(_, action)| action)
+            } else {
+                None
+            }
+        };
+
+        match conditional_fault {
+            Some(FaultAction::Reject(injected)) => Err(injected.to_etl_error()),
+            Some(fault) => Ok(Some(fault)),
+            None => self.take_fault(FaultyOp::WriteEvents).await,
         }
     }
 }
@@ -373,7 +418,7 @@ where
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
-        let fault = self.take_fault(FaultyOp::WriteEvents).await?;
+        let fault = self.take_write_events_fault(&events).await?;
 
         let destination = {
             let inner = self.inner.read().await;
