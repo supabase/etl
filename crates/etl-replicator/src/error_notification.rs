@@ -2,6 +2,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     error::Error,
     hash::{Hash, Hasher},
+    net::{IpAddr, Ipv6Addr},
     time::Duration,
 };
 
@@ -88,7 +89,11 @@ impl ErrorNotificationClient {
         project_ref: String,
         pipeline_id: String,
     ) -> Result<Self, reqwest::Error> {
+        // Require direct IPv6 connections to the Supabase API, without IPv4
+        // fallback.
         let client = reqwest::Client::builder()
+            .local_address(IpAddr::V6(Ipv6Addr::UNSPECIFIED))
+            .no_proxy()
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
@@ -236,7 +241,7 @@ mod tests {
         status: StatusCode,
         body: &'static str,
     ) -> (String, AbortOnDropHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = TcpListener::bind("[::1]:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let app = Router::new().route(
             "/system/replication/abcdefghijklmnopqrst/emails",
@@ -366,5 +371,17 @@ mod tests {
 
         // Different errors should produce different hashes.
         assert_ne!(hash1, hash2);
+    }
+
+    /// An IPv4-only endpoint must fail instead of bypassing IPv6 enforcement.
+    #[tokio::test]
+    async fn rejects_ipv4_connections() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client = error_notification_client(&url);
+        let error = client.client.get(&url).send().await.unwrap_err();
+        assert!(error.is_connect());
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
     }
 }
