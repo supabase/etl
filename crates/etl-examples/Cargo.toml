@@ -24,7 +24,6 @@ test = false
 name = "ducklake"
 path = "src/bin/ducklake.rs"
 required-features = ["ducklake"]
-test = false
 
 [[bin]]
 name = "snowflake"

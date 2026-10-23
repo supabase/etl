@@ -5,7 +5,7 @@ use crate::retry::{ClassifiedError, classified_error};
 
 /// Removes provider response data while retaining the error kind and retry
 /// flag.
-pub(super) fn redact_iceberg_error(error: iceberg::Error) -> iceberg::Error {
+pub fn redact_iceberg_error(error: iceberg::Error) -> iceberg::Error {
     iceberg::Error::new(error.kind(), "Iceberg operation failed; provider details omitted")
         .with_retryable(error.retryable())
 }

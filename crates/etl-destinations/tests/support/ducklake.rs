@@ -142,7 +142,6 @@ pub async fn create_test_lake(test_name: &str) -> DuckLakeTestEnv {
     let (catalog_database, catalog_url) = create_catalog_database().await;
     let data_url = path_to_file_url(&data_dir);
 
-    println!("[{test_name}] catalog : {catalog_url}");
     println!("[{test_name}] data    : {}", data_dir.display());
 
     DuckLakeTestEnv { catalog_database, catalog_url, data_dir, data_url }
