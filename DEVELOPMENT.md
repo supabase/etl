@@ -378,7 +378,12 @@ async tasks, and waits for native work to release its permits. If native cleanup
 still has not finished after 30 seconds, it aborts the process instead of
 returning success or hanging in runtime teardown. Keep the container termination
 grace above the drain budget plus native cleanup time and scheduling headroom.
-Other destinations retain their own teardown contracts and limits.
+`cargo x deploy-local` reserves the default drain budget plus 60 seconds for
+cleanup and scheduling headroom, giving pods 90 seconds with the current default.
+Custom manifests must set `terminationGracePeriodSeconds` explicitly; Kubernetes'
+30-second default is too short for both phases. Increase the pod grace when
+increasing the drain budget. Other destinations retain their own teardown
+contracts and limits.
 
 Only acknowledged durable work can advance source checkpoints. DuckLake commits
 its row changes and replay watermark atomically, so a restarted instance can
