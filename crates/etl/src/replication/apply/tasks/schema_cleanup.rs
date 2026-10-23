@@ -136,6 +136,7 @@ where
         "schema cleanup",
         run_schema_cleanup(schema_store, worker_type, schema_cleanup_rx),
     );
+
     (schema_cleanup_tx, task)
 }
 

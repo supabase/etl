@@ -91,8 +91,8 @@ enum DeferredEventsWrite {
 /// sends catalog-only transactions, such as autovacuum's `ANALYZE`, as empty
 /// `Begin`/`Commit` pairs, so the apply checkpoint may move past a test's own
 /// commit. Such an acknowledgement also settles any accepted write before it,
-/// so [`IdleDurabilityTest`] analyzes its database up front to keep autovacuum
-/// out of its window.
+/// so tests using this destination analyze their database before producing
+/// held writes to reduce catalog autoanalyze during that window.
 #[derive(Clone)]
 struct DeferredEventsDestination {
     /// Table whose insert batches should be held.
@@ -1033,6 +1033,10 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users_schema = database_schema.users_schema();
     let table_id = users_schema.id;
+
+    // Analyze fresh catalogs before the copy snapshot to reduce PostgreSQL 14
+    // background transactions during the keepalive-only handover.
+    database.run_sql("analyze").await.unwrap();
 
     let other_database = spawn_source_database().await;
     let other_database_table = test_table_name("table_sync_keepalive_wal");
@@ -2879,6 +2883,11 @@ async fn catchup_retry_recopies_after_dispatched_write() {
     let mut database = spawn_source_database().await;
     let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let table_id = schema.users_schema().id;
+
+    // Refresh catalog statistics before the snapshot to reduce PostgreSQL 14
+    // background transactions during the held catchup write.
+    database.run_sql("analyze").await.unwrap();
+
     let store = NotifyingStore::new();
     let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
     let destination = TestDestinationWrapper::wrap(destination);
