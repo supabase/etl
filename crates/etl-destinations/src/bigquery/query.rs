@@ -25,10 +25,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
-    bigquery::{
-        client::bq_error_to_etl_error,
-        error::{RedactedBigQueryError, bigquery_error_summary},
-    },
+    bigquery::client::bq_error_to_etl_error,
     retry::{RetryPolicy, retry_with_backoff},
 };
 
@@ -113,7 +110,7 @@ fn log_query_retry(attempt: crate::retry::RetryAttempt<'_, BQError>) {
         retry_index = attempt.retry_index,
         max_retries = attempt.max_retries,
         sleep_ms = attempt.sleep_delay.as_millis(),
-        error = %bigquery_error_summary(attempt.error),
+        error = %attempt.error,
         "retrying transient bigquery query error"
     );
 }
@@ -289,8 +286,7 @@ where
         |error: &EtlError| {
             !error
                 .source()
-                .and_then(|source| source.downcast_ref::<RedactedBigQueryError>())
-                .map(RedactedBigQueryError::inner)
+                .and_then(|source| source.downcast_ref::<BQError>())
                 .is_some_and(query_retry_requires_new_request_id)
         },
         |delay| query_retry_delay(delay).min(deadline.saturating_duration_since(Instant::now())),
@@ -367,7 +363,6 @@ mod tests {
     use crate::{
         bigquery::{
             client::bq_error_to_etl_error,
-            error::RedactedBigQueryError,
             query::{
                 QUERY_MAX_RETRY_DELAY, QUERY_TIMEOUT, QUERY_WAIT_TIMEOUT_MS, complete_query,
                 execute_query, execute_query_attempt, query_retry_delay,
@@ -449,34 +444,6 @@ mod tests {
             .unwrap();
 
         (client, server)
-    }
-
-    /// URLs carried by SDK transport errors cannot escape through the query's
-    /// diagnostic source chain.
-    #[tokio::test]
-    async fn query_transport_errors_omit_url_credentials() {
-        // An unsupported scheme fails locally without contacting a provider.
-        let client = ClientBuilder::new()
-            .with_v2_base_url("ftp://example.com/?token=placeholder-url-token".to_owned())
-            .build_from_authenticator(Arc::new(TestAuthenticator::default()))
-            .await
-            .unwrap();
-
-        let error =
-            execute_query(&client, "project", QueryRequest::new("select 1")).await.unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::DestinationIoError);
-        assert_eq!(error.retryability(), Retryability::Permanent);
-        assert!(!error.to_string().contains("placeholder-url-token"));
-        assert!(!format!("{error:?}").contains("placeholder-url-token"));
-        let source = error.source().unwrap();
-        assert!(source.source().is_none());
-        let BQError::RequestError(raw) =
-            source.downcast_ref::<RedactedBigQueryError>().unwrap().inner()
-        else {
-            panic!("Expected a typed request error");
-        };
-        assert!(raw.url().unwrap().as_str().contains("placeholder-url-token"));
     }
 
     /// Verifies the composed executor preserves request identity across
@@ -871,12 +838,7 @@ mod tests {
             assert_eq!(returned.kind(), kind);
             assert_eq!(
                 std::mem::discriminant(
-                    returned
-                        .source()
-                        .unwrap()
-                        .downcast_ref::<RedactedBigQueryError>()
-                        .unwrap()
-                        .inner()
+                    returned.source().unwrap().downcast_ref::<BQError>().unwrap()
                 ),
                 provider_type
             );

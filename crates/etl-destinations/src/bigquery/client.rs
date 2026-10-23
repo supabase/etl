@@ -1,4 +1,4 @@
-use std::{error::Error as _, fmt};
+use std::{error::Error as _, fmt, io};
 
 use etl::{
     data::Cell,
@@ -26,11 +26,15 @@ use gcp_bigquery_client::{
         query_response::ResultSet,
     },
     storage::{AppendRequest, AppendResult, StorageApiConfig, StreamName, TableDescriptor},
-    yup_oauth2::parse_service_account_key,
+    yup_oauth2::ServiceAccountKey,
 };
 use metrics::counter;
 use prost::Message;
 use rand::random;
+use serde::{
+    Deserialize, Deserializer,
+    de::{self, MapAccess, Visitor},
+};
 use tokio::time::{Duration, Instant, sleep};
 use tonic::Code;
 use tracing::{debug, error, info, warn};
@@ -39,7 +43,6 @@ use crate::{
     bigquery::{
         BIGQUERY_COLUMN_NAME_MAPPING,
         encoding::BigQueryTableRow,
-        error::{RedactedBigQueryError, bigquery_error_summary},
         metrics::{
             ETL_BQ_APPEND_BATCHES_BATCH_ERRORS_TOTAL, ETL_BQ_APPEND_BATCHES_BATCH_ROW_ERRORS_TOTAL,
         },
@@ -78,7 +81,7 @@ const STORAGE_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const STORAGE_WRITE_MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// BigQuery response reasons that are transient even when surfaced with a 4xx
 /// status code.
-pub(super) const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &[
+const TRANSIENT_BIGQUERY_RESPONSE_REASONS: &[&str] = &[
     "backendError",
     "internalError",
     "badGateway",
@@ -99,6 +102,67 @@ pub type BigQueryDatasetId = String;
 
 /// BigQuery table identifier.
 pub type BigQueryTableId = String;
+
+/// Accepts a credential object without echoing rejected strings or integers.
+struct ServiceAccountKeyVisitor;
+
+impl<'de> Visitor<'de> for ServiceAccountKeyVisitor {
+    type Value = ServiceAccountKey;
+
+    /// Describes the supported credential document shape.
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a service-account JSON object")
+    }
+
+    /// Preserves the SDK's field parsing and ignored-field behavior.
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        ServiceAccountKey::deserialize(de::value::MapAccessDeserializer::new(map))
+    }
+
+    /// Omits the root string, which may contain a whole encoded key.
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> {
+        Err(E::invalid_type(de::Unexpected::Other("string"), &self))
+    }
+
+    /// Rejects a signed integer without echoing its value.
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+        Err(E::invalid_type(de::Unexpected::Other("integer"), &self))
+    }
+
+    /// Rejects an unsigned integer without echoing its value.
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+        Err(E::invalid_type(de::Unexpected::Other("integer"), &self))
+    }
+}
+
+/// Service-account document parsed without echoing a rejected root string.
+///
+/// A double-encoded JSON document can put the entire private key in Serde's
+/// default invalid-type error. Object fields still use the SDK deserializer:
+/// all known fields are strings, so their values do not appear in type errors.
+struct ServiceAccountKeyDocument(ServiceAccountKey);
+
+impl<'de> Deserialize<'de> for ServiceAccountKeyDocument {
+    /// Routes the root through credential-aware type errors.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ServiceAccountKeyVisitor).map(Self)
+    }
+}
+
+/// Parses credentials while retaining JSON diagnostics without root values.
+fn parse_service_account_key(bytes: &[u8]) -> Result<ServiceAccountKey, BQError> {
+    serde_json::from_slice::<ServiceAccountKeyDocument>(bytes).map(|document| document.0).map_err(
+        |error| {
+            BQError::InvalidServiceAccountKey(io::Error::new(io::ErrorKind::InvalidData, error))
+        },
+    )
+}
+
+/// Reads credentials through the same parser used for inline keys.
+pub(super) async fn read_service_account_key(path: &str) -> Result<ServiceAccountKey, BQError> {
+    let bytes = tokio::fs::read(path).await?;
+    parse_service_account_key(&bytes)
+}
 
 /// Renders creation-only partitioning and clustering clauses for a table.
 ///
@@ -636,7 +700,6 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
         None
     };
 
-    let err = RedactedBigQueryError::from(err);
     match detail {
         Some(detail) => classified_error_with_detail(kind, description, detail, err),
         None => classified_error(kind, description, err),
@@ -644,7 +707,7 @@ pub(super) fn bq_error_to_etl_error(err: BQError) -> EtlError {
 }
 
 /// Decodes BigQuery Storage error codes from gRPC status details when present.
-pub(super) fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
+fn decode_storage_error_codes(status: &tonic::Status) -> Vec<&'static str> {
     let Ok(rpc_status) = GoogleRpcStatus::decode(status.details()) else {
         return Vec::new();
     };
@@ -703,7 +766,7 @@ fn is_storage_write_not_found(error: &BQError) -> bool {
 /// Returns retry detail for Storage Write schema update propagation errors.
 fn retryable_storage_write_schema_update_detail(error: &BQError) -> Option<String> {
     if is_retryable_schema_propagation_error(error) {
-        return Some(bigquery_error_summary(error));
+        return Some(error.to_string());
     }
 
     None
@@ -721,7 +784,7 @@ async fn retryable_storage_write_not_found_detail(
     }
 
     if client.table_exists(&request.dataset_id, &request.table_id).await? {
-        return Ok(Some(bigquery_error_summary(error)));
+        return Ok(Some(error.to_string()));
     }
 
     Ok(None)
@@ -753,10 +816,8 @@ async fn retryable_storage_write_error_detail(
 
 /// Returns whether BigQuery rejected `DROP DEFAULT` because no default exists.
 fn is_missing_column_default_error(error: &EtlError) -> bool {
-    let Some(BQError::ResponseError { error }) = error
-        .source()
-        .and_then(|source| source.downcast_ref::<RedactedBigQueryError>())
-        .map(RedactedBigQueryError::inner)
+    let Some(BQError::ResponseError { error }) =
+        error.source().and_then(|source| source.downcast_ref::<BQError>())
     else {
         return false;
     };
@@ -804,9 +865,10 @@ impl BigQueryClient {
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
+        let sa_key = read_service_account_key(sa_key_file).await.map_err(bq_error_to_etl_error)?;
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
-            .build_from_service_account_key_file(sa_key_file)
+            .build_from_service_account_key(sa_key, false)
             .await
             .map_err(bq_error_to_etl_error)?;
 
@@ -828,9 +890,7 @@ impl BigQueryClient {
         let storage_config =
             StorageApiConfig { connection_pool_size, max_inflight_requests, compression: false };
 
-        let sa_key = parse_service_account_key(sa_key)
-            .map_err(BQError::from)
-            .map_err(bq_error_to_etl_error)?;
+        let sa_key = parse_service_account_key(sa_key.as_bytes()).map_err(bq_error_to_etl_error)?;
         let client = ClientBuilder::new()
             .with_storage_config(storage_config)
             .build_from_service_account_key(sa_key, false)
@@ -1447,7 +1507,7 @@ impl BigQueryClient {
                     let error_code = error_code_label(&request_error);
                     warn!(
                         request_index,
-                        error = %bigquery_error_summary(&request_error),
+                        error = %request_error,
                         "append request failed after library retries"
                     );
 
@@ -1545,6 +1605,196 @@ mod tests {
     };
 
     use super::*;
+
+    /// A complete credential-shaped fixture containing only placeholders.
+    const SERVICE_ACCOUNT_DOCUMENT: &str = r#"{
+        "type": "service_account",
+        "project_id": "placeholder-project",
+        "private_key_id": "placeholder-key-id",
+        "private_key": "placeholder-private-key\n\"quoted\"",
+        "client_email": "service@example.com",
+        "client_id": "placeholder-client-id",
+        "auth_uri": "https://example.com/auth",
+        "token_uri": "https://example.com/token",
+        "auth_provider_x509_cert_url": "https://example.com/certs",
+        "client_x509_cert_url": "https://example.com/client-certs"
+    }"#;
+
+    /// Checks every printable error layer without including its text on
+    /// failure.
+    fn assert_no_credential_value(error: &(dyn std::error::Error + 'static)) {
+        let mut current = Some(error);
+        while let Some(error) = current {
+            assert!(!error.to_string().contains("placeholder-"));
+            assert!(!format!("{error:?}").contains("placeholder-"));
+            current = error.source();
+        }
+    }
+
+    /// Root strings must not echo a whole double-encoded key or escaped values.
+    #[test]
+    fn service_account_parser_hides_rejected_root_strings() {
+        for document in [
+            serde_json::to_string(SERVICE_ACCOUNT_DOCUMENT).unwrap(),
+            r#""placeholder-private-key\n\"quoted\"雪""#.to_owned(),
+        ] {
+            let error = parse_service_account_key(document.as_bytes()).err().unwrap();
+            assert_no_credential_value(&error);
+            assert!(error.to_string().contains("invalid type: string"));
+            assert!(error.to_string().contains("expected a service-account JSON object"));
+            assert!(error.to_string().contains("at line 1 column"));
+        }
+    }
+
+    /// Keep actionable parse reasons, position, and the typed JSON error.
+    #[test]
+    fn service_account_parser_preserves_json_diagnostics() {
+        for (document, reason) in [
+            ("", "EOF while parsing a value"),
+            ("{}", "missing field `private_key`"),
+            (r#"{"private_key":true}"#, "boolean `true`, expected a string"),
+            (r#"{"private_key":["placeholder-private-key"]}"#, "sequence, expected a string"),
+            (r#"{"private_key":{"value":"placeholder-private-key"}}"#, "map, expected a string"),
+            (r#"{"private_key":"placeholder-private-key""#, "EOF while parsing an object"),
+            (r#"{"private_key":"placeholder-private-key"#, "EOF while parsing a string"),
+            (
+                r#"{"private_key":"placeholder-one","private_key":"placeholder-two"}"#,
+                "duplicate field `private_key`",
+            ),
+            (r#"{"private_key":"placeholder-private-key\x"}"#, "invalid escape"),
+            (r#"{"private_key":"placeholder-private-key" 雪}"#, "expected `,` or `}`"),
+        ] {
+            let error = parse_service_account_key(document.as_bytes()).err().unwrap();
+            assert_no_credential_value(&error);
+            let BQError::InvalidServiceAccountKey(error) = error else { panic!() };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            let json_error = error.get_ref().unwrap().downcast_ref::<serde_json::Error>().unwrap();
+            assert!(json_error.to_string().contains(reason));
+            assert!(json_error.line() > 0);
+        }
+        let invalid_utf8 = b"{\"private_key\":\"placeholder-\xff\"}";
+        let error = parse_service_account_key(invalid_utf8).err().unwrap();
+        assert_no_credential_value(&error);
+        assert!(error.to_string().contains("invalid unicode code point"));
+    }
+
+    /// Non-object documents and trailing input remain recoverable parse errors.
+    #[test]
+    fn service_account_parser_rejects_other_document_shapes() {
+        for document in
+            ["null", "true", "42", "-42", "1.5", "1e400", "[]", "[\"placeholder-private-key\"]"]
+        {
+            let error = parse_service_account_key(document.as_bytes()).err().unwrap();
+            assert_no_credential_value(&error);
+            assert!(matches!(error, BQError::InvalidServiceAccountKey(_)));
+        }
+        let document = format!("{SERVICE_ACCOUNT_DOCUMENT} true");
+        let error = parse_service_account_key(document.as_bytes()).err().unwrap();
+        assert_no_credential_value(&error);
+        assert!(error.to_string().contains("trailing characters"));
+    }
+
+    /// Credential values and ignored extension fields retain SDK semantics.
+    #[test]
+    fn service_account_parser_preserves_valid_credentials() {
+        let document = SERVICE_ACCOUNT_DOCUMENT.replacen(
+            '}',
+            &format!(",\"unknown\":{}0{}}}", "[".repeat(150), "]".repeat(150)),
+            1,
+        );
+        let expected =
+            gcp_bigquery_client::yup_oauth2::parse_service_account_key(&document).unwrap();
+        let parsed = parse_service_account_key(document.as_bytes()).unwrap();
+        assert!(serde_json::to_value(&parsed).unwrap() == serde_json::to_value(expected).unwrap());
+
+        // Reassess this boundary when upgrading the SDK: new field types or
+        // Serde attributes could echo rejected credential strings. These typed
+        // bindings catch field additions and type changes, not attribute
+        // changes.
+        let ServiceAccountKey {
+            key_type,
+            project_id,
+            private_key_id,
+            private_key,
+            client_email,
+            client_id,
+            auth_uri,
+            token_uri,
+            auth_provider_x509_cert_url,
+            client_x509_cert_url,
+        } = parsed;
+        let _: Option<String> = key_type;
+        let _: Option<String> = project_id;
+        let _: Option<String> = private_key_id;
+        let _: String = private_key;
+        let _: String = client_email;
+        let _: Option<String> = client_id;
+        let _: Option<String> = auth_uri;
+        let _: String = token_uri;
+        let _: Option<String> = auth_provider_x509_cert_url;
+        let _: Option<String> = client_x509_cert_url;
+    }
+
+    /// Both public constructors reject unsafe documents before authentication.
+    #[tokio::test]
+    async fn service_account_constructors_preserve_safe_parse_errors() {
+        let document = serde_json::to_string(SERVICE_ACCOUNT_DOCUMENT).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(file.path(), &document).await.unwrap();
+        let inline = BigQueryClient::new_with_key("placeholder-project".to_owned(), &document, 1)
+            .await
+            .unwrap_err();
+        let from_file = BigQueryClient::new_with_key_path(
+            "placeholder-project".to_owned(),
+            file.path().to_str().unwrap(),
+            1,
+        )
+        .await
+        .unwrap_err();
+
+        for error in [inline, from_file] {
+            assert_no_credential_value(&error);
+            assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
+            assert_eq!(error.retryability(), Retryability::Permanent);
+            assert!(error.to_string().contains("expected a service-account JSON object"));
+            assert!(matches!(
+                error.source().unwrap().downcast_ref::<BQError>(),
+                Some(BQError::InvalidServiceAccountKey(_))
+            ));
+        }
+    }
+
+    /// The file loader shared by production and test setup preserves
+    /// credentials.
+    #[tokio::test]
+    async fn service_account_file_loader_preserves_valid_credentials() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        tokio::fs::write(file.path(), SERVICE_ACCOUNT_DOCUMENT).await.unwrap();
+        let key = read_service_account_key(file.path().to_str().unwrap()).await.unwrap();
+        assert!(key.private_key == "placeholder-private-key\n\"quoted\"");
+    }
+
+    /// File access failures keep their original typed I/O cause.
+    #[tokio::test]
+    async fn service_account_file_constructor_preserves_io_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("missing-key.json");
+        let error = BigQueryClient::new_with_key_path(
+            "placeholder-project".to_owned(),
+            path.to_str().unwrap(),
+            1,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
+        assert_eq!(error.retryability(), Retryability::Permanent);
+        let Some(BQError::InvalidServiceAccountKey(source)) =
+            error.source().unwrap().downcast_ref::<BQError>()
+        else {
+            panic!()
+        };
+        assert_eq!(source.kind(), io::ErrorKind::NotFound);
+    }
 
     fn replicated_schema_with_identity(table_id: u32, table_name: &str) -> ReplicatedTableSchema {
         ReplicatedTableSchema::all(Arc::new(TableSchema::new(
@@ -1926,7 +2176,7 @@ mod tests {
         ] {
             let mut rpc_status = GoogleRpcStatus {
                 code: i32::from(Code::InvalidArgument),
-                message: format!("{message} placeholder-provider-detail"),
+                message: message.to_owned(),
                 details: vec![Default::default()],
             };
             rpc_status.details[0].type_url =
@@ -1939,12 +2189,11 @@ mod tests {
                 rpc_status.encode_to_vec().into(),
             ));
 
-            let detail = retryable_storage_write_schema_update_detail(&error);
-            assert_eq!(detail.is_some(), retryable, "{code:?}");
-            if let Some(detail) = detail {
-                assert!(detail.contains(code.as_str_name()));
-                assert!(!detail.contains("placeholder-provider-detail"));
-            }
+            assert_eq!(
+                retryable_storage_write_schema_update_detail(&error).is_some(),
+                retryable,
+                "{code:?}"
+            );
         }
     }
 
@@ -1952,14 +2201,10 @@ mod tests {
     fn schema_update_detail_classifies_extra_proto_fields_schema_lag() {
         let error = BQError::from(tonic::Status::invalid_argument(
             "Found incompatible fields: 'id' and/or mismatch fields, extra proto fields: \
-             'ddl_col_1_0' extra bq fields: '' placeholder-row-value",
+             'ddl_col_1_0' extra bq fields: ''",
         ));
 
-        let detail = retryable_storage_write_schema_update_detail(&error).unwrap();
-        assert!(detail.contains("InvalidArgument"));
-        assert!(!detail.contains("placeholder-row-value"));
-        let timeout = storage_write_retry_timeout_error(&detail);
-        assert!(!timeout.to_string().contains("placeholder-row-value"));
+        assert!(retryable_storage_write_schema_update_detail(&error).is_some());
     }
 
     #[test]
