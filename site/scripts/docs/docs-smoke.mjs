@@ -306,7 +306,7 @@ async function checkSeoEndpoints() {
       !destinationsText.includes('Private alpha') &&
       !destinationsText.includes('**Status: Stable**') &&
       !destinationsText.includes('**Status: In progress**') &&
-      destinationsText.includes('**Status: Deprecated**') &&
+      !destinationsText.includes('**Status: Deprecated**') &&
       !destinationsText.includes('<DestinationStatus'),
     'The Destinations Markdown does not expose consistent plain-text statuses.',
   );
@@ -758,9 +758,9 @@ async function checkDesktop(page) {
   await page.goto(`${baseUrl}/reference/destinations/`, { waitUntil: 'networkidle' });
   await assertNoHorizontalOverflow(page);
   assert(
-    (await page.locator('.etl-destination-status').count()) === 5 &&
+    (await page.locator('.etl-destination-status').count()) === 4 &&
       (await page.locator('.etl-destination-status[data-status="public-alpha"] svg').count()) === 4 &&
-      (await page.locator('.etl-destination-status[data-status="deprecated"] svg').count()) === 1,
+      (await page.locator('.etl-destination-status[data-status="deprecated"]').count()) === 0,
     'Destination release-status badges are missing their status icons.',
   );
   const destinationsCopy = await page.locator('#nd-page').innerText();

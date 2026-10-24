@@ -28,7 +28,7 @@ struct Inner {
 /// workflows. All data is held in memory and will be lost when the process
 /// terminates.
 ///
-/// Like real destinations (BigQuery, Iceberg), this destination tracks table
+/// Like real destinations (BigQuery), this destination tracks table
 /// metadata (snapshot IDs and replication masks) in a state store to mirror
 /// destinations that persist table-copy state.
 #[derive(Clone)]
@@ -45,7 +45,7 @@ where
     ///
     /// The state store is used to track table metadata (snapshot IDs and
     /// replication masks), mirroring the behavior of real destinations like
-    /// BigQuery and Iceberg.
+    /// BigQuery.
     pub fn new(store: S) -> Self {
         let inner = Inner { events: Vec::new(), table_rows: HashMap::new() };
 
@@ -177,7 +177,7 @@ where
         let table_id = replicated_table_schema.id();
 
         // Store destination table metadata on first write, like real
-        // destinations (BigQuery, Iceberg) do.
+        // destinations (BigQuery) do.
         self.sync_destination_table_metadata(replicated_table_schema).await?;
 
         let mut inner = self.inner.lock().await;

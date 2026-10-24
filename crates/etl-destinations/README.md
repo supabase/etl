@@ -10,7 +10,6 @@ building `etl-replicator`.
 | `bigquery` | Google BigQuery | Public alpha |
 | `ducklake` | DuckLake | Public alpha |
 | `snowflake` | Snowflake | Public alpha |
-| `iceberg` | Apache Iceberg | Deprecated |
 
 Public alpha describes the managed-service release stage. Local and self-hosted
 use of the open-source destinations is unrestricted.

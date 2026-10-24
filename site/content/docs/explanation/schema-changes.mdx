@@ -34,9 +34,6 @@ handling](/reference/destinations/#row-value-handling).
 | Publish an existing column | Added using the historical-value policy described below |
 | Stop publishing a column | The destination column is dropped |
 
-Iceberg is deprecated and rejects every newer schema instead of applying
-schema-change DDL.
-
 <Callout className="etl-callout" type="warn" title="Type changes require a resync">
   BigQuery, DuckLake, and Snowflake currently leave the destination type
   unchanged after a PostgreSQL type change. Later schema changes or row writes
@@ -219,7 +216,7 @@ remove the old default idempotently, then set the new default only if it is
 supported by the current destination renderer.
 
 Mapped destination-name collisions fail before DDL. BigQuery and DuckLake use
-ASCII-lowercase destination names; ClickHouse, Snowflake, and Iceberg preserve
+ASCII-lowercase destination names; ClickHouse and Snowflake preserve
 source spelling. Snowflake requires `QUOTED_IDENTIFIERS_IGNORE_CASE = FALSE` so
 quoted names remain stable.
 
@@ -293,7 +290,6 @@ which affects only future inserts.
 | **[ClickHouse](https://clickhouse.com/docs/reference/statements/alter/column)** | Applies add, drop, rename, `NOT NULL` relaxation, create-time defaults, and supported literal add-column defaults. Later existing-column default changes are skipped because ClickHouse would apply them to rows stored before the column was added. Publication-added scalars are nullable and default-free; publication-added arrays are default-free and read as empty arrays for existing rows, because [`Nullable(Array(...))`](https://clickhouse.com/docs/reference/data-types/nullable) is unsupported. Type changes that change the ClickHouse type, and changes between `timestamp` and `timestamptz`, are rejected and require a resynchronization; changes that keep the ClickHouse type, such as a longer `varchar`, need no DDL. `ReplacingMergeTree` also rejects primary-key changes. |
 | **[DuckLake](https://ducklake.select/docs/stable/duckdb/usage/schema_evolution)** | Applies add, drop, rename, `NOT NULL` relaxation, and supported literal defaults transactionally. Publication-added columns are nullable and omit DuckLake initial defaults. ETL does not emit `DEFAULT(NULL)`; some catalog clients display an omitted default as `NULL`. Type DDL is skipped. |
 | **[Snowflake](https://docs.snowflake.com/en/sql-reference/sql/alter-table)** | Applies add, drop, rename, create-time defaults, and supported literal add-column defaults. Destination columns remain nullable. Publication-added columns omit defaults because Snowflake would populate old rows. Later existing-column default changes are skipped. Type DDL is skipped. |
-| **[Iceberg](https://iceberg.apache.org/spec/#schema-evolution)** | Deprecated. Accepts only an identical applied relation and rejects every newer logical schema, including publication-mask changes. |
 
 See [Destinations](/reference/destinations/) for maturity, setup requirements,
 and broader destination limitations.
@@ -326,9 +322,6 @@ replication mask as one logical recovery endpoint.
 Initial table setup uses a separate `Creating` state. If setup is interrupted,
 ETL retries the destination's idempotent write-path setup for that exact target
 schema and records `Applied` only after the destination is ready for writes.
-Iceberg also uses `Creating` to bracket its ETL-owned drop-and-recreate
-implementation of source truncation, so an interrupted recreation can finish
-before replayed writes continue.
 Ancillary objects that are not required for writes, such as BigQuery's
 customer-facing view, have their own idempotent reconciliation. This keeps
 creation recovery separate from partially applied schema changes, which may
@@ -352,8 +345,7 @@ ETL does not infer missing recovery state:
 - An equal snapshot with a different replication mask is rejected because it
   has no valid schema ordering.
 
-Older relations never rewind destination DDL. ClickHouse, BigQuery, Snowflake,
-and Iceberg reject a replayed relation older than their applied destination
+Older relations never rewind destination DDL. ClickHouse, BigQuery, and Snowflake reject a replayed relation older than their applied destination
 snapshot. DuckLake skips older relations and uses durable per-table progress
 to discard already-applied rows and truncates before validating the remaining
 events against the applied schema. DuckLake commits that progress in the same
@@ -368,7 +360,6 @@ Recovery then follows each destination's DDL guarantees:
   target endpoint. A partially applied DDL sequence requires operator recovery.
 - BigQuery and Snowflake leave interrupted nontransactional DDL in `Applying`
   for operator recovery rather than guessing what completed.
-- Iceberg rejects schema evolution.
 
 Resynchronize the affected table when recovery cannot prove a safe endpoint.
 

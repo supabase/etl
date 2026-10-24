@@ -60,8 +60,7 @@ fn run_replicator(args: RunReplicatorArgs) -> Result<()> {
         bail!(
             "No local replicator configuration found.\n\nInitialize ClickHouse (the local \
              default):\n  cargo x setup replicator\n  cargo x seed\n\nOr pass --destination \
-             bigquery, ducklake, iceberg, or snowflake.\n\nThen start it:\n  cargo x run \
-             replicator"
+             bigquery, ducklake, or snowflake.\n\nThen start it:\n  cargo x run replicator"
         );
     }
 

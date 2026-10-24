@@ -563,9 +563,7 @@ impl ClickHouseClient {
     /// Verifies that the ClickHouse server is reachable.
     ///
     /// Issues a `SELECT 1` round-trip; cheaper than any DDL or metadata query
-    /// and exercises the auth/transport path. Mirrors the Iceberg destination's
-    /// `validate_connectivity` so destination validators
-    /// can treat the two destinations uniformly.
+    /// and exercises the auth/transport path.
     pub async fn validate_connectivity(&self) -> EtlResult<()> {
         let query = self
             .inner
