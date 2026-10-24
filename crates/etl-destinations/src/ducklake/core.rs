@@ -31,7 +31,10 @@ use etl_config::{
         DuckLakeSortNulls, DuckLakeTableSortingConfig, DuckLakeWriterConfig, Validate,
     },
 };
-use etl_maintenance::ducklake::RedactedDuckDbError;
+use etl_maintenance::{
+    ExternalMaintenanceOperationPolicy,
+    ducklake::{DataFileRewriteReason, RedactedDuckDbError},
+};
 use metrics::gauge;
 use parking_lot::{Mutex, RwLock as ParkingLotRwLock};
 use pg_escape::{quote_identifier as quote_postgres_identifier, quote_literal};
@@ -197,17 +200,25 @@ fn expire_snapshots_retention_seconds(value: &str) -> Option<i64> {
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }
 
-/// Returns whether file maintenance should run for a table.
+/// Returns why file maintenance should run for a table.
 ///
 /// Initial COPY deliberately creates Parquet files in each batch. Deferring
 /// rewrites and compaction until every copy completes keeps maintenance from
 /// competing with the writer and avoids repeatedly compacting a growing table.
-fn should_request_file_maintenance(
+fn file_maintenance_reason(
     copy_phase_active: bool,
     active_data_files: i64,
+    deleted_row_ratio: f64,
     rewrite_data_files_min_active_data_files: i64,
-) -> bool {
-    !copy_phase_active && active_data_files > rewrite_data_files_min_active_data_files
+) -> Option<DataFileRewriteReason> {
+    if copy_phase_active {
+        return None;
+    }
+    DataFileRewriteReason::for_table(
+        active_data_files,
+        deleted_row_ratio,
+        rewrite_data_files_min_active_data_files,
+    )
 }
 
 /// One active sort key read from the DuckLake metadata catalog.
@@ -746,6 +757,42 @@ pub(super) struct ExternalMaintenanceOperationSample {
     pub operations: ExternalMaintenanceOperations,
     /// Whether any table is currently in initial copy.
     pub copy_phase_active: bool,
+    /// First table-selection reason that triggered a data-file rewrite request.
+    pub rewrite_data_files_reason: Option<DataFileRewriteReason>,
+}
+
+impl ExternalMaintenanceOperationSample {
+    /// Selects file maintenance from one table's storage pressure and operation
+    /// policy.
+    fn for_file_metrics(
+        copy_phase_active: bool,
+        active_data_files: i64,
+        deleted_row_ratio: f64,
+        min_active_data_files: i64,
+        policy: ExternalMaintenanceOperationPolicy,
+    ) -> Self {
+        let reason = file_maintenance_reason(
+            copy_phase_active,
+            active_data_files,
+            deleted_row_ratio,
+            min_active_data_files,
+        );
+        let rewrite_data_files = reason.is_some() && policy.rewrite_data_files_enabled;
+        // Merge cannot reduce deletion pressure, so only request dependent work
+        // when rewriting is enabled or merging can resolve excess file counts.
+        let compact_files =
+            rewrite_data_files || reason == Some(DataFileRewriteReason::ActiveDataFiles);
+        Self {
+            operations: ExternalMaintenanceOperations {
+                merge_adjacent_files: compact_files && policy.merge_adjacent_files_enabled,
+                rewrite_data_files,
+                cleanup_old_files: compact_files && policy.cleanup_old_files_enabled,
+                ..ExternalMaintenanceOperations::default()
+            },
+            copy_phase_active,
+            rewrite_data_files_reason: reason.filter(|_| rewrite_data_files),
+        }
+    }
 }
 
 /// Runtime backend used for DuckLake external maintenance coordination.
@@ -4015,11 +4062,13 @@ where
     }
 
     /// Samples catalog state and returns which externally coordinated
-    /// maintenance operations should be requested now.
+    /// maintenance operations should be requested now, applying the operation
+    /// policy before selecting file maintenance.
     pub(super) async fn sample_external_maintenance_operations(
         &self,
         inline_flush_min_inlined_bytes: u64,
         rewrite_data_files_min_active_data_files: i64,
+        policy: ExternalMaintenanceOperationPolicy,
     ) -> EtlResult<ExternalMaintenanceOperationSample> {
         let table_names = self.list_active_ducklake_tables().await?;
         let inline_sampler = DuckLakePendingInlineSizeSampler::new(
@@ -4028,6 +4077,8 @@ where
         );
         let copy_phase_active = self.has_active_table_copy().await?;
         let mut operations = ExternalMaintenanceOperations::default();
+        let mut rewrite_data_files_reason = None;
+        let mut file_maintenance_requested = false;
         let catalog_metrics = query_catalog_maintenance_metrics(
             &self.metadata_pg_pool,
             self.metadata_schema.as_ref(),
@@ -4078,31 +4129,37 @@ where
                 operations.inline_flush = sizes.inlined_bytes >= inline_flush_min_inlined_bytes;
             }
 
-            if !operations.rewrite_data_files && !copy_phase_active {
+            if !file_maintenance_requested && !copy_phase_active {
                 let metrics = query_table_storage_metrics(
                     &self.metadata_pg_pool,
                     self.metadata_schema.as_ref(),
                     &table_name,
                 )
                 .await?;
-                operations.rewrite_data_files = should_request_file_maintenance(
+                let sample = ExternalMaintenanceOperationSample::for_file_metrics(
                     copy_phase_active,
                     metrics.active_data_files,
+                    metrics.deleted_row_ratio(),
                     rewrite_data_files_min_active_data_files,
+                    policy,
                 );
+                file_maintenance_requested = !sample.operations.is_empty();
+                operations.merge_adjacent_files = sample.operations.merge_adjacent_files;
+                operations.rewrite_data_files = sample.operations.rewrite_data_files;
+                operations.cleanup_old_files = sample.operations.cleanup_old_files;
+                rewrite_data_files_reason = sample.rewrite_data_files_reason;
             }
 
-            if operations.inline_flush && operations.rewrite_data_files {
+            if operations.inline_flush && file_maintenance_requested {
                 break;
             }
         }
 
-        if !copy_phase_active && operations.rewrite_data_files {
-            operations.merge_adjacent_files = true;
-            operations.cleanup_old_files = true;
-        }
-
-        Ok(ExternalMaintenanceOperationSample { operations, copy_phase_active })
+        Ok(ExternalMaintenanceOperationSample {
+            operations,
+            copy_phase_active,
+            rewrite_data_files_reason,
+        })
     }
 
     /// Returns whether any table is currently in initial copy.
@@ -4429,9 +4486,152 @@ mod tests {
     /// files during an initial copy.
     #[test]
     fn file_maintenance_is_deferred_during_copy() {
-        assert!(!should_request_file_maintenance(true, 41, 40));
-        assert!(!should_request_file_maintenance(false, 40, 40));
-        assert!(should_request_file_maintenance(false, 41, 40));
+        assert_eq!(file_maintenance_reason(true, 41, 0.0, 40), None);
+        assert_eq!(file_maintenance_reason(true, 1, 0.98, 40), None);
+        assert_eq!(file_maintenance_reason(true, 41, 0.98, 40), None);
+    }
+
+    /// Preserves the strict file-count threshold independently of deletion
+    /// pressure.
+    #[test]
+    fn file_maintenance_preserves_file_count_threshold() {
+        assert_eq!(file_maintenance_reason(false, 40, 0.0, 40), None);
+        assert_eq!(
+            file_maintenance_reason(false, 41, 0.0, 40),
+            Some(DataFileRewriteReason::ActiveDataFiles)
+        );
+        assert_eq!(
+            file_maintenance_reason(false, 41, 0.98, 40),
+            Some(DataFileRewriteReason::ActiveDataFiles)
+        );
+    }
+
+    /// Requests rewrites for heavily deleted files even in a small table.
+    #[test]
+    fn file_maintenance_requests_heavily_deleted_small_tables() {
+        for (files, ratio) in [(1, 0.98), (2, 0.96), (1, 1.0)] {
+            assert_eq!(
+                file_maintenance_reason(false, files, ratio, 40),
+                Some(DataFileRewriteReason::DeletedRowRatio)
+            );
+        }
+        assert_eq!(file_maintenance_reason(false, 1, 0.95, 40), None);
+        assert_eq!(file_maintenance_reason(false, 1, 0.0, 40), None);
+        assert_eq!(file_maintenance_reason(false, 0, 1.0, 40), None);
+    }
+
+    /// Disabled rewrites must not repeatedly request operations that cannot
+    /// remove deletes.
+    #[test]
+    fn file_maintenance_policy_skips_deleted_rows_when_rewrites_are_disabled() {
+        let policy = ExternalMaintenanceOperationPolicy {
+            rewrite_data_files_enabled: false,
+            ..ExternalMaintenanceOperationPolicy::default()
+        };
+        for files in [1, 2] {
+            let sample = ExternalMaintenanceOperationSample::for_file_metrics(
+                false, files, 0.98, 40, policy,
+            );
+
+            assert!(sample.operations.is_empty());
+            assert_eq!(sample.rewrite_data_files_reason, None);
+        }
+    }
+
+    /// Merging still resolves excessive file counts when rewrites are disabled.
+    #[test]
+    fn file_maintenance_policy_preserves_merges_when_rewrites_are_disabled() {
+        let policy = ExternalMaintenanceOperationPolicy {
+            rewrite_data_files_enabled: false,
+            ..ExternalMaintenanceOperationPolicy::default()
+        };
+        let sample =
+            ExternalMaintenanceOperationSample::for_file_metrics(false, 41, 0.98, 40, policy);
+
+        assert_eq!(
+            sample.operations,
+            ExternalMaintenanceOperations {
+                merge_adjacent_files: true,
+                cleanup_old_files: true,
+                ..ExternalMaintenanceOperations::default()
+            }
+        );
+        assert_eq!(sample.rewrite_data_files_reason, None);
+    }
+
+    /// A disabled deletion-pressure trigger must not stop sampling before a
+    /// valid merge trigger.
+    #[test]
+    fn file_maintenance_policy_keeps_sampling_after_disabled_rewrite() {
+        let policy = ExternalMaintenanceOperationPolicy {
+            rewrite_data_files_enabled: false,
+            ..ExternalMaintenanceOperationPolicy::default()
+        };
+        let selected_files = [(1, 0.98), (41, 0.0)].into_iter().find_map(|(files, ratio)| {
+            let sample = ExternalMaintenanceOperationSample::for_file_metrics(
+                false, files, ratio, 40, policy,
+            );
+            (!sample.operations.is_empty()).then_some(files)
+        });
+
+        assert_eq!(selected_files, Some(41));
+    }
+
+    /// Enabled rewrites retain their dependent operations and trigger reason.
+    #[test]
+    fn file_maintenance_policy_preserves_enabled_rewrites() {
+        let sample = ExternalMaintenanceOperationSample::for_file_metrics(
+            false,
+            1,
+            0.98,
+            40,
+            ExternalMaintenanceOperationPolicy::default(),
+        );
+
+        assert_eq!(
+            sample.operations,
+            ExternalMaintenanceOperations {
+                merge_adjacent_files: true,
+                rewrite_data_files: true,
+                cleanup_old_files: true,
+                ..ExternalMaintenanceOperations::default()
+            }
+        );
+        assert_eq!(sample.rewrite_data_files_reason, Some(DataFileRewriteReason::DeletedRowRatio));
+    }
+
+    /// Rewrite selection respects independent operation flags and initial-copy
+    /// deferral.
+    #[test]
+    fn file_maintenance_policy_preserves_operation_flags_and_copy_deferral() {
+        let policy = ExternalMaintenanceOperationPolicy {
+            merge_adjacent_files_enabled: false,
+            cleanup_old_files_enabled: false,
+            ..ExternalMaintenanceOperationPolicy::default()
+        };
+        let sample =
+            ExternalMaintenanceOperationSample::for_file_metrics(false, 1, 0.98, 40, policy);
+        assert_eq!(
+            sample.operations,
+            ExternalMaintenanceOperations {
+                rewrite_data_files: true,
+                ..ExternalMaintenanceOperations::default()
+            }
+        );
+        assert_eq!(sample.rewrite_data_files_reason, Some(DataFileRewriteReason::DeletedRowRatio));
+
+        for (files, ratio) in [(1, 0.98), (41, 0.0)] {
+            let sample = ExternalMaintenanceOperationSample::for_file_metrics(
+                true,
+                files,
+                ratio,
+                40,
+                ExternalMaintenanceOperationPolicy::default(),
+            );
+            assert!(sample.operations.is_empty());
+            assert!(sample.copy_phase_active);
+            assert_eq!(sample.rewrite_data_files_reason, None);
+        }
     }
 
     #[test]
