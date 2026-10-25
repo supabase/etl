@@ -13,7 +13,7 @@ homepage.workspace = true
 doctest = false
 
 [features]
-default = ["tls-rustls-ring"]
+default = ["tls-rustls-ring", "serde_json_arbitrary_precision"]
 tls-rustls-ring = [
     "etl/tls-rustls-ring",
     "etl-maintenance?/tls-rustls-ring",
@@ -23,6 +23,11 @@ tls-rustls-aws-lc-rs = [
     "etl/tls-rustls-aws-lc-rs",
     "etl-maintenance?/tls-rustls-aws-lc-rs",
     "sqlx?/tls-rustls-aws-lc-rs",
+]
+serde_json_arbitrary_precision = [
+    "etl/serde_json_arbitrary_precision",
+    "etl-maintenance?/serde_json_arbitrary_precision",
+    "serde_json?/arbitrary_precision",
 ]
 ducklake = [
     "dep:duckdb",
@@ -142,7 +147,7 @@ reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls",
 rustls = { workspace = true, optional = true, features = ["aws-lc-rs"] }
 secrecy = { workspace = true, optional = true, features = ["serde"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
-serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
+serde_json = { workspace = true, optional = true, features = ["std"] }
 sha2 = { workspace = true, optional = true }
 sqlx = { workspace = true, optional = true, features = ["runtime-tokio", "postgres"] }
 thiserror = { workspace = true, optional = true }
