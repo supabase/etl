@@ -33,8 +33,8 @@ use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_destination,
     cleanup_replication_slots, duration_millis, format_decimal, format_duration_ms, format_integer,
-    init_benchmark_tracing, mib_per_second, per_second, pipeline_config, run_etl_migrations,
-    write_report,
+    init_benchmark_tracing, mib_per_second, per_second, pipeline_config,
+    reset_shared_destination_tables, run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-copy benchmark.
@@ -168,6 +168,9 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     info!("starting table-copy benchmark");
+    // Clearing leftovers from earlier runs is setup, not measured work.
+    reset_shared_destination_tables(&args.destination, &args.pg, &args.table_ids).await?;
+
     let total_started = Instant::now();
     run_etl_migrations(&args.pg).await?;
 
@@ -212,9 +215,12 @@ async fn run(args: RunArgs) -> Result<()> {
     let cleanup_result =
         cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await;
     let destination_cleanup_result = cleanup_destination(&args.destination, args.pipeline_id).await;
+    let shared_table_cleanup_result =
+        reset_shared_destination_tables(&args.destination, &args.pg, &args.table_ids).await;
     shutdown_result.context("Failed to shut down pipeline")?;
     cleanup_result?;
     destination_cleanup_result?;
+    shared_table_cleanup_result?;
     copy_result?;
 
     let destination_stats = destination.stats();
