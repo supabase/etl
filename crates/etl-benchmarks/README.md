@@ -443,9 +443,10 @@ GitHub run identifiers, runner details, and the list of report files. Benchmark
 settings and metrics stay in the reports themselves.
 
 Nightly and manual runs compare the median reports against the most recent
-run on the same ref with the same artifact name. Only successful jobs upload
-that name, so each destination has its own baseline and one failed destination
-does not disqualify the others. Backfills skip the comparison. The GitHub step
+run on the same ref with the same trigger and artifact name, so nightly runs
+only compare with nightly runs. Only successful jobs upload that name, so each
+destination has its own baseline and one failed destination does not
+disqualify the others. Backfills skip the comparison. The GitHub step
 summary contains the benchmark environment, formatted median results with
 sample spread, and the comparison diff against the previous successful run when
 one is available.
@@ -469,9 +470,9 @@ cargo x benchmark-compare \
 ```
 
 In GitHub Actions mode, `benchmark-compare` uses `GITHUB_TOKEN`,
-`GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, and `GITHUB_REF_NAME` to find the most
-recent `benchmark.yml` run with an artifact named `--artifact-name`. It ignores
-`manifest.json` when loading reports.
+`GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_REF_NAME`, and `GITHUB_EVENT_NAME`
+to find the most recent `benchmark.yml` run from the same event with an artifact
+named `--artifact-name`. It ignores `manifest.json` when loading reports.
 
 ## Reading The Output
 

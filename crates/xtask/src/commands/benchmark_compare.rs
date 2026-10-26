@@ -182,6 +182,8 @@ struct GitHubContext {
     repo: String,
     current_run_id: u64,
     ref_name: String,
+    /// Event that triggered the current run; baselines must share it.
+    event_name: String,
     current_sha: Option<String>,
 }
 
@@ -271,8 +273,9 @@ impl BenchmarkCompareArgs {
         let repo = env::var("GITHUB_REPOSITORY").ok()?;
         let current_run_id = env::var("GITHUB_RUN_ID").ok()?.parse().ok()?;
         let ref_name = self.ref_name.clone().or_else(|| env::var("GITHUB_REF_NAME").ok())?;
+        let event_name = env::var("GITHUB_EVENT_NAME").ok()?;
         let current_sha = env::var("GITHUB_SHA").ok();
-        Some(GitHubContext { token, repo, current_run_id, ref_name, current_sha })
+        Some(GitHubContext { token, repo, current_run_id, ref_name, event_name, current_sha })
     }
 
     async fn load_github_previous_reports(
@@ -280,7 +283,8 @@ impl BenchmarkCompareArgs {
         client: &GitHubClient,
         context: &GitHubContext,
     ) -> Result<Option<(Reports, WorkflowRun, Option<CodeCompare>)>> {
-        let runs = client.workflow_runs(&self.workflow, &context.ref_name).await?;
+        let runs =
+            client.workflow_runs(&self.workflow, &context.ref_name, &context.event_name).await?;
         for run in runs {
             // Runs hold one job per destination, and one failed job fails the
             // whole run. Only a successful job uploads `--artifact-name`, so the
@@ -327,7 +331,16 @@ impl GitHubClient {
         Ok(Self { client, token, repo })
     }
 
-    async fn workflow_runs(&self, workflow: &str, ref_name: &str) -> Result<Vec<WorkflowRun>> {
+    /// Lists recent completed runs on `ref_name` triggered by `event_name`.
+    ///
+    /// Scheduled runs compare only with scheduled runs, so a manual run with a
+    /// larger runner or custom inputs never becomes the nightly baseline.
+    async fn workflow_runs(
+        &self,
+        workflow: &str,
+        ref_name: &str,
+        event_name: &str,
+    ) -> Result<Vec<WorkflowRun>> {
         let url = format!(
             "{GITHUB_API_BASE}/repos/{}/actions/workflows/{}/runs",
             self.repo,
@@ -338,8 +351,7 @@ impl GitHubClient {
             .get(url)
             .query(&[
                 ("branch", ref_name),
-                // No event filter: scheduled runs are valid baselines, and backfills
-                // upload under a different artifact name.
+                ("event", event_name),
                 ("status", "completed"),
                 ("per_page", "30"),
             ])
