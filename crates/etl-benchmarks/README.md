@@ -430,8 +430,10 @@ The workflow starts only source Postgres, installs pinned `go-tpc`, runs
 writes a `manifest.json` next to the reports. Each destination uploads
 `target/bench-results/*.json` as its own artifact:
 
-- `benchmark-results-<destination>` for nightly and manual runs.
-- `benchmark-backfill-<destination>` for runs with a `commit` input.
+- `benchmark-results-<destination>` for successful nightly and manual jobs.
+- `benchmark-backfill-<destination>` for successful runs with a `commit` input.
+- `benchmark-failed-<destination>` for failed or cancelled jobs, kept for
+  debugging and never used as a baseline.
 
 The manifest describes the run so the artifacts can be ingested later without
 guessing from workflow metadata: `schema_version`, `kind` (`benchmark`),
@@ -441,11 +443,12 @@ GitHub run identifiers, runner details, and the list of report files. Benchmark
 settings and metrics stay in the reports themselves.
 
 Nightly and manual runs compare the median reports against the most recent
-successful run on the same ref with the same artifact name, so each destination
-has its own baseline. Backfills skip the comparison. The GitHub step summary
-contains the benchmark environment, formatted median results with sample
-spread, and the comparison diff against the previous successful run when one
-is available.
+run on the same ref with the same artifact name. Only successful jobs upload
+that name, so each destination has its own baseline and one failed destination
+does not disqualify the others. Backfills skip the comparison. The GitHub step
+summary contains the benchmark environment, formatted median results with
+sample spread, and the comparison diff against the previous successful run when
+one is available.
 
 If no previous successful run exists, the comparison writes a "no previous
 benchmark artifact" summary and passes. If a comparable previous run exists, the
@@ -466,9 +469,9 @@ cargo x benchmark-compare \
 ```
 
 In GitHub Actions mode, `benchmark-compare` uses `GITHUB_TOKEN`,
-`GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, and `GITHUB_REF_NAME` to find the previous
-successful `benchmark.yml` run with an artifact named `--artifact-name`. It
-ignores `manifest.json` when loading reports.
+`GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, and `GITHUB_REF_NAME` to find the most
+recent `benchmark.yml` run with an artifact named `--artifact-name`. It ignores
+`manifest.json` when loading reports.
 
 ## Reading The Output
 

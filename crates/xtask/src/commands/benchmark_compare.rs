@@ -145,7 +145,6 @@ struct WorkflowRun {
     id: u64,
     run_number: u64,
     html_url: String,
-    conclusion: Option<String>,
     head_sha: Option<String>,
 }
 
@@ -283,7 +282,10 @@ impl BenchmarkCompareArgs {
     ) -> Result<Option<(Reports, WorkflowRun, Option<CodeCompare>)>> {
         let runs = client.workflow_runs(&self.workflow, &context.ref_name).await?;
         for run in runs {
-            if run.id == context.current_run_id || run.conclusion.as_deref() != Some("success") {
+            // Runs hold one job per destination, and one failed job fails the
+            // whole run. Only a successful job uploads `--artifact-name`, so the
+            // artifact lookup below decides eligibility per destination.
+            if run.id == context.current_run_id {
                 continue;
             }
 
@@ -1093,7 +1095,6 @@ mod tests {
             id: 1,
             run_number: 42,
             html_url: "https://github.com/supabase/etl/actions/runs/42".to_owned(),
-            conclusion: Some("success".to_owned()),
             head_sha: Some("abc123456789".to_owned()),
         };
         let code_compare = CodeCompare {

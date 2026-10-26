@@ -196,7 +196,9 @@ jobs:
       DESTINATION: ${{ matrix.destination }}
       BENCHMARK_TRIGGER: ${{ needs.plan.outputs.trigger }}
       BENCHMARK_RUNNER: ${{ needs.plan.outputs.runner }}
-      # Backfills use their own name so they never become a comparison baseline.
+      # Only a successful nightly or manual job uploads under this name, so its
+      # presence marks a usable baseline for that destination. Backfills use
+      # their own name so they never become a comparison baseline.
       ARTIFACT_NAME: ${{ format('{0}-{1}', needs.plan.outputs.trigger == 'backfill' && 'benchmark-backfill' || 'benchmark-results', matrix.destination) }}
     steps:
       - name: Check out source
@@ -588,12 +590,22 @@ jobs:
           exit "$status"
 
       - name: Upload benchmark results
-        if: always()
+        if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: target/bench-results/*.json
           if-no-files-found: error
+
+      # Failed reports stay available for debugging under a name that is never
+      # used as a baseline.
+      - name: Upload failed benchmark results
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-failed-${{ matrix.destination }}
+          path: target/bench-results/*.json
+          if-no-files-found: warn
 
       - name: Remove BigQuery credentials
         if: always() && matrix.destination == 'bigquery'
