@@ -41,7 +41,7 @@ use etl_destinations::ducklake::DuckLakeDestination;
 #[cfg(feature = "snowflake")]
 use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
-    Destination as SnowflakeDestination,
+    Destination as SnowflakeDestination, SqlClient as SnowflakeSqlClient,
 };
 use etl_telemetry::tracing::{LogFlusher, init_tracing_for_environment};
 use serde::Serialize;
@@ -545,7 +545,12 @@ pub enum BenchDestination {
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
     #[cfg_attr(
-        not(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake")),
+        not(any(
+            feature = "bigquery",
+            feature = "clickhouse",
+            feature = "ducklake",
+            feature = "snowflake"
+        )),
         expect(clippy::unused_async)
     )]
     #[cfg_attr(
@@ -683,8 +688,14 @@ impl BenchDestination {
             DestinationType::Snowflake => {
                 install_crypto_provider();
 
-                let config = SnowflakeConfig::require_bench_env()?;
-                let auth = Arc::new(AuthManager::new(config)?);
+                let (auth, sql, schema) = snowflake_run_target(pipeline_id)?;
+                sql.execute_ddl(&format!(
+                    "create schema if not exists {}",
+                    quote_snowflake_identifier(&schema)
+                ))
+                .await
+                .with_context(|| format!("failed to create Snowflake schema {schema}"))?;
+
                 let client = SnowflakeClient::new(auth, pipeline_id);
                 let destination = SnowflakeDestination::new(client, store);
 
@@ -1021,8 +1032,11 @@ pub async fn cleanup_replication_slots(
 
 /// Drops the destination state created by a benchmark run.
 #[cfg_attr(
-    not(feature = "clickhouse"),
-    expect(unused_variables, reason = "only ClickHouse runs create destination state")
+    not(any(feature = "clickhouse", feature = "snowflake")),
+    expect(
+        unused_variables,
+        reason = "only ClickHouse and Snowflake runs create destination state"
+    )
 )]
 pub async fn cleanup_destination(
     destination_args: &DestinationArgs,
@@ -1052,6 +1066,17 @@ pub async fn cleanup_destination(
             .with_context(|| format!("failed to drop ClickHouse database {database}"))?;
     }
 
+    #[cfg(feature = "snowflake")]
+    if matches!(destination_args.destination, DestinationType::Snowflake) {
+        let (_, sql, schema) = snowflake_run_target(pipeline_id)?;
+        sql.execute_ddl(&format!(
+            "drop schema if exists {} cascade",
+            quote_snowflake_identifier(&schema)
+        ))
+        .await
+        .with_context(|| format!("failed to drop Snowflake schema {schema}"))?;
+    }
+
     Ok(())
 }
 
@@ -1067,6 +1092,35 @@ fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clic
         Some(password) => client.with_password(password),
         None => client,
     }
+}
+
+/// Connects to the Snowflake benchmark target for one run.
+///
+/// Each run writes to its own schema, `{schema}_{pipeline_id}`, so tables left
+/// by earlier runs never collide with a new pipeline. Returns credentials
+/// scoped to that run schema, a SQL client on the configured base schema
+/// (which must exist) for creating and dropping the run schema, and the run
+/// schema name.
+#[cfg(feature = "snowflake")]
+fn snowflake_run_target(
+    pipeline_id: u64,
+) -> Result<(Arc<AuthManager>, SnowflakeSqlClient<AuthManager>, String)> {
+    let config = SnowflakeConfig::require_bench_env()?;
+    let base_config = config.clone_without_credentials();
+    let schema = format!("{}_{pipeline_id}", config.schema());
+    let auth = Arc::new(AuthManager::new(config.with_schema(&schema))?);
+    let sql = SnowflakeSqlClient::new(base_config, Arc::clone(&auth), reqwest::Client::new());
+
+    Ok((auth, sql, schema))
+}
+
+/// Quotes a Snowflake identifier without changing its case.
+///
+/// The destination quotes its schema, so the run schema must be created with
+/// the same exact-case name.
+#[cfg(feature = "snowflake")]
+fn quote_snowflake_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 /// Writes a machine-readable benchmark report.

@@ -266,6 +266,8 @@ cargo x benchmark \
 
 `BENCH_SNOWFLAKE_CONNECTION` is the only Snowflake benchmark credential input. It is a JSON object with `account`, `user`, `database`, `schema`, optional `role`, optional `private_key_passphrase`, and `private_key`. Snowflake credentials are read from the environment and are not accepted as benchmark CLI arguments.
 
+Each run writes to its own schema, `<schema>_<pipeline_id>`, in the configured database and drops it during cleanup, so runs never collide with tables from earlier runs. The configured `schema` must exist, and the role needs `CREATE SCHEMA` on the database.
+
 ### Snowflake Encoder Micro-Benchmark
 
 `snowflake_encoder` measures encoding CPU, compressed output bytes, request count,

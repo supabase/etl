@@ -23,6 +23,7 @@ clickhouse = ["dep:clickhouse", "dep:etl-destinations", "etl-destinations/clickh
 ducklake = ["dep:etl-destinations", "etl-destinations/ducklake"]
 snowflake = [
     "dep:etl-destinations",
+    "dep:reqwest",
     "etl-destinations/snowflake",
     "etl-destinations/test-utils",
 ]
@@ -37,6 +38,7 @@ etl-destinations = { workspace = true, optional = true, features = ["tls-rustls-
 etl-postgres = { workspace = true, features = ["sqlx", "tls-rustls-ring"] }
 etl-telemetry = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
+reqwest = { workspace = true, optional = true }
 rustls = { workspace = true, features = ["aws-lc-rs", "logging"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
