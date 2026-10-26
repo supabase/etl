@@ -12,6 +12,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+#[cfg(feature = "snowflake")]
+use etl::schema::TableName;
 use etl::{
     data::{SizeHint, TableRow},
     destination::{
@@ -42,6 +44,7 @@ use etl_destinations::ducklake::DuckLakeDestination;
 use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
     Destination as SnowflakeDestination, SqlClient as SnowflakeSqlClient,
+    test_utils::drop_destination_table,
 };
 use etl_telemetry::tracing::{LogFlusher, init_tracing_for_environment};
 use serde::Serialize;
@@ -545,12 +548,7 @@ pub enum BenchDestination {
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
     #[cfg_attr(
-        not(any(
-            feature = "bigquery",
-            feature = "clickhouse",
-            feature = "ducklake",
-            feature = "snowflake"
-        )),
+        not(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake")),
         expect(clippy::unused_async)
     )]
     #[cfg_attr(
@@ -688,14 +686,8 @@ impl BenchDestination {
             DestinationType::Snowflake => {
                 install_crypto_provider();
 
-                let (auth, sql, schema) = snowflake_run_target(pipeline_id)?;
-                sql.execute_ddl(&format!(
-                    "create schema if not exists {}",
-                    quote_snowflake_identifier(&schema)
-                ))
-                .await
-                .with_context(|| format!("failed to create Snowflake schema {schema}"))?;
-
+                let config = SnowflakeConfig::require_bench_env()?;
+                let auth = Arc::new(AuthManager::new(config)?);
                 let client = SnowflakeClient::new(auth, pipeline_id);
                 let destination = SnowflakeDestination::new(client, store);
 
@@ -1032,11 +1024,8 @@ pub async fn cleanup_replication_slots(
 
 /// Drops the destination state created by a benchmark run.
 #[cfg_attr(
-    not(any(feature = "clickhouse", feature = "snowflake")),
-    expect(
-        unused_variables,
-        reason = "only ClickHouse and Snowflake runs create destination state"
-    )
+    not(feature = "clickhouse"),
+    expect(unused_variables, reason = "only ClickHouse runs create destination state")
 )]
 pub async fn cleanup_destination(
     destination_args: &DestinationArgs,
@@ -1066,17 +1055,6 @@ pub async fn cleanup_destination(
             .with_context(|| format!("failed to drop ClickHouse database {database}"))?;
     }
 
-    #[cfg(feature = "snowflake")]
-    if matches!(destination_args.destination, DestinationType::Snowflake) {
-        let (_, sql, schema) = snowflake_run_target(pipeline_id)?;
-        sql.execute_ddl(&format!(
-            "drop schema if exists {} cascade",
-            quote_snowflake_identifier(&schema)
-        ))
-        .await
-        .with_context(|| format!("failed to drop Snowflake schema {schema}"))?;
-    }
-
     Ok(())
 }
 
@@ -1094,33 +1072,67 @@ fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clic
     }
 }
 
-/// Connects to the Snowflake benchmark target for one run.
+/// Drops benchmark destination tables that every run shares.
 ///
-/// Each run writes to its own schema, `{schema}_{pipeline_id}`, so tables left
-/// by earlier runs never collide with a new pipeline. Returns credentials
-/// scoped to that run schema, a SQL client on the configured base schema
-/// (which must exist) for creating and dropping the run schema, and the run
-/// schema name.
-#[cfg(feature = "snowflake")]
-fn snowflake_run_target(
-    pipeline_id: u64,
-) -> Result<(Arc<AuthManager>, SnowflakeSqlClient<AuthManager>, String)> {
-    let config = SnowflakeConfig::require_bench_env()?;
-    let base_config = config.clone_without_credentials();
-    let schema = format!("{}_{pipeline_id}", config.schema());
-    let auth = Arc::new(AuthManager::new(config.with_schema(&schema))?);
-    let sql = SnowflakeSqlClient::new(base_config, Arc::clone(&auth), reqwest::Client::new());
+/// Snowflake runs write to the configured schema, so tables and companion
+/// views left by an earlier pipeline, including a crashed run, block the next
+/// pipeline from creating them. Call this before a run to clear leftovers and
+/// after it to clean up. Other destinations isolate runs and need nothing.
+#[cfg_attr(
+    not(feature = "snowflake"),
+    expect(
+        unused_variables,
+        clippy::unused_async,
+        reason = "only Snowflake runs share destination tables"
+    )
+)]
+pub async fn reset_shared_destination_tables(
+    destination_args: &DestinationArgs,
+    pg: &PgConnectionArgs,
+    table_ids: &[u32],
+) -> Result<()> {
+    #[cfg(feature = "snowflake")]
+    if matches!(destination_args.destination, DestinationType::Snowflake) {
+        let config = SnowflakeConfig::require_bench_env()?;
+        let auth = Arc::new(AuthManager::new(config)?);
+        let sql = SnowflakeSqlClient::new(
+            auth.config().clone_without_credentials(),
+            auth,
+            reqwest::Client::new(),
+        );
+        for table_name in source_table_names(pg, table_ids).await? {
+            drop_destination_table(&sql, &table_name).await.with_context(|| {
+                format!("failed to drop Snowflake destination objects for {table_name}")
+            })?;
+        }
+    }
 
-    Ok((auth, sql, schema))
+    Ok(())
 }
 
-/// Quotes a Snowflake identifier without changing its case.
-///
-/// The destination quotes its schema, so the run schema must be created with
-/// the same exact-case name.
+/// Looks up the source names of benchmark tables.
 #[cfg(feature = "snowflake")]
-fn quote_snowflake_identifier(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
+async fn source_table_names(pg: &PgConnectionArgs, table_ids: &[u32]) -> Result<Vec<TableName>> {
+    let table_ids: Vec<i64> = table_ids.iter().copied().map(i64::from).collect();
+    let pool = pg_pool(pg).await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "select n.nspname::text, c.relname::text
+         from pg_class c
+         join pg_namespace n on n.oid = c.relnamespace
+         where c.oid::int8 = any($1)
+         order by c.oid",
+    )
+    .bind(&table_ids)
+    .fetch_all(&pool)
+    .await
+    .context("failed to look up benchmark source table names")?;
+    pool.close().await;
+
+    if rows.len() != table_ids.len() {
+        bail!("found {} of {} benchmark source tables", rows.len(), table_ids.len());
+    }
+
+    Ok(rows.into_iter().map(|(schema, name)| TableName::new(schema, name)).collect())
 }
 
 /// Writes a machine-readable benchmark report.

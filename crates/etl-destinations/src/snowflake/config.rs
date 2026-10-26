@@ -176,12 +176,6 @@ impl Config {
         self
     }
 
-    /// Set the target schema.
-    pub fn with_schema(mut self, schema: &str) -> Self {
-        self.schema = schema.to_owned();
-        self
-    }
-
     /// Parse a JSON Snowflake connection string from `value` for `source_name`.
     fn parse_connection_json(value: &str, source_name: &str) -> snowflake::Result<Self> {
         let mut connection: ConnectionJson = serde_json::from_str(value).map_err(|error| {
