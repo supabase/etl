@@ -19,8 +19,7 @@ use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_destination,
     cleanup_replication_slots, duration_millis, format_decimal, format_duration_ms, format_integer,
-    mib_per_second, per_second, pipeline_config, reset_shared_destination_tables,
-    run_etl_migrations, write_report,
+    mib_per_second, per_second, pipeline_config, run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-streaming benchmark.
@@ -147,9 +146,6 @@ async fn run(args: RunArgs) -> Result<()> {
     validate_args(&args)?;
     info!("starting table-streaming benchmark");
 
-    // Clearing leftovers from earlier runs is setup, not measured work.
-    reset_shared_destination_tables(&args.destination, &args.pg, &args.table_ids).await?;
-
     let total_started = Instant::now();
     run_etl_migrations(&args.pg).await?;
     let table_ids = args.table_ids.clone();
@@ -207,7 +203,6 @@ async fn run(args: RunArgs) -> Result<()> {
 
     cleanup_replication_slots(&args.pg, args.pipeline_id, &table_ids).await?;
     cleanup_destination(&args.destination, args.pipeline_id).await?;
-    reset_shared_destination_tables(&args.destination, &args.pg, &table_ids).await?;
 
     let destination_stats = destination.stats();
     if destination_stats.cdc_data_events == 0 {
