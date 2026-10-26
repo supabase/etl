@@ -266,6 +266,8 @@ cargo x benchmark \
 
 `BENCH_SNOWFLAKE_CONNECTION` is the only Snowflake benchmark credential input. It is a JSON object with `account`, `user`, `database`, `schema`, optional `role`, optional `private_key_passphrase`, and `private_key`. Snowflake credentials are read from the environment and are not accepted as benchmark CLI arguments.
 
+Every run writes to the configured `schema`, so use a schema reserved for benchmarks. Before and after each run, the benchmark drops the destination tables and companion views for its source tables, whichever pipeline created them, so leftovers from an earlier or crashed run do not block the next one. Two runs against the same schema at the same time will collide.
+
 ### Snowflake Encoder Micro-Benchmark
 
 `snowflake_encoder` measures encoding CPU, compressed output bytes, request count,
@@ -358,7 +360,12 @@ Optional:
 
 ## GitHub Actions
 
-The `Benchmark` workflow is manual and runs through `workflow_dispatch`.
+The `Benchmark` workflow runs nightly and on demand through `workflow_dispatch`.
+
+The nightly run (`53 5 * * *` UTC) benchmarks the default branch with the
+default inputs as a matrix over `null`, `clickhouse`, and `snowflake`. Each
+destination is an independent job, so one failing
+destination does not stop the others.
 
 From the GitHub UI, open **Actions**, select **Benchmark**, choose **Run
 workflow**, then set the inputs.
@@ -395,28 +402,58 @@ Important workflow inputs:
   `0.2`.
 - `enable_memory_backpressure`: opt into ETL memory backpressure. Defaults to
   `false` for benchmark runs.
-- `destination`: `null`, `bigquery`, `clickhouse`, or `snowflake`.
+- `destination`: `null`, `bigquery`, `clickhouse`, `snowflake`, or `all` to run
+  `null`, `clickhouse`, and `snowflake` as a matrix.
+- `commit`: optional full 40-character commit SHA to benchmark instead of the
+  selected workflow ref (a backfill). The workflow still comes from the
+  selected ref, so the commit's `cargo x benchmark` must accept the flags the
+  workflow passes; older commits fail fast on unknown flags.
 - `force_prepare`: drop and regenerate TPC-C tables before running.
 - `skip_table_copy`: skip table copy.
 - `skip_table_streaming`: skip table streaming.
 
 For BigQuery workflow runs, set the repository secret
 `BENCHMARK_BQ_SA_KEY_JSON`, then pass `destination=bigquery`,
-`bq_project_id`, and an existing `bq_dataset_id`.
+`bq_project_id`, and an existing `bq_dataset_id`. Blank project and dataset
+inputs fall back to the `BENCHMARK_BQ_PROJECT_ID` and
+`BENCHMARK_BQ_DATASET_ID` repository variables. BigQuery is not part of the
+nightly matrix or `destination=all` yet.
 
 For Snowflake workflow runs, set the `BENCH_SNOWFLAKE_CONNECTION` repository secret and pass `destination=snowflake`.
+Snowflake backfills need a `commit` that includes the shared table reset (see
+[Snowflake Runs](#snowflake-runs)). Older commits never drop their tables, so
+a second older backfill fails on the first one's leftovers. The next run from a
+newer commit clears them.
 
 For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
 starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and points
 the benchmark at it (user `etl`, database `default`); no secrets are needed.
 
 The workflow starts only source Postgres, installs pinned `go-tpc`, runs
-`cargo x benchmark` with three measured samples plus one warmup sample,
-compares the median reports against the most recent successful
-`benchmark-results` artifact on the same ref, and uploads
-`target/bench-results/*.json`. The GitHub step summary contains the benchmark
-environment, formatted median results with sample spread, and the comparison
-diff against the previous successful run when one is available.
+`cargo x benchmark` with three measured samples plus one warmup sample, and
+writes a `manifest.json` next to the reports. Each destination uploads
+`target/bench-results/*.json` as its own artifact:
+
+- `benchmark-results-<destination>` for successful nightly and manual jobs.
+- `benchmark-backfill-<destination>` for successful runs with a `commit` input.
+- `benchmark-failed-<destination>` for failed or cancelled jobs, kept for
+  debugging and never used as a baseline.
+
+The manifest describes the run so the artifacts can be ingested later without
+guessing from workflow metadata: `schema_version`, `kind` (`benchmark`),
+`trigger` (`nightly`, `manual`, or `backfill`), `destination`, the benchmarked
+`commit` (`sha` and `committed_at`), the `workflow_sha` the workflow ran from,
+GitHub run identifiers, runner details, and the list of report files. Benchmark
+settings and metrics stay in the reports themselves.
+
+Nightly and manual runs compare the median reports against the most recent
+run on the same ref with the same trigger and artifact name, so nightly runs
+only compare with nightly runs. Only successful jobs upload that name, so each
+destination has its own baseline and one failed destination does not
+disqualify the others. Backfills skip the comparison. The GitHub step
+summary contains the benchmark environment, formatted median results with
+sample spread, and the comparison diff against the previous successful run when
+one is available.
 
 If no previous successful run exists, the comparison writes a "no previous
 benchmark artifact" summary and passes. If a comparable previous run exists, the
@@ -437,8 +474,10 @@ cargo x benchmark-compare \
 ```
 
 In GitHub Actions mode, `benchmark-compare` uses `GITHUB_TOKEN`,
-`GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, and `GITHUB_REF_NAME` to find the previous
-successful `workflow_dispatch` run for `benchmark.yml`.
+`GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_REF_NAME`, and `GITHUB_EVENT_NAME`
+to find the most recent `benchmark.yml` run from the same event with an artifact
+named `--artifact-name`, searching up to 150 recent runs. It ignores
+`manifest.json` when loading reports.
 
 ## Reading The Output
 
