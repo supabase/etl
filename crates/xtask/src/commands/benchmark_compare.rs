@@ -296,9 +296,9 @@ impl BenchmarkCompareArgs {
                 .await?;
             let last_page = runs.len() < RUNS_PER_PAGE;
             for run in runs {
-                // Runs hold one job per destination, and one failed job fails the
-                // whole run. Only a successful job uploads `--artifact-name`, so
-                // the artifact lookup below decides eligibility per destination.
+                // One failed destination job fails the whole run, so the run
+                // conclusion is not checked. Only successful jobs upload the
+                // artifact, so its presence marks a usable baseline.
                 if run.id == context.current_run_id {
                     continue;
                 }
