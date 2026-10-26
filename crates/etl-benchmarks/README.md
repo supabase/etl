@@ -420,6 +420,10 @@ inputs fall back to the `BENCHMARK_BQ_PROJECT_ID` and
 nightly matrix or `destination=all` yet.
 
 For Snowflake workflow runs, set the `BENCH_SNOWFLAKE_CONNECTION` repository secret and pass `destination=snowflake`.
+Snowflake backfills need a `commit` that includes the shared table reset (see
+[Snowflake Runs](#snowflake-runs)). Older commits never drop their tables, so
+a second older backfill fails on the first one's leftovers. The next run from a
+newer commit clears them.
 
 For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
 starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and points
