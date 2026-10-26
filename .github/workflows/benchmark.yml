@@ -1,6 +1,9 @@
 name: Benchmark
 
 on:
+  schedule:
+    # Off the whole hour and away from the other scheduled workflows.
+    - cron: "53 5 * * *"
   workflow_dispatch:
     inputs:
       benchmark_runner:
@@ -50,7 +53,7 @@ on:
         type: boolean
         default: false
       destination:
-        description: Destination to benchmark.
+        description: Destination to benchmark; `all` runs null, clickhouse, and snowflake as a matrix.
         required: true
         type: choice
         options:
@@ -58,13 +61,18 @@ on:
           - bigquery
           - clickhouse
           - snowflake
+          - all
         default: "null"
+      commit:
+        description: Optional full commit SHA to benchmark (backfill); defaults to the selected workflow ref.
+        required: false
+        default: ""
       bq_project_id:
-        description: BigQuery project ID when destination is bigquery.
+        description: BigQuery project ID; defaults to the BENCHMARK_BQ_PROJECT_ID repository variable.
         required: false
         default: ""
       bq_dataset_id:
-        description: BigQuery dataset ID when destination is bigquery.
+        description: BigQuery dataset ID; defaults to the BENCHMARK_BQ_DATASET_ID repository variable.
         required: false
         default: ""
       force_prepare:
@@ -96,24 +104,104 @@ env:
   BENCH_CLICKHOUSE_USER: etl
   BENCH_CLICKHOUSE_PASSWORD: etl
   BENCH_CLICKHOUSE_DATABASE: default
+  # Scheduled runs have no inputs; keep these fallbacks equal to the input defaults.
+  WAREHOUSES: ${{ inputs.warehouses || '10' }}
+  TPCC_THREADS: ${{ inputs.tpcc_threads }}
+  STREAMING_DURATION_SECONDS: ${{ inputs.streaming_duration_seconds || '60' }}
+  STREAMING_DRAIN_QUIET_MS: ${{ inputs.streaming_drain_quiet_ms || '2000' }}
+  MAX_TABLE_SYNC_WORKERS: ${{ inputs.max_table_sync_workers || '8' }}
+  MAX_COPY_CONNECTIONS_PER_TABLE: ${{ inputs.max_copy_connections_per_table || '4' }}
+  BATCH_MAX_FILL_MS: ${{ inputs.batch_max_fill_ms || '1000' }}
+  MEMORY_BUDGET_RATIO: ${{ inputs.memory_budget_ratio || '0.2' }}
+  ENABLE_MEMORY_BACKPRESSURE: ${{ inputs.enable_memory_backpressure || false }}
+  FORCE_PREPARE: ${{ inputs.force_prepare || false }}
+  SKIP_TABLE_COPY: ${{ inputs.skip_table_copy || false }}
+  SKIP_TABLE_STREAMING: ${{ inputs.skip_table_streaming || false }}
+  BQ_PROJECT_ID: ${{ inputs.bq_project_id || vars.BENCHMARK_BQ_PROJECT_ID }}
+  BQ_DATASET_ID: ${{ inputs.bq_dataset_id || vars.BENCHMARK_BQ_DATASET_ID }}
 
 permissions:
   actions: read
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
+  plan:
+    name: Plan
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      trigger: ${{ steps.plan.outputs.trigger }}
+      destinations: ${{ steps.plan.outputs.destinations }}
+      runner: ${{ steps.plan.outputs.runner }}
+    steps:
+      - name: Resolve run plan
+        id: plan
+        env:
+          COMMIT: ${{ inputs.commit }}
+          DESTINATION: ${{ inputs.destination || 'all' }}
+          RUNNER: ${{ inputs.benchmark_runner || 'blacksmith-16vcpu-ubuntu-2404' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$COMMIT" && ! "$COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Commit must be a full 40-character lowercase SHA'
+            exit 1
+          fi
+
+          if [[ -n "$COMMIT" ]]; then
+            trigger=backfill
+            sha="$COMMIT"
+          elif [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            trigger=nightly
+            sha="$GITHUB_SHA"
+          else
+            trigger=manual
+            sha="$GITHUB_SHA"
+          fi
+
+          case "$DESTINATION" in
+            # BigQuery stays out until its benchmark secret and project/dataset variables exist.
+            all) destinations='["null","clickhouse","snowflake"]' ;;
+            null | clickhouse | bigquery | snowflake) destinations="[\"$DESTINATION\"]" ;;
+            *)
+              echo "::error::Unknown destination: $DESTINATION"
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "sha=$sha"
+            echo "trigger=$trigger"
+            echo "destinations=$destinations"
+            echo "runner=$RUNNER"
+          } >> "$GITHUB_OUTPUT"
+
   benchmark:
-    name: Benchmark
-    runs-on: ${{ inputs.benchmark_runner }}
+    name: Benchmark (${{ matrix.destination }})
+    needs: plan
+    runs-on: ${{ needs.plan.outputs.runner }}
     timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        destination: ${{ fromJSON(needs.plan.outputs.destinations) }}
+    # One run per destination at a time: BigQuery and Snowflake runs share remote
+    # datasets; queueing keeps every pending backfill instead of replacing it.
+    concurrency:
+      group: benchmark-${{ matrix.destination }}
+      cancel-in-progress: false
+      queue: max
+    env:
+      DESTINATION: ${{ matrix.destination }}
+      BENCHMARK_TRIGGER: ${{ needs.plan.outputs.trigger }}
+      BENCHMARK_RUNNER: ${{ needs.plan.outputs.runner }}
+      # Backfills use their own name so they never become a comparison baseline.
+      ARTIFACT_NAME: ${{ format('{0}-{1}', needs.plan.outputs.trigger == 'backfill' && 'benchmark-backfill' || 'benchmark-results', matrix.destination) }}
     steps:
       - name: Check out source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
 
       - name: Set up Rust
@@ -122,7 +210,7 @@ jobs:
           rustflags: ''
           cache-key: benchmark
           cache-on-failure: false
-          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-save-if: ${{ github.ref == 'refs/heads/main' && needs.plan.outputs.trigger != 'backfill' }}
 
       - name: Install system tools
         run: |
@@ -151,7 +239,7 @@ jobs:
             cargo --locked xtask postgres start --shards 1 --base-port "$POSTGRES_PORT" --source-only
 
       - name: Prepare BigQuery key
-        if: inputs.destination == 'bigquery'
+        if: matrix.destination == 'bigquery'
         env:
           BQ_SA_KEY_JSON: ${{ secrets.BENCHMARK_BQ_SA_KEY_JSON }}
         run: |
@@ -160,15 +248,19 @@ jobs:
             echo "BENCHMARK_BQ_SA_KEY_JSON secret is required for BigQuery benchmarks." >&2
             exit 1
           fi
+          if [[ -z "${BQ_PROJECT_ID}" || -z "${BQ_DATASET_ID}" ]]; then
+            echo "BigQuery benchmarks need bq_project_id and bq_dataset_id inputs or the BENCHMARK_BQ_PROJECT_ID and BENCHMARK_BQ_DATASET_ID repository variables." >&2
+            exit 1
+          fi
           umask 077
           printf '%s' "${BQ_SA_KEY_JSON}" > "$RUNNER_TEMP/bigquery-key.json"
 
       - name: Start ClickHouse
-        if: inputs.destination == 'clickhouse'
+        if: matrix.destination == 'clickhouse'
         run: docker compose -f scripts/docker/docker-compose.yaml up -d --wait clickhouse
 
       - name: Check Snowflake connection
-        if: inputs.destination == 'snowflake'
+        if: matrix.destination == 'snowflake'
         env:
           BENCH_SNOWFLAKE_CONNECTION: ${{ secrets.BENCH_SNOWFLAKE_CONNECTION }}
         run: |
@@ -179,18 +271,11 @@ jobs:
           fi
 
       - name: Record benchmark environment
-        env:
-          BENCHMARK_RUNNER_INPUT: ${{ inputs.benchmark_runner }}
-          DESTINATION_INPUT: ${{ inputs.destination }}
-          ENABLE_MEMORY_BACKPRESSURE_INPUT: ${{ inputs.enable_memory_backpressure }}
-          MEMORY_BUDGET_RATIO_INPUT: ${{ inputs.memory_budget_ratio }}
-          TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
-          WAREHOUSES_INPUT: ${{ inputs.warehouses }}
         run: |
           set -euo pipefail
           mkdir -p target/bench-results
 
-          tpcc_threads="${TPCC_THREADS_INPUT:-derived}"
+          tpcc_threads="${TPCC_THREADS:-derived}"
           host_memory="$(awk '/MemTotal/ { printf "%.2f GiB", $2 / 1024 / 1024 }' /proc/meminfo || true)"
           if [[ -z "${host_memory}" ]]; then
             host_memory="unavailable"
@@ -208,40 +293,27 @@ jobs:
             echo
             echo "| Setting | Value |"
             echo "| --- | --- |"
-            echo "| Runner | ${BENCHMARK_RUNNER_INPUT} |"
+            echo "| Commit | $(git rev-parse HEAD) |"
+            echo "| Trigger | ${BENCHMARK_TRIGGER} |"
+            echo "| Runner | ${BENCHMARK_RUNNER} |"
             echo "| Runner name | ${RUNNER_NAME} |"
             echo "| Runner OS | ${RUNNER_OS} |"
             echo "| Runner arch | ${RUNNER_ARCH} |"
             echo "| CPUs | $(nproc) |"
             echo "| Host memory | ${host_memory} |"
             echo "| Cgroup memory limit | ${cgroup_memory_limit} |"
-            echo "| Warehouses | ${WAREHOUSES_INPUT} |"
+            echo "| Warehouses | ${WAREHOUSES} |"
             echo "| TPC-C threads | ${tpcc_threads} |"
             echo "| Measured samples | ${BENCHMARK_SAMPLES} |"
             echo "| Warmup samples | ${BENCHMARK_WARMUP_SAMPLES} |"
-            echo "| Memory budget ratio | ${MEMORY_BUDGET_RATIO_INPUT} |"
-            echo "| Memory backpressure | ${ENABLE_MEMORY_BACKPRESSURE_INPUT} |"
-            echo "| Destination | ${DESTINATION_INPUT} |"
+            echo "| Memory budget ratio | ${MEMORY_BUDGET_RATIO} |"
+            echo "| Memory backpressure | ${ENABLE_MEMORY_BACKPRESSURE} |"
+            echo "| Destination | ${DESTINATION} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run benchmarks
         env:
-          BATCH_MAX_FILL_MS_INPUT: ${{ inputs.batch_max_fill_ms }}
-          BQ_DATASET_ID_INPUT: ${{ inputs.bq_dataset_id }}
-          BQ_PROJECT_ID_INPUT: ${{ inputs.bq_project_id }}
           BQ_SA_KEY_FILE: ${{ runner.temp }}/bigquery-key.json
-          DESTINATION_INPUT: ${{ inputs.destination }}
-          ENABLE_MEMORY_BACKPRESSURE_INPUT: ${{ inputs.enable_memory_backpressure }}
-          FORCE_PREPARE_INPUT: ${{ inputs.force_prepare }}
-          MAX_COPY_CONNECTIONS_PER_TABLE_INPUT: ${{ inputs.max_copy_connections_per_table }}
-          MAX_TABLE_SYNC_WORKERS_INPUT: ${{ inputs.max_table_sync_workers }}
-          MEMORY_BUDGET_RATIO_INPUT: ${{ inputs.memory_budget_ratio }}
-          SKIP_TABLE_COPY_INPUT: ${{ inputs.skip_table_copy }}
-          SKIP_TABLE_STREAMING_INPUT: ${{ inputs.skip_table_streaming }}
-          STREAMING_DRAIN_QUIET_MS_INPUT: ${{ inputs.streaming_drain_quiet_ms }}
-          STREAMING_DURATION_SECONDS_INPUT: ${{ inputs.streaming_duration_seconds }}
-          TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
-          WAREHOUSES_INPUT: ${{ inputs.warehouses }}
           BENCH_SNOWFLAKE_CONNECTION: ${{ secrets.BENCH_SNOWFLAKE_CONNECTION }}
         run: |
           set -euo pipefail
@@ -253,49 +325,126 @@ jobs:
             --database "$POSTGRES_DB"
             --username "$POSTGRES_USER"
             --password "$POSTGRES_PASSWORD"
-            --warehouses "$WAREHOUSES_INPUT"
-            --streaming-drain-quiet-ms "$STREAMING_DRAIN_QUIET_MS_INPUT"
-            --max-table-sync-workers "$MAX_TABLE_SYNC_WORKERS_INPUT"
-            --max-copy-connections-per-table "$MAX_COPY_CONNECTIONS_PER_TABLE_INPUT"
-            --batch-max-fill-ms "$BATCH_MAX_FILL_MS_INPUT"
-            --memory-budget-ratio "$MEMORY_BUDGET_RATIO_INPUT"
-            --destination "$DESTINATION_INPUT"
+            --warehouses "$WAREHOUSES"
+            --streaming-drain-quiet-ms "$STREAMING_DRAIN_QUIET_MS"
+            --max-table-sync-workers "$MAX_TABLE_SYNC_WORKERS"
+            --max-copy-connections-per-table "$MAX_COPY_CONNECTIONS_PER_TABLE"
+            --batch-max-fill-ms "$BATCH_MAX_FILL_MS"
+            --memory-budget-ratio "$MEMORY_BUDGET_RATIO"
+            --destination "$DESTINATION"
             --samples "$BENCHMARK_SAMPLES"
             --warmup-samples "$BENCHMARK_WARMUP_SAMPLES"
             --output-dir target/bench-results
           )
 
-          if [[ -n "$TPCC_THREADS_INPUT" ]]; then
-            args+=(--tpcc-threads "$TPCC_THREADS_INPUT")
+          if [[ -n "$TPCC_THREADS" ]]; then
+            args+=(--tpcc-threads "$TPCC_THREADS")
           fi
 
-          if [[ -n "$STREAMING_DURATION_SECONDS_INPUT" ]]; then
-            args+=(--streaming-duration-seconds "$STREAMING_DURATION_SECONDS_INPUT")
+          if [[ -n "$STREAMING_DURATION_SECONDS" ]]; then
+            args+=(--streaming-duration-seconds "$STREAMING_DURATION_SECONDS")
           fi
 
-          if [[ "$ENABLE_MEMORY_BACKPRESSURE_INPUT" == "true" ]]; then
+          if [[ "$ENABLE_MEMORY_BACKPRESSURE" == "true" ]]; then
             args+=(--enable-memory-backpressure)
           fi
 
-          if [[ "$FORCE_PREPARE_INPUT" == "true" ]]; then
+          if [[ "$FORCE_PREPARE" == "true" ]]; then
             args+=(--force-prepare)
           fi
 
-          if [[ "$SKIP_TABLE_COPY_INPUT" == "true" ]]; then
+          if [[ "$SKIP_TABLE_COPY" == "true" ]]; then
             args+=(--skip-table-copy)
           fi
 
-          if [[ "$SKIP_TABLE_STREAMING_INPUT" == "true" ]]; then
+          if [[ "$SKIP_TABLE_STREAMING" == "true" ]]; then
             args+=(--skip-table-streaming)
           fi
 
-          if [[ "$DESTINATION_INPUT" == "bigquery" ]]; then
-            args+=(--bq-project-id "$BQ_PROJECT_ID_INPUT")
-            args+=(--bq-dataset-id "$BQ_DATASET_ID_INPUT")
+          if [[ "$DESTINATION" == "bigquery" ]]; then
+            args+=(--bq-project-id "$BQ_PROJECT_ID")
+            args+=(--bq-dataset-id "$BQ_DATASET_ID")
             args+=(--bq-sa-key-file "$BQ_SA_KEY_FILE")
           fi
 
           cargo --locked xtask "${args[@]}"
+
+      # Written by the workflow, not xtask, so backfills of older commits get one too.
+      - name: Write run manifest
+        run: |
+          set -euo pipefail
+          COMMIT_SHA="$(git rev-parse HEAD)"
+          COMMITTED_AT="$(git show -s --format=%cI HEAD)"
+          export COMMIT_SHA COMMITTED_AT
+
+          python3 <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          results_dir = Path("target/bench-results")
+          manifest_path = results_dir / "manifest.json"
+
+          def memory_bytes():
+              try:
+                  for line in Path("/proc/meminfo").read_text().splitlines():
+                      if line.startswith("MemTotal:"):
+                          return int(line.split()[1]) * 1024
+              except OSError:
+                  pass
+              return None
+
+          def cgroup_memory_limit():
+              for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+                  try:
+                      return Path(path).read_text().strip()
+                  except OSError:
+                      continue
+              return None
+
+          reports = sorted(
+              path.name
+              for path in results_dir.glob("*.json")
+              if path != manifest_path and not path.name.startswith(".")
+          )
+          if not reports:
+              raise SystemExit("no benchmark reports found to describe in the manifest")
+
+          manifest = {
+              "schema_version": 1,
+              "kind": "benchmark",
+              "trigger": os.environ["BENCHMARK_TRIGGER"],
+              "destination": os.environ["DESTINATION"],
+              "commit": {
+                  "sha": os.environ["COMMIT_SHA"],
+                  "committed_at": os.environ["COMMITTED_AT"],
+              },
+              "workflow_sha": os.environ["GITHUB_SHA"],
+              "github": {
+                  "repository": os.environ["GITHUB_REPOSITORY"],
+                  "workflow": os.environ["GITHUB_WORKFLOW"],
+                  "event_name": os.environ["GITHUB_EVENT_NAME"],
+                  "ref": os.environ["GITHUB_REF"],
+                  "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "run_number": int(os.environ["GITHUB_RUN_NUMBER"]),
+                  "job": os.environ["GITHUB_JOB"],
+              },
+              "runner": {
+                  "label": os.environ["BENCHMARK_RUNNER"],
+                  "name": os.environ.get("RUNNER_NAME"),
+                  "os": os.environ.get("RUNNER_OS"),
+                  "arch": os.environ.get("RUNNER_ARCH"),
+                  "cpus": os.cpu_count(),
+                  "memory_bytes": memory_bytes(),
+                  "cgroup_memory_limit": cgroup_memory_limit(),
+              },
+              "reports": reports,
+              "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+          }
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
 
       - name: Summarize benchmark results
         run: |
@@ -422,6 +571,7 @@ jobs:
           PY
 
       - name: Compare benchmark results
+        if: needs.plan.outputs.trigger != 'backfill'
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
@@ -429,6 +579,7 @@ jobs:
           set +e
           cargo --locked xtask benchmark-compare \
             --current-dir target/bench-results \
+            --artifact-name "$ARTIFACT_NAME" \
             --output target/bench-results/benchmark-comparison.md
           status=$?
           set -e
@@ -439,10 +590,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: benchmark-results
+          name: ${{ env.ARTIFACT_NAME }}
           path: target/bench-results/*.json
           if-no-files-found: error
 
       - name: Remove BigQuery credentials
-        if: always() && inputs.destination == 'bigquery'
+        if: always() && matrix.destination == 'bigquery'
         run: rm -f "$RUNNER_TEMP/bigquery-key.json"

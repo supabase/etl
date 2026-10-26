@@ -15,6 +15,8 @@ use serde_json::Value;
 const DEFAULT_ARTIFACT_NAME: &str = "benchmark-results";
 const DEFAULT_CURRENT_DIR: &str = "target/bench-results";
 const DEFAULT_WORKFLOW: &str = "benchmark.yml";
+/// Run manifest uploaded beside the reports; not itself a report.
+const MANIFEST_FILE_NAME: &str = "manifest.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
@@ -334,7 +336,8 @@ impl GitHubClient {
             .get(url)
             .query(&[
                 ("branch", ref_name),
-                ("event", "workflow_dispatch"),
+                // No event filter: scheduled runs are valid baselines, and backfills
+                // upload under a different artifact name.
                 ("status", "completed"),
                 ("per_page", "30"),
             ])
@@ -397,7 +400,9 @@ fn load_reports(dir: &Path) -> Result<Reports> {
     let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || path.file_name().and_then(|name| name.to_str()) == Some(MANIFEST_FILE_NAME)
+        {
             continue;
         }
 
@@ -834,6 +839,27 @@ mod tests {
         fs::write(&report_path, report_contents).unwrap();
 
         assert_eq!(fs::read(&report_path).unwrap(), report_contents);
+    }
+
+    /// The run manifest is not loaded as a benchmark report.
+    #[test]
+    fn load_reports_ignores_run_manifest() {
+        use std::fs;
+
+        use crate::commands::benchmark_compare::{create_previous_reports_dir, load_reports};
+
+        let temp_dir = create_previous_reports_dir().unwrap();
+        fs::write(temp_dir.path().join("table_copy.json"), br#"{"benchmark":"table_copy"}"#)
+            .unwrap();
+        fs::write(
+            temp_dir.path().join("manifest.json"),
+            br#"{"schema_version":1,"destination":"null"}"#,
+        )
+        .unwrap();
+
+        let reports = load_reports(temp_dir.path()).unwrap();
+
+        assert_eq!(reports.keys().collect::<Vec<_>>(), ["table_copy"]);
     }
 
     #[test]
