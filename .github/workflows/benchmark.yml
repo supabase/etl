@@ -108,7 +108,8 @@ env:
   BENCH_CLICKHOUSE_DATABASE: default
   # Scheduled runs have no inputs; keep these fallbacks equal to the input defaults.
   WAREHOUSES: ${{ inputs.warehouses || '10' }}
-  TPCC_THREADS: ${{ inputs.tpcc_threads }}
+  # Not TPCC_THREADS: the xtask reads that env var, and an empty value fails to parse.
+  TPCC_THREADS_INPUT: ${{ inputs.tpcc_threads }}
   STREAMING_DURATION_SECONDS: ${{ inputs.streaming_duration_seconds || '60' }}
   STREAMING_DRAIN_QUIET_MS: ${{ inputs.streaming_drain_quiet_ms || '2000' }}
   MAX_TABLE_SYNC_WORKERS: ${{ inputs.max_table_sync_workers || '8' }}
@@ -277,7 +278,7 @@ jobs:
           set -euo pipefail
           mkdir -p target/bench-results
 
-          tpcc_threads="${TPCC_THREADS:-derived}"
+          tpcc_threads="${TPCC_THREADS_INPUT:-derived}"
           host_memory="$(awk '/MemTotal/ { printf "%.2f GiB", $2 / 1024 / 1024 }' /proc/meminfo || true)"
           if [[ -z "${host_memory}" ]]; then
             host_memory="unavailable"
@@ -339,8 +340,8 @@ jobs:
             --output-dir target/bench-results
           )
 
-          if [[ -n "$TPCC_THREADS" ]]; then
-            args+=(--tpcc-threads "$TPCC_THREADS")
+          if [[ -n "$TPCC_THREADS_INPUT" ]]; then
+            args+=(--tpcc-threads "$TPCC_THREADS_INPUT")
           fi
 
           if [[ -n "$STREAMING_DURATION_SECONDS" ]]; then
