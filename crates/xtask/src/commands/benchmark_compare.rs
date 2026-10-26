@@ -21,6 +21,13 @@ const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "supabase-etl-benchmark-compare";
+/// Workflow runs requested per listing page.
+const RUNS_PER_PAGE: usize = 30;
+/// Listing pages searched for a baseline before giving up.
+///
+/// Runs without the artifact, such as backfills or other destinations, can
+/// fill whole pages; a bound keeps the search cheap when no baseline exists.
+const MAX_RUN_PAGES: usize = 5;
 
 const TABLE_COPY_METRICS: &[Metric] = &[
     Metric { key: "copied_rows", label: "Rows copied", policy: RegressionPolicy::Informational },
@@ -283,40 +290,54 @@ impl BenchmarkCompareArgs {
         client: &GitHubClient,
         context: &GitHubContext,
     ) -> Result<Option<(Reports, WorkflowRun, Option<CodeCompare>)>> {
-        let runs =
-            client.workflow_runs(&self.workflow, &context.ref_name, &context.event_name).await?;
-        for run in runs {
-            // Runs hold one job per destination, and one failed job fails the
-            // whole run. Only a successful job uploads `--artifact-name`, so the
-            // artifact lookup below decides eligibility per destination.
-            if run.id == context.current_run_id {
-                continue;
+        for page in 1..=MAX_RUN_PAGES {
+            let runs = client
+                .workflow_runs(&self.workflow, &context.ref_name, &context.event_name, page)
+                .await?;
+            let last_page = runs.len() < RUNS_PER_PAGE;
+            for run in runs {
+                // Runs hold one job per destination, and one failed job fails the
+                // whole run. Only a successful job uploads `--artifact-name`, so
+                // the artifact lookup below decides eligibility per destination.
+                if run.id == context.current_run_id {
+                    continue;
+                }
+
+                let Some(artifact) = client.find_artifact(run.id, &self.artifact_name).await?
+                else {
+                    continue;
+                };
+
+                let temp_dir = create_previous_reports_dir()?;
+                let archive_path = temp_dir.path().join("benchmark-results.zip");
+                let extract_dir = temp_dir.path().join("extract");
+                fs::create_dir_all(&extract_dir)
+                    .with_context(|| format!("failed to create {}", extract_dir.display()))?;
+                client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
+                unzip_archive(&archive_path, &extract_dir)?;
+                let reports = load_reports(&extract_dir).with_context(|| {
+                    format!(
+                        "failed to load benchmark reports from artifact {} in run {}",
+                        self.artifact_name, run.run_number
+                    )
+                })?;
+                let code_compare =
+                    code_compare(&context.repo, &run, context.current_sha.as_deref());
+                return Ok(Some((reports, run, code_compare)));
             }
 
-            let Some(artifact) = client.find_artifact(run.id, &self.artifact_name).await? else {
-                continue;
-            };
-
-            let temp_dir = create_previous_reports_dir()?;
-            let archive_path = temp_dir.path().join("benchmark-results.zip");
-            let extract_dir = temp_dir.path().join("extract");
-            fs::create_dir_all(&extract_dir)
-                .with_context(|| format!("failed to create {}", extract_dir.display()))?;
-            client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
-            unzip_archive(&archive_path, &extract_dir)?;
-            let reports = load_reports(&extract_dir).with_context(|| {
-                format!(
-                    "failed to load benchmark reports from artifact {} in run {}",
-                    self.artifact_name, run.run_number
-                )
-            })?;
-            let code_compare = code_compare(&context.repo, &run, context.current_sha.as_deref());
-            return Ok(Some((reports, run, code_compare)));
+            if last_page {
+                break;
+            }
         }
 
         eprintln!(
-            "No previous successful benchmark artifact named '{}' was found for ref '{}'.",
-            self.artifact_name, context.ref_name
+            "No previous successful benchmark artifact named '{}' was found for ref '{}' in up to \
+             {} recent '{}' runs.",
+            self.artifact_name,
+            context.ref_name,
+            MAX_RUN_PAGES * RUNS_PER_PAGE,
+            context.event_name
         );
         Ok(None)
     }
@@ -331,7 +352,8 @@ impl GitHubClient {
         Ok(Self { client, token, repo })
     }
 
-    /// Lists recent completed runs on `ref_name` triggered by `event_name`.
+    /// Lists one page of completed runs on `ref_name` triggered by
+    /// `event_name`, newest first.
     ///
     /// Scheduled runs compare only with scheduled runs, so a manual run with a
     /// larger runner or custom inputs never becomes the nightly baseline.
@@ -340,6 +362,7 @@ impl GitHubClient {
         workflow: &str,
         ref_name: &str,
         event_name: &str,
+        page: usize,
     ) -> Result<Vec<WorkflowRun>> {
         let url = format!(
             "{GITHUB_API_BASE}/repos/{}/actions/workflows/{}/runs",
@@ -349,12 +372,8 @@ impl GitHubClient {
         let response = self
             .client
             .get(url)
-            .query(&[
-                ("branch", ref_name),
-                ("event", event_name),
-                ("status", "completed"),
-                ("per_page", "30"),
-            ])
+            .query(&[("branch", ref_name), ("event", event_name), ("status", "completed")])
+            .query(&[("per_page", RUNS_PER_PAGE), ("page", page)])
             .bearer_auth(&self.token)
             .header("Accept", GITHUB_ACCEPT)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)

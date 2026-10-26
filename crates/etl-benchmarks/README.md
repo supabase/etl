@@ -472,7 +472,8 @@ cargo x benchmark-compare \
 In GitHub Actions mode, `benchmark-compare` uses `GITHUB_TOKEN`,
 `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_REF_NAME`, and `GITHUB_EVENT_NAME`
 to find the most recent `benchmark.yml` run from the same event with an artifact
-named `--artifact-name`. It ignores `manifest.json` when loading reports.
+named `--artifact-name`, searching up to 150 recent runs. It ignores
+`manifest.json` when loading reports.
 
 ## Reading The Output
 
