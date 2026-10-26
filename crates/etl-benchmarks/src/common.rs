@@ -689,8 +689,10 @@ impl BenchDestination {
                 install_crypto_provider();
 
                 let (auth, sql, schema) = snowflake_run_target(pipeline_id)?;
+                // Replace, not reuse: a crashed run with this pipeline id
+                // leaves tables that this run's fresh store does not own.
                 sql.execute_ddl(&format!(
-                    "create schema if not exists {}",
+                    "create or replace schema {}",
                     quote_snowflake_identifier(&schema)
                 ))
                 .await
