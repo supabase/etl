@@ -1,6 +1,8 @@
 name: Benchmark
 
 on:
+  # Temporary: verifies the matrix on its own PR. Remove before merging.
+  pull_request:
   schedule:
     # Off the whole hour and away from the other scheduled workflows.
     - cron: "53 5 * * *"
