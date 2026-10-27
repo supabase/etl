@@ -437,7 +437,8 @@ jobs:
                   "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
                   "run_number": int(os.environ["GITHUB_RUN_NUMBER"]),
                   "job": os.environ["GITHUB_JOB"],
-                  "job_id": int(os.environ["JOB_CHECK_RUN_ID"]),
+                  # Null rather than failing the benchmark if the context is absent.
+                  "job_id": int(os.environ["JOB_CHECK_RUN_ID"]) if os.environ.get("JOB_CHECK_RUN_ID") else None,
               },
               "runner": {
                   "label": os.environ["BENCHMARK_RUNNER"],
