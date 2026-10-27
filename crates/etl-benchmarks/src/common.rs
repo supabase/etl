@@ -51,6 +51,8 @@ use sqlx::{
 };
 use tokio::sync::Notify;
 use tracing::info;
+#[cfg(feature = "snowflake")]
+use tracing::warn;
 #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
 use url::Url;
 
@@ -693,7 +695,10 @@ impl BenchDestination {
                 install_crypto_provider();
 
                 let target = snowflake_run_target(pipeline_id)?;
-                drop_stale_snowflake_run_schemas(&target).await?;
+                // Housekeeping only: a failed sweep must not fail the run.
+                if let Err(error) = drop_stale_snowflake_run_schemas(&target).await {
+                    warn!(error = %error, "failed to drop stale snowflake run schemas");
+                }
                 // Replace, not reuse: a crashed run with this pipeline id
                 // leaves tables that this run's fresh store does not own.
                 target
