@@ -139,7 +139,7 @@ tokio-postgres = { git = "https://github.com/supabase/rust-postgres", default-fe
 tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = { version = "0.1.18", default-features = false, features = ["sync"] }
 tokio-util = { version = "0.7.18", default-features = false, features = ["rt"] }
-tonic = { version = "0.14.2", default-features = false }
+tonic = { version = "0.14.7", default-features = false }
 tower-service = { version = "0.3.3", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-appender = { version = "0.2.3", default-features = false }
@@ -149,7 +149,7 @@ url = { version = "2.5.8", features = ["serde"] }
 utoipa = { version = "6.0.0", default-features = false }
 uuid = { version = "1.17.0", default-features = false }
 x509-cert = { version = "0.2.2", default-features = false }
-zstd = { version = "0.13.0", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 
 [profile.dev.package.libduckdb-sys]
 # The published C++ extensions use release allocator bookkeeping. The bundled
