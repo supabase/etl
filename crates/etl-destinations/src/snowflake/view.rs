@@ -25,19 +25,6 @@ fn fingerprint(value: &str) -> String {
     Sha256::digest(value.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Returns the public and pending companion view names for a raw table.
-pub(super) fn view_names(table: &str) -> (String, String) {
-    // Snowflake identifiers allow 255 characters. Reserve room for the
-    // temporary suffix too; the fallback prefix cannot be a raw table name.
-    let name = if table.chars().count() + "_CURRENT_PENDING".len() > 255 {
-        format!("_ETL_{}_CURRENT", fingerprint(table).to_ascii_uppercase())
-    } else {
-        format!("{table}_CURRENT")
-    };
-    let pending = format!("{name}_PENDING");
-    (name, pending)
-}
-
 /// Ordinary current-state view and its reserved name during schema transitions.
 pub(super) struct CompanionView {
     /// Customer-facing view name in the raw table's namespace.
@@ -53,10 +40,16 @@ impl CompanionView {
     /// Derives names from recorded destination ownership, never a new source
     /// name.
     pub(super) fn new(pipeline: PipelineId, table_id: TableId, table: &str) -> Self {
-        let (name, pending) = view_names(table);
+        // Snowflake identifiers allow 255 characters. Reserve room for the
+        // temporary suffix too; the fallback prefix cannot be a raw table name.
+        let name = if table.chars().count() + "_CURRENT_PENDING".len() > 255 {
+            format!("_ETL_{}_CURRENT", fingerprint(table).to_ascii_uppercase())
+        } else {
+            format!("{table}_CURRENT")
+        };
         Self {
+            pending: format!("{name}_PENDING"),
             name,
-            pending,
             owner: format!(
                 "supabase-etl:view:v1:{}:",
                 serde_json::json!([pipeline, table_id.into_inner(), table])
