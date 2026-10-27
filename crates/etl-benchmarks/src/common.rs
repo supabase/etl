@@ -12,6 +12,8 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
+#[cfg(feature = "snowflake")]
+use etl::schema::TableName;
 use etl::{
     data::{SizeHint, TableRow},
     destination::{
@@ -41,7 +43,8 @@ use etl_destinations::ducklake::DuckLakeDestination;
 #[cfg(feature = "snowflake")]
 use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
-    Destination as SnowflakeDestination,
+    Destination as SnowflakeDestination, SqlClient as SnowflakeSqlClient,
+    test_utils::drop_destination_table,
 };
 use etl_telemetry::tracing::{LogFlusher, init_tracing_for_environment};
 use serde::Serialize;
@@ -1067,6 +1070,69 @@ fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clic
         Some(password) => client.with_password(password),
         None => client,
     }
+}
+
+/// Drops benchmark destination tables that every run shares.
+///
+/// Snowflake runs write to the configured schema, so tables and companion
+/// views left by an earlier pipeline, including a crashed run, block the next
+/// pipeline from creating them. Call this before a run to clear leftovers and
+/// after it to clean up. Other destinations isolate runs and need nothing.
+#[cfg_attr(
+    not(feature = "snowflake"),
+    expect(
+        unused_variables,
+        clippy::unused_async,
+        reason = "only Snowflake runs share destination tables"
+    )
+)]
+pub async fn reset_shared_destination_tables(
+    destination_args: &DestinationArgs,
+    pg: &PgConnectionArgs,
+    table_ids: &[u32],
+) -> Result<()> {
+    #[cfg(feature = "snowflake")]
+    if matches!(destination_args.destination, DestinationType::Snowflake) {
+        let config = SnowflakeConfig::require_bench_env()?;
+        let auth = Arc::new(AuthManager::new(config)?);
+        let sql = SnowflakeSqlClient::new(
+            auth.config().clone_without_credentials(),
+            auth,
+            reqwest::Client::new(),
+        );
+        for table_name in source_table_names(pg, table_ids).await? {
+            drop_destination_table(&sql, &table_name).await.with_context(|| {
+                format!("failed to drop Snowflake destination objects for {table_name}")
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Looks up the source names of benchmark tables.
+#[cfg(feature = "snowflake")]
+async fn source_table_names(pg: &PgConnectionArgs, table_ids: &[u32]) -> Result<Vec<TableName>> {
+    let table_ids: Vec<i64> = table_ids.iter().copied().map(i64::from).collect();
+    let pool = pg_pool(pg).await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "select n.nspname::text, c.relname::text
+         from pg_class c
+         join pg_namespace n on n.oid = c.relnamespace
+         where c.oid::int8 = any($1)
+         order by c.oid",
+    )
+    .bind(&table_ids)
+    .fetch_all(&pool)
+    .await
+    .context("failed to look up benchmark source table names")?;
+    pool.close().await;
+
+    if rows.len() != table_ids.len() {
+        bail!("found {} of {} benchmark source tables", rows.len(), table_ids.len());
+    }
+
+    Ok(rows.into_iter().map(|(schema, name)| TableName::new(schema, name)).collect())
 }
 
 /// Writes a machine-readable benchmark report.
