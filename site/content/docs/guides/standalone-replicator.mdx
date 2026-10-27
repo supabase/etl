@@ -329,12 +329,7 @@ labels, to reject stale observations. Process restarts lose the in-memory age;
 missing metrics, a stopped process, or a new process exporting zero do not prove
 previous work became durable. Old images do not export these metrics.
 
-Recommended alerts are age above 300 seconds for 2 minutes and above 1,200
-seconds for 1 minute, independently per pipeline, using observations less than
-2 minutes old. Scrape, evaluation, and notification delays are additional.
-Keep separate scrape/workload health checks for absent series. This measures
-outstanding CDC durability, not a complete source-to-query freshness SLO or a
-single provider request's latency. Use WAL lag and source retention alongside it.
+Recommended alerts are age above 300 seconds for 120 seconds and above 1,200 seconds for 60 seconds, independently per pipeline, using observations less than 120 seconds old. Scrape, evaluation, and notification delays are additional. Keep separate scrape/workload health checks for absent series. This measures outstanding CDC durability, not a complete source-to-query freshness SLO or a single provider request's latency. Use WAL lag and source retention alongside it.
 
 ### Replication lag
 
