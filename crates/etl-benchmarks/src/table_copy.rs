@@ -179,43 +179,52 @@ async fn run(args: RunArgs) -> Result<()> {
     if args.destination_settle_ms > 0 {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
     }
-    let config = pipeline_config(
-        args.pipeline_id,
-        args.publication_name.clone(),
-        &args.pg,
-        &args.tuning,
-        TableSyncCopyConfig::IncludeTables { table_ids: args.table_ids.clone() },
-    );
+    // Everything after destination setup runs in one block so slot and
+    // destination cleanup happen whether it succeeds or fails.
+    let run_result: Result<(u128, Duration, u128)> = async {
+        let config = pipeline_config(
+            args.pipeline_id,
+            args.publication_name.clone(),
+            &args.pg,
+            &args.tuning,
+            TableSyncCopyConfig::IncludeTables { table_ids: args.table_ids.clone() },
+        );
 
-    config.validate().context("Invalid pipeline config")?;
+        config.validate().context("Invalid pipeline config")?;
 
-    let table_copy_notifications = register_table_copy_notifications(&store, &args.table_ids)
-        .await
-        .context("Failed to register table-copy notifications")?;
+        let table_copy_notifications = register_table_copy_notifications(&store, &args.table_ids)
+            .await
+            .context("Failed to register table-copy notifications")?;
 
-    let mut pipeline = Pipeline::new(config, store, destination.clone());
+        let mut pipeline = Pipeline::new(config, store, destination.clone());
 
-    let start_started = Instant::now();
-    pipeline.start().await.context("Failed to start pipeline")?;
-    let pipeline_start_ms = duration_millis(start_started.elapsed());
+        let start_started = Instant::now();
+        pipeline.start().await.context("Failed to start pipeline")?;
+        let pipeline_start_ms = duration_millis(start_started.elapsed());
 
-    let copy_started = Instant::now();
-    let copy_result =
-        wait_for_table_copies(&destination, args.expected_row_count, table_copy_notifications)
-            .await;
-    let copy_wait_duration = copy_started.elapsed();
+        let copy_started = Instant::now();
+        let copy_result =
+            wait_for_table_copies(&destination, args.expected_row_count, table_copy_notifications)
+                .await;
+        let copy_wait_duration = copy_started.elapsed();
 
-    let shutdown_started = Instant::now();
-    let shutdown_result = pipeline.shutdown_and_wait().await;
-    let shutdown_ms = duration_millis(shutdown_started.elapsed());
+        let shutdown_started = Instant::now();
+        let shutdown_result = pipeline.shutdown_and_wait().await;
+        let shutdown_ms = duration_millis(shutdown_started.elapsed());
+
+        shutdown_result.context("Failed to shut down pipeline")?;
+        copy_result?;
+
+        Ok((pipeline_start_ms, copy_wait_duration, shutdown_ms))
+    }
+    .await;
 
     let cleanup_result =
         cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await;
     let destination_cleanup_result = cleanup_destination(&args.destination, args.pipeline_id).await;
-    shutdown_result.context("Failed to shut down pipeline")?;
+    let (pipeline_start_ms, copy_wait_duration, shutdown_ms) = run_result?;
     cleanup_result?;
     destination_cleanup_result?;
-    copy_result?;
 
     let destination_stats = destination.stats();
     let copied_rows = destination_stats.table_rows;

@@ -132,6 +132,24 @@ struct TableStreamingReport {
     destination_stats: DestinationStatsSnapshot,
 }
 
+/// Timings measured while the streaming pipeline runs.
+struct StreamingPhaseTimings {
+    /// Time to start the pipeline.
+    pipeline_start_ms: u128,
+    /// Time until every table finished syncing.
+    ready_wait_ms: u128,
+    /// Time the TPC-C workload ran.
+    producer_duration: Duration,
+    /// Time until CDC events stopped arriving.
+    drain_duration: Duration,
+    /// Workload start until drain finished.
+    end_to_end_duration: Duration,
+    /// Time to shut down the pipeline.
+    shutdown_duration: Duration,
+    /// Workload start until shutdown finished.
+    end_to_end_with_shutdown_duration: Duration,
+}
+
 /// Runs the table-streaming benchmark binary.
 pub async fn main() -> Result<()> {
     let args = Args::parse();
@@ -158,51 +176,77 @@ async fn run(args: RunArgs) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
     }
 
-    let notifications = register_table_sync_notifications(&store, &table_ids).await?;
+    // Everything after destination setup runs in one block so slot and
+    // destination cleanup happen whether it succeeds or fails.
+    let run_result: Result<StreamingPhaseTimings> = async {
+        let notifications = register_table_sync_notifications(&store, &table_ids).await?;
 
-    let config = pipeline_config(
-        args.pipeline_id,
-        args.publication_name.clone(),
-        &args.pg,
-        &args.tuning,
-        TableSyncCopyConfig::SkipAllTables,
-    );
-    config.validate().context("invalid pipeline config")?;
+        let config = pipeline_config(
+            args.pipeline_id,
+            args.publication_name.clone(),
+            &args.pg,
+            &args.tuning,
+            TableSyncCopyConfig::SkipAllTables,
+        );
+        config.validate().context("invalid pipeline config")?;
 
-    let mut pipeline = Pipeline::new(config, store, destination.clone());
+        let mut pipeline = Pipeline::new(config, store, destination.clone());
 
-    let start_started = Instant::now();
-    pipeline.start().await.context("failed to start pipeline")?;
-    let pipeline_start_ms = duration_millis(start_started.elapsed());
+        let start_started = Instant::now();
+        pipeline.start().await.context("failed to start pipeline")?;
+        let pipeline_start_ms = duration_millis(start_started.elapsed());
 
-    let ready_started = Instant::now();
-    wait_for_table_sync(notifications).await?;
-    let ready_wait_ms = duration_millis(ready_started.elapsed());
+        let ready_started = Instant::now();
+        wait_for_table_sync(notifications).await?;
+        let ready_wait_ms = duration_millis(ready_started.elapsed());
 
-    destination.reset_cdc_stats();
+        destination.reset_cdc_stats();
 
-    let end_to_end_started = Instant::now();
-    let producer_started = Instant::now();
-    run_tpcc_workload(&args).await?;
-    let producer_duration = producer_started.elapsed();
+        let end_to_end_started = Instant::now();
+        let producer_started = Instant::now();
+        run_tpcc_workload(&args).await?;
+        let producer_duration = producer_started.elapsed();
 
-    let drain_started = Instant::now();
-    wait_for_cdc_quiescence(
-        &destination,
-        Duration::from_millis(args.drain_quiet_ms),
-        Duration::from_millis(args.drain_poll_ms),
-    )
+        let drain_started = Instant::now();
+        wait_for_cdc_quiescence(
+            &destination,
+            Duration::from_millis(args.drain_quiet_ms),
+            Duration::from_millis(args.drain_poll_ms),
+        )
+        .await;
+        let drain_duration = drain_started.elapsed();
+        let end_to_end_duration = end_to_end_started.elapsed();
+
+        let shutdown_started = Instant::now();
+        pipeline.shutdown_and_wait().await.context("failed to shut down pipeline")?;
+        let shutdown_duration = shutdown_started.elapsed();
+        let end_to_end_with_shutdown_duration = end_to_end_started.elapsed();
+
+        Ok(StreamingPhaseTimings {
+            pipeline_start_ms,
+            ready_wait_ms,
+            producer_duration,
+            drain_duration,
+            end_to_end_duration,
+            shutdown_duration,
+            end_to_end_with_shutdown_duration,
+        })
+    }
     .await;
-    let drain_duration = drain_started.elapsed();
-    let end_to_end_duration = end_to_end_started.elapsed();
 
-    let shutdown_started = Instant::now();
-    pipeline.shutdown_and_wait().await.context("failed to shut down pipeline")?;
-    let shutdown_duration = shutdown_started.elapsed();
-    let end_to_end_with_shutdown_duration = end_to_end_started.elapsed();
-
-    cleanup_replication_slots(&args.pg, args.pipeline_id, &table_ids).await?;
-    cleanup_destination(&args.destination, args.pipeline_id).await?;
+    let cleanup_result = cleanup_replication_slots(&args.pg, args.pipeline_id, &table_ids).await;
+    let destination_cleanup_result = cleanup_destination(&args.destination, args.pipeline_id).await;
+    let StreamingPhaseTimings {
+        pipeline_start_ms,
+        ready_wait_ms,
+        producer_duration,
+        drain_duration,
+        end_to_end_duration,
+        shutdown_duration,
+        end_to_end_with_shutdown_duration,
+    } = run_result?;
+    cleanup_result?;
+    destination_cleanup_result?;
 
     let destination_stats = destination.stats();
     if destination_stats.cdc_data_events == 0 {
