@@ -3,6 +3,8 @@
 use tokio_postgres::types::Type;
 use tracing::warn;
 
+use crate::schema::numeric_modifiers;
+
 /// A conservative, portable representation of a Postgres column default.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum DefaultExpression {
@@ -32,9 +34,15 @@ pub enum DefaultExpression {
 ///
 /// The parser is intentionally conservative. It recognizes values whose meaning
 /// is stable across destinations and returns `None` for expressions that need a
-/// fuller Postgres evaluator or have destination-specific behavior.
-pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultExpression> {
-    let expression = normalize_postgres_expression(expression);
+/// fuller Postgres evaluator or have destination-specific behavior. That
+/// includes casts and column type modifiers that would change the literal's
+/// value, since destinations receive the literal as the unmodified type.
+pub fn parse_default_expression(
+    expression: &str,
+    typ: &Type,
+    modifier: i32,
+) -> Option<DefaultExpression> {
+    let expression = normalize_postgres_expression(expression, typ);
     if expression.is_empty() || expression.eq_ignore_ascii_case("null") {
         return None;
     }
@@ -43,28 +51,55 @@ pub fn parse_default_expression(expression: &str, typ: &Type) -> Option<DefaultE
         return None;
     }
 
-    if is_string_literal(expression) {
-        return parse_string_literal(expression, typ);
+    let parsed = if is_string_literal(expression) {
+        parse_string_literal(expression, typ)?
+    } else if is_numeric_literal(expression) {
+        parse_numeric_literal(expression, typ)
+    } else if is_bool_literal(expression) {
+        parse_bool_literal(expression, typ)
+    } else {
+        return None;
+    };
+
+    keeps_value_under_modifier(&parsed, typ, modifier).then_some(parsed)
+}
+
+/// Returns whether Postgres stores `expression` unchanged in a column of `typ`
+/// with type modifier `modifier`.
+fn keeps_value_under_modifier(expression: &DefaultExpression, typ: &Type, modifier: i32) -> bool {
+    if modifier < 0 {
+        return true;
     }
 
-    if is_numeric_literal(expression) {
-        return Some(parse_numeric_literal(expression, typ));
+    match (typ, expression) {
+        (&Type::VARCHAR, DefaultExpression::StringLiteral(literal)) => {
+            string_literal_length(literal).is_some_and(|length| length <= modifier - 4)
+        }
+        (&Type::BPCHAR, DefaultExpression::StringLiteral(literal)) => {
+            string_literal_length(literal).is_some_and(|length| length == modifier - 4)
+        }
+        (&Type::NUMERIC, DefaultExpression::NumericLiteral(literal)) => {
+            let fraction_digits = literal.split_once('.').map_or(0, |(_, fraction)| fraction.len());
+            numeric_modifiers(modifier)
+                .and_then(|modifiers| usize::try_from(modifiers.s).ok())
+                .is_some_and(|scale| fraction_digits <= scale)
+        }
+        _ => false,
     }
+}
 
-    if is_bool_literal(expression) {
-        return Some(parse_bool_literal(expression, typ));
-    }
-
-    None
+/// Returns the character length of a SQL string literal.
+fn string_literal_length(literal: &str) -> Option<i32> {
+    i32::try_from(unquote_postgres_string_literal(literal)?.chars().count()).ok()
 }
 
 /// Normalizes PostgreSQL-specific expression wrappers.
-fn normalize_postgres_expression(expression: &str) -> &str {
+fn normalize_postgres_expression<'a>(expression: &'a str, typ: &Type) -> &'a str {
     let mut expression = expression.trim();
     let max_iterations = expression.len();
 
     for _ in 0..max_iterations {
-        let stripped = strip_outer_parens(strip_postgres_cast(expression));
+        let stripped = strip_outer_parens(strip_postgres_cast(expression, typ));
         if stripped == expression {
             return expression;
         }
@@ -87,8 +122,8 @@ fn normalize_postgres_expression(expression: &str) -> &str {
     expression
 }
 
-/// Strips a trailing Postgres type cast from a default expression.
-fn strip_postgres_cast(expression: &str) -> &str {
+/// Strips a trailing Postgres type cast that keeps the value of a `typ` column.
+fn strip_postgres_cast<'a>(expression: &'a str, typ: &Type) -> &'a str {
     let Some(cast_start) = top_level_cast_start(expression) else {
         return expression;
     };
@@ -121,7 +156,10 @@ fn strip_postgres_cast(expression: &str) -> &str {
 
     let type_name = type_name.trim();
     let cast_subject = cast_subject.trim();
-    if is_cast_type_name(type_name) && !has_top_level_binary_operator(cast_subject) {
+    if is_cast_type_name(type_name)
+        && is_value_preserving_cast(type_name, typ)
+        && !has_top_level_binary_operator(cast_subject)
+    {
         cast_subject
     } else {
         expression
@@ -187,6 +225,24 @@ fn is_cast_type_name(type_name: &str) -> bool {
             ch.is_ascii_alphanumeric()
                 || matches!(ch, '_' | ' ' | '"' | '.' | '[' | ']' | '(' | ')' | ',')
         })
+}
+
+/// Returns whether a cast to `type_name` keeps the value once Postgres
+/// converts the result to the column type `typ`.
+///
+/// Modifiers truncate or round. `bpchar` trims trailing blanks, `"char"` keeps
+/// one byte, and `real` loses precision when converted to another type.
+fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
+    if type_name.contains('(') {
+        return false;
+    }
+
+    match type_name.to_ascii_lowercase().as_str() {
+        "bpchar" | "character" | "char" => *typ == Type::BPCHAR,
+        "\"char\"" => *typ == Type::CHAR,
+        "real" | "float4" => *typ == Type::FLOAT4,
+        _ => true,
+    }
 }
 
 /// Returns whether a Postgres type is text-like.
@@ -491,46 +547,42 @@ mod tests {
     #[test]
     fn parses_simple_literals() {
         assert_eq!(
-            parse_default_expression("'pending'::text", &Type::TEXT),
+            parse_default_expression("'pending'::text", &Type::TEXT, -1),
             Some(DefaultExpression::StringLiteral("'pending'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("('don''t'::text)", &Type::TEXT),
+            parse_default_expression("('don''t'::text)", &Type::TEXT, -1),
             Some(DefaultExpression::StringLiteral("'don''t'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("42", &Type::INT4),
+            parse_default_expression("42", &Type::INT4, -1),
             Some(DefaultExpression::NumericLiteral("42".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("false", &Type::BOOL),
+            parse_default_expression("false", &Type::BOOL, -1),
             Some(DefaultExpression::BooleanLiteral("false".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("true::text", &Type::TEXT),
+            parse_default_expression("true::text", &Type::TEXT, -1),
             Some(DefaultExpression::StringLiteral("'true'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("42::text", &Type::TEXT),
+            parse_default_expression("42::text", &Type::TEXT, -1),
             Some(DefaultExpression::StringLiteral("'42'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'true'::boolean", &Type::BOOL),
+            parse_default_expression("'true'::boolean", &Type::BOOL, -1),
             Some(DefaultExpression::BooleanLiteral("true".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'42'::integer", &Type::INT4),
+            parse_default_expression("'42'::integer", &Type::INT4, -1),
             Some(DefaultExpression::NumericLiteral("42".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'42.10'::numeric(10,2)", &Type::NUMERIC),
-            Some(DefaultExpression::NumericLiteral("42.10".to_owned()))
-        );
-        assert_eq!(
-            parse_default_expression("'1'::integer", &Type::INT4),
+            parse_default_expression("'1'::integer", &Type::INT4, -1),
             Some(DefaultExpression::NumericLiteral("1".to_owned()))
         );
-        assert_eq!(parse_default_expression("'abc'::text", &Type::INT4), None);
+        assert_eq!(parse_default_expression("'abc'::text", &Type::INT4, -1), None);
     }
 
     #[test]
@@ -544,41 +596,52 @@ mod tests {
 
     #[test]
     fn normalizes_nested_postgres_wrappers() {
-        assert_eq!(normalize_postgres_expression("((('pending'::text)))"), "'pending'");
+        assert_eq!(
+            normalize_postgres_expression("((('pending'::text)))", &Type::TEXT),
+            "'pending'"
+        );
     }
 
     #[test]
     fn parses_typed_literals() {
         assert_eq!(
-            parse_default_expression("'2026-01-01'::date", &Type::DATE),
+            parse_default_expression("'2026-01-01'::date", &Type::DATE, -1),
             Some(DefaultExpression::DateLiteral("'2026-01-01'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'12:30:00'::time without time zone", &Type::TIME),
+            parse_default_expression("'12:30:00'::time without time zone", &Type::TIME, -1),
             Some(DefaultExpression::TimeLiteral("'12:30:00'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'12:30:00+02'::time with time zone", &Type::TIMETZ),
+            parse_default_expression("'12:30:00+02'::time with time zone", &Type::TIMETZ, -1),
             Some(DefaultExpression::TimeTzLiteral("'12:30:00+02'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'2026-01-01 12:30:00'::timestamp", &Type::TIMESTAMP),
+            parse_default_expression("'2026-01-01 12:30:00'::timestamp", &Type::TIMESTAMP, -1),
             Some(DefaultExpression::TimestampLiteral("'2026-01-01 12:30:00'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'2026-01-01 12:30:00+02'::timestamptz", &Type::TIMESTAMPTZ),
+            parse_default_expression(
+                "'2026-01-01 12:30:00+02'::timestamptz",
+                &Type::TIMESTAMPTZ,
+                -1
+            ),
             Some(DefaultExpression::TimestampTzLiteral("'2026-01-01 12:30:00+02'".to_owned(),))
         );
         assert_eq!(
-            parse_default_expression("'30 days'::interval", &Type::INTERVAL),
+            parse_default_expression("'30 days'::interval", &Type::INTERVAL, -1),
             Some(DefaultExpression::IntervalLiteral("'30 days'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'{}'::jsonb", &Type::JSONB),
+            parse_default_expression("'{}'::jsonb", &Type::JSONB, -1),
             Some(DefaultExpression::JsonLiteral("'{}'".to_owned()))
         );
         assert_eq!(
-            parse_default_expression("'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid", &Type::UUID,),
+            parse_default_expression(
+                "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid",
+                &Type::UUID,
+                -1
+            ),
             Some(DefaultExpression::StringLiteral(
                 "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'".to_owned(),
             ))
@@ -587,40 +650,98 @@ mod tests {
 
     #[test]
     fn skips_non_literal_expressions() {
-        assert_eq!(parse_default_expression("now()", &Type::TIMESTAMPTZ), None);
-        assert_eq!(parse_default_expression("current_timestamp", &Type::TIMESTAMPTZ), None);
-        assert_eq!(parse_default_expression("current_date", &Type::DATE), None);
-        assert_eq!(parse_default_expression("current_time", &Type::TIMETZ), None);
-        assert_eq!(parse_default_expression("localtime", &Type::TIME), None);
-        assert_eq!(parse_default_expression("localtimestamp", &Type::TIMESTAMP), None);
-        assert_eq!(parse_default_expression("timezone('UTC', now())", &Type::TIMESTAMP), None);
-        assert_eq!(parse_default_expression("gen_random_uuid()", &Type::UUID), None);
-        assert_eq!(parse_default_expression("uuid_generate_v4()", &Type::UUID), None);
-        assert_eq!(parse_default_expression("current_user", &Type::TEXT), None);
-        assert_eq!(parse_default_expression("session_user", &Type::TEXT), None);
-        assert_eq!(parse_default_expression("lower('USER'::text)", &Type::TEXT), None);
-        assert_eq!(parse_default_expression("upper('user')", &Type::TEXT), None);
-        assert_eq!(parse_default_expression("'a' || 'b'", &Type::TEXT), None);
+        assert_eq!(parse_default_expression("now()", &Type::TIMESTAMPTZ, -1), None);
+        assert_eq!(parse_default_expression("current_timestamp", &Type::TIMESTAMPTZ, -1), None);
+        assert_eq!(parse_default_expression("current_date", &Type::DATE, -1), None);
+        assert_eq!(parse_default_expression("current_time", &Type::TIMETZ, -1), None);
+        assert_eq!(parse_default_expression("localtime", &Type::TIME, -1), None);
+        assert_eq!(parse_default_expression("localtimestamp", &Type::TIMESTAMP, -1), None);
+        assert_eq!(parse_default_expression("timezone('UTC', now())", &Type::TIMESTAMP, -1), None);
+        assert_eq!(parse_default_expression("gen_random_uuid()", &Type::UUID, -1), None);
+        assert_eq!(parse_default_expression("uuid_generate_v4()", &Type::UUID, -1), None);
+        assert_eq!(parse_default_expression("current_user", &Type::TEXT, -1), None);
+        assert_eq!(parse_default_expression("session_user", &Type::TEXT, -1), None);
+        assert_eq!(parse_default_expression("lower('USER'::text)", &Type::TEXT, -1), None);
+        assert_eq!(parse_default_expression("upper('user')", &Type::TEXT, -1), None);
+        assert_eq!(parse_default_expression("'a' || 'b'", &Type::TEXT, -1), None);
         assert_eq!(
-            parse_default_expression("(('user'::text || '_'::text) || 'id'::text)", &Type::TEXT),
+            parse_default_expression(
+                "(('user'::text || '_'::text) || 'id'::text)",
+                &Type::TEXT,
+                -1
+            ),
             None
         );
-        assert_eq!(parse_default_expression("lower('a' || 'b')", &Type::TEXT), None);
-        assert_eq!(parse_default_expression("(10 + 5) * 2", &Type::INT4), None);
-        assert_eq!(parse_default_expression("1 +", &Type::INT4), None);
-        assert_eq!(parse_default_expression("1..2", &Type::INT4), None);
-        assert_eq!(parse_default_expression("(1 + 2", &Type::INT4), None);
-        assert_eq!(parse_default_expression("--1", &Type::INT4), None);
-        assert_eq!(parse_default_expression("nextval('users_id_seq')", &Type::INT8), None);
+        assert_eq!(parse_default_expression("lower('a' || 'b')", &Type::TEXT, -1), None);
+        assert_eq!(parse_default_expression("(10 + 5) * 2", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("1 +", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("1..2", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("(1 + 2", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("--1", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("nextval('users_id_seq')", &Type::INT8, -1), None);
         assert_eq!(
-            parse_default_expression("now() + '30 days'::interval", &Type::TIMESTAMPTZ),
+            parse_default_expression("now() + '30 days'::interval", &Type::TIMESTAMPTZ, -1),
             None
         );
-        assert_eq!(parse_default_expression("array['a', 'b']::text[]", &Type::TEXT_ARRAY), None);
-        assert_eq!(parse_default_expression("1e6", &Type::INT8), None);
+        assert_eq!(
+            parse_default_expression("array['a', 'b']::text[]", &Type::TEXT_ARRAY, -1),
+            None
+        );
+        assert_eq!(parse_default_expression("1e6", &Type::INT8, -1), None);
 
         for expression in ["'", "('", "(('a'", "'a", "'a'::", "((1 + 2"] {
-            assert_eq!(parse_default_expression(expression, &Type::TEXT), None);
+            assert_eq!(parse_default_expression(expression, &Type::TEXT, -1), None);
         }
+    }
+
+    #[test]
+    fn skips_value_changing_casts() {
+        assert_eq!(
+            parse_default_expression("'abcdef'::character varying(3)", &Type::TEXT, -1),
+            None
+        );
+        assert_eq!(parse_default_expression("'42.10'::numeric(10,2)", &Type::NUMERIC, -1), None);
+        assert_eq!(parse_default_expression("'ab  '::bpchar", &Type::TEXT, -1), None);
+        assert_eq!(parse_default_expression("'0.1'::real", &Type::FLOAT8, -1), None);
+        assert_eq!(
+            parse_default_expression("'0.1'::real", &Type::FLOAT4, -1),
+            Some(DefaultExpression::NumericLiteral("0.1".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'ab'::character varying", &Type::TEXT, -1),
+            Some(DefaultExpression::StringLiteral("'ab'".to_owned()))
+        );
+    }
+
+    #[test]
+    fn skips_defaults_changed_by_column_type_modifier() {
+        // `varchar(3)`, `character(5)`, and `numeric(10,2)` encoded as
+        // `atttypmod`.
+        let varchar_3 = 7;
+        let char_5 = 9;
+        let numeric_10_2 = (10 << 16 | 2) + 4;
+
+        assert_eq!(
+            parse_default_expression("'abc'::character varying", &Type::VARCHAR, varchar_3),
+            Some(DefaultExpression::StringLiteral("'abc'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression("'abcd   '::character varying", &Type::VARCHAR, varchar_3),
+            None
+        );
+        assert_eq!(
+            parse_default_expression("'abcde'::bpchar", &Type::BPCHAR, char_5),
+            Some(DefaultExpression::StringLiteral("'abcde'".to_owned()))
+        );
+        assert_eq!(parse_default_expression("'ab'::bpchar", &Type::BPCHAR, char_5), None);
+        assert_eq!(
+            parse_default_expression("1.23", &Type::NUMERIC, numeric_10_2),
+            Some(DefaultExpression::NumericLiteral("1.23".to_owned()))
+        );
+        assert_eq!(parse_default_expression("1.239", &Type::NUMERIC, numeric_10_2), None);
+        assert_eq!(
+            parse_default_expression("'12:00:00.7'::time without time zone", &Type::TIME, 0),
+            None
+        );
     }
 }

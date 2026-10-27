@@ -1320,6 +1320,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                             table_name,
                             &after_column_schema.name,
                             &after_column_schema.typ,
+                            after_column_schema.modifier,
                             default_expression,
                         ) else {
                             warn!(
@@ -1502,6 +1503,7 @@ fn plan_ducklake_schema_ddl_with_nullability(
                         table_name,
                         &before.name,
                         &after.typ,
+                        after.modifier,
                         after_default_expression,
                     ) else {
                         warn!(
