@@ -61,12 +61,19 @@ pub fn parse_default_expression(
         return None;
     };
 
-    keeps_value_under_modifier(&parsed, typ, modifier).then_some(parsed)
+    keeps_value_in_column(&parsed, typ, modifier).then_some(parsed)
 }
 
 /// Returns whether Postgres stores `expression` unchanged in a column of `typ`
 /// with type modifier `modifier`.
-fn keeps_value_under_modifier(expression: &DefaultExpression, typ: &Type, modifier: i32) -> bool {
+fn keeps_value_in_column(expression: &DefaultExpression, typ: &Type, modifier: i32) -> bool {
+    // Integer columns round fractional values.
+    if is_integer_type(typ)
+        && let DefaultExpression::NumericLiteral(literal) = expression
+    {
+        return !literal.contains('.');
+    }
+
     if modifier < 0 {
         return true;
     }
@@ -250,7 +257,8 @@ fn is_cast_type_name(type_name: &str) -> bool {
 /// converts the result to the column type `typ`.
 ///
 /// Modifiers truncate or round. `bpchar` trims trailing blanks, `"char"` keeps
-/// one byte, and `real` loses precision when converted to another type.
+/// one byte, `real` loses precision when converted to another type, and
+/// integer casts round fractions for non-integer columns.
 fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
     if type_name.contains('(') {
         return false;
@@ -260,6 +268,9 @@ fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
         "bpchar" | "character" | "char" => *typ == Type::BPCHAR,
         "\"char\"" => *typ == Type::CHAR,
         "real" | "float4" => *typ == Type::FLOAT4,
+        "smallint" | "integer" | "bigint" | "int2" | "int4" | "int8" | "int" => {
+            is_integer_type(typ)
+        }
         _ => true,
     }
 }
@@ -267,6 +278,11 @@ fn is_value_preserving_cast(type_name: &str, typ: &Type) -> bool {
 /// Returns whether a Postgres type is text-like.
 fn is_text_type(typ: &Type) -> bool {
     matches!(typ, &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT)
+}
+
+/// Returns whether a Postgres type is an integer type.
+fn is_integer_type(typ: &Type) -> bool {
+    matches!(typ, &Type::INT2 | &Type::INT4 | &Type::INT8)
 }
 
 /// Returns whether a Postgres type is numeric-like.
@@ -729,6 +745,14 @@ mod tests {
         assert_eq!(
             parse_default_expression("'ab'::character varying", &Type::TEXT, -1),
             Some(DefaultExpression::StringLiteral("'ab'".to_owned()))
+        );
+        // Postgres rounds `1.5` to `2` for an integer cast or column.
+        assert_eq!(parse_default_expression("(1.5)::integer", &Type::NUMERIC, -1), None);
+        assert_eq!(parse_default_expression("1.5", &Type::INT4, -1), None);
+        assert_eq!(parse_default_expression("'1.5'::numeric", &Type::INT8, -1), None);
+        assert_eq!(
+            parse_default_expression("'42'::integer", &Type::INT8, -1),
+            Some(DefaultExpression::NumericLiteral("42".to_owned()))
         );
     }
 
