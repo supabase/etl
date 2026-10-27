@@ -6,9 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
-[lints]
-workspace = true
-
 [dependencies]
 anyhow = { workspace = true, features = ["std"] }
 chrono = { workspace = true, features = ["clock", "serde"] }
@@ -29,3 +26,6 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true
