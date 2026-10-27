@@ -3066,52 +3066,6 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
     assert_eq!(durability_age(&metrics.render(), pipeline_id), -1.0);
 }
 
-/// Exported age grows before completion and survives Accepted writes and
-/// keepalives.
-#[tokio::test(flavor = "multi_thread")]
-async fn durability_age_tracks_pending_and_accepted_writes_until_durable() {
-    let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
-    let mut test = IdleDurabilityTest::start_with_settle_interval(Some(3_000)).await;
-    let pipeline_id = test.pipeline.id();
-
-    test.insert(1).await;
-    let (first_lsn, first) = test.next_batch().await;
-    // The result sender stays owned by the test while the independent sampler
-    // must publish a positive age. This observes a lifecycle boundary rather
-    // than relying on a fixed sleep to assume that sampling happened.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while durability_age(&metrics.render(), pipeline_id) < 1.0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let pending_age = durability_age(&metrics.render(), pipeline_id);
-    assert!(
-        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(first_lsn)
-    );
-    first.send(Ok(DestinationWriteStatus::Accepted));
-
-    let mut last_lsn = first_lsn;
-    for value in [2, 3] {
-        test.insert(value).await;
-        let (lsn, result) = test.next_batch().await;
-        assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age);
-        result.send(Ok(DestinationWriteStatus::Accepted));
-        last_lsn = lsn;
-    }
-    let barrier = test.next_barrier().await;
-    assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age + 2.0);
-    assert!(test.confirmed_lsn().await < first_lsn);
-
-    barrier.send(Ok(DestinationWriteStatus::Durable));
-    test.wait_for_flush(last_lsn).await;
-    assert_eq!(durability_age(&metrics.render(), pipeline_id), 0.0);
-    test.pipeline.shutdown_and_wait().await.unwrap();
-    assert_eq!(durability_age(&metrics.render(), pipeline_id), -1.0);
-    assert_checkpoint_reached(&test.store, &test.received_end_lsn, last_lsn).await;
-}
-
 /// A single accepted batch settles without another source write.
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_durability_settles_on_primary_keepalive() {
@@ -3133,14 +3087,30 @@ async fn idle_durability_settles_on_primary_keepalive() {
 }
 
 /// Later inserts are accepted during the settle window and remain undurable
-/// together with the earlier write.
+/// together with the earlier write. Exported age grows from the first dispatch
+/// through acceptance and keepalives until durable confirmation.
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_durability_allows_multiple_writes_during_settle_interval() {
     const SETTLE_AFTER_MS: u64 = 3_000;
+    let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
     let mut test = IdleDurabilityTest::start_with_settle_interval(Some(SETTLE_AFTER_MS)).await;
+    let pipeline_id = test.pipeline.id();
 
     test.insert(1).await;
     let (first_lsn, first_result) = test.next_batch().await;
+
+    // Hold the first result until sampling observes its age before acceptance.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while durability_age(&metrics.render(), pipeline_id) < 1.0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pending_age = durability_age(&metrics.render(), pipeline_id);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(first_lsn)
+    );
     let accepted_at = Instant::now();
     first_result.send(Ok(DestinationWriteStatus::Accepted));
 
@@ -3150,6 +3120,7 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
         let (lsn, result) = test.next_batch().await;
         assert!(lsn > previous_lsn);
         assert!(accepted_at.elapsed() < Duration::from_millis(SETTLE_AFTER_MS));
+        assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age);
         result.send(Ok(DestinationWriteStatus::Accepted));
         previous_lsn = lsn;
     }
@@ -3157,9 +3128,14 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
 
     let barrier = test.next_barrier().await;
     assert!(accepted_at.elapsed() >= Duration::from_millis(SETTLE_AFTER_MS));
+    assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age + 2.0);
+    assert!(test.confirmed_lsn().await < first_lsn);
     barrier.send(Ok(DestinationWriteStatus::Durable));
     test.wait_for_flush(previous_lsn).await;
+    assert_eq!(durability_age(&metrics.render(), pipeline_id), 0.0);
     test.pipeline.shutdown_and_wait().await.unwrap();
+    assert_eq!(durability_age(&metrics.render(), pipeline_id), -1.0);
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, previous_lsn).await;
 }
 
 /// Without a settle window, a later insert is overtaken by the durability
