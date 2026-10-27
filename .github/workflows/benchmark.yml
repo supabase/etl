@@ -374,6 +374,10 @@ jobs:
 
       # Written by the workflow, not xtask, so backfills of older commits get one too.
       - name: Write run manifest
+        env:
+          # Equals the jobs API `id`, so the manifest joins to its exact matrix
+          # job. `GITHUB_JOB` is only the YAML key and is shared by every leg.
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
           set -euo pipefail
           COMMIT_SHA="$(git rev-parse HEAD)"
@@ -433,6 +437,7 @@ jobs:
                   "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
                   "run_number": int(os.environ["GITHUB_RUN_NUMBER"]),
                   "job": os.environ["GITHUB_JOB"],
+                  "job_id": int(os.environ["JOB_CHECK_RUN_ID"]),
               },
               "runner": {
                   "label": os.environ["BENCHMARK_RUNNER"],
