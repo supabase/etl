@@ -1,19 +1,37 @@
 # Controlled Snowflake experiments
 
-This runner writes **synthetic SQL workloads to a real managed staging Postgres source** and uses ordinary Platform-created ETL pipelines and a real Snowflake destination. It does not import the benchmark or simulator runners. A run has a saved plan, a unique source schema/publication and Snowflake schema, finite write stages, an independent observer, and correctness assertions.
+`etl-experiments` runs controlled replication workloads against a managed staging PostgreSQL source, a hosted ETL pipeline and a Snowflake destination. Each run has a saved plan, isolated source and destination schemas, finite write stages, an independent observer and correctness checks.
 
-Start with the [staging walkthrough](https://github.com/supabase/etl-k8s/blob/main/etl-experiments/README.md). It explains the Kubernetes terms and commands, including exporting reports. No cluster action happens merely by merging this crate.
+For deployment, credentials, Kubernetes operations and artifact export, see the [staging runbook](https://github.com/supabase/etl-k8s/blob/main/etl-experiments/README.md).
 
 ## What a run does
 
-1. `prepare` creates a fresh UUID-named source schema, deterministic fixture, publication and Snowflake schema. It records its ownership in a source control table excluded from the publication.
+1. `prepare` creates a fresh UUID-named source schema and seeds all fixture rows before replication starts. It creates the publication and empty Snowflake schema, and records ownership in a source control table excluded from the publication.
 2. `observe` starts separately. It samples source LSNs, retained WAL, transaction ages, logical decoding spill, effective settings, Platform table states, pipeline-scoped metrics, and the named replicator's image and resources.
 3. `run` atomically claims the prepared fixture. A duplicate Kubernetes Job cannot replay it. By default it creates the destination and pipeline through **Platform**, selects an optional registered version, waits for the observer and starts the pipeline. Attach mode validates a stopped Studio-created pipeline against the fixture and destination.
-4. Initial copy runs concurrently with a finite source write stage. Every planned table must enter `following_wal`; an errored table fails the experiment. Ordered CDC stages then run with configured aggregate operation rates, concurrency and transaction sizes.
+4. The pipeline copies the prepared rows to Snowflake. After copying is observed, `copy_load` modifies source rows concurrently with initial synchronization. The runner waits for both that write stage to finish and every table's durable state to become `Ready`; an errored table fails the experiment. It then executes `cdc_loads` sequentially with configured aggregate operation rates, writer counts and transaction sizes.
 5. Writers stop. A reserved row in every table receives a revision-only update, preserving its original large text value. Final marker rows are inserted. The runner waits for markers, then compares **every row and field** with each Snowflake `_CURRENT` view using bounded ordered pages. It distinguishes SQL NULL from JSON null. Source payloads never enter reports or errors.
 6. The pipeline is stopped and deleted to reclaim its replication slots. Source fixtures, Snowflake data and artifacts remain for inspection. The report records stop and reclamation separately; unsuccessful teardown is never treated as a pass. `cleanup` removes the remaining owned API destination and, with `--drop-data`, the synthetic schemas.
 
 The runner and observer are separate Kubernetes Jobs with separate persistent volumes. The observer requests cancellation and stops/deletes the owned pipeline on runner-heartbeat loss or a WAL budget breach. Neither process can guarantee cleanup during a cluster, source, or Platform outage: an unconfirmed teardown requires operator inspection. Sampling budgets can overshoot by writes made between observations; they are not a hard WAL or Snowflake billing cap.
+
+## Fixture preparation and reuse
+
+`prepare` and `run` are separate commands. Preparation generates and inserts the entire initial dataset once. Execution uses those existing source tables for initial sync, concurrent writes, CDC stages and final verification; it does not seed them again between stages. Preparation can finish before the runner and observer Jobs are started.
+
+The loader generates deterministic text in Rust and sends parameterized `insert ... select ... from unnest(...)` batches. Tables load sequentially, with at most 256 rows and 1 MiB of generated text per batch. Each batch commits independently, followed by `analyze` after each table. Preparation has bounded batch memory but no configurable parallelism, `COPY` import or cached seed dataset.
+
+The checked-in example expands to:
+
+| Profile | Initial rows | Initial text payload |
+| --- | ---: | ---: |
+| Smoke | 1,024 | 16 MiB |
+| Example baseline | 3,200,000 | 25.02 GiB |
+| Double of example baseline | 6,400,000 | 50.05 GiB |
+
+These are logical text sizes before CDC writes. They exclude JSONB, row/index/TOAST overhead and WAL, and do not predict compressed physical storage or Snowflake billing. Preparation precedes the run's generated-WAL measurement; it still produces source writes and WAL. Initial synchronization transfers the prepared dataset to Snowflake, and final verification reads every source and destination value again.
+
+Every newly derived plan creates fresh source and Snowflake schemas and pays the full preparation cost. Completed source fixtures remain until explicit cleanup, but a prepared run can be claimed only once. Repeating `run` against completed data, importing an existing schema and resetting a retained fixture for another run are unsupported. A retained schema is evidence for inspection, not a reusable template.
 
 ## Three rollout levels
 
@@ -41,16 +59,16 @@ Each table has a bigint primary key and revision, nullable text, and nullable JS
 
 Each writer owns disjoint key ranges. A deterministic cycle updates only revision, replaces text, clears text, changes JSON (including JSON null), deletes, and reinserts. The copy stage waits for observed copying and requires a committed source write while copying is still visible. A copy too fast to observe makes the result inconclusive. CDC begins only when every table's current durable state is `Ready`; the dashboard's broader following-WAL status is not sufficient. Transactions are paced after commit without catch-up bursts. Reports record requested/achieved operations per second, committed operations, affected rows, written text bytes and elapsed time. Operation count is not WAL volume: observed WAL is recorded separately. Concurrent scheduling is not bit-for-bit deterministic despite a fixed seed.
 
-The prepared fixture is harness-owned. The first experiment accepts a managed source connection and configurable table groups; it does not modify arbitrary existing customer tables. Adapt the groups from schema/size/transaction statistics, without copying customer contents.
+The runner creates and owns its fixture tables. Configure table groups from schema, size and transaction statistics; all row values are synthetic.
 
 ## WAL-retention cases
 
-The default `retention: {"kind":"none"}` establishes an unmodified baseline. Other cases use fresh run IDs:
+The default `retention: {"kind":"none"}` runs without an additional retention scenario. Other cases use fresh run IDs:
 
-- `{"kind":"held_transaction","release_after_wal_bytes":67108864}` opens a write transaction **after initial sync**, while independent writers commit. It checks whether confirmed flush progresses past the transaction's start while restart LSN remains behind it, then commits the held transaction after the measured WAL threshold. If the workload does not produce enough WAL, the run fails with that explicit reason. Missing pinning evidence makes the result inconclusive. A forced long transaction demonstrates a mechanism, not the cause of a customer's incident.
+- `{"kind":"held_transaction","release_after_wal_bytes":67108864}` opens a write transaction **after initial sync**, while independent writers commit. It checks whether confirmed flush progresses past the transaction's start while restart LSN remains behind it, then commits the held transaction after the measured WAL threshold. If the workload does not produce enough WAL, the run fails with that explicit reason. Missing pinning evidence makes the result inconclusive. A passing result establishes the configured transaction's retention behavior.
 - `{"kind":"large_transaction","rows":10000}` updates the reserved first table in one transaction before normal CDC stages. Its rows must fit that table. Use the observer to distinguish destination acceptance, commit/checkpoint progress and retained WAL.
 
-This first experiment **does not change managed Postgres WAL settings or assert that Platform caused a configuration reset**. Effective settings are sampled so unexpected changes appear in the evidence. Deliberate 16 GiB → 4 GiB reduction and recovery after invalidation should be a separate, explicitly configured experiment after the baseline works.
+The runner samples effective PostgreSQL settings throughout execution. Retention cases leave managed WAL settings unchanged; they do not exercise configuration changes or recovery from slot invalidation.
 
 ## Platform and Studio launch
 
@@ -58,9 +76,9 @@ Default: `"launch":{"mode":"platform"}`. The runner uses the project-scoped `/pl
 
 For Studio: prepare first, then create a Snowflake destination/pipeline using the exact generated schema and publication. **Studio's current creation flow automatically starts replication. Stop that pipeline in Studio before attaching.** Set `launch` to `{"mode":"attach","pipeline_id":123}` in the private plan, then render/run it. Explicit `pipeline_config` fields must match the existing pipeline; use `{}` to accept its defaults and review the recorded effective configuration before comparing runs. The fixture fingerprint intentionally excludes launch mode so attachment is possible. Do not change the fixture groups after preparation. The runner owns resuming, stopping and ultimately deleting this dedicated experimental pipeline.
 
-Attachment validates the resumed workload and final contents, but cannot retroactively observe initial synchronization. Its summary records `initial_sync_observed_from_start: false` and the whole-experiment verdict remains **inconclusive**, even when its observed behavior checks pass. Use automated Platform launch for smoke/baseline/double qualification from a fresh initial sync. No Studio UI changes are required.
+Attachment validates the resumed workload and final contents, but cannot retroactively observe initial synchronization. Its summary records `initial_sync_observed_from_start: false` and the whole-experiment verdict remains **inconclusive**, even when its observed behavior checks pass. Use automated Platform launch for smoke/baseline/double qualification from a fresh initial sync.
 
-`version_id: null` uses the current default replicator version. A registered non-default image requires the experiment tenant in the existing test-tenant allowlist (currently named `simulator_tenants`); that allowlist does not run the simulator. Registering an image or changing that configuration is a separate reviewed staging operation. Reports record the selected API version and observed container image IDs; the runner image and replicator image are independent.
+`version_id: null` uses the current default replicator version. A registered non-default image requires the experiment tenant in the API's `simulator_tenants` allowlist. Registering an image or changing that configuration is a separate reviewed staging operation. Reports record the selected API version and observed container image IDs; the runner image and replicator image are independent.
 
 ## Authentication and limits
 
@@ -77,7 +95,7 @@ Credentials come only from environment variables / mounted files:
 
 Plans contain identifiers but no credentials. Keep real plans and artifacts outside Git: treat identifiers, resource inventories and operational observations as private. The workload itself is synthetic.
 
-The initial runner uses a finite rate for each stage. More nuanced burst schedules can be represented as successive stages. Match source compute/storage, Postgres version, WAL/slot limits, replica identity, table-size and TOAST distributions, transaction sizes, hot-table distribution, replicator resources, Snowflake role/warehouse and regions before drawing conclusions about production. Current profiles distribute operations evenly across tables; workloads dominated by a few hot tables need additional calibrated scheduling before equivalence can be claimed.
+Each load stage has a fixed target rate and finite operation count. More nuanced burst schedules can be represented as successive stages. Match source compute/storage, Postgres version, WAL/slot limits, replica identity, table-size and TOAST distributions, transaction sizes, hot-table distribution, replicator resources, Snowflake role/warehouse and regions before drawing conclusions about production. Current profiles distribute operations evenly across tables; workloads dominated by a few hot tables need additional calibrated scheduling before equivalence can be claimed.
 
 ## Reports and interpretation
 
