@@ -76,6 +76,23 @@ const FEEDBACK_TEST_WAL_SENDER_TIMEOUT: Duration = Duration::from_secs(2);
 /// instead of hanging it until the CI job times out.
 const IDLE_DURABILITY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Reads a single main apply-worker durability age from exported metrics.
+fn durability_age(rendered: &str, pipeline_id: PipelineId) -> f64 {
+    rendered
+        .lines()
+        .find(|line| {
+            line.starts_with("etl_destination_durability_age_seconds{")
+                && line.contains(&format!("pipeline_id=\"{pipeline_id}\""))
+                && line.contains("worker_type=\"apply\"")
+        })
+        .unwrap()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
     /// Target-table event batch held before reporting its write status.
@@ -101,6 +118,8 @@ struct DeferredEventsDestination {
     writes_tx: mpsc::UnboundedSender<DeferredEventsWrite>,
     /// Highest commit end LSN received in any batch.
     received_end_lsn: Arc<Mutex<Option<PgLsn>>>,
+    /// Optional table-specific copy hold for mixed copy/CDC tests.
+    copy_gate: Arc<Mutex<Option<(TableId, HoldGate)>>>,
 }
 
 impl DeferredEventsDestination {
@@ -108,7 +127,15 @@ impl DeferredEventsDestination {
     fn new(table_id: TableId) -> (Self, mpsc::UnboundedReceiver<DeferredEventsWrite>) {
         let (writes_tx, writes_rx) = mpsc::unbounded_channel();
 
-        (Self { table_id, writes_tx, received_end_lsn: Arc::default() }, writes_rx)
+        (
+            Self {
+                table_id,
+                writes_tx,
+                received_end_lsn: Arc::default(),
+                copy_gate: Arc::default(),
+            },
+            writes_rx,
+        )
     }
 
     /// Returns the shared highest commit end LSN received so far.
@@ -134,11 +161,23 @@ impl Destination for DeferredEventsDestination {
 
     async fn write_table_rows(
         &self,
-        _replicated_table_schema: &ReplicatedTableSchema,
+        replicated_table_schema: &ReplicatedTableSchema,
         _batch_id: Option<TableCopyBatchId>,
         _table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
+        let gate = {
+            let mut gate = self.copy_gate.lock().unwrap();
+            if gate.as_ref().is_some_and(|(table_id, _)| *table_id == replicated_table_schema.id())
+            {
+                gate.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.apply(Ok(())).await?;
+        }
         async_result.send(Ok(DestinationWriteStatus::Durable));
 
         Ok(())
@@ -1276,6 +1315,7 @@ async fn assert_apply_feedback_during_stall(
 /// while destination dispatch is suspended.
 #[tokio::test(flavor = "multi_thread")]
 async fn feedback_continues_during_destination_dispatch() {
+    let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
     let mut database = spawn_source_database().await;
     database
         .run_sql(&format!(
@@ -1334,6 +1374,7 @@ async fn feedback_continues_during_destination_dispatch() {
         .await;
 
     assert_eq!(activity::snapshot()[0].last_observed_at(), observed_at);
+    assert!(durability_age(&metrics.render(), pipeline_id) > 1.0);
 
     assert!(!inner.events().await.iter().any(|event| matches!(event, Event::Insert(_))));
 
@@ -2841,6 +2882,7 @@ impl IdleDurabilityTest {
 /// attempt, even when the original write completed durably.
 #[tokio::test(flavor = "multi_thread")]
 async fn apply_retry_replays_dispatched_write_without_checkpointing() {
+    let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
     let _scenario = FailScenario::setup();
     let mut test = IdleDurabilityTest::start().await;
 
@@ -2856,10 +2898,20 @@ async fn apply_retry_replays_dispatched_write_without_checkpointing() {
     );
     assert!(test.confirmed_lsn().await < commit_lsn);
 
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while durability_age(&metrics.render(), test.pipeline.id()) < 1.0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pending_age = durability_age(&metrics.render(), test.pipeline.id());
+
     result.send(Ok(DestinationWriteStatus::Durable));
 
     let (replay_lsn, replay_result) = test.next_batch().await;
     assert_eq!(replay_lsn, commit_lsn);
+    assert!(durability_age(&metrics.render(), test.pipeline.id()) >= pending_age);
     assert!(
         test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(commit_lsn)
     );
@@ -2867,6 +2919,7 @@ async fn apply_retry_replays_dispatched_write_without_checkpointing() {
     replay_result.send(Ok(DestinationWriteStatus::Durable));
 
     test.wait_for_flush(commit_lsn).await;
+    assert_eq!(durability_age(&metrics.render(), test.pipeline.id()), 0.0);
     test.pipeline.shutdown_and_wait().await.unwrap();
 
     assert_checkpoint_reached(&test.store, &test.received_end_lsn, commit_lsn).await;
@@ -2941,6 +2994,122 @@ async fn catchup_retry_recopies_after_dispatched_write() {
         table_rows.get(&table_id).unwrap(),
         &[TableRow::new(vec![Cell::I64(1), Cell::String("user_1".to_owned()), Cell::I32(1)])],
     );
+}
+
+/// Main apply-worker durability remains visible while another table is copying.
+#[tokio::test(flavor = "multi_thread")]
+async fn durability_age_observes_cdc_while_another_table_is_copying() {
+    let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
+    let database = spawn_source_database().await;
+    let streaming_name = test_table_name("durability_streaming");
+    let copying_name = test_table_name("durability_copying");
+    let streaming_id = database
+        .create_table(streaming_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+    let copying_id = database
+        .create_table(copying_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+    database.insert_values(copying_name.clone(), &["value"], &[&1_i32]).await.unwrap();
+    let publication = "durability_mixed_publication";
+    database
+        .create_publication(publication, &[streaming_name.clone(), copying_name])
+        .await
+        .unwrap();
+    let store = NotifyingStore::new();
+    let (destination, mut writes) = DeferredEventsDestination::new(streaming_id);
+    let (fault, copy_hold) = FaultAction::hold();
+    let FaultAction::HoldResponse(copy_gate) = fault else {
+        panic!("FaultAction::hold must produce a hold gate");
+    };
+    *destination.copy_gate.lock().unwrap() = Some((copying_id, copy_gate));
+    let pipeline_id = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication.to_owned(),
+        store.clone(),
+        destination,
+    )
+    .with_table_sync_copy_config(TableSyncCopyConfig::SkipTables {
+        table_ids: vec![streaming_id.0],
+    })
+    .with_max_table_sync_workers(2)
+    .build();
+    let synced = store.notify_on_table_sync_complete(streaming_id).await;
+
+    pipeline.start().await.unwrap();
+
+    synced.wait_for(Duration::from_secs(30)).notified().await;
+    copy_hold.wait_reached().await;
+    database.run_sql("analyze").await.unwrap();
+    database.insert_values(streaming_name, &["value"], &[&1_i32]).await.unwrap();
+    let write =
+        tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, writes.recv()).await.unwrap().unwrap();
+    let DeferredEventsWrite::Batch { result, .. } = write else {
+        panic!("The first target-table write must be a nonempty batch");
+    };
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while durability_age(&metrics.render(), pipeline_id) < 1.0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(store.get_table_state(copying_id).await.unwrap(), Some(TableState::DataSync)));
+
+    result.send(Ok(DestinationWriteStatus::Durable));
+    copy_hold.release_ok();
+    pipeline.shutdown_and_wait().await.unwrap();
+    assert_eq!(durability_age(&metrics.render(), pipeline_id), -1.0);
+}
+
+/// Exported age grows before completion and survives Accepted writes and
+/// keepalives.
+#[tokio::test(flavor = "multi_thread")]
+async fn durability_age_tracks_pending_and_accepted_writes_until_durable() {
+    let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
+    let mut test = IdleDurabilityTest::start_with_settle_interval(Some(3_000)).await;
+    let pipeline_id = test.pipeline.id();
+
+    test.insert(1).await;
+    let (first_lsn, first) = test.next_batch().await;
+    // The result sender stays owned by the test while the independent sampler
+    // must publish a positive age. This observes a lifecycle boundary rather
+    // than relying on a fixed sleep to assume that sampling happened.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while durability_age(&metrics.render(), pipeline_id) < 1.0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let pending_age = durability_age(&metrics.render(), pipeline_id);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(first_lsn)
+    );
+    first.send(Ok(DestinationWriteStatus::Accepted));
+
+    let mut last_lsn = first_lsn;
+    for value in [2, 3] {
+        test.insert(value).await;
+        let (lsn, result) = test.next_batch().await;
+        assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age);
+        result.send(Ok(DestinationWriteStatus::Accepted));
+        last_lsn = lsn;
+    }
+    let barrier = test.next_barrier().await;
+    assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age + 2.0);
+    assert!(test.confirmed_lsn().await < first_lsn);
+
+    barrier.send(Ok(DestinationWriteStatus::Durable));
+    test.wait_for_flush(last_lsn).await;
+    assert_eq!(durability_age(&metrics.render(), pipeline_id), 0.0);
+    test.pipeline.shutdown_and_wait().await.unwrap();
+    assert_eq!(durability_age(&metrics.render(), pipeline_id), -1.0);
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, last_lsn).await;
 }
 
 /// A single accepted batch settles without another source write.

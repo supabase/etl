@@ -299,6 +299,43 @@ non-production environment before operating the replicator on production data.
 - Back up configuration metadata, but never include credentials in diagnostic
   bundles or public issues.
 
+### Outstanding CDC durability age
+
+`etl_destination_durability_age_seconds` measures the live age of the main apply
+worker's oldest outstanding destination-write interval. Timing starts before a
+nonempty `write_events` call, including a call or result that never returns.
+Later `Accepted` results and PostgreSQL heartbeats preserve the original start.
+A successfully handled `Durable` result covers earlier accepted writes in that
+ordered stream and clears the interval. Empty barriers can confirm existing
+work but do not start a new interval on an idle source.
+
+An independent pipeline-owned task refreshes the gauge every second, including
+while dispatch, confirmation, retry backoff, or shutdown draining is pending.
+The gauge has `pipeline_id`, `worker_type="apply"`, and
+`replication_path="cdc"` labels; the standalone replicator also supplies its
+global `project` and `destination` labels. Initial copy and table-sync catchup
+are excluded. Main-worker CDC remains observed while other tables are copying.
+
+Retries retain the original age until a durable replay commit covers the prior
+attempt's dispatched WAL frontier. This is conservative: partially replayed
+work may remain in the measured interval. Errors and cancelled writes do not
+clear the interval. Completed latency histograms keep their existing semantics.
+
+Zero means no **observed** outstanding work in this process. Negative values
+mean observation is unavailable, including before the main apply loop starts
+and after the sampling task stops. Use
+`etl_destination_durability_observed_at_seconds`, a Unix timestamp with the same
+labels, to reject stale observations. Process restarts lose the in-memory age;
+missing metrics, a stopped process, or a new process exporting zero do not prove
+previous work became durable. Old images do not export these metrics.
+
+Recommended alerts are age above 300 seconds for 2 minutes and above 1,200
+seconds for 1 minute, independently per pipeline, using observations less than
+2 minutes old. Scrape, evaluation, and notification delays are additional.
+Keep separate scrape/workload health checks for absent series. This measures
+outstanding CDC durability, not a complete source-to-query freshness SLO or a
+single provider request's latency. Use WAL lag and source retention alongside it.
+
 ### Replication lag
 
 `etl_replication_wal_lag_bytes` measures replication lag: the source WAL head

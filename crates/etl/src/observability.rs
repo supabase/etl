@@ -15,6 +15,12 @@ pub(crate) const ETL_DESTINATION_DURABILITY_DURATION_SECONDS: &str =
     "etl_destination_durability_duration_seconds";
 pub(crate) const ETL_DESTINATION_DURABILITY_WAIT_DURATION_SECONDS: &str =
     "etl_destination_durability_wait_duration_seconds";
+/// Live age of the main apply worker's outstanding durability interval.
+pub(crate) const ETL_DESTINATION_DURABILITY_AGE_SECONDS: &str =
+    "etl_destination_durability_age_seconds";
+/// Unix timestamp of the latest durability monitor observation.
+pub(crate) const ETL_DESTINATION_DURABILITY_OBSERVED_AT_SECONDS: &str =
+    "etl_destination_durability_observed_at_seconds";
 pub(crate) const ETL_TRANSACTIONS_TOTAL: &str = "etl_transactions_total";
 pub(crate) const ETL_TRANSACTION_SIZE: &str = "etl_transaction_size";
 pub(crate) const ETL_TABLE_COPY_DURATION_SECONDS: &str = "etl_table_copy_duration_seconds";
@@ -142,6 +148,20 @@ pub(crate) fn register_metrics() {
              the destination reports Durable, labeled by worker_type, replication_path and \
              confirmation; direct intervals contain one batch while deferred intervals may cover \
              multiple accepted batches"
+        );
+
+        describe_gauge!(
+            ETL_DESTINATION_DURABILITY_AGE_SECONDS,
+            Unit::Seconds,
+            "Age of outstanding main apply-worker CDC destination work from dispatch through \
+             durable confirmation; zero means no observed outstanding work, negative means \
+             unavailable. Retained conservatively across retries; resets on process restart."
+        );
+        describe_gauge!(
+            ETL_DESTINATION_DURABILITY_OBSERVED_AT_SECONDS,
+            Unit::Seconds,
+            "Unix timestamp of the latest main apply-worker durability observation; use with \
+             durability age to detect stale observations."
         );
 
         describe_histogram!(
