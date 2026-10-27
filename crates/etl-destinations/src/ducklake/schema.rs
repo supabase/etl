@@ -111,7 +111,11 @@ fn ducklake_default_clause(column_schema: &ColumnSchema) -> Option<String> {
         .default_expression
         .as_deref()
         .and_then(|default_expression| {
-            ducklake_default_expression(default_expression, &column_schema.typ)
+            ducklake_default_expression(
+                default_expression,
+                &column_schema.typ,
+                column_schema.modifier,
+            )
         })
         .map(|rendered_default_expression| format!(" default {rendered_default_expression}"));
     if default_clause.is_none() && column_schema.default_expression.is_some() {
@@ -205,8 +209,12 @@ fn quote_numeric_literal_as_string(expression: &str) -> String {
 }
 
 /// Returns a rendered DuckLake default expression for a column, if supported.
-fn ducklake_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
-    parse_default_expression(default_expression, typ)
+fn ducklake_default_expression(
+    default_expression: &str,
+    typ: &Type,
+    modifier: i32,
+) -> Option<String> {
+    parse_default_expression(default_expression, typ, modifier)
         .and_then(|expression| render_ducklake_default_expression(&expression, typ))
 }
 
@@ -316,9 +324,11 @@ pub(super) fn build_set_default_sql_ducklake(
     table_name: &DuckLakeTableName,
     column_name: &str,
     typ: &Type,
+    modifier: i32,
     default_expression: &str,
 ) -> Option<String> {
-    let rendered_default_expression = ducklake_default_expression(default_expression, typ)?;
+    let rendered_default_expression =
+        ducklake_default_expression(default_expression, typ, modifier)?;
     let table_name = qualified_lake_table_name(table_name);
     let column_name = quote_identifier(column_name);
 
@@ -601,6 +611,7 @@ mod tests {
                 &table_name("table\"name"),
                 &column.name,
                 &column.typ,
+                column.modifier,
                 column.default_expression.as_deref().expect("test default")
             ),
             Some(

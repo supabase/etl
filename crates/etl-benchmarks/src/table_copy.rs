@@ -32,9 +32,9 @@ use url::Url;
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_destination,
-    cleanup_replication_slots, duration_millis, format_decimal, format_duration_ms, format_integer,
-    init_benchmark_tracing, mib_per_second, per_second, pipeline_config,
-    reset_shared_destination_tables, run_etl_migrations, write_report,
+    cleanup_replication_slots, duration_millis, finish_run, format_decimal, format_duration_ms,
+    format_integer, init_benchmark_tracing, mib_per_second, per_second, pipeline_config,
+    run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-copy benchmark.
@@ -168,9 +168,6 @@ async fn run(args: RunArgs) -> Result<()> {
     }
 
     info!("starting table-copy benchmark");
-    // Clearing leftovers from earlier runs is setup, not measured work.
-    reset_shared_destination_tables(&args.destination, &args.pg, &args.table_ids).await?;
-
     let total_started = Instant::now();
     run_etl_migrations(&args.pg).await?;
 
@@ -182,46 +179,61 @@ async fn run(args: RunArgs) -> Result<()> {
     if args.destination_settle_ms > 0 {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
     }
-    let config = pipeline_config(
-        args.pipeline_id,
-        args.publication_name.clone(),
-        &args.pg,
-        &args.tuning,
-        TableSyncCopyConfig::IncludeTables { table_ids: args.table_ids.clone() },
-    );
+    // Everything after destination setup runs in one block so slot and
+    // destination cleanup happen whether it succeeds or fails.
+    let run_result: Result<(u128, Duration, u128)> = async {
+        let config = pipeline_config(
+            args.pipeline_id,
+            args.publication_name.clone(),
+            &args.pg,
+            &args.tuning,
+            TableSyncCopyConfig::IncludeTables { table_ids: args.table_ids.clone() },
+        );
 
-    config.validate().context("Invalid pipeline config")?;
+        config.validate().context("Invalid pipeline config")?;
 
-    let table_copy_notifications = register_table_copy_notifications(&store, &args.table_ids)
-        .await
-        .context("Failed to register table-copy notifications")?;
+        let table_copy_notifications = register_table_copy_notifications(&store, &args.table_ids)
+            .await
+            .context("Failed to register table-copy notifications")?;
 
-    let mut pipeline = Pipeline::new(config, store, destination.clone());
+        let mut pipeline = Pipeline::new(config, store, destination.clone());
 
-    let start_started = Instant::now();
-    pipeline.start().await.context("Failed to start pipeline")?;
-    let pipeline_start_ms = duration_millis(start_started.elapsed());
+        let start_started = Instant::now();
+        let start_result = pipeline.start().await.context("Failed to start pipeline");
+        let pipeline_start_ms = duration_millis(start_started.elapsed());
 
-    let copy_started = Instant::now();
-    let copy_result =
-        wait_for_table_copies(&destination, args.expected_row_count, table_copy_notifications)
-            .await;
-    let copy_wait_duration = copy_started.elapsed();
+        // Shut down even when start or the copy fails, so the destination
+        // stops writing before cleanup drops it.
+        let copy_started = Instant::now();
+        let copy_result = match start_result {
+            Ok(()) => {
+                wait_for_table_copies(
+                    &destination,
+                    args.expected_row_count,
+                    table_copy_notifications,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let copy_wait_duration = copy_started.elapsed();
 
-    let shutdown_started = Instant::now();
-    let shutdown_result = pipeline.shutdown_and_wait().await;
-    let shutdown_ms = duration_millis(shutdown_started.elapsed());
+        let shutdown_started = Instant::now();
+        let shutdown_result =
+            pipeline.shutdown_and_wait().await.context("Failed to shut down pipeline");
+        let shutdown_ms = duration_millis(shutdown_started.elapsed());
+
+        finish_run(copy_result, [shutdown_result])?;
+
+        Ok((pipeline_start_ms, copy_wait_duration, shutdown_ms))
+    }
+    .await;
 
     let cleanup_result =
         cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await;
     let destination_cleanup_result = cleanup_destination(&args.destination, args.pipeline_id).await;
-    let shared_table_cleanup_result =
-        reset_shared_destination_tables(&args.destination, &args.pg, &args.table_ids).await;
-    shutdown_result.context("Failed to shut down pipeline")?;
-    cleanup_result?;
-    destination_cleanup_result?;
-    shared_table_cleanup_result?;
-    copy_result?;
+    let (pipeline_start_ms, copy_wait_duration, shutdown_ms) =
+        finish_run(run_result, [cleanup_result, destination_cleanup_result])?;
 
     let destination_stats = destination.stats();
     let copied_rows = destination_stats.table_rows;

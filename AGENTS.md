@@ -124,6 +124,17 @@ implementation details private.
   or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
   own `--locked` flag.
 
+### Temporary dependency audit deferral
+
+Iceberg still pulls in `zstd 0.13.3` and `zstd-safe 7.2.4` through its own,
+Apache Avro, and Parquet dependencies. The remaining audit findings
+`RUSTSEC-2026-0391`, `RUSTSEC-2026-0398`, and `RUSTSEC-2026-0403` are deferred to
+[destination removal in PR #1159](https://github.com/supabase/etl/pull/1159).
+Keep the audit enabled; do not add advisory ignores, forks, or vendored patches
+for this deferred chain. When integrating that removal, remove this note and
+verify that the affected versions and findings are gone. Investigate any
+findings that remain after removal or involve another dependency path.
+
 ### Deprecated destination scope
 
 Iceberg is deprecated. Unless the user explicitly requests Iceberg work,
