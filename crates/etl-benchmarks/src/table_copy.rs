@@ -32,9 +32,9 @@ use url::Url;
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_destination,
-    cleanup_replication_slots, duration_millis, format_decimal, format_duration_ms, format_integer,
-    init_benchmark_tracing, mib_per_second, per_second, pipeline_config, run_etl_migrations,
-    write_report,
+    cleanup_replication_slots, duration_millis, finish_run, format_decimal, format_duration_ms,
+    format_integer, init_benchmark_tracing, mib_per_second, per_second, pipeline_config,
+    run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-copy benchmark.
@@ -222,9 +222,8 @@ async fn run(args: RunArgs) -> Result<()> {
     let cleanup_result =
         cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await;
     let destination_cleanup_result = cleanup_destination(&args.destination, args.pipeline_id).await;
-    let (pipeline_start_ms, copy_wait_duration, shutdown_ms) = run_result?;
-    cleanup_result?;
-    destination_cleanup_result?;
+    let (pipeline_start_ms, copy_wait_duration, shutdown_ms) =
+        finish_run(run_result, [cleanup_result, destination_cleanup_result])?;
 
     let destination_stats = destination.stats();
     let copied_rows = destination_stats.table_rows;

@@ -18,8 +18,8 @@ use tracing::info;
 use crate::common::{
     BenchDestination, DestinationArgs, DestinationStatsSnapshot, DestinationType, LogTarget,
     PgConnectionArgs, PipelineTuningArgs, bytes_to_mib, cleanup_destination,
-    cleanup_replication_slots, duration_millis, format_decimal, format_duration_ms, format_integer,
-    mib_per_second, per_second, pipeline_config, run_etl_migrations, write_report,
+    cleanup_replication_slots, duration_millis, finish_run, format_decimal, format_duration_ms,
+    format_integer, mib_per_second, per_second, pipeline_config, run_etl_migrations, write_report,
 };
 
 /// Command-line arguments for the table-streaming benchmark.
@@ -196,30 +196,52 @@ async fn run(args: RunArgs) -> Result<()> {
         pipeline.start().await.context("failed to start pipeline")?;
         let pipeline_start_ms = duration_millis(start_started.elapsed());
 
-        let ready_started = Instant::now();
-        wait_for_table_sync(notifications).await?;
-        let ready_wait_ms = duration_millis(ready_started.elapsed());
+        // Shut down even when a phase fails, so the apply worker releases its
+        // slot and stops writing before cleanup drops them.
+        let phase_result: Result<(u128, Duration, Duration, Duration, Instant)> = async {
+            let ready_started = Instant::now();
+            wait_for_table_sync(notifications).await?;
+            let ready_wait_ms = duration_millis(ready_started.elapsed());
 
-        destination.reset_cdc_stats();
+            destination.reset_cdc_stats();
 
-        let end_to_end_started = Instant::now();
-        let producer_started = Instant::now();
-        run_tpcc_workload(&args).await?;
-        let producer_duration = producer_started.elapsed();
+            let end_to_end_started = Instant::now();
+            let producer_started = Instant::now();
+            run_tpcc_workload(&args).await?;
+            let producer_duration = producer_started.elapsed();
 
-        let drain_started = Instant::now();
-        wait_for_cdc_quiescence(
-            &destination,
-            Duration::from_millis(args.drain_quiet_ms),
-            Duration::from_millis(args.drain_poll_ms),
-        )
+            let drain_started = Instant::now();
+            wait_for_cdc_quiescence(
+                &destination,
+                Duration::from_millis(args.drain_quiet_ms),
+                Duration::from_millis(args.drain_poll_ms),
+            )
+            .await;
+            let drain_duration = drain_started.elapsed();
+            let end_to_end_duration = end_to_end_started.elapsed();
+
+            Ok((
+                ready_wait_ms,
+                producer_duration,
+                drain_duration,
+                end_to_end_duration,
+                end_to_end_started,
+            ))
+        }
         .await;
-        let drain_duration = drain_started.elapsed();
-        let end_to_end_duration = end_to_end_started.elapsed();
 
         let shutdown_started = Instant::now();
-        pipeline.shutdown_and_wait().await.context("failed to shut down pipeline")?;
+        let shutdown_result = pipeline.shutdown_and_wait().await;
         let shutdown_duration = shutdown_started.elapsed();
+
+        shutdown_result.context("failed to shut down pipeline")?;
+        let (
+            ready_wait_ms,
+            producer_duration,
+            drain_duration,
+            end_to_end_duration,
+            end_to_end_started,
+        ) = phase_result?;
         let end_to_end_with_shutdown_duration = end_to_end_started.elapsed();
 
         Ok(StreamingPhaseTimings {
@@ -244,9 +266,7 @@ async fn run(args: RunArgs) -> Result<()> {
         end_to_end_duration,
         shutdown_duration,
         end_to_end_with_shutdown_duration,
-    } = run_result?;
-    cleanup_result?;
-    destination_cleanup_result?;
+    } = finish_run(run_result, [cleanup_result, destination_cleanup_result])?;
 
     let destination_stats = destination.stats();
     if destination_stats.cdc_data_events == 0 {
