@@ -29,7 +29,7 @@ pub(super) fn column_default_sql(column_schema: &ColumnSchema) -> Option<String>
     }
 
     column_schema.default_expression.as_deref().and_then(|default_expression| {
-        default_expression_sql(default_expression, &column_schema.typ)
+        default_expression_sql(default_expression, &column_schema.typ, column_schema.modifier)
     })
 }
 
@@ -57,8 +57,8 @@ pub(super) fn column_spec(column_schema: &ColumnSchema) -> EtlResult<String> {
 }
 
 /// Returns a rendered default expression for BigQuery, if supported.
-fn default_expression_sql(default_expression: &str, typ: &Type) -> Option<String> {
-    parse_default_expression(default_expression, typ)
+fn default_expression_sql(default_expression: &str, typ: &Type, modifier: i32) -> Option<String> {
+    parse_default_expression(default_expression, typ, modifier)
         .and_then(|expression| render_default_expression(&expression, typ))
 }
 
@@ -508,7 +508,7 @@ mod tests {
         ];
 
         for (typ, expression, expected) in cases {
-            assert_eq!(default_expression_sql(expression, &typ).as_deref(), Some(expected));
+            assert_eq!(default_expression_sql(expression, &typ, -1).as_deref(), Some(expected));
         }
     }
 
@@ -531,7 +531,7 @@ mod tests {
 
         for (typ, expression, expected) in cases {
             assert_eq!(
-                default_expression_sql(expression, &typ).as_deref(),
+                default_expression_sql(expression, &typ, -1).as_deref(),
                 Some(expected),
                 "expression: {expression}"
             );
@@ -553,7 +553,7 @@ mod tests {
         ];
 
         for (typ, expression) in cases {
-            assert_eq!(default_expression_sql(expression, &typ), None);
+            assert_eq!(default_expression_sql(expression, &typ, -1), None);
         }
     }
 

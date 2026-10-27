@@ -147,7 +147,11 @@ pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
         .default_expression
         .as_deref()
         .and_then(|default_expression| {
-            snowflake_default_expression(default_expression, &column_schema.typ)
+            snowflake_default_expression(
+                default_expression,
+                &column_schema.typ,
+                column_schema.modifier,
+            )
         })
         .map(|rendered_default_expression| format!(" DEFAULT {rendered_default_expression}"));
     if default_clause.is_none() && column_schema.default_expression.is_some() {
@@ -167,7 +171,11 @@ pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<
         .default_expression
         .as_deref()
         .and_then(|default_expression| {
-            snowflake_add_column_default_expression(default_expression, &column_schema.typ)
+            snowflake_add_column_default_expression(
+                default_expression,
+                &column_schema.typ,
+                column_schema.modifier,
+            )
         })
         .map(|rendered_default_expression| format!(" DEFAULT {rendered_default_expression}"));
     if default_clause.is_none() && column_schema.default_expression.is_some() {
@@ -182,14 +190,22 @@ pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<
 }
 
 /// Returns a rendered Snowflake default expression for a column, if supported.
-fn snowflake_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
-    parse_default_expression(default_expression, typ)
+fn snowflake_default_expression(
+    default_expression: &str,
+    typ: &Type,
+    modifier: i32,
+) -> Option<String> {
+    parse_default_expression(default_expression, typ, modifier)
         .and_then(|expression| render_snowflake_default_expression(&expression, typ))
 }
 
 /// Returns a Snowflake `ADD COLUMN` default expression, if supported.
-fn snowflake_add_column_default_expression(default_expression: &str, typ: &Type) -> Option<String> {
-    parse_default_expression(default_expression, typ)
+fn snowflake_add_column_default_expression(
+    default_expression: &str,
+    typ: &Type,
+    modifier: i32,
+) -> Option<String> {
+    parse_default_expression(default_expression, typ, modifier)
         .filter(|expression| {
             matches!(
                 expression,

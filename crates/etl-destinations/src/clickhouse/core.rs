@@ -207,7 +207,11 @@ fn clickhouse_add_column_definition(
 
     let preserve_not_null = !after_column_schema.nullable
         && after_column_schema.default_expression.as_deref().is_some_and(|default_expression| {
-            supports_column_default(default_expression, &after_column_schema.typ)
+            supports_column_default(
+                default_expression,
+                &after_column_schema.typ,
+                after_column_schema.modifier,
+            )
         });
     (destination_column_schema, !preserve_not_null)
 }
