@@ -1527,6 +1527,7 @@ dependencies = [
  "etl-postgres",
  "etl-telemetry",
  "k8s-openapi",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",

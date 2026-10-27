@@ -15,10 +15,19 @@ use serde_json::Value;
 const DEFAULT_ARTIFACT_NAME: &str = "benchmark-results";
 const DEFAULT_CURRENT_DIR: &str = "target/bench-results";
 const DEFAULT_WORKFLOW: &str = "benchmark.yml";
+/// Run manifest uploaded beside the reports; not itself a report.
+const MANIFEST_FILE_NAME: &str = "manifest.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "supabase-etl-benchmark-compare";
+/// Workflow runs requested per listing page.
+const RUNS_PER_PAGE: usize = 30;
+/// Listing pages searched for a baseline before giving up.
+///
+/// Runs without the artifact, such as backfills or other destinations, can
+/// fill whole pages; a bound keeps the search cheap when no baseline exists.
+const MAX_RUN_PAGES: usize = 5;
 
 const TABLE_COPY_METRICS: &[Metric] = &[
     Metric { key: "copied_rows", label: "Rows copied", policy: RegressionPolicy::Informational },
@@ -143,7 +152,6 @@ struct WorkflowRun {
     id: u64,
     run_number: u64,
     html_url: String,
-    conclusion: Option<String>,
     head_sha: Option<String>,
 }
 
@@ -181,6 +189,8 @@ struct GitHubContext {
     repo: String,
     current_run_id: u64,
     ref_name: String,
+    /// Event that triggered the current run; baselines must share it.
+    event_name: String,
     current_sha: Option<String>,
 }
 
@@ -270,8 +280,9 @@ impl BenchmarkCompareArgs {
         let repo = env::var("GITHUB_REPOSITORY").ok()?;
         let current_run_id = env::var("GITHUB_RUN_ID").ok()?.parse().ok()?;
         let ref_name = self.ref_name.clone().or_else(|| env::var("GITHUB_REF_NAME").ok())?;
+        let event_name = env::var("GITHUB_EVENT_NAME").ok()?;
         let current_sha = env::var("GITHUB_SHA").ok();
-        Some(GitHubContext { token, repo, current_run_id, ref_name, current_sha })
+        Some(GitHubContext { token, repo, current_run_id, ref_name, event_name, current_sha })
     }
 
     async fn load_github_previous_reports(
@@ -279,36 +290,54 @@ impl BenchmarkCompareArgs {
         client: &GitHubClient,
         context: &GitHubContext,
     ) -> Result<Option<(Reports, WorkflowRun, Option<CodeCompare>)>> {
-        let runs = client.workflow_runs(&self.workflow, &context.ref_name).await?;
-        for run in runs {
-            if run.id == context.current_run_id || run.conclusion.as_deref() != Some("success") {
-                continue;
+        for page in 1..=MAX_RUN_PAGES {
+            let runs = client
+                .workflow_runs(&self.workflow, &context.ref_name, &context.event_name, page)
+                .await?;
+            let last_page = runs.len() < RUNS_PER_PAGE;
+            for run in runs {
+                // One failed destination job fails the whole run, so the run
+                // conclusion is not checked. Only successful jobs upload the
+                // artifact, so its presence marks a usable baseline.
+                if run.id == context.current_run_id {
+                    continue;
+                }
+
+                let Some(artifact) = client.find_artifact(run.id, &self.artifact_name).await?
+                else {
+                    continue;
+                };
+
+                let temp_dir = create_previous_reports_dir()?;
+                let archive_path = temp_dir.path().join("benchmark-results.zip");
+                let extract_dir = temp_dir.path().join("extract");
+                fs::create_dir_all(&extract_dir)
+                    .with_context(|| format!("failed to create {}", extract_dir.display()))?;
+                client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
+                unzip_archive(&archive_path, &extract_dir)?;
+                let reports = load_reports(&extract_dir).with_context(|| {
+                    format!(
+                        "failed to load benchmark reports from artifact {} in run {}",
+                        self.artifact_name, run.run_number
+                    )
+                })?;
+                let code_compare =
+                    code_compare(&context.repo, &run, context.current_sha.as_deref());
+                return Ok(Some((reports, run, code_compare)));
             }
 
-            let Some(artifact) = client.find_artifact(run.id, &self.artifact_name).await? else {
-                continue;
-            };
-
-            let temp_dir = create_previous_reports_dir()?;
-            let archive_path = temp_dir.path().join("benchmark-results.zip");
-            let extract_dir = temp_dir.path().join("extract");
-            fs::create_dir_all(&extract_dir)
-                .with_context(|| format!("failed to create {}", extract_dir.display()))?;
-            client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
-            unzip_archive(&archive_path, &extract_dir)?;
-            let reports = load_reports(&extract_dir).with_context(|| {
-                format!(
-                    "failed to load benchmark reports from artifact {} in run {}",
-                    self.artifact_name, run.run_number
-                )
-            })?;
-            let code_compare = code_compare(&context.repo, &run, context.current_sha.as_deref());
-            return Ok(Some((reports, run, code_compare)));
+            if last_page {
+                break;
+            }
         }
 
         eprintln!(
-            "No previous successful benchmark artifact named '{}' was found for ref '{}'.",
-            self.artifact_name, context.ref_name
+            "No previous successful benchmark artifact named '{}' was found for ref '{}' in up to \
+             {} recent '{}' runs.",
+            self.artifact_name,
+            context.ref_name,
+            MAX_RUN_PAGES * RUNS_PER_PAGE,
+            context.event_name
         );
         Ok(None)
     }
@@ -323,7 +352,18 @@ impl GitHubClient {
         Ok(Self { client, token, repo })
     }
 
-    async fn workflow_runs(&self, workflow: &str, ref_name: &str) -> Result<Vec<WorkflowRun>> {
+    /// Lists one page of completed runs on `ref_name` triggered by
+    /// `event_name`, newest first.
+    ///
+    /// Scheduled runs compare only with scheduled runs, so a manual run with a
+    /// larger runner or custom inputs never becomes the nightly baseline.
+    async fn workflow_runs(
+        &self,
+        workflow: &str,
+        ref_name: &str,
+        event_name: &str,
+        page: usize,
+    ) -> Result<Vec<WorkflowRun>> {
         let url = format!(
             "{GITHUB_API_BASE}/repos/{}/actions/workflows/{}/runs",
             self.repo,
@@ -332,12 +372,8 @@ impl GitHubClient {
         let response = self
             .client
             .get(url)
-            .query(&[
-                ("branch", ref_name),
-                ("event", "workflow_dispatch"),
-                ("status", "completed"),
-                ("per_page", "30"),
-            ])
+            .query(&[("branch", ref_name), ("event", event_name), ("status", "completed")])
+            .query(&[("per_page", RUNS_PER_PAGE), ("page", page)])
             .bearer_auth(&self.token)
             .header("Accept", GITHUB_ACCEPT)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
@@ -397,7 +433,9 @@ fn load_reports(dir: &Path) -> Result<Reports> {
     let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || path.file_name().and_then(|name| name.to_str()) == Some(MANIFEST_FILE_NAME)
+        {
             continue;
         }
 
@@ -836,6 +874,27 @@ mod tests {
         assert_eq!(fs::read(&report_path).unwrap(), report_contents);
     }
 
+    /// The run manifest is not loaded as a benchmark report.
+    #[test]
+    fn load_reports_ignores_run_manifest() {
+        use std::fs;
+
+        use crate::commands::benchmark_compare::{create_previous_reports_dir, load_reports};
+
+        let temp_dir = create_previous_reports_dir().unwrap();
+        fs::write(temp_dir.path().join("table_copy.json"), br#"{"benchmark":"table_copy"}"#)
+            .unwrap();
+        fs::write(
+            temp_dir.path().join("manifest.json"),
+            br#"{"schema_version":1,"destination":"null"}"#,
+        )
+        .unwrap();
+
+        let reports = load_reports(temp_dir.path()).unwrap();
+
+        assert_eq!(reports.keys().collect::<Vec<_>>(), ["table_copy"]);
+    }
+
     #[test]
     fn config_changes_detects_changed_and_missing_fields() {
         let previous = json!({
@@ -1067,7 +1126,6 @@ mod tests {
             id: 1,
             run_number: 42,
             html_url: "https://github.com/supabase/etl/actions/runs/42".to_owned(),
-            conclusion: Some("success".to_owned()),
             head_sha: Some("abc123456789".to_owned()),
         };
         let code_compare = CodeCompare {
