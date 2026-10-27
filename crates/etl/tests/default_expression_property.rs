@@ -271,6 +271,15 @@ impl Harness {
 
         Some((variant, value))
     }
+
+    /// Returns whether two numeric texts denote the same value.
+    async fn numerics_equal(&self, left: &str, right: &str) -> bool {
+        self.etl
+            .query_one("select $1::text::numeric = $2::text::numeric", &[&left, &right])
+            .await
+            .unwrap()
+            .get(0)
+    }
 }
 
 /// Extracts the content of a pgoutput logical decoding message, if `data` is a
@@ -619,10 +628,18 @@ fn check_literal_denotes_backfill(
         let column = harness.bootstrap_column().await;
         let target_type =
             if ignore_type_modifier { &column.typname } else { &column.formatted_type };
-        let Some((variant, denoted)) = harness.denoted_value(&column, target_type).await else {
+        let Some((variant, mut denoted)) = harness.denoted_value(&column, target_type).await else {
             return Ok(());
         };
         let backfilled = harness.backfilled_value().await.ok_or_else(|| "null".to_owned());
+        // `numeric(p,s)` pads to its scale, so `0` and `0.0` are the same
+        // value.
+        if column.typ == Type::NUMERIC
+            && let (Ok(left), Ok(right)) = (&denoted, &backfilled)
+            && harness.numerics_equal(left, right).await
+        {
+            denoted = backfilled.clone();
+        }
 
         prop_assert_eq!(
             denoted,
@@ -781,8 +798,6 @@ async fn parsed_default_skips_value_changing_cast() {
     .await;
 }
 
-#[ignore = "compares text: `numeric(p,s)` backfills pad to the scale (`0.0`) while the kept \
-            literal (`0`) is the same value"]
 #[tokio::test(flavor = "multi_thread")]
 async fn parsed_default_literal_denotes_backfilled_value_without_type_modifier() {
     init_test_tracing();
