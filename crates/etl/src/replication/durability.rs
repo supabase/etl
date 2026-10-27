@@ -12,9 +12,8 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::{
     observability::{
-        CDC_REPLICATION_PATH, ETL_DESTINATION_DURABILITY_AGE_SECONDS,
-        ETL_DESTINATION_DURABILITY_OBSERVED_AT_SECONDS, PIPELINE_ID_LABEL, REPLICATION_PATH_LABEL,
-        WORKER_TYPE_LABEL,
+        CDC_REPLICATION_PATH, ETL_DESTINATION_DURABILITY_AGE_SECONDS, PIPELINE_ID_LABEL,
+        REPLICATION_PATH_LABEL, WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
     task::spawn_best_effort_task,
@@ -126,7 +125,7 @@ impl DurabilityMonitor {
         })
     }
 
-    /// Publishes age and freshness with the same bounded label set.
+    /// Publishes age with a bounded label set.
     fn emit(&self, age: f64) {
         let labels = [
             (PIPELINE_ID_LABEL, self.pipeline_id.to_string()),
@@ -134,8 +133,6 @@ impl DurabilityMonitor {
             (REPLICATION_PATH_LABEL, CDC_REPLICATION_PATH.to_owned()),
         ];
         gauge!(ETL_DESTINATION_DURABILITY_AGE_SECONDS, &labels).set(age);
-        gauge!(ETL_DESTINATION_DURABILITY_OBSERVED_AT_SECONDS, &labels)
-            .set(chrono::Utc::now().timestamp() as f64);
     }
 }
 
