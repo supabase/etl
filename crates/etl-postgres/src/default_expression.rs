@@ -84,6 +84,15 @@ fn keeps_value_under_modifier(expression: &DefaultExpression, typ: &Type, modifi
                 .and_then(|modifiers| usize::try_from(modifiers.s).ok())
                 .is_some_and(|scale| fraction_digits <= scale)
         }
+        (
+            &Type::TIME | &Type::TIMETZ | &Type::TIMESTAMP | &Type::TIMESTAMPTZ,
+            DefaultExpression::TimeLiteral(literal)
+            | DefaultExpression::TimeTzLiteral(literal)
+            | DefaultExpression::TimestampLiteral(literal)
+            | DefaultExpression::TimestampTzLiteral(literal),
+        ) => {
+            i32::try_from(fractional_second_digits(literal)).is_ok_and(|digits| digits <= modifier)
+        }
         _ => false,
     }
 }
@@ -91,6 +100,16 @@ fn keeps_value_under_modifier(expression: &DefaultExpression, typ: &Type, modifi
 /// Returns the character length of a SQL string literal.
 fn string_literal_length(literal: &str) -> Option<i32> {
     i32::try_from(unquote_postgres_string_literal(literal)?.chars().count()).ok()
+}
+
+/// Returns the number of fractional-second digits in a time or timestamp
+/// literal.
+///
+/// Temporal type modifiers are the raw precision, with no `VARHDRSZ` offset.
+fn fractional_second_digits(literal: &str) -> usize {
+    literal
+        .rsplit_once('.')
+        .map_or(0, |(_, rest)| rest.bytes().take_while(u8::is_ascii_digit).count())
 }
 
 /// Normalizes PostgreSQL-specific expression wrappers.
@@ -742,6 +761,38 @@ mod tests {
         assert_eq!(
             parse_default_expression("'12:00:00.7'::time without time zone", &Type::TIME, 0),
             None
+        );
+    }
+
+    #[test]
+    fn keeps_temporal_defaults_within_column_precision() {
+        assert_eq!(
+            parse_default_expression(
+                "'2099-01-01 00:00:00'::timestamp without time zone",
+                &Type::TIMESTAMP,
+                6
+            ),
+            Some(DefaultExpression::TimestampLiteral("'2099-01-01 00:00:00'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression(
+                "'2098-12-31 22:00:00.12+00'::timestamp with time zone",
+                &Type::TIMESTAMPTZ,
+                3
+            ),
+            Some(DefaultExpression::TimestampTzLiteral("'2098-12-31 22:00:00.12+00'".to_owned()))
+        );
+        assert_eq!(
+            parse_default_expression(
+                "'2098-12-31 22:00:00.1234+00'::timestamp with time zone",
+                &Type::TIMESTAMPTZ,
+                3
+            ),
+            None
+        );
+        assert_eq!(
+            parse_default_expression("'12:00:00'::time without time zone", &Type::TIME, 0),
+            Some(DefaultExpression::TimeLiteral("'12:00:00'".to_owned()))
         );
     }
 }

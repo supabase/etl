@@ -830,6 +830,35 @@ async fn parsed_default_skips_values_changed_by_type_modifier() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn parsed_default_keeps_values_the_type_modifier_preserves() {
+    init_test_tracing();
+    let harness = Harness::new().await;
+
+    // The backfill properties pass whenever the parser skips a default, so
+    // this pins that defaults Postgres stores unchanged still reach
+    // destinations. Rails declares every datetime column as `timestamp(6)`.
+    for (column_type, literal) in [
+        ("timestamp(6)", "'2099-01-01 00:00:00'"),
+        ("timestamptz(3)", "'2099-01-01 00:00:00.12+02'"),
+        ("time(0)", "'12:00:00'"),
+        ("varchar(3)", "'abc'"),
+        ("character(3)", "'abc'"),
+        ("numeric(10,2)", "1.5"),
+    ] {
+        let case = DefaultCase { column_type: column_type.to_owned(), literal: literal.to_owned() };
+        assert!(harness.add_defaulted_column(&case, &SessionSettings::etl()).await);
+        let column = harness.bootstrap_column().await;
+        let parsed = parse_default_expression(
+            column.default_expression.as_deref().unwrap(),
+            &column.typ,
+            column.modifier,
+        );
+
+        assert!(parsed.is_some(), "{column_type} default {literal}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn ddl_message_default_matches_bootstrap_under_any_session_settings() {
     init_test_tracing();
     let harness = Harness::new().await;
