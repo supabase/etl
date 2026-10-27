@@ -1,0 +1,72 @@
+{
+  "format_version": 1,
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "profile": "baseline",
+  "project_ref": "exampleprojectref",
+  "source_host": "db.exampleprojectref.example.com",
+  "snowflake": {
+    "account": "EXAMPLE-ACCOUNT",
+    "user": "EXPERIMENT_USER",
+    "database": "EXPERIMENTS",
+    "role": "EXPERIMENT_ROLE",
+    "warehouse": "EXPERIMENT_WH"
+  },
+  "launch": {
+    "mode": "platform"
+  },
+  "version_id": null,
+  "pipeline_config": {
+    "max_table_sync_workers": 8,
+    "max_copy_connections_per_table": 2
+  },
+  "seed": 1173,
+  "groups": [
+    {
+      "tables": 288,
+      "rows_per_table": 10000,
+      "payload_bytes": 2048,
+      "external_storage": false,
+      "replica_identity_full": false
+    },
+    {
+      "tables": 16,
+      "rows_per_table": 20000,
+      "payload_bytes": 65536,
+      "external_storage": true,
+      "replica_identity_full": false
+    }
+  ],
+  "copy_load": {
+    "name": "during_copy",
+    "operations": 100000,
+    "operations_per_second": 200,
+    "writers": 4,
+    "transaction_rows": 20
+  },
+  "cdc_loads": [
+    {
+      "name": "steady",
+      "operations": 100000,
+      "operations_per_second": 200,
+      "writers": 4,
+      "transaction_rows": 20
+    },
+    {
+      "name": "higher_load",
+      "operations": 200000,
+      "operations_per_second": 1000,
+      "writers": 8,
+      "transaction_rows": 100
+    }
+  ],
+  "retention": {
+    "kind": "none"
+  },
+  "sample_seconds": 5,
+  "deadline_seconds": 86400,
+  "convergence_seconds": 1800,
+  "max_retained_wal_bytes": 3221225472,
+  "max_generated_wal_bytes": 1099511627776,
+  "max_artifact_bytes": 1073741824,
+  "minimum_rate_ratio": 0.8
+}
