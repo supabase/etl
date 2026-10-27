@@ -266,7 +266,7 @@ cargo x benchmark \
 
 `BENCH_SNOWFLAKE_CONNECTION` is the only Snowflake benchmark credential input. It is a JSON object with `account`, `user`, `database`, `schema`, optional `role`, optional `private_key_passphrase`, and `private_key`. Snowflake credentials are read from the environment and are not accepted as benchmark CLI arguments.
 
-Every run writes to the configured `schema`, so use a schema reserved for benchmarks. Before and after each run, the benchmark drops the destination tables and companion views for its source tables, whichever pipeline created them, so leftovers from an earlier or crashed run do not block the next one. Two runs against the same schema at the same time will collide.
+Each run writes to its own schema, `<schema>_<pipeline_id>`, in the configured database and drops it during cleanup, so runs never collide with tables from earlier runs. The configured `schema` must exist, and the role needs `CREATE SCHEMA` on the database.
 
 ### Snowflake Encoder Micro-Benchmark
 
@@ -420,10 +420,9 @@ inputs fall back to the `BENCHMARK_BQ_PROJECT_ID` and
 nightly matrix or `destination=all` yet.
 
 For Snowflake workflow runs, set the `BENCH_SNOWFLAKE_CONNECTION` repository secret and pass `destination=snowflake`.
-Snowflake backfills need a `commit` that includes the shared table reset (see
-[Snowflake Runs](#snowflake-runs)). Older commits never drop their tables, so
-a second older backfill fails on the first one's leftovers. The next run from a
-newer commit clears them.
+Snowflake backfills of commits before #1161 can fail: those commits write to the
+shared configured schema and never drop their tables, so a second such backfill
+fails on the first one's leftovers. Later commits clean up after themselves.
 
 For ClickHouse workflow runs, pass `destination=clickhouse`. The workflow
 starts the `clickhouse` service from `scripts/docker/docker-compose.yaml` and points
