@@ -532,6 +532,12 @@ impl ClickHouseClient {
         Self {
             inner: Arc::new({
                 let client = client.with_url(url.to_string()).with_user(user);
+                let client = match &config.product_info {
+                    Some(product_info) => {
+                        client.with_product_info(product_info.name(), product_info.version())
+                    }
+                    None => client,
+                };
                 let client = match database {
                     Some(database) => client.with_database(database),
                     None => client,
