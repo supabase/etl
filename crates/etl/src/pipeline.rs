@@ -30,7 +30,7 @@ use crate::{
     etl_error,
     observability::register_metrics,
     postgres::{client::PgReplicationClient, migrations},
-    replication::{ReplicationLagMonitor, state::TableState},
+    replication::{DurabilityMonitor, ReplicationLagMonitor, state::TableState},
     runtime::{ApplyWorker, ApplyWorkerHandle, MemoryMonitor, TableSyncWorkerPool},
     schema::TableId,
     store::PipelineStore,
@@ -57,6 +57,8 @@ struct PipelineTasks {
     memory_monitor_task: AbortOnDropHandle<()>,
     /// Single source sampler shared by copy and CDC worker registrations.
     replication_lag_sampler_task: AbortOnDropHandle<()>,
+    /// Independent observer of pending main apply-worker destination work.
+    durability_metrics_task: AbortOnDropHandle<()>,
 }
 
 /// Internal state tracking for pipeline lifecycle.
@@ -243,6 +245,9 @@ where
             self.config.memory_refresh_interval_ms,
         );
 
+        let durability_monitor = DurabilityMonitor::new(self.config.id);
+        let durability_metrics_task = durability_monitor.spawn_durability_metrics_task();
+
         // We create and start the apply worker.
         let apply_worker = ApplyWorker::new(
             self.config.id,
@@ -251,6 +256,7 @@ where
             self.store.clone(),
             self.destination.clone(),
             replication_lag_monitor,
+            durability_monitor,
             self.shutdown_token.clone(),
             table_sync_worker_permits,
             memory_monitor,
@@ -263,6 +269,7 @@ where
                 pool,
                 memory_monitor_task,
                 replication_lag_sampler_task,
+                durability_metrics_task,
             })),
         };
 
@@ -302,6 +309,7 @@ where
             pool,
             memory_monitor_task,
             replication_lag_sampler_task,
+            durability_metrics_task,
         }) = tasks.lock().await.take()
         else {
             bail!(ErrorKind::InvalidState, "Pipeline wait has already been called");
@@ -354,6 +362,7 @@ where
         // Optional monitors must not turn successful replication into failure.
         for (task_name, task) in [
             ("replication lag sampler", replication_lag_sampler_task),
+            ("durability monitor", durability_metrics_task),
             ("memory monitor", memory_monitor_task),
         ] {
             debug!(task_name, "stopping optional background task");
