@@ -78,6 +78,9 @@ pub(super) struct SyncSettings {
 }
 
 /// Reads settings, storing `history_since` when given.
+///
+/// Moving `history_since` earlier clears `analyses_backfilled`, because the
+/// stored analyses only reach back to the previous start.
 pub(super) async fn load_settings(
     conn: &mut PgConnection,
     history_since: Option<NaiveDate>,
@@ -85,7 +88,10 @@ pub(super) async fn load_settings(
 ) -> Result<SyncSettings> {
     let row = sqlx::query(
         "insert into ci.sync_state (history_since) values (coalesce($1, $2))
-         on conflict (id) do update set history_since = coalesce($1, ci.sync_state.history_since)
+         on conflict (id) do update set
+             history_since = coalesce($1, ci.sync_state.history_since),
+             analyses_backfilled = ci.sync_state.analyses_backfilled
+                 and coalesce($1, ci.sync_state.history_since) >= ci.sync_state.history_since
          returning history_since, analyses_backfilled",
     )
     .bind(history_since)
@@ -123,12 +129,12 @@ pub(super) async fn load_day_states(
 }
 
 /// Stored runs of one day: the latest attempt's state plus every stored
-/// attempt number.
+/// attempt number with whether that attempt has completed.
 pub(super) async fn load_stored_runs(
     conn: &mut PgConnection,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
-) -> Result<HashMap<i64, (StoredRun, Vec<i32>)>> {
+) -> Result<HashMap<i64, (StoredRun, Vec<(i32, bool)>)>> {
     let rows = sqlx::query(
         "select run_id, run_attempt, updated_at, status, detail_fetched_at
          from ci.run
@@ -140,7 +146,7 @@ pub(super) async fn load_stored_runs(
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut runs: HashMap<i64, (StoredRun, Vec<i32>)> = HashMap::new();
+    let mut runs: HashMap<i64, (StoredRun, Vec<(i32, bool)>)> = HashMap::new();
     for row in rows {
         let run_id: i64 = row.try_get("run_id")?;
         let stored = StoredRun {
@@ -149,7 +155,7 @@ pub(super) async fn load_stored_runs(
             status: row.try_get("status")?,
             detail_fetched_at: row.try_get("detail_fetched_at")?,
         };
-        let attempt = stored.latest_attempt;
+        let attempt = (stored.latest_attempt, stored.status == "completed");
         // Rows arrive in attempt order, so the last one is the latest.
         let entry = runs.entry(run_id).or_insert_with(|| (stored.clone(), Vec::new()));
         entry.0 = stored;
@@ -592,9 +598,16 @@ pub(super) async fn insert_analysis(
     Ok(result.rows_affected() == 1)
 }
 
-/// Records that analyses are paged back to `history_since`.
-pub(super) async fn set_analyses_backfilled(conn: &mut PgConnection) -> Result<()> {
-    sqlx::query("update ci.sync_state set analyses_backfilled = true").execute(&mut *conn).await?;
+/// Records whether stored analyses reach back to `history_since` without
+/// gaps.
+pub(super) async fn set_analyses_backfilled(
+    conn: &mut PgConnection,
+    backfilled: bool,
+) -> Result<()> {
+    sqlx::query("update ci.sync_state set analyses_backfilled = $1")
+        .bind(backfilled)
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 

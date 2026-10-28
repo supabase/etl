@@ -39,8 +39,15 @@ const USER_AGENT: &str = "supabase-etl-ci-metrics";
 const APPLICATION_NAME: &str = "etl-ci-metrics";
 /// Default history window, a little over six months.
 const DEFAULT_HISTORY_DAYS: u64 = 190;
-/// Default requests per sync; `GITHUB_TOKEN` allows 1,000 per hour.
-const DEFAULT_MAX_REQUESTS: u64 = 800;
+/// Default requests per sync. `GITHUB_TOKEN` allows 1,000 per hour per
+/// repository, shared with every other workflow; an hourly sync needs about
+/// 50-110 in steady state, and the daily recent-days refetch spreads over
+/// several syncs.
+const DEFAULT_MAX_REQUESTS: u64 = 400;
+/// Port of Supabase's transaction-mode pooler. Each statement may run on a
+/// different server connection there, which breaks the sync's session-level
+/// advisory lock.
+const TRANSACTION_POOLER_PORT: u16 = 6543;
 
 /// Collect GitHub Actions data into the CI metrics database.
 #[derive(Args)]
@@ -118,6 +125,18 @@ fn require_verified_tls(host: &str, mode: PgSslMode) -> Result<()> {
     bail!("{DATABASE_URL_ENV} must use sslmode=verify-full for non-local hosts");
 }
 
+/// Fails for transaction-mode pooler connections, where session state such as
+/// the sync lock does not persist between statements.
+fn require_session_connection(port: u16) -> Result<()> {
+    if port == TRANSACTION_POOLER_PORT {
+        bail!(
+            "{DATABASE_URL_ENV} uses the transaction pooler (port {TRANSACTION_POOLER_PORT}); use \
+             the session pooler or a direct connection"
+        );
+    }
+    Ok(())
+}
+
 /// Connects using `CI_METRICS_DATABASE_URL` without echoing it.
 async fn connect() -> Result<PgConnection> {
     let url = SecretString::from(
@@ -130,6 +149,7 @@ async fn connect() -> Result<PgConnection> {
         options = options.ssl_root_cert(path);
     }
     require_verified_tls(options.get_host(), options.get_ssl_mode())?;
+    require_session_connection(options.get_port())?;
     PgConnection::connect_with(&options)
         .await
         .context("Failed to connect to the CI metrics database")
@@ -162,5 +182,11 @@ mod tests {
         // A name that merely starts like a loopback host is remote.
         assert!(require_verified_tls("localhost.example.com", PgSslMode::Require).is_err());
         assert!(require_verified_tls("127.0.0.1.example.com", PgSslMode::Require).is_err());
+    }
+
+    #[test]
+    fn transaction_pooler_is_refused() {
+        assert!(require_session_connection(TRANSACTION_POOLER_PORT).is_err());
+        assert!(require_session_connection(5432).is_ok());
     }
 }
