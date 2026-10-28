@@ -7,9 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       max_requests:
-        description: GitHub requests this sync may send; raise for a manual catch-up.
+        # `GITHUB_TOKEN` allows 1,000 requests per hour per repository, shared
+        # with every workflow, and the collector stops while 300 remain. Large
+        # catch-ups run locally with a personal token instead.
+        description: GitHub requests this sync may send (at most 700).
         required: false
-        default: "800"
+        default: "400"
 
 # Syncs never overlap; the collector also takes an advisory lock.
 concurrency:
@@ -26,7 +29,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     environment: ci-metrics
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       actions: read
       contents: read
@@ -49,5 +52,10 @@ jobs:
           CI_METRICS_DATABASE_URL: ${{ secrets.CI_METRICS_DATABASE_URL }}
           CI_METRICS_SSL_ROOT_CERT: ${{ github.workspace }}/.github/ci-metrics/supabase-ca.crt
           GITHUB_TOKEN: ${{ github.token }}
-          MAX_REQUESTS: ${{ inputs.max_requests || '800' }}
-        run: cargo --locked xtask ci-metrics sync --repo "$GITHUB_REPOSITORY" --max-requests "$MAX_REQUESTS"
+          MAX_REQUESTS: ${{ inputs.max_requests || '400' }}
+        run: |
+          if ! [[ "$MAX_REQUESTS" =~ ^[0-9]+$ ]] || (( MAX_REQUESTS > 700 )); then
+            echo "::error::max_requests must be a number up to 700"
+            exit 1
+          fi
+          cargo --locked xtask ci-metrics sync --repo "$GITHUB_REPOSITORY" --max-requests "$MAX_REQUESTS"
