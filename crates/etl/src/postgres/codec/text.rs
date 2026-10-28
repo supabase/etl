@@ -835,6 +835,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde_json_arbitrary_precision")]
     fn try_from_str_json_accepts_wide_number_literals() {
         let json_str = r#"{"value":1e309}"#;
         let cell = parse_cell_from_postgres_text(&Type::JSON, json_str).unwrap();
@@ -846,6 +847,12 @@ mod tests {
 
         let cell = parse_cell_from_postgres_text(&Type::JSONB, json_str).unwrap();
         assert!(matches!(cell, Cell::Json(_)));
+    }
+
+    #[cfg(not(feature = "serde_json_arbitrary_precision"))]
+    #[test]
+    fn try_from_str_json_rejects_numbers_outside_default_range() {
+        assert!(parse_cell_from_postgres_text(&Type::JSON, r#"{"value":1e309}"#).is_err());
     }
 
     #[test]

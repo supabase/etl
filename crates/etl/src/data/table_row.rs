@@ -283,8 +283,14 @@ fn estimated_pg_numeric_allocated_bytes(value: &PgNumeric) -> usize {
 }
 
 /// Returns the owned text bytes of an arbitrary-precision JSON number.
+#[cfg(feature = "serde_json_arbitrary_precision")]
 fn estimate_json_number_allocated_bytes(value: &serde_json::Number) -> usize {
     value.as_str().len()
+}
+
+#[cfg(not(feature = "serde_json_arbitrary_precision"))]
+fn estimate_json_number_allocated_bytes(_value: &serde_json::Number) -> usize {
+    0
 }
 
 /// Returns an estimate of additional heap bytes owned by a JSON value.
@@ -471,6 +477,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "serde_json_arbitrary_precision")]
     fn json_size_hint_covers_owned_numbers_arrays_and_objects() {
         let number: serde_json::Value =
             serde_json::from_str("123456789012345678901234567890").unwrap();
@@ -497,6 +504,13 @@ mod tests {
             + key.capacity()
             + estimate_json_allocated_bytes(value);
         assert_eq!(estimate_json_allocated_bytes(&object), expected_object_bytes);
+    }
+
+    #[test]
+    #[cfg(not(feature = "serde_json_arbitrary_precision"))]
+    fn json_size_hint_does_not_count_inline_numbers() {
+        let number = serde_json::json!(123);
+        assert_eq!(estimate_json_allocated_bytes(&number), 0);
     }
 
     #[test]

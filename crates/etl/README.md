@@ -10,11 +10,29 @@ when you implement a store or destination.
 
 ## Features
 
-| Feature      | Description                           |
-| ------------ | ------------------------------------- |
-| `test-utils` | Enables testing utilities and helpers |
-| `failpoints` | Enables failure injection for testing |
-| `egress`     | Enables structured billing usage logs |
+| Feature                         | Description |
+| -------------------------------- | ----------- |
+| `serde_json_arbitrary_precision` | Preserves arbitrary-precision JSON numbers. Enabled by default; disable it with `default-features = false` if your application needs to avoid enabling `serde_json/arbitrary_precision` through Cargo feature unification. Without it, parsing PostgreSQL `json`/`jsonb` values can round or reject numbers outside `serde_json`'s default numeric range. |
+| `test-utils`                     | Enables testing utilities and helpers |
+| `failpoints`                     | Enables failure injection for testing |
+| `egress`                           | Enables structured billing usage logs |
+
+To opt out while retaining the default TLS backend:
+
+```toml
+[dependencies.etl]
+git = "https://github.com/supabase/etl"
+default-features = false
+features = ["tls-rustls-ring"]
+```
+
+When using `etl-destinations`, also disable its defaults and select the
+destination and TLS features you need; its `serde_json_arbitrary_precision`
+feature is enabled by default as well.
+
+Cargo features are unified across the dependency graph. If another dependency
+enables `serde_json/arbitrary_precision`, disabling ETL's feature cannot turn it
+off for the application.
 
 ## Architecture
 
