@@ -16,8 +16,8 @@ use etl::{
     error::{ErrorKind, EtlResult},
     event::{Event, EventType, InsertEvent},
     failpoints::{
-        APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, SEND_STATUS_UPDATE_FP,
-        START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
+        APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP, APPLY_LOOP_EXPIRE_DURABILITY_FP,
+        APPLY_LOOP_PAUSE_INTAKE_FP, SEND_STATUS_UPDATE_FP, START_TABLE_SYNC_AFTER_FINISHED_COPY_FP,
         START_TABLE_SYNC_BEFORE_DATA_SYNC_SLOT_CREATION_FP, START_TABLE_SYNC_DURING_DATA_SYNC_FP,
         STORE_REPLICATION_CHECKPOINT_FP, TABLE_SYNC_WORKER_BEFORE_STREAMING_FP,
     },
@@ -49,7 +49,7 @@ use etl::{
         },
     },
 };
-use etl_config::shared::{PipelineConfig, TableSyncCopyConfig};
+use etl_config::shared::{BatchConfig, PipelineConfig, TableSyncCopyConfig};
 use etl_postgres::{
     application_name::{apply_worker_application_name, table_sync_worker_application_name},
     below_version,
@@ -79,7 +79,9 @@ const IDLE_DURABILITY_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Relevant streaming write observed by [`DeferredEventsDestination`].
 enum DeferredEventsWrite {
     /// Target-table event batch held before reporting its write status.
-    Batch { commit_end_lsn: PgLsn, result: WriteEventsResult },
+    Batch { commit_end_lsn: PgLsn, durability: WriteEventsDurability, result: WriteEventsResult },
+    /// Target-table changes sent before their transaction commit was decoded.
+    PartialBatch { durability: WriteEventsDurability, result: WriteEventsResult },
     /// Empty required-durability write whose result remains held by the test.
     DurabilityBarrier { result: WriteEventsResult },
 }
@@ -170,24 +172,21 @@ impl Destination for DeferredEventsDestination {
         });
 
         if let Some(target_commit_lsn) = target_commit_lsn {
-            assert_eq!(durability, WriteEventsDurability::MayDefer);
             // A batch may also hold unrelated transactions, so report the
             // target transaction's own commit.
-            let commit_end_lsn = events
-                .iter()
-                .find_map(|event| match event {
-                    Event::Commit(commit) if commit.commit_lsn == target_commit_lsn => {
-                        Some(commit.end_lsn)
-                    }
-                    _ => None,
-                })
-                .expect("accepted event batch should contain its commit");
-
-            assert!(
-                self.writes_tx
-                    .send(DeferredEventsWrite::Batch { commit_end_lsn, result: async_result })
-                    .is_ok()
-            );
+            let commit_end_lsn = events.iter().find_map(|event| match event {
+                Event::Commit(commit) if commit.commit_lsn == target_commit_lsn => {
+                    Some(commit.end_lsn)
+                }
+                _ => None,
+            });
+            let write = match commit_end_lsn {
+                Some(commit_end_lsn) => {
+                    DeferredEventsWrite::Batch { commit_end_lsn, durability, result: async_result }
+                }
+                None => DeferredEventsWrite::PartialBatch { durability, result: async_result },
+            };
+            assert!(self.writes_tx.send(write).is_ok());
 
             return Ok(());
         }
@@ -1091,7 +1090,7 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // exists at the later catchup target T to settle A's durability debt.
     let (accepted_commit_end_lsn, barrier_result) =
         tokio::time::timeout(Duration::from_secs(30), async {
-            let Some(DeferredEventsWrite::Batch { commit_end_lsn, result }) =
+            let Some(DeferredEventsWrite::Batch { commit_end_lsn, result, .. }) =
                 writes_rx.recv().await
             else {
                 panic!("expected accepted target-table event batch");
@@ -2739,11 +2738,16 @@ impl IdleDurabilityTest {
         Self::start_with_settle_interval(None).await
     }
 
-    /// Starts like [`Self::start`], with an optional durability window.
-    ///
-    /// A configured window also shortens `wal_sender_timeout` so several
-    /// primary keepalives arrive before the window elapses.
+    /// Starts like [`Self::start`], with an optional idle durability window.
     async fn start_with_settle_interval(settle_durable_interval_ms: Option<u64>) -> Self {
+        Self::start_with_batch(settle_durable_interval_ms, None).await
+    }
+
+    /// Starts the fixture with an optional batch size for split transactions.
+    async fn start_with_batch(
+        settle_durable_interval_ms: Option<u64>,
+        batch: Option<BatchConfig>,
+    ) -> Self {
         init_test_tracing();
         let database = spawn_source_database().await;
         let table_name = test_table_name("idle_durability");
@@ -2761,7 +2765,7 @@ impl IdleDurabilityTest {
         let received_end_lsn = destination.received_end_lsn();
         let pipeline_id: PipelineId = random();
         let slot_name = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
-        let mut pipeline = PipelineBuilder::new(
+        let mut builder = PipelineBuilder::new(
             database.config.clone(),
             pipeline_id,
             publication_name.to_owned(),
@@ -2770,8 +2774,11 @@ impl IdleDurabilityTest {
         )
         .with_table_sync_copy_config(TableSyncCopyConfig::SkipAllTables)
         .with_settle_durable_interval_ms(settle_durable_interval_ms)
-        .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1)
-        .build();
+        .with_retry_config(PipelineConfig::MIN_TABLE_ERROR_RETRY_DELAY_MS, 1);
+        if let Some(batch) = batch {
+            builder = builder.with_batch_config(batch);
+        }
+        let mut pipeline = builder.build();
         let synced = store.notify_on_table_sync_complete(table_id).await;
 
         pipeline.start().await.unwrap();
@@ -2800,7 +2807,7 @@ impl IdleDurabilityTest {
             .await
             .expect("timed out waiting for an event batch")
             .unwrap();
-        let DeferredEventsWrite::Batch { commit_end_lsn, result } = write else {
+        let DeferredEventsWrite::Batch { commit_end_lsn, result, .. } = write else {
             panic!("expected an event batch");
         };
 
@@ -2819,6 +2826,33 @@ impl IdleDurabilityTest {
         };
 
         result
+    }
+
+    /// Waits until source feedback proves a successor was decoded while its
+    /// predecessor's destination result is still held.
+    async fn wait_for_received(&self, target: PgLsn) {
+        tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, async {
+            loop {
+                let row = self
+                    .database
+                    .client
+                    .as_ref()
+                    .unwrap()
+                    .query_one(
+                        "select r.write_lsn from pg_stat_replication r join pg_replication_slots \
+                         s on s.active_pid = r.pid where s.slot_name = $1",
+                        &[&self.slot_name],
+                    )
+                    .await
+                    .unwrap();
+                if row.get::<_, Option<PgLsn>>(0).is_some_and(|lsn| lsn > target) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     /// Reads the source slot's acknowledged durable position.
@@ -2943,6 +2977,193 @@ async fn catchup_retry_recopies_after_dispatched_write() {
     );
 }
 
+/// Expired debt forces a busy successor to confirm durability, and its result
+/// cannot acknowledge a later buffered transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn durability_deadline_flushes_busy_successor_without_acknowledging_later_work() {
+    let _scenario = FailScenario::setup();
+    // Idle keepalives cannot settle this debt during the test.
+    let mut test = IdleDurabilityTest::start_with_settle_interval(Some(600_000)).await;
+    test.insert(1).await;
+    let (first_lsn, first_result) = test.next_batch().await;
+    let received = test.database.current_wal_flush_lsn().await.unwrap();
+
+    test.insert(2).await;
+    test.wait_for_received(received).await;
+    assert!(test.writes_rx.try_recv().is_err());
+    fail::cfg(APPLY_LOOP_EXPIRE_DURABILITY_FP, "1*return(apply)").unwrap();
+    first_result.send(Ok(DestinationWriteStatus::Accepted));
+
+    let write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, test.writes_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let DeferredEventsWrite::Batch { commit_end_lsn: second_lsn, durability, result } = write
+    else {
+        panic!("expected buffered work in the required-durability write");
+    };
+    assert_eq!(durability, WriteEventsDurability::RequireDurable);
+    assert!(second_lsn > first_lsn);
+    assert!(test.confirmed_lsn().await < first_lsn);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(first_lsn)
+    );
+
+    let received = test.database.current_wal_flush_lsn().await.unwrap();
+    test.insert(3).await;
+    test.wait_for_received(received).await;
+    // Cross the normal batch deadline so the nonterminal required write has
+    // a queued successor when it completes.
+    assert!(tokio::time::timeout(Duration::from_secs(2), test.writes_rx.recv()).await.is_err());
+    result.send(Ok(DestinationWriteStatus::Durable));
+
+    let (third_lsn, third_result) = test.next_batch().await;
+    test.wait_for_flush(second_lsn).await;
+    assert!(test.confirmed_lsn().await < third_lsn);
+    assert_eq!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+        Some(second_lsn)
+    );
+
+    third_result.send(Ok(DestinationWriteStatus::Durable));
+    test.wait_for_flush(third_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, third_lsn).await;
+    assert!(test.writes_rx.try_recv().is_err());
+}
+
+/// Timer-driven confirmation and source feedback progress without polling
+/// source messages, as required while intake is backpressured.
+#[tokio::test(flavor = "multi_thread")]
+async fn durability_deadline_settles_with_intake_suspended() {
+    let _scenario = FailScenario::setup();
+    let mut test = IdleDurabilityTest::start_with_settle_interval(Some(600_000)).await;
+    test.insert(1).await;
+    let (commit_lsn, result) = test.next_batch().await;
+    fail::cfg(APPLY_LOOP_PAUSE_INTAKE_FP, "return").unwrap();
+    fail::cfg(APPLY_LOOP_EXPIRE_DURABILITY_FP, "1*return(apply)").unwrap();
+    result.send(Ok(DestinationWriteStatus::Accepted));
+
+    let barrier = test.next_barrier().await;
+    assert!(test.confirmed_lsn().await < commit_lsn);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(commit_lsn)
+    );
+    barrier.send(Ok(DestinationWriteStatus::Durable));
+
+    test.wait_for_flush(commit_lsn).await;
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, commit_lsn).await;
+    // Closing the debt must disarm the timer, including while intake remains
+    // suspended and no new source message can change the state.
+    assert!(tokio::time::timeout(Duration::from_millis(200), test.writes_rx.recv()).await.is_err());
+    test.pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// A failed deadline barrier cannot acknowledge its accepted predecessor;
+/// restart must replay that commit before it can advance progress.
+#[tokio::test(flavor = "multi_thread")]
+async fn durability_deadline_failure_replays_unconfirmed_work() {
+    let _scenario = FailScenario::setup();
+    let mut test = IdleDurabilityTest::start_with_settle_interval(Some(600_000)).await;
+    test.insert(1).await;
+    let (commit_lsn, result) = test.next_batch().await;
+    fail::cfg(APPLY_LOOP_EXPIRE_DURABILITY_FP, "1*return(apply)").unwrap();
+    result.send(Ok(DestinationWriteStatus::Accepted));
+    let barrier = test.next_barrier().await;
+    barrier.send(Err(etl::etl_error!(
+        ErrorKind::WithTimedRetry,
+        "Test deadline confirmation failure"
+    )));
+
+    let (replayed_lsn, replayed_result) = test.next_batch().await;
+    assert_eq!(replayed_lsn, commit_lsn);
+    assert!(test.confirmed_lsn().await < commit_lsn);
+    assert!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(commit_lsn)
+    );
+    replayed_result.send(Ok(DestinationWriteStatus::Durable));
+    test.wait_for_flush(commit_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+}
+
+/// A deadline can confirm part of a large transaction but cannot checkpoint
+/// that transaction until its commit has been sent and confirmed.
+#[tokio::test(flavor = "multi_thread")]
+async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
+    let _scenario = FailScenario::setup();
+    let mut test = IdleDurabilityTest::start_with_batch(
+        Some(600_000),
+        Some(BatchConfig { max_fill_ms: 100, max_bytes: 16_384, memory_budget_ratio: 0.2 }),
+    )
+    .await;
+    test.insert(1).await;
+    let (first_lsn, result) = test.next_batch().await;
+    result.send(Ok(DestinationWriteStatus::Accepted));
+
+    test.database
+        .run_sql(&format!(
+            "insert into {} (value) select generate_series(2, 2000)",
+            test.table_name
+        ))
+        .await
+        .unwrap();
+    let write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, test.writes_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let DeferredEventsWrite::PartialBatch { durability, result } = write else {
+        panic!("expected a split transaction");
+    };
+    assert_eq!(durability, WriteEventsDurability::MayDefer);
+    fail::cfg(APPLY_LOOP_EXPIRE_DURABILITY_FP, "1*return(apply)").unwrap();
+    result.send(Ok(DestinationWriteStatus::Accepted));
+
+    let write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, test.writes_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let DeferredEventsWrite::PartialBatch { durability, result } = write else {
+        panic!("expected a required-durability transaction fragment");
+    };
+    assert_eq!(durability, WriteEventsDurability::RequireDurable);
+    assert!(test.confirmed_lsn().await < first_lsn);
+    result.send(Ok(DestinationWriteStatus::Durable));
+
+    let mut write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, test.writes_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    test.wait_for_flush(first_lsn).await;
+    assert_eq!(
+        test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+        Some(first_lsn)
+    );
+    let transaction_lsn = loop {
+        match write {
+            DeferredEventsWrite::PartialBatch { result, .. } => {
+                result.send(Ok(DestinationWriteStatus::Durable));
+            }
+            DeferredEventsWrite::Batch { commit_end_lsn, result, .. } => {
+                assert!(test.confirmed_lsn().await < commit_end_lsn);
+                assert_eq!(
+                    test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+                    Some(first_lsn)
+                );
+                result.send(Ok(DestinationWriteStatus::Durable));
+                break commit_end_lsn;
+            }
+            DeferredEventsWrite::DurabilityBarrier { .. } => panic!("unexpected extra barrier"),
+        }
+        write = tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, test.writes_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    };
+    test.wait_for_flush(transaction_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, transaction_lsn).await;
+}
+
 /// A single accepted batch settles without another source write.
 #[tokio::test(flavor = "multi_thread")]
 async fn idle_durability_settles_on_primary_keepalive() {
@@ -2993,18 +3214,23 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
     test.pipeline.shutdown_and_wait().await.unwrap();
 }
 
-/// Without a settle window, a later insert is overtaken by the durability
-/// barrier.
+/// Without a settle window, a keepalive can start a barrier immediately; a
+/// later insert must wait for that already-dispatched barrier to complete.
 #[tokio::test(flavor = "multi_thread")]
-#[should_panic(expected = "expected an event batch")]
-async fn idle_durability_disallows_multiple_writes_without_settle_interval() {
+async fn idle_durability_serializes_writes_after_immediate_idle_barrier() {
     let mut test = IdleDurabilityTest::start().await;
     test.insert(1).await;
     let (_commit_lsn, result) = test.next_batch().await;
     result.send(Ok(DestinationWriteStatus::Accepted));
+    let barrier = test.next_barrier().await;
 
     test.insert(2).await;
-    test.next_batch().await;
+    assert!(tokio::time::timeout(Duration::from_secs(2), test.writes_rx.recv()).await.is_err());
+    barrier.send(Ok(DestinationWriteStatus::Durable));
+    let (commit_lsn, result) = test.next_batch().await;
+    result.send(Ok(DestinationWriteStatus::Durable));
+    test.wait_for_flush(commit_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

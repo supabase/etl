@@ -1060,6 +1060,8 @@ mod tests {
         fail_append: bool,
         /// Counts attempted appends, including failures.
         append_attempts: AtomicUsize,
+        /// Counts durability polls independently of accepted appends.
+        status_reads: AtomicUsize,
     }
 
     impl StreamClient for RecordingStreamClient {
@@ -1149,6 +1151,7 @@ mod tests {
             table: &str,
             _channel: &str,
         ) -> Result<ChannelStatusResponse> {
+            self.status_reads.fetch_add(1, Ordering::SeqCst);
             Ok(self.statuses.lock().unwrap().get(table).unwrap().clone())
         }
     }
@@ -1222,6 +1225,43 @@ mod tests {
             replicated_table_schema: schema.clone(),
             table_row: TableRow::new(vec![Cell::I32(1), Cell::String("initial".to_owned())]),
         })
+    }
+
+    /// Internal window drains can repeatedly leave an accepted tail even
+    /// though the transport has committed every request. The apply loop needs
+    /// a later cumulative confirmation to checkpoint these calls.
+    #[tokio::test]
+    async fn cdc_window_drains_can_keep_returning_accepted() {
+        let (destination, stream, schemas) = recording_destination(65, false).await;
+        let mut ordinal = 0;
+        for (iteration, count) in [65, 64, 64].into_iter().enumerate() {
+            let events = schemas[..count]
+                .iter()
+                .map(|schema| {
+                    let event = insert_event(schema, ordinal);
+                    ordinal += 1;
+                    event
+                })
+                .collect();
+            let status =
+                write_events(&destination, WriteEventsDurability::MayDefer, events).await.unwrap();
+            assert_eq!(status, DestinationWriteStatus::Accepted);
+            // Each call confirmed a full window internally, then accepted a
+            // new tail without returning a cumulative Durable result to ETL.
+            assert_eq!(stream.status_reads.load(Ordering::SeqCst), (iteration + 1) * 64);
+            let requests = stream.requests.lock().unwrap();
+            let statuses = stream.statuses.lock().unwrap();
+            assert_eq!(requests.len(), 65 + iteration * 64);
+            for request in requests.iter() {
+                assert!(statuses[&request.table].offset_token.as_ref().unwrap() >= &request.end);
+            }
+        }
+        let status = write_events(&destination, WriteEventsDurability::RequireDurable, vec![])
+            .await
+            .unwrap();
+        assert_eq!(status, DestinationWriteStatus::Durable);
+        assert_eq!(stream.status_reads.load(Ordering::SeqCst), 193);
+        destination.shutdown().await.unwrap();
     }
 
     #[tokio::test]
