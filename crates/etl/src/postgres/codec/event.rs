@@ -429,18 +429,10 @@ pub(crate) fn parse_event_from_commit_message(
 
 /// Returns the set of column names to replicate from a relation message.
 ///
-/// PostgreSQL pgoutput emits relation columns by iterating the relation
-/// `TupleDesc` in physical `pg_attribute.attnum` order and skipping columns
-/// that are not published.
-///
-/// This function intentionally returns a [`HashSet`]: mask membership is built
-/// by column name, and PostgreSQL requires live column names to be unique
-/// within one table schema version. Relation-message order is therefore not
-/// needed to decide which columns are included. The order matters later, when
-/// tuple data is decoded, because tuple fields are sent in the same order as
-/// the relation message. Applying the name-based masks to ETL's stored,
-/// `attnum`-ordered [`TableSchema`] creates the [`ReplicatedTableSchema`] view
-/// used for positional tuple decoding.
+/// pgoutput emits published columns in physical `pg_attribute.attnum` order.
+/// Unique column names determine mask membership; the stored schema supplies
+/// tuple order. [`validate_relation_schema`] verifies that the resulting
+/// projection still agrees with the protocol before positional decoding.
 pub(crate) fn parse_replicated_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
@@ -459,11 +451,9 @@ pub(crate) fn parse_replicated_column_names(
 /// key-column membership on each [`protocol::RelationBody`] column. For
 /// `REPLICA IDENTITY FULL`, every relation-message column belongs to the
 /// runtime old-row identity. Otherwise, the low bit of the column flags marks
-/// identity membership. The column order is the same `attnum` order described
-/// in [`parse_replicated_column_names`]. This returns names because
-/// identity-mask membership is also name-based; tuple interpretation relies on
-/// the resulting replicated schema preserving relation-message order after the
-/// masks are applied.
+/// identity membership. As in [`parse_replicated_column_names`], names
+/// determine membership and the validated schema projection supplies tuple
+/// order.
 pub(crate) fn parse_replica_identity_column_names(
     relation_body: &protocol::RelationBody,
 ) -> EtlResult<HashSet<String>> {
@@ -485,6 +475,54 @@ pub(crate) fn parse_replica_identity_column_names(
     };
 
     Ok(column_names)
+}
+
+/// Verifies that the selected decoder agrees with the protocol's tuple layout.
+///
+/// Name-based masks cannot detect reordered columns or changed types in a
+/// stale snapshot. Reject that mismatch before decoding any row. Unknown
+/// source types use the same text fallback as captured schema metadata.
+pub(crate) fn validate_relation_schema(
+    table_schema: &ReplicatedTableSchema,
+    relation: &protocol::RelationBody,
+) -> EtlResult<()> {
+    let columns = table_schema.column_schemas();
+    if columns.len() != relation.columns().len() {
+        bail!(
+            ErrorKind::InvalidState,
+            "Relation schema does not match stored snapshot",
+            format!(
+                "Table {} at snapshot {} has {} replicated columns, but the relation contains {}",
+                table_schema.id(),
+                table_schema.inner().snapshot_id,
+                columns.len(),
+                relation.columns().len()
+            )
+        );
+    }
+
+    for (column, relation_column) in columns.zip(relation.columns()) {
+        // The protocol library exposes the unsigned OID through an i32.
+        let type_oid = u32::from_ne_bytes(relation_column.type_id().to_ne_bytes());
+        if column.name != relation_column.name()?
+            || column.typ != convert_type_oid_to_type(type_oid)
+            || column.modifier != relation_column.type_modifier()
+        {
+            bail!(
+                ErrorKind::InvalidState,
+                "Relation schema does not match stored snapshot",
+                format!(
+                    "Table {} at snapshot {} disagrees with relation column '{}' in name, type, \
+                     or type modifier",
+                    table_schema.id(),
+                    table_schema.inner().snapshot_id,
+                    relation_column.name()?
+                )
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Converts a Postgres insert message into an [`InsertEvent`].
@@ -1194,71 +1232,23 @@ mod tests {
             assert!(invalid_payload.parse::<SchemaChangeMessage>().is_err());
         }
 
-        let null_scoped_table = r#"{
-            "command_tag": "ALTER TABLE",
-            "publication_name": null,
-            "nspname": "public",
-            "relname": "items",
-            "oid": 42,
-            "identity": {
-                "primary_key_attnums": [],
-                "relreplident": "d",
-                "replica_identity_index_attnums": []
-            },
-            "columns": []
-        }"#
-        .parse::<SchemaChangeMessage>()
-        .unwrap();
+        let mut scoped_ddl: serde_json::Value = serde_json::from_str(table_ddl).unwrap();
+        scoped_ddl["publication_name"] = serde_json::Value::Null;
+        let null_scoped_table = scoped_ddl.to_string().parse::<SchemaChangeMessage>().unwrap();
         assert!(null_scoped_table.applies_to_publication("pipeline_publication"));
 
-        let unscoped_publication = r#"{
-            "command_tag": "ALTER PUBLICATION",
-            "nspname": "public",
-            "relname": "items",
-            "oid": 42,
-            "identity": {
-                "primary_key_attnums": [],
-                "relreplident": "d",
-                "replica_identity_index_attnums": []
-            },
-            "columns": []
-        }"#
-        .parse::<SchemaChangeMessage>()
-        .unwrap();
+        scoped_ddl["command_tag"] = serde_json::json!("ALTER PUBLICATION");
+        scoped_ddl.as_object_mut().unwrap().remove("publication_name");
+        let unscoped_publication = scoped_ddl.to_string().parse::<SchemaChangeMessage>().unwrap();
         assert!(!unscoped_publication.applies_to_publication("pipeline_publication"));
 
-        let scoped = r#"{
-            "command_tag": "ALTER PUBLICATION",
-            "publication_name": "pipeline_publication",
-            "nspname": "public",
-            "relname": "items",
-            "oid": 42,
-            "identity": {
-                "primary_key_attnums": [],
-                "relreplident": "d",
-                "replica_identity_index_attnums": []
-            },
-            "columns": []
-        }"#
-        .parse::<SchemaChangeMessage>()
-        .unwrap();
+        scoped_ddl["publication_name"] = serde_json::json!("pipeline_publication");
+        let scoped = scoped_ddl.to_string().parse::<SchemaChangeMessage>().unwrap();
         assert!(scoped.applies_to_publication("pipeline_publication"));
         assert!(!scoped.applies_to_publication("other_publication"));
 
-        let malformed = r#"{
-            "command_tag": "ALTER PUBLICATION",
-            "publication_name": 42,
-            "nspname": "public",
-            "relname": "items",
-            "oid": 42,
-            "identity": {
-                "primary_key_attnums": [],
-                "relreplident": "d",
-                "replica_identity_index_attnums": []
-            },
-            "columns": []
-        }"#;
-        assert!(malformed.parse::<SchemaChangeMessage>().is_err());
+        scoped_ddl["publication_name"] = serde_json::json!(42);
+        assert!(scoped_ddl.to_string().parse::<SchemaChangeMessage>().is_err());
     }
 
     /// Malformed DDL payloads fail without panicking and retain their cause.
@@ -1572,28 +1562,17 @@ mod tests {
             assert!(!identity.primary_key_condeferrable);
         }
 
-        let identity: IdentityMessage = serde_json::from_value(serde_json::json!({
-            "primary_key_attnums": [1],
-            "primary_key_condeferrable": true,
-            "relreplident": "d",
-            "replica_identity_attnums": [],
-        }))
-        .unwrap();
-        assert!(identity.primary_key_condeferrable);
-        assert!(identity.replica_identity_attnums.is_empty());
-    }
-
-    /// Legacy deferrable primary keys cannot act as default replica identity.
-    #[test]
-    fn identity_payload_normalizes_legacy_deferrable_primary_key() {
-        let identity: IdentityMessage = serde_json::from_value(serde_json::json!({
-            "primary_key_attnums": [1],
-            "primary_key_condeferrable": true,
-            "relreplident": "d",
-            "replica_identity_index_attnums": [],
-        }))
-        .unwrap();
-        assert!(identity.replica_identity_attnums.is_empty());
+        for keys in ["replica_identity_attnums", "replica_identity_index_attnums"] {
+            let identity: IdentityMessage = serde_json::from_value(serde_json::json!({
+                "primary_key_attnums": [1],
+                "primary_key_condeferrable": true,
+                "relreplident": "d",
+                keys: [],
+            }))
+            .unwrap();
+            assert!(identity.primary_key_condeferrable);
+            assert!(identity.replica_identity_attnums.is_empty());
+        }
     }
 
     /// Missing explicit-index metadata must not silently become an empty key.

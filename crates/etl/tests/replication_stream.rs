@@ -2164,25 +2164,9 @@ async fn logical_replication_recursive_alter_partitioned_table_emits_leaf_ddl_me
     expected.push(ExpectedStreamMarker::Commit);
     expected.extend([
         ExpectedStreamMarker::Begin,
-        ExpectedStreamMarker::Relation(
-            leaf_table_ids[0].into_inner(),
-            vec![
-                "id".to_owned(),
-                "data".to_owned(),
-                "partition_key".to_owned(),
-                "category".to_owned(),
-            ],
-        ),
+        ExpectedStreamMarker::Relation(leaf_table_ids[0].into_inner(), columns.clone()),
         ExpectedStreamMarker::Insert(leaf_table_ids[0].into_inner()),
-        ExpectedStreamMarker::Relation(
-            leaf_table_ids[1].into_inner(),
-            vec![
-                "id".to_owned(),
-                "data".to_owned(),
-                "partition_key".to_owned(),
-                "category".to_owned(),
-            ],
-        ),
+        ExpectedStreamMarker::Relation(leaf_table_ids[1].into_inner(), columns),
         ExpectedStreamMarker::Insert(leaf_table_ids[1].into_inner()),
         ExpectedStreamMarker::Commit,
     ]);

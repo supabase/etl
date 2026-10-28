@@ -892,7 +892,11 @@ async fn schema_store_upsert_replaces_columns_atomically_in_batches() {
                 ordinal == 1,
             );
             column.default_expression = Some(r"'synthetic''; select 1; --\'::text".to_owned());
-            column.missing_value_expression = (ordinal % 2 == 0).then(|| "null".to_owned());
+            column.missing_value_expression = match ordinal % 3 {
+                0 => Some("null".to_owned()),
+                1 => Some(r"'captured''; select 2; --\'".to_owned()),
+                _ => None,
+            };
 
             column
         })

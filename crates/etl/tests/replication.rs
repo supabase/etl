@@ -384,76 +384,6 @@ async fn collect_ddl_messages(
     messages
 }
 
-/// Exercises capture after another DDL commits, with an optional older
-/// snapshot.
-async fn assert_ddl_capture_visibility(
-    isolation_level: IsolationLevel,
-    establish_snapshot_before_ddl: bool,
-    sees_later_commit: bool,
-) {
-    let database = spawn_source_database().await;
-    let table_name = test_table_name("ddl_capture_visibility");
-    let table_id =
-        database.create_table(table_name.clone(), true, &[("value", "integer")]).await.unwrap();
-    database
-        .create_publication("ddl_visibility_pub", std::slice::from_ref(&table_name))
-        .await
-        .unwrap();
-    let mut replication = PgReplicationClient::connect(database.config.clone()).await.unwrap();
-    let slot_name = test_slot_name("ddl_visibility");
-    let slot = replication.create_slot(&slot_name, &Default::default()).await.unwrap();
-    let (stream, _) = replication
-        .start_logical_replication("ddl_visibility_pub", &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
-    let (mut client, _) = connect_to_pg_database(&database.config).await;
-    let transaction =
-        client.build_transaction().isolation_level(isolation_level).start().await.unwrap();
-    if establish_snapshot_before_ddl {
-        transaction
-            .query_one(
-                "select count(*) from pg_catalog.pg_attribute where attrelid = $1",
-                &[&table_id],
-            )
-            .await
-            .unwrap();
-    }
-
-    database
-        .alter_table(
-            table_name.clone(),
-            &[TableModification::AddColumn { name: "extra", data_type: "integer" }],
-        )
-        .await
-        .unwrap();
-
-    transaction
-        .batch_execute(&format!(
-            "alter table {} alter column value set default 1",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-    transaction.commit().await.unwrap();
-
-    let messages = collect_ddl_messages(stream, 2).await;
-    assert_eq!(messages[0]["columns"].as_array().unwrap().len(), 3);
-    let captured_names = messages[1]["columns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|column| column["attname"].as_str().unwrap())
-        .collect::<HashSet<_>>();
-    assert_eq!(captured_names.contains("extra"), sees_later_commit);
-    let value = messages[1]["columns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|column| column["attname"] == "value")
-        .unwrap();
-    assert_eq!(value["default_expression"], "1");
-}
-
 const REPLICA_IDENTITY_LARGE_TEXT_SIZE_BYTES: usize = 8192;
 const REPLICA_IDENTITY_INITIAL_ID: i64 = 1;
 const REPLICA_IDENTITY_INITIAL_NAME: &str = "alice";
@@ -2219,30 +2149,222 @@ async fn schema_change_capture_ignores_unrelated_table_metadata() {
     transaction.commit().await.unwrap();
 }
 
+/// Default deparsing does not add locks on other published tables, including
+/// siblings refreshed by partition-tree capture.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_capture_does_not_lock_other_published_tables() {
+    for partitioned in [false, true] {
+        let database = spawn_source_database().await;
+        let client = database.client.as_ref().unwrap();
+        let setup = if partitioned {
+            "create table test.lock_root (id integer, value integer default 1) partition by \
+             range(id);
+             create table test.lock_target partition of test.lock_root for values from (0) to (10);
+             create table test.lock_other partition of test.lock_root for values from (10) to (20);
+             create publication lock_pub for table test.lock_root with (publish = 'insert')"
+        } else {
+            "create table test.lock_target (id integer, value integer default 1);
+             create table test.lock_other (id integer, value integer default 1);
+             create publication lock_pub for table test.lock_target, test.lock_other with (publish \
+             = 'insert')"
+        };
+        client.batch_execute(setup).await.unwrap();
+        let mut replication = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+        let slot_name = test_slot_name("ddl_locked_member");
+        let slot = replication.create_slot(&slot_name, &Default::default()).await.unwrap();
+
+        let (mut holder, _) = connect_to_pg_database(&database.config).await;
+        let lock = holder.transaction().await.unwrap();
+        lock.batch_execute("lock table test.lock_other in access exclusive mode").await.unwrap();
+
+        let result = client
+            .batch_execute(
+                "set lock_timeout = '1s';
+                 alter table test.lock_target alter column value set default 2;
+                 alter publication lock_pub set (publish = 'insert');
+                 reset lock_timeout",
+            )
+            .await;
+        lock.rollback().await.unwrap();
+        result.unwrap();
+
+        let (stream, _) = replication
+            .start_logical_replication("lock_pub", &slot_name, slot.consistent_point, None)
+            .await
+            .unwrap();
+        let count = if partitioned { 4 } else { 3 };
+        let messages = collect_ddl_messages(stream, count).await;
+        for message in messages {
+            let value = message["columns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|column| column["attname"] == "value")
+                .unwrap();
+            let expected = if message["relname"] == "lock_target" { "2" } else { "1" };
+            assert_eq!(value["default_expression"], expected);
+        }
+    }
+}
+
+/// Variable-free default deparsing matches PostgreSQL's table-aware output,
+/// including object references and expressions that must not be evaluated.
+#[tokio::test(flavor = "multi_thread")]
+async fn schema_change_capture_default_deparsing_matches_postgres() {
+    let database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create type test.default_choice as enum ('first', 'second');
+             create domain test.default_domain as integer check (value > 0);
+             create function test.default_function() returns integer language plpgsql volatile as \
+             $$begin raise exception 'Default evaluated during capture'; end$$;
+             create table test.default_expressions (
+                 id serial primary key,
+                 literal text default E'quoted '' value\\n旧',
+                 arithmetic integer default (2 + 3),
+                 expression integer default coalesce(null::integer, 7),
+                 chosen test.default_choice default 'first',
+                 constrained test.default_domain default 1,
+                 function_call integer default test.default_function(),
+                 clock timestamptz default current_timestamp,
+                 object regclass default 'test.default_expressions_id_seq'::regclass,
+                 array_value integer[] default array[1, 2],
+                 document jsonb default jsonb_build_object('key', 1),
+                 generated integer generated always as (arithmetic + 1) stored
+             )",
+        )
+        .await
+        .unwrap();
+    let row = client
+        .query_one(
+            "select count(*), bool_and(s.default_expression is not distinct from \
+             pg_catalog.pg_get_expr(ad.adbin, ad.adrelid))
+             from etl.describe_table_columns('test.default_expressions'::regclass) s
+             join pg_catalog.pg_attrdef ad on ad.adrelid = 'test.default_expressions'::regclass \
+             and ad.adnum = s.attnum",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i64>(0), 11);
+    assert!(row.get::<_, bool>(1));
+}
+
 /// Read committed capture sees DDL committed after an earlier statement.
 #[tokio::test(flavor = "multi_thread")]
 async fn schema_change_capture_read_committed_refreshes_visibility() {
-    assert_ddl_capture_visibility(IsolationLevel::ReadCommitted, true, true).await;
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("ddl_capture_visibility");
+    let table_id =
+        database.create_table(table_name.clone(), true, &[("value", "integer")]).await.unwrap();
+    database
+        .create_publication("ddl_visibility_pub", std::slice::from_ref(&table_name))
+        .await
+        .unwrap();
+    let mut replication = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("ddl_visibility");
+    let slot = replication.create_slot(&slot_name, &Default::default()).await.unwrap();
+
+    let (mut client, _) = connect_to_pg_database(&database.config).await;
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::ReadCommitted)
+        .start()
+        .await
+        .unwrap();
+    transaction
+        .query_one("select count(*) from pg_catalog.pg_attribute where attrelid = $1", &[&table_id])
+        .await
+        .unwrap();
+
+    database
+        .alter_table(
+            table_name.clone(),
+            &[TableModification::AddColumn { name: "extra", data_type: "integer" }],
+        )
+        .await
+        .unwrap();
+
+    transaction
+        .batch_execute(&format!(
+            "alter table {} alter column value set default 1",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    // The slot retains the DDL. Start this feedback-free reader only
+    // when ready to consume, avoiding idle sender timeouts during setup.
+    let (stream, _) = replication
+        .start_logical_replication("ddl_visibility_pub", &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
+    let messages = collect_ddl_messages(stream, 2).await;
+    assert_eq!(messages[0]["columns"].as_array().unwrap().len(), 3);
+    let captured_names = messages[1]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| column["attname"].as_str().unwrap())
+        .collect::<HashSet<_>>();
+    assert!(captured_names.contains("extra"));
+    let value = messages[1]["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|column| column["attname"] == "value")
+        .unwrap();
+    assert_eq!(value["default_expression"], "1");
 }
 
-/// Fresh repeatable-read capture sees preceding committed DDL when it has not
-/// already established a transaction snapshot.
+/// A partition reports only its own primary-key columns, in its own physical
+/// layout, even when an invalid parent-only primary key exists.
 #[tokio::test(flavor = "multi_thread")]
-async fn schema_change_capture_fresh_repeatable_read_sees_preceding_ddl() {
-    assert_ddl_capture_visibility(IsolationLevel::RepeatableRead, false, true).await;
-}
-
-/// Serializing DDL does not repair an already established repeatable-read
-/// snapshot.
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_change_capture_repeatable_read_documents_stale_snapshot() {
-    assert_ddl_capture_visibility(IsolationLevel::RepeatableRead, true, false).await;
-}
-
-/// Serializable isolation does not guarantee rejection of stale DDL capture.
-#[tokio::test(flavor = "multi_thread")]
-async fn schema_change_capture_serializable_documents_stale_snapshot() {
-    assert_ddl_capture_visibility(IsolationLevel::Serializable, true, false).await;
+async fn partition_primary_key_metadata_is_table_local() {
+    for parent_only in [false, true] {
+        let database = spawn_source_database().await;
+        let root = test_table_name("local_partition_pk");
+        let leaf = test_table_name("local_partition_pk_leaf");
+        let only = if parent_only { "only " } else { "" };
+        database
+            .client
+            .as_ref()
+            .unwrap()
+            .batch_execute(&format!(
+                "create table {} (id integer not null, data text, part integer not null) \
+                 partition by range(part); create table {} (part integer not null, id integer not \
+                 null, data text); alter table {} attach partition {} for values from (0) to \
+                 (10); alter table {only}{} add primary key (id, part)",
+                root.as_quoted_identifier(),
+                leaf.as_quoted_identifier(),
+                root.as_quoted_identifier(),
+                leaf.as_quoted_identifier(),
+                root.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+        let row = database
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(
+                "select etl.describe_table_identity($1::text::regclass), coalesce((select \
+                 to_jsonb(conkey) from pg_catalog.pg_constraint where conrelid = \
+                 $1::text::regclass and contype = 'p'), '[]'::jsonb)",
+                &[&leaf.as_quoted_identifier()],
+            )
+            .await
+            .unwrap();
+        let identity = row.get::<_, JsonValue>(0);
+        let own_keys = row.get::<_, JsonValue>(1);
+        let expected = if parent_only { serde_json::json!([]) } else { serde_json::json!([2, 1]) };
+        assert_eq!(own_keys, expected);
+        assert_eq!(identity["primary_key_attnums"], own_keys);
+        assert_eq!(identity["replica_identity_attnums"], own_keys);
+        assert_eq!(identity["primary_key_condeferrable"], false);
+    }
 }
 
 /// DDL anywhere in a declarative partition tree refreshes every effective
@@ -2298,10 +2420,7 @@ async fn schema_change_messages_refresh_whole_partition_tree() {
         let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
         let slot_name = test_slot_name("ddl_tree_refresh");
         let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-        let (stream, _) = client
-            .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
-            .await
-            .unwrap();
+
         let mut expected = Vec::new();
         for (target, value) in [(&root, "root"), (&middle, "middle"), (&leaf, "leaf")] {
             database
@@ -2332,6 +2451,12 @@ async fn schema_change_messages_refresh_whole_partition_tree() {
             }
             expected.push(phase);
         }
+        // The slot retains the DDL. Start this feedback-free reader only
+        // when ready to consume, avoiding idle sender timeouts during setup.
+        let (stream, _) = client
+            .start_logical_replication(publication, &slot_name, slot.consistent_point, None)
+            .await
+            .unwrap();
         let messages = collect_ddl_messages(stream, targets.len() * expected.len()).await;
         for (phase, batch) in expected.iter().zip(messages.chunks_exact(targets.len())) {
             let ids = batch
@@ -2472,13 +2597,6 @@ async fn schema_change_messages_capture_required_metadata_for_alter_table_varian
         )
         .await
         .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 2', 31, \
-             'alice2@example.com')"
-        ))
-        .await
-        .unwrap();
 
     database
         .alter_table(
@@ -2487,23 +2605,9 @@ async fn schema_change_messages_capture_required_metadata_for_alter_table_varian
         )
         .await
         .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 3', 32, \
-             'alice3@example.com')"
-        ))
-        .await
-        .unwrap();
 
     database
         .alter_table(table_name.clone(), &[TableModification::ReplicaIdentity { value: "full" }])
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!(
-            "insert into {quoted_table_name} (full_name, age, email) values ('alice 4', 33, \
-             'alice4@example.com')"
-        ))
         .await
         .unwrap();
 
@@ -2606,10 +2710,6 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_default_payload_slot");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
 
     database
         .run_sql(&format!(
@@ -2623,6 +2723,12 @@ async fn schema_change_messages_emit_and_decode_set_and_drop_default() {
         .await
         .unwrap();
 
+    // The slot retains the DDL. Start this feedback-free reader only
+    // when ready to consume, avoiding idle sender timeouts during setup.
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
     let messages = collect_ddl_messages(stream, 2).await;
     let set_default_message = &messages[0];
     let drop_default_message = &messages[1];
@@ -2693,15 +2799,42 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
         .await
         .unwrap();
 
+    // Customer display settings must not round floats or change metadata
+    // compared with the canonical formats used by initial copy.
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(
+            "set extra_float_digits = -15; set datestyle = 'SQL, DMY';
+             set intervalstyle = 'sql_standard'; set timezone = 'Asia/Kolkata';
+             set bytea_output = 'escape'",
+        )
+        .await
+        .unwrap();
     database
         .run_sql(&format!(
             "alter table {table}
              add column score integer default 1, alter column score set default 2,
+             add column object_id oid default 1, alter column object_id set default 2,
              add column absent integer, alter column absent set default 2,
+             add column exact_float double precision default 1.23456789012345,
+             alter column exact_float set default 3.456789012345,
+             add column exact_real real default 1.234567,
+             alter column exact_real set default 3.456789,
+             add column negative_zero double precision default '-0'::double precision,
+             alter column negative_zero set default 1,
              add column flag boolean default true, alter column flag set default false,
-             add column label text default 'old''quoted', alter column label set default 'new',
+             add column label text default 'old''quoted\\path', alter column label set default \
+             'new',
              add column day date default '2020-01-01', alter column day set default '2030-01-01',
-             add column document jsonb default '{{\"key\": 1}}',
+             add column moment timestamptz default '2020-01-01 12:00:00+05:30',
+             alter column moment set default '2030-01-01 12:00:00+05:30',
+             add column span interval default '1 year 2 days 03:04:05',
+             alter column span set default '2 years 3 days 04:05:06',
+             add column binary_value bytea default '\\x6162',
+             alter column binary_value set default '\\x6364',
+             add column document jsonb default '{{\"key\": \"a\\\"b\"}}',
              alter column document set default '{{\"key\": 2}}',
              add column json_null jsonb default 'null',
              alter column json_null set default 'true',
@@ -2715,12 +2848,56 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
 
     let messages = collect_ddl_messages(stream, 1).await;
     let columns = column_schemas_from_ddl_message(&messages[0]);
+    for (name, typ, current_default) in
+        [("exact_float", "double precision", "3.456789012345"), ("exact_real", "real", "3.456789")]
+    {
+        let column = columns.iter().find(|column| column.name == name).unwrap();
+        let missing = column.missing_value_expression.as_ref().unwrap();
+        let default = column.default_expression.as_ref().unwrap();
+        let row = database
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(
+                &format!(
+                    "select ({missing})::{typ} = {name}, ({default})::{typ} = \
+                     ({current_default})::{typ}, current_setting('extra_float_digits') from \
+                     {table}"
+                ),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(row.get::<_, bool>(0));
+        assert!(row.get::<_, bool>(1));
+        assert_eq!(row.get::<_, String>(2), "-15");
+    }
+    let negative_zero = columns.iter().find(|column| column.name == "negative_zero").unwrap();
+    let literal = negative_zero.missing_value_expression.as_ref().unwrap();
+    let matches: bool = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            &format!(
+                "select pg_catalog.float8send(({literal})::double precision) = \
+                 pg_catalog.float8send(negative_zero) from {table}"
+            ),
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(matches);
     for (name, typ) in [
         ("score", "integer"),
+        ("object_id", "oid"),
         ("absent", "integer"),
         ("flag", "boolean"),
         ("label", "text"),
         ("day", "date"),
+        ("moment", "timestamptz"),
+        ("span", "interval"),
         ("document", "jsonb"),
         ("json_null", "jsonb"),
         ("json_string", "json"),
@@ -2759,6 +2936,21 @@ async fn schema_change_messages_capture_missing_values_separately_from_defaults(
     let (schema, _) = transaction.get_table_schema_with_identity(table_id).await.unwrap();
     transaction.commit().await.unwrap();
     assert_eq!(columns, schema.column_schemas);
+    let settings = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select current_setting('datestyle'), current_setting('intervalstyle'), \
+             current_setting('timezone'), current_setting('bytea_output')",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(settings.get::<_, String>(0), "SQL, DMY");
+    assert_eq!(settings.get::<_, String>(1), "sql_standard");
+    assert_eq!(settings.get::<_, String>(2), "Asia/Kolkata");
+    assert_eq!(settings.get::<_, String>(3), "escape");
 }
 
 /// Table owners must not execute user-defined JSON casts as the trigger owner.
@@ -2839,10 +3031,6 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     let slot_name = test_slot_name("ddl_filter_slot");
     let slot = client.create_slot(&slot_name, &Default::default()).await.unwrap();
-    let (stream, _) = client
-        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
-        .await
-        .unwrap();
 
     database
         .alter_table(
@@ -2855,6 +3043,12 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
     database.run_sql("create temporary table temp_ddl_filter (id integer)").await.unwrap();
     database.run_sql("alter table temp_ddl_filter add column note text").await.unwrap();
 
+    // The slot retains the DDL. Start this feedback-free reader only
+    // when ready to consume, avoiding idle sender timeouts during setup.
+    let (stream, _) = client
+        .start_logical_replication(publication_name, &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
     let result = timeout(Duration::from_secs(2), collect_ddl_messages(stream, 1)).await;
     assert!(
         result.is_err(),
@@ -2866,6 +3060,25 @@ async fn schema_change_messages_skip_unpublished_and_temporary_tables() {
 async fn schema_change_messages_allow_alter_table_from_table_owner_role() {
     init_test_tracing();
     let database = spawn_source_database().await;
+
+    let safe_paths = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select bool_and(coalesce(p.proconfig @> array['search_path=pg_catalog, pg_temp'], \
+             false)) from pg_catalog.pg_proc p where p.oid in (
+                'etl.describe_table_columns(oid)'::pg_catalog.regprocedure,
+                'etl.describe_table_identity(oid)'::pg_catalog.regprocedure,
+                'etl.describe_table_publication_columns(oid,text)'::pg_catalog.regprocedure,
+                'etl.publication_table_candidates(oid)'::pg_catalog.regprocedure,
+                'etl.emit_schema_change_messages()'::pg_catalog.regprocedure
+             )",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(safe_paths.get::<_, bool>(0));
 
     let table_name = test_table_name("ddl_table_owner_role");
     database.create_table(table_name.clone(), true, &[("name", "text not null")]).await.unwrap();

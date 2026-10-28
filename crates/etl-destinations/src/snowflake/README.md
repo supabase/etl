@@ -62,8 +62,8 @@ queries must be regenerated after DDL.
 metadata contains IDs. A dropped/re-added
 name identifies a new column. Added columns follow the same default-value support
 as complete rows: unsupported defaults and type changes can require a resync.
-Stable IDs do not extend that support. pgoutput announces changed relations with
-the next row event; DDL alone does not update the destination.
+Stable IDs do not extend that support. Supported DDL emits ordered schema
+messages, so ETL updates the destination even when no row changes follow.
 See [Partial updates and materialization](https://supabase.github.io/etl/reference/destinations/#partial-updates-and-materialization)
 for supported key types, query diagnostics, and resync requirements.
 
@@ -71,7 +71,7 @@ for supported key types, query diagnostics, and resync requirements.
 
 The ETL role needs `CREATE VIEW` on the destination schema and must retain
 ownership of its raw tables and companion views. Missing privileges fail setup
-or startup reconciliation. ETL does not grant privileges itself. Grant consumers
+or view reconciliation. ETL does not grant privileges itself. Grant consumers
 `SELECT` on the companion view and the usual database/schema/warehouse usage.
 
 ETL reserves `<physical_table>_CURRENT` and `<physical_table>_CURRENT_PENDING`.
@@ -89,10 +89,13 @@ Streams on an ETL view are unsupported because replacement makes them stale.
 Before drops or renames, ETL temporarily renames the view to the reserved
 `_CURRENT_PENDING` name. The public name is unavailable until the raw schema is
 applied and the definition is replaced. Add-only changes replace the definition
-without this outage. Startup reconciles views for tables that completed initial
-synchronization, including idle tables. Tables awaiting a fresh copy and errored
-tables are skipped. Interrupted raw DDL still requires the existing
-recovery/resync procedure.
+without this outage. Startup validates applied raw tables and preserves existing
+public views. Creating or restoring a view requires authoritative relation or
+copy metadata, because stored destination schemas do not retain replica identity.
+A parked view on an idle table stays unavailable until that metadata arrives;
+replayed schema messages can restore it without a row change. Tables awaiting a
+fresh copy and errored tables are skipped. Interrupted raw DDL still requires the
+existing recovery/resync procedure.
 
 Same-name resync retains view grants while replacing CDC history. Resync after
 a source rename removes the old view and creates one beside the new raw table;
@@ -118,8 +121,8 @@ stored history and replication offsets and requires no backfill.
 The configured Snowflake role must allow the ALTER. Unrelated schema mismatches
 remain errors. ETL updates the table format; customer-owned queries must support
 partial records before consuming them. Existing deployments also need the
-`CREATE VIEW` grant before upgrading; ETL creates views for applied tables at
-startup.
+`CREATE VIEW` grant before upgrading; ETL creates views for applied tables when
+authoritative relation metadata arrives.
 
 ## Request Packing and Large Rows
 

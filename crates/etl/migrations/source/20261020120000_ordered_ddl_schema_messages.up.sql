@@ -1,3 +1,5 @@
+-- Keep pg_temp explicitly last so it cannot precede pg_catalog implicitly.
+-- Catalog relations, types, and ETL helper calls remain schema-qualified.
 -- Copy and CDC need column OIDs and modifiers, not formatted type names. Keep
 -- describe_table_schema for older binaries and source introspection, while the
 -- shared decoder query avoids its type-cache lookups and unused metadata.
@@ -14,7 +16,13 @@ returns table (
 language sql
 stable
 strict
-set search_path = pg_catalog
+set search_path = pg_catalog, pg_temp
+-- Capture the configured migration connection's formats, matching copy.
+set datestyle from current
+set intervalstyle from current
+set extra_float_digits from current
+set timezone from current
+set bytea_output from current
 as
 $fnc$
 with column_values as (
@@ -24,12 +32,17 @@ with column_values as (
         a.atttypid,
         a.atttypmod,
         a.attnotnull,
-        case when a.atthasdef then pg_catalog.pg_get_expr(ad.adbin, ad.adrelid) end as default_expression,
+        -- Defaults contain no column references; generated expressions are
+        -- excluded below. OID 0 avoids opening and locking each table.
+        case when a.atthasdef then pg_catalog.pg_get_expr(ad.adbin, 0) end as default_expression,
         a.atthasmissing,
-        a.atttypid in (
+        -- Partitioned tables store no rows or missing values; partitions keep
+        -- the add-time values, so fall back to the current default.
+        c.relkind <> 'p' and a.atttypid in (
             'pg_catalog.bool'::pg_catalog.regtype,
             'pg_catalog.int2'::pg_catalog.regtype, 'pg_catalog.int4'::pg_catalog.regtype,
-            'pg_catalog.int8'::pg_catalog.regtype, 'pg_catalog.float4'::pg_catalog.regtype,
+            'pg_catalog.int8'::pg_catalog.regtype, 'pg_catalog.oid'::pg_catalog.regtype,
+            'pg_catalog.float4'::pg_catalog.regtype,
             'pg_catalog.float8'::pg_catalog.regtype, 'pg_catalog.numeric'::pg_catalog.regtype,
             'pg_catalog.text'::pg_catalog.regtype, 'pg_catalog.varchar'::pg_catalog.regtype,
             'pg_catalog.bpchar'::pg_catalog.regtype, 'pg_catalog.name'::pg_catalog.regtype,
@@ -41,6 +54,8 @@ with column_values as (
         ) as missing_value_supported,
         a.attmissingval
     from pg_catalog.pg_attribute a
+    join pg_catalog.pg_class c
+      on c.oid = a.attrelid
     left join pg_catalog.pg_attrdef ad
       on ad.adrelid = a.attrelid and ad.adnum = a.attnum
     where a.attrelid = p_table and a.attnum > 0
@@ -55,15 +70,19 @@ with column_values as (
     from column_values v
 ), literals as (
     select v.*,
+        -- Quote like pg_get_expr: standard-conforming strings, never E''.
         case
             when not v.missing_value_supported then null
             when not v.atthasmissing then 'null'
             when v.atttypid in ('pg_catalog.json'::pg_catalog.regtype, 'pg_catalog.jsonb'::pg_catalog.regtype)
-                then pg_catalog.quote_nullable(v.missing_value::pg_catalog.text)
+                then '''' || pg_catalog.replace(v.missing_value::pg_catalog.text, '''', '''''') || ''''
+            -- A bare numeric -0 becomes positive zero before a float cast.
+            when v.atttypid in ('pg_catalog.float4'::pg_catalog.regtype, 'pg_catalog.float8'::pg_catalog.regtype)
+                then '''' || (v.missing_value #>> '{}') || ''''
             when pg_catalog.json_typeof(v.missing_value) in ('number', 'boolean')
                 then v.missing_value::pg_catalog.text
             when pg_catalog.json_typeof(v.missing_value) = 'string'
-                then pg_catalog.quote_nullable(v.missing_value #>> '{}')
+                then '''' || pg_catalog.replace(v.missing_value #>> '{}', '''', '''''') || ''''
             -- Array/composite defaults retain the existing portability fallback.
         end as missing_literal
     from converted_values v
@@ -83,6 +102,7 @@ $$Returns the non-generated columns needed by both copy and CDC decoders from
 one MVCC catalog snapshot. Captured missing values are encoded as SQL literals
 only when different from the current default. They describe fast column
 additions, not values already materialized by rewrites or volatile defaults.
+Partitioned tables report none because their partitions hold those values.
 Default deparsing still uses pg_get_expr and cannot make concurrent shared-object
 DDL or stale transaction snapshots safe.$$;
 
@@ -93,72 +113,13 @@ create or replace function etl.describe_table_identity(
 language sql
 stable
 strict
-set search_path = pg_catalog
+set search_path = pg_catalog, pg_temp
 as
 $fnc$
 with rel as (
     select c.relreplident, c.relkind
     from pg_catalog.pg_class c
     where c.oid = p_table
-),
-direct_parent as (
-    select i.inhparent as parent_oid
-    from pg_catalog.pg_inherits i
-    join pg_catalog.pg_class c on c.oid = i.inhrelid
-    where i.inhrelid = p_table and c.relispartition and not i.inhdetachpending
-    order by i.inhseqno
-    limit 1
-),
-primary_key_cols as (
-    select
-        x.attnum::pg_catalog.int4 as attnum,
-        x.n::pg_catalog.int4 as position
-    from pg_catalog.pg_constraint con
-    cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-    where con.conrelid = p_table
-      and con.contype = 'p'
-),
-parent_primary_key_cols as (
-    select
-        x.attnum::pg_catalog.int4 as attnum,
-        x.n::pg_catalog.int4 as position
-    from direct_parent dp
-    join pg_catalog.pg_constraint con
-      on con.conrelid = dp.parent_oid
-     and con.contype = 'p'
-    cross join lateral unnest(con.conkey) with ordinality as x(attnum, n)
-),
-effective_primary_key_cols as (
-    select
-        pkc.attnum,
-        pkc.position
-    from primary_key_cols pkc
-    union all
-    select
-        ppkc.attnum,
-        ppkc.position
-    from parent_primary_key_cols ppkc
-    where not exists (
-        select 1
-        from primary_key_cols pkc
-    )
-),
--- Uses the same leaf-or-parent fallback as `effective_primary_key_cols`.
-effective_primary_key_condeferrable as (
-    select con.condeferrable
-    from pg_catalog.pg_constraint con
-    where con.conrelid = p_table
-      and con.contype = 'p'
-    union all
-    select con.condeferrable
-    from direct_parent dp
-    join pg_catalog.pg_constraint con
-      on con.conrelid = dp.parent_oid
-     and con.contype = 'p'
-    where not exists (
-        select 1
-        from primary_key_cols pkc
-    )
 ),
 -- Default identity is the table's own non-deferrable primary index. A
 -- parent's key and included index attributes are not protocol identity keys.
@@ -195,21 +156,9 @@ replica_identity_index as (
 )
 select pg_catalog.jsonb_build_object(
     'primary_key_attnums',
-    coalesce(
-        (
-            select pg_catalog.jsonb_agg(epkc.attnum order by epkc.position)
-            from effective_primary_key_cols epkc
-        ),
-        '[]'::pg_catalog.jsonb
-    ),
+    coalesce(pg_catalog.to_jsonb(pk.conkey), '[]'::pg_catalog.jsonb),
     'primary_key_condeferrable',
-    coalesce(
-        (
-            select pg_catalog.bool_or(epkd.condeferrable)
-            from effective_primary_key_condeferrable epkd
-        ),
-        false
-    ),
+    coalesce(pk.condeferrable, false),
     'replica_identity_attnums',
     pi.attnums,
     'relreplident',
@@ -225,14 +174,17 @@ select pg_catalog.jsonb_build_object(
     case when r.relreplident = 'i' then pi.attnums else '[]'::pg_catalog.jsonb end
 )
 from rel r
-cross join protocol_identity pi;
+cross join protocol_identity pi
+left join pg_catalog.pg_constraint pk
+  on pk.conrelid = p_table and pk.contype = 'p';
 $fnc$;
 
 comment on function etl.describe_table_identity(pg_catalog.oid) is
 $$Returns primary-key metadata and the table-local protocol replica-identity
 keys from one MVCC catalog snapshot. Protocol keys exclude non-immediate
-indexes and non-key included index columns. Parent primary-key metadata is only
-inherited for declarative partitions, not ordinary SQL inheritance.$$;
+indexes and non-key included index columns. Primary-key metadata comes from
+the table's own constraint, including partition-local attribute numbers;
+a parent-only constraint does not invent a primary key on its partitions.$$;
 
 -- Give copy and streaming one MVCC definition of publication columns.
 -- Schema, identity, and these columns are captured in one trigger query.
@@ -244,7 +196,7 @@ create function etl.describe_table_publication_columns(
 ) returns table (publication_name pg_catalog.text, column_attnums pg_catalog.int2[])
 language plpgsql
 stable
-set search_path = pg_catalog
+set search_path = pg_catalog, pg_temp
 as
 $fnc$
 begin
@@ -323,8 +275,6 @@ begin
         from (select distinct pa.pubid from published_ancestors pa) candidates
         join pg_catalog.pg_publication p on p.oid = candidates.pubid
         join pg_catalog.pg_class c on c.oid = p_table
-        left join pg_catalog.pg_publication_rel pr
-          on pr.prpubid = p.oid and pr.prrelid = c.oid
         where (p_publication is null or p.pubname::pg_catalog.text = p_publication)
           and c.relkind in ('r', 'p') and c.relpersistence = 'p'
           and c.oid >= 16384
@@ -349,40 +299,12 @@ No rows means the relation is not an effective publication target. The helper
 does not expand publications through current-cache functions or lock unrelated
 tables. It does not make concurrent topology or publication changes supported.$$;
 
--- Preserve non-PUBLIC readers when an admin installs helpers on behalf of
--- a non-owner pipeline role. New signatures do not inherit existing grants.
-do
-$acl$
-declare
-    r record;
-begin
-    for r in
-        select roles.rolname, pg_catalog.bool_or(acl.is_grantable) as is_grantable
-        from pg_catalog.pg_proc p
-        cross join lateral pg_catalog.aclexplode(
-            coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))
-        ) acl
-        join pg_catalog.pg_roles roles on roles.oid = acl.grantee
-        where p.oid = 'etl.describe_table_schema(oid)'::pg_catalog.regprocedure
-          and acl.privilege_type = 'EXECUTE'
-        group by roles.rolname
-    loop
-        execute pg_catalog.format(
-            'grant execute on function etl.describe_table_columns(pg_catalog.oid), '
-            'etl.describe_table_publication_columns(pg_catalog.oid, pg_catalog.text) to %I%s',
-            r.rolname,
-            case when r.is_grantable then ' with grant option' else '' end
-        );
-    end loop;
-end;
-$acl$;
-
 -- Bound publication-wide DDL discovery before reading complete table snapshots.
 create function etl.publication_table_candidates(p_publication pg_catalog.oid)
 returns table (table_oid pg_catalog.oid)
 language plpgsql
 stable
-set search_path = pg_catalog
+set search_path = pg_catalog, pg_temp
 as
 $fnc$
 declare
@@ -431,13 +353,54 @@ bounds discovery: describe_table_publication_columns remains authoritative for
 effective root/leaf targets and filters. Catalog reads use the caller's MVCC
 snapshot and do not lock unrelated user tables.$$;
 
+-- Preserve non-PUBLIC readers when an admin installs helpers on behalf of
+-- a non-owner pipeline role. New signatures do not inherit existing grants.
+-- This runs once during installation, not for each captured DDL command.
+do
+$acl$
+declare
+    r record;
+    v_trigger_owner pg_catalog.text;
+begin
+    for r in
+        select roles.rolname, pg_catalog.bool_or(acl.is_grantable) as is_grantable
+        from pg_catalog.pg_proc p
+        cross join lateral pg_catalog.aclexplode(
+            coalesce(p.proacl, pg_catalog.acldefault('f', p.proowner))
+        ) acl
+        join pg_catalog.pg_roles roles on roles.oid = acl.grantee
+        where p.oid = 'etl.describe_table_schema(pg_catalog.oid)'::pg_catalog.regprocedure
+          and acl.privilege_type = 'EXECUTE'
+        group by roles.rolname
+    loop
+        execute pg_catalog.format(
+            'grant execute on function etl.describe_table_columns(pg_catalog.oid), '
+            'etl.describe_table_publication_columns(pg_catalog.oid, pg_catalog.text) to %I%s',
+            r.rolname,
+            case when r.is_grantable then ' with grant option' else '' end
+        );
+    end loop;
+
+    -- Replacement retains the trigger function's owner, which may differ
+    -- from this installer. Only that trusted owner needs the private helper.
+    select roles.rolname into v_trigger_owner
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_roles roles on roles.oid = p.proowner
+    where p.oid = 'etl.emit_schema_change_messages()'::pg_catalog.regprocedure;
+    execute pg_catalog.format(
+        'grant execute on function etl.publication_table_candidates(pg_catalog.oid) to %I',
+        v_trigger_owner
+    );
+end;
+$acl$;
+
 drop event trigger if exists supabase_etl_ddl_message_trigger;
 
 create or replace function etl.emit_schema_change_messages()
 returns pg_catalog.event_trigger
 language plpgsql
 security definer
-set search_path = pg_catalog
+set search_path = pg_catalog, pg_temp
 as
 $fnc$
 declare
@@ -464,12 +427,8 @@ begin
               and not coalesce(d.in_extension, false)
         ),
         base as (
-            -- ALTER TABLE identifies the relation directly and is intentionally
-            -- unscoped: a table change applies to every publication containing
-            -- that table. Per-table ALTER PUBLICATION events instead identify a
-            -- surviving pg_publication_rel row, from which both relation and
-            -- publication are resolved. Table DDL is expanded to descendants
-            -- below so cascaded column changes reach published leaf identities.
+            -- Table DDL is unscoped. Per-table publication commands identify a
+            -- surviving pg_publication_rel row with both target and publication.
             select
                 coalesce(pr.prrelid, d.objid) as table_oid,
                 p.pubname as publication_name
@@ -484,10 +443,8 @@ begin
                   or pr.prrelid is not null
               )
             union all
-            -- Publication-level ALTER PUBLICATION events identify pg_publication
-            -- itself rather than a specific relation. The command parameters are
-            -- not inspected; every such event expands the publication's post-DDL
-            -- effective table set so each table receives a scoped snapshot.
+            -- Publication-level commands identify pg_publication. Expand its
+            -- post-command members without parsing submitted SQL.
             select
                 c.oid as table_oid,
                 p.pubname as publication_name
@@ -542,7 +499,7 @@ begin
             from etl.describe_table_publication_columns(c.oid, ddl.publication_name::pg_catalog.text) p
         ) pc
         cross join lateral (
-            select pg_catalog.jsonb_agg(
+            select coalesce(pg_catalog.jsonb_agg(
                 pg_catalog.jsonb_build_object(
                     'attname', s.attname,
                     'attnum', s.attnum,
@@ -553,12 +510,12 @@ begin
                 ) || case when s.missing_value_expression is null then '{}'::pg_catalog.jsonb
                           else pg_catalog.jsonb_build_object('missing_value_expression', s.missing_value_expression)
                      end order by s.attnum
-            ) as columns
+            ), '[]'::pg_catalog.jsonb) as columns
             from etl.describe_table_columns(c.oid) s
             where pc.publication_column_attnums is not null
         ) ss
         where c.relkind in ('r', 'p') and c.relpersistence = 'p'
-          and ss.columns is not null and pc.publication_column_attnums is not null
+          and pc.publication_column_attnums is not null
         -- All payload fields use this one statement's catalog snapshot.
         order by c.oid
     loop
@@ -590,31 +547,17 @@ $fnc$;
 revoke all on function etl.emit_schema_change_messages() from public;
 
 comment on function etl.emit_schema_change_messages() is
-$$Event trigger function that emits transactional logical schema snapshots for
-published permanent tables affected by supported ALTER TABLE and ALTER
-PUBLICATION events.
+$$Emits transactional schema snapshots for effective published permanent tables.
+Table DDL refreshes each identity in the containing declarative partition tree
+using that table's own schema; ordinary inheritance expands downward only.
+Publication DDL describes surviving targets scoped to the changed publication.
+Removed membership rows and other catalog object types emit no snapshots.
 
-ALTER TABLE events refresh the containing declarative partition tree, including
-ancestors, intermediate roots, leaves, and siblings. Each effective publication
-identity receives one unscoped snapshot of its own schema, even when unchanged.
-Ordinary inheritance keeps downward-only capture. These snapshots do not
-synchronize rows for partition attachment or removal.
-Surviving pg_publication_rel events resolve one explicitly identified relation
-and emit a snapshot scoped to that publication. Events identifying
-pg_publication itself expand the publication's post-command effective table set
-and emit one scoped snapshot per table. Schema, identity, and effective
-publication columns are read by one SQL statement through shared stable
-helpers. Other ALTER PUBLICATION catalog object
-types and removed pg_publication_rel rows emit no snapshots.
-
-The payload contains only schema, identity, publication filters, and routing
-metadata used by ETL. Submitted SQL and detailed command descriptions are not
-copied into WAL. The function inspects catalog state after each statement
-without parsing the client-submitted query text. Messages are transactional,
-disappear if the outer transaction rolls back, and retain statement order
-relative to relation and DML events. The function runs with its owner's
-privileges so table owners do not need direct execute access to ETL helper
-functions.$$;
+Schema, identity, and publication filters share one statement snapshot through
+stable helpers. Payloads omit submitted SQL and command descriptions. Messages
+roll back with DDL and retain statement order. Capture does not synchronize rows
+for membership or partition-topology changes. The trusted function owner supplies
+helper privileges, so table owners need no direct helper grants.$$;
 
 create event trigger supabase_etl_ddl_message_trigger
     on ddl_command_end

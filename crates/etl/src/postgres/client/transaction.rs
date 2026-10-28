@@ -10,18 +10,20 @@ use tokio::sync::watch;
 use tokio_postgres::{CopyOutStream, SimpleQueryMessage, Transaction};
 use tracing::warn;
 
-use super::{
-    child::ChildPgReplicationClient,
-    query::{PgReplicationQueryTarget, classify_table_copy_error},
-    raw::{PgReplicationClient, PgReplicationConnectionConfig},
-    types::{CtidPartition, PostgresConnectionUpdate},
-    utils::get_row_value,
-};
 use crate::{
     bail,
     error::{ErrorKind, EtlResult},
     etl_error,
-    postgres::codec::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
+    postgres::{
+        client::{
+            child::ChildPgReplicationClient,
+            query::{PgReplicationQueryTarget, classify_table_copy_error},
+            raw::{PgReplicationClient, PgReplicationConnectionConfig},
+            types::{CtidPartition, PostgresConnectionUpdate},
+            utils::get_row_value,
+        },
+        codec::{ColumnSchemaMessage, IdentityMessage, build_table_schema},
+    },
     schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
 };
 
@@ -279,7 +281,7 @@ impl<'a> PgReplicationTransactionCore<'a> {
         let column_query = format!(
             "select p.column_attnums is null as all_columns, published.attnum from \
              etl.describe_table_publication_columns({table_id}, {}) p left join lateral \
-             unnest(p.column_attnums) as published(attnum) on true",
+             pg_catalog.unnest(p.column_attnums) as published(attnum) on true",
             quote_literal(publication_name),
         );
 
@@ -631,11 +633,6 @@ impl<'a> PgReplicationTransactionCore<'a> {
             "#,
         );
 
-        // TODO: there's a lot of code using simple_query but only checking for
-        // SimpleQueryMessage::Row, a small optimization could be done here if
-        // we upgraded tokio-postgres to a newer version in order to use
-        // https://docs.rs/tokio-postgres/0.7.15/tokio_postgres/struct.Client.html#method.simple_query_raw
-        // to filter on SimpleQueryMessage::Row and avoid useless allocations.
         for message in self.transaction.simple_query(&schema_snapshot_query).await? {
             if let SimpleQueryMessage::Row(row) = message {
                 let schema_name = get_row_value::<String>(&row, "schema_name", "pg_namespace")?;

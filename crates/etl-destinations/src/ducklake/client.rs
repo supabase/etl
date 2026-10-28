@@ -1437,6 +1437,18 @@ mod tests {
         }
     }
 
+    /// Waits until the watchdog observes its deadline before sending competing
+    /// completion signals.
+    async fn wait_for_watchdog_timeout(watchdog: &DuckDbQueryWatchdog) {
+        tokio::time::timeout(WATCHDOG_JOIN_TIMEOUT, async {
+            while !watchdog.timed_out() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     async fn assert_watchdog_sequence_completes(
         name: &str,
         before_deadline: &[WatchdogSignal],
@@ -1454,7 +1466,7 @@ mod tests {
         }
 
         if wait_past_deadline {
-            tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+            wait_for_watchdog_timeout(&watchdog).await;
         }
 
         for signal in after_deadline {
@@ -1840,7 +1852,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn query_watchdog_signal_order_matrix_does_not_deadlock() {
         use WatchdogSignal::{DropDoneSender, DropInterruptSender, Finish, PublishInterrupt};
 
@@ -1944,7 +1956,7 @@ mod tests {
                 });
 
                 if signal_after_deadline {
-                    tokio::time::sleep(WATCHDOG_DEADLINE * 2).await;
+                    wait_for_watchdog_timeout(&watchdog).await;
                 }
 
                 barrier.wait().await;

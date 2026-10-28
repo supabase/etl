@@ -204,7 +204,9 @@ impl TruncateEvent {
 /// ETL emits a synthetic relation event for every supported DDL message using
 /// its captured publication columns and identity. A real PostgreSQL relation
 /// message also produces this event; destinations must accept an identical
-/// snapshot and replication mask again without reapplying DDL.
+/// snapshot and replication mask again without reapplying DDL. Recovery can
+/// replay a DDL statement's relation after its successors were applied, so
+/// built-in destinations skip relations older than their applied snapshot.
 ///
 /// In ETL's non-streaming `pgoutput` session, PostgreSQL sends relation
 /// metadata lazily before a published row change or truncate:
@@ -243,8 +245,8 @@ impl TruncateEvent {
 /// masks are built by unique column name, so ordering is not needed for mask
 /// membership. Applying those masks to ETL's `attnum`-ordered stored table
 /// schema creates a [`ReplicatedTableSchema`] whose column order matches the
-/// tuple payloads. Event conversion can then decode row values by
-/// replicated-column position.
+/// tuple payloads. ETL validates the projected names, types, and type modifiers
+/// against every real relation before decoding row values by column position.
 ///
 /// Relation messages have no durable replay identity, so this event has no
 /// LSN or event position and does not consume a transaction ordinal.

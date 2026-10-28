@@ -16,8 +16,8 @@ const APP_NAME_REPLICATOR_MIGRATIONS: &str = "supabase_etl_replicator_migrations
 
 /// Connection options for ETL migration queries.
 ///
-/// Uses an extended statement timeout for DDL while keeping bounded lock and
-/// idle-in-transaction timeouts from the common Postgres defaults.
+/// Uses the shared Postgres defaults for output formats and bounded timeouts.
+/// Source helpers capture their output formats from this connection.
 static MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
     LazyLock::new(|| PgConnectionOptions::builder(APP_NAME_REPLICATOR_MIGRATIONS).build());
 

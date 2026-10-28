@@ -2231,9 +2231,9 @@ async fn schema_change_applies_rename_cycle_and_same_name_replacement() {
 
     events_notify.notified().await;
 
-    // PostgreSQL requires each column rename to be a separate statement. With
-    // no intervening DML, pgoutput emits no intermediate Relation, so the
-    // destination observes the old and final names as one rename cycle.
+    // PostgreSQL requires each column rename to be a separate statement. Each
+    // statement emits its own synthetic relation, so the destination applies
+    // the cycle one rename at a time.
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;

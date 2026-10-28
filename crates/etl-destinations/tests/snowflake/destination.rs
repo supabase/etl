@@ -1187,9 +1187,9 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         assert_eq!(committed, Some(expected_offset));
 
         // Recreate the destination to restore the channel's durable offset,
-        // then replay the stream from before the schema change. The relation
-        // has no offset of its own, so the destination must reject it before
-        // considering whether the following rows were already committed.
+        // then replay the stream from before the schema change. The older
+        // relation is a skipped replay marker, but its row must be rejected
+        // before considering whether it was already committed.
         let restarted_destination = Destination::new(
             Client::new(build_auth(), PipelineId::from(1_u64)),
             harness.store.clone(),

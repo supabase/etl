@@ -160,17 +160,18 @@ pub(crate) fn default_clause(column_schema: &ColumnSchema) -> Option<String> {
     default_clause
 }
 
-/// Returns the Snowflake default clause to include in `ADD COLUMN`, if
-/// supported.
+/// Returns the supported add-time default for a physical column addition.
+///
+/// Snowflake populates historical rows when adding a column with a default.
+/// Publication-only additions skip this helper and do not backfill rows.
 pub(crate) fn add_column_default_clause(column_schema: &ColumnSchema) -> Option<String> {
     let default_clause = column_schema
-        .default_expression
-        .as_deref()
+        .initial_default_expression()
         .and_then(|default_expression| {
             snowflake_add_column_default_expression(default_expression, &column_schema.typ)
         })
         .map(|rendered_default_expression| format!(" DEFAULT {rendered_default_expression}"));
-    if default_clause.is_none() && column_schema.default_expression.is_some() {
+    if default_clause.is_none() && column_schema.initial_default_expression().is_some() {
         warn!(
             column_name = %column_schema.name,
             "skipping source column default for snowflake add column because snowflake only \
@@ -505,6 +506,17 @@ mod tests {
 
         assert_eq!(default_clause(&text_column).as_deref(), Some(r#" DEFAULT 'path\\d'"#));
         assert_eq!(default_clause(&json_column), None);
+    }
+
+    /// Only the captured add-time value may populate historical Snowflake rows.
+    #[test]
+    fn add_column_default_clause_uses_missing_value_hint() {
+        for (missing, expected) in [("1", Some(" DEFAULT 1")), ("null", None)] {
+            let column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, true)
+                .with_default_expression("2".to_owned())
+                .with_missing_value_expression(Some(missing.to_owned()));
+            assert_eq!(add_column_default_clause(&column).as_deref(), expected);
+        }
     }
 
     #[test]

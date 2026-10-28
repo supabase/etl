@@ -14,7 +14,10 @@ use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
     event::{Event, EventPosition},
-    schema::{ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
+    schema::{
+        ColumnMetadataChange, ColumnSchema, ReplicatedTableSchema, TableId, TableName, TableSchema,
+        Type,
+    },
     store::DestinationStore,
     task::{TaskGroup, TaskRegistry},
 };
@@ -23,7 +26,10 @@ use tracing::{debug, warn};
 
 use crate::{
     iceberg::{ICEBERG_COLUMN_NAME_MAPPING, IcebergClient, error::iceberg_error_to_etl_error},
-    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        is_stale_relation_replay,
+    },
     table_name::try_stringify_table_name,
 };
 
@@ -474,10 +480,21 @@ where
                     ErrorKind::CorruptedTableSchema,
                     "Destination metadata missing for Iceberg relation event",
                     format!(
-                        "Table {table_id} has no destination metadata from initial synchronization"
+                        "Table {table_id} has no destination metadata from initial \
+                         synchronization."
                     )
                 )
             })?;
+        if metadata.is_applied()
+            && is_stale_relation_replay(
+                "Iceberg",
+                table_id,
+                metadata.snapshot_id(),
+                new_schema.inner().snapshot_id,
+            )
+        {
+            return Ok(());
+        }
         let applied_schema = if new_schema.inner().snapshot_id > metadata.snapshot_id() {
             self.store.get_table_schema(&table_id, metadata.snapshot_id()).await?
         } else {
@@ -711,12 +728,14 @@ where
     }
 }
 
-/// Accepts repeated relations and snapshots with identical contents and masks.
+/// Accepts repeated relations and snapshots with unchanged column definitions
+/// and masks.
 ///
 /// Row preparation supplies no historical schema and therefore requires the
 /// exact applied endpoint. Relation barriers can supply its recorded schema to
-/// validate a metadata-only refresh. Identity masks do not change Iceberg's
-/// physical schema and are refreshed by the source decoder independently.
+/// validate a metadata-only refresh. Add-time missing-value hints do not affect
+/// existing columns. Identity masks do not change Iceberg's physical schema and
+/// are refreshed by the source decoder independently.
 fn ensure_iceberg_relation_is_unchanged(
     metadata: &DestinationTableMetadata,
     applied_schema: Option<&TableSchema>,
@@ -751,7 +770,14 @@ fn ensure_iceberg_relation_is_unchanged(
             schema.snapshot_id == *snapshot_id
                 && schema.id == table_id
                 && schema.name == *new_schema.name()
-                && schema.column_schemas == new_schema.inner().column_schemas
+                && schema.primary_key_deferrable == new_schema.inner().primary_key_deferrable
+                && schema.column_schemas.len() == new_schema.inner().column_schemas.len()
+                && schema.column_schemas.iter().zip(&new_schema.inner().column_schemas).all(
+                    |(before, after)| {
+                        before.ordinal_position == after.ordinal_position
+                            && ColumnMetadataChange::between(before, after).is_none()
+                    },
+                )
                 && replication_mask == new_replication_mask
         })
     {
@@ -961,13 +987,11 @@ mod tests {
 
         ensure_iceberg_relation_is_unchanged(&metadata, None, &schema).unwrap();
 
-        let newer_table_schema = Arc::new(TableSchema::with_snapshot_id(
-            schema.id(),
-            schema.name().clone(),
-            schema.inner().column_schemas.clone(),
-            test_snapshot_id(1_u64, 1_u64),
-        ));
-        let newer_schema = ReplicatedTableSchema::all(newer_table_schema);
+        let mut newer_table_schema = schema.inner().clone();
+        newer_table_schema.snapshot_id = test_snapshot_id(1, 1);
+        // Add-time hints do not affect an existing Iceberg column.
+        newer_table_schema.column_schemas[1].missing_value_expression = Some("null".to_owned());
+        let newer_schema = ReplicatedTableSchema::all(Arc::new(newer_table_schema));
         let newer_error =
             ensure_iceberg_relation_is_unchanged(&metadata, None, &newer_schema).unwrap_err();
         assert_eq!(newer_error.kind(), ErrorKind::CorruptedTableSchema);
@@ -991,6 +1015,13 @@ mod tests {
         let changed = ReplicatedTableSchema::all(Arc::new(changed_table));
         assert!(
             ensure_iceberg_relation_is_unchanged(&metadata, Some(schema.inner()), &changed,)
+                .is_err()
+        );
+        let mut changed_table = newer_schema.inner().clone();
+        changed_table.primary_key_deferrable = true;
+        let changed = ReplicatedTableSchema::all(Arc::new(changed_table));
+        assert!(
+            ensure_iceberg_relation_is_unchanged(&metadata, Some(schema.inner()), &changed)
                 .is_err()
         );
         let filtered = ReplicatedTableSchema::from_mask(

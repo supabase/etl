@@ -1528,9 +1528,11 @@ async fn table_schema_copy_survives_pipeline_restarts() {
     let mut expected_users_schema = database_schema.users_schema();
     expected_users_schema.column_schemas[0].default_expression =
         Some("nextval('test.users_id_seq'::regclass)".to_owned());
+    expected_users_schema.column_schemas[0].missing_value_expression = Some("null".to_owned());
     let mut expected_orders_schema = database_schema.orders_schema();
     expected_orders_schema.column_schemas[0].default_expression =
         Some("nextval('test.orders_id_seq'::regclass)".to_owned());
+    expected_orders_schema.column_schemas[0].missing_value_expression = Some("null".to_owned());
 
     // We check that the table schemas have been stored.
     let table_schemas = store.get_latest_table_schemas().await;
@@ -2556,10 +2558,7 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
 
     // Wait for an insert event to be processed.
     let insert_events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     // Insert test data with all columns (including email and phone).
@@ -2575,7 +2574,12 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
     insert_events_notify.notified().await;
     table_ready_notify.notified().await;
 
-    // Add email column to publication -> (id, name, age, email).
+    // Publication DDL emits a synthetic Relation before the next insert's
+    // native Relation refreshes the same snapshot.
+    let insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
     database
         .run_sql(&format!(
             "alter publication {publication_name} set table {} (id, name, age, email)",
@@ -2583,14 +2587,6 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
         ))
         .await
         .unwrap();
-
-    // Wait for 1 insert event with 4 columns.
-    let insert_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
-        .await;
 
     database
         .run_sql(&format!(
@@ -2603,7 +2599,10 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
 
     insert_notify.notified().await;
 
-    // Remove age column from publication -> (id, name, email).
+    let insert_notify = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
+        .await;
+
     database
         .run_sql(&format!(
             "alter publication {publication_name} set table {} (id, name, email)",
@@ -2611,14 +2610,6 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
         ))
         .await
         .unwrap();
-
-    // Wait for 1 insert event with 3 columns (different set than before).
-    let insert_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
-        .await;
 
     database
         .run_sql(&format!(
@@ -2652,15 +2643,23 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(relations.len(), 3);
+    assert_eq!(relations.len(), 5);
     assert_eq!(inserts.len(), 3);
 
     let expected_column_names = [
         vec!["id", "name", "age"],
         vec!["id", "name", "age", "email"],
+        vec!["id", "name", "age", "email"],
+        vec!["id", "name", "email"],
         vec!["id", "name", "email"],
     ];
-    let expected_masks = [vec![1_u8, 1, 1, 0, 0], vec![1, 1, 1, 1, 0], vec![1, 1, 0, 1, 0]];
+    let expected_masks = [
+        vec![1_u8, 1, 1, 0, 0],
+        vec![1, 1, 1, 1, 0],
+        vec![1, 1, 1, 1, 0],
+        vec![1, 1, 0, 1, 0],
+        vec![1, 1, 0, 1, 0],
+    ];
 
     for ((relation, expected_names), expected_mask) in
         relations.iter().zip(expected_column_names).zip(expected_masks)
@@ -2679,7 +2678,10 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
         .iter()
         .map(|relation| relation.replicated_table_schema.inner().snapshot_id)
         .collect::<Vec<_>>();
-    assert!(relation_snapshot_ids.windows(2).all(|window| window[0] < window[1]));
+    assert!(relation_snapshot_ids[0] < relation_snapshot_ids[1]);
+    assert_eq!(relation_snapshot_ids[1], relation_snapshot_ids[2]);
+    assert!(relation_snapshot_ids[2] < relation_snapshot_ids[3]);
+    assert_eq!(relation_snapshot_ids[3], relation_snapshot_ids[4]);
 
     // BEGIN consumes ordinal 0. Connection-local Relation messages must not
     // consume ordinals, including after either publication change.
@@ -2688,7 +2690,10 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
         .iter()
         .map(|insert| insert.replicated_table_schema.inner().snapshot_id)
         .collect::<Vec<_>>();
-    assert_eq!(insert_snapshot_ids, relation_snapshot_ids);
+    assert_eq!(
+        insert_snapshot_ids,
+        vec![relation_snapshot_ids[0], relation_snapshot_ids[2], relation_snapshot_ids[4]]
+    );
     let insert_values =
         inserts.iter().map(|insert| insert.table_row.values().to_vec()).collect::<Vec<_>>();
     assert_eq!(
@@ -2712,7 +2717,7 @@ async fn publication_column_filter_changes_update_snapshots_without_shifting_dml
     let stored_snapshots = state_store.get_table_schemas().await;
     let stored_snapshot_ids =
         stored_snapshots[&table_id].iter().map(|(snapshot_id, _)| *snapshot_id).collect::<Vec<_>>();
-    assert_eq!(stored_snapshot_ids, vec![relation_snapshot_ids[2]]);
+    assert_eq!(stored_snapshot_ids, vec![relation_snapshot_ids[4]]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

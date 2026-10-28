@@ -37,9 +37,9 @@
 //! A table-sync worker seeds `WithSchema` from its consistent initial-copy
 //! snapshot. The apply worker clears its entry before starting table sync, then
 //! establishes `WithSchema` from complete DDL metadata, an owned real relation,
-//! or durable `SyncDone` state
-//! after handover. Consequently, `WithSchema` also proves that the current
-//! apply connection can keep decoding after `SyncDone` becomes `Ready`.
+//! or durable `SyncDone` state after handover. Consequently, `WithSchema` also
+//! proves that the current apply connection can keep decoding after `SyncDone`
+//! becomes `Ready`.
 
 use std::sync::Arc;
 

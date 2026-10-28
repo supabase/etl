@@ -1134,8 +1134,7 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
     client
         .batch_execute(
             "alter table public.upgrade_identity replica identity using index \
-             upgrade_identity_value;
-             insert into public.upgrade_identity values (1, 10)",
+             upgrade_identity_value",
         )
         .await
         .unwrap();
@@ -1145,9 +1144,7 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
     client
         .batch_execute(
             "alter table public.upgrade_identity owner to current_user;
-             insert into public.upgrade_identity values (2, 20);
-             alter table public.upgrade_identity replica identity default;
-             insert into public.upgrade_identity values (3, 30)",
+             alter table public.upgrade_identity replica identity default",
         )
         .await
         .unwrap();
@@ -1185,6 +1182,130 @@ async fn source_upgrade_from_main_preserves_queued_identity_messages() {
         assert_eq!(legacy.relreplident, mode);
         assert_eq!(legacy.replica_identity_index_attnums, legacy_keys);
     }
+}
+
+/// Column output formats follow the configured SQLx migration connection rather
+/// than duplicated defaults in the migration SQL.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_migration_captures_connection_output_formats() {
+    let database = spawn_unmigrated_database().await;
+    let mut session_options = (*TEST_MIGRATION_OPTIONS).clone();
+    session_options.extra_float_digits = 1;
+    let options: PgConnectOptions = database.config.with_db(Some(&session_options));
+    let mut conn = PgConnection::connect_with(&options).await.unwrap();
+    let application_name: String =
+        sqlx::query_scalar("show application_name").fetch_one(&mut conn).await.unwrap();
+    assert_eq!(application_name, session_options.application_name);
+    conn.execute("create schema etl; set search_path = etl").await.unwrap();
+
+    source_migrator().run(&mut conn).await.unwrap();
+
+    let (count, matches_connection): (i64, bool) = sqlx::query_as(
+        "select count(*), bool_and(
+             split_part(config, '=', 2) = current_setting(split_part(config, '=', 1))
+         )
+         from pg_catalog.pg_proc p
+         cross join lateral unnest(p.proconfig) config
+         where p.oid = 'etl.describe_table_columns(pg_catalog.oid)'::regprocedure
+           and lower(split_part(config, '=', 1)) = any(array[
+               'datestyle', 'intervalstyle', 'extra_float_digits', 'timezone', 'bytea_output'
+           ])",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(count, 5);
+    assert!(matches_connection);
+    let float_setting: String =
+        sqlx::query_scalar("show extra_float_digits").fetch_one(&mut conn).await.unwrap();
+    assert_eq!(float_setting, "1");
+}
+
+/// The production migration runner applies shared ETL options at connection
+/// startup, overriding conflicting database defaults.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_migrations_use_shared_connection_defaults() {
+    let database = spawn_unmigrated_database().await;
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "alter database {} set extra_float_digits = -15",
+            quote_identifier(&database.config.name)
+        ))
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    let mut conn = migration_connection(&database.config).await;
+    let captured: String = sqlx::query_scalar(
+        "select split_part(config, '=', 2)
+         from pg_catalog.pg_proc p
+         cross join lateral unnest(p.proconfig) config
+         where p.oid = 'etl.describe_table_columns(pg_catalog.oid)'::regprocedure
+           and split_part(config, '=', 1) = 'extra_float_digits'",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(captured, TEST_MIGRATION_OPTIONS.extra_float_digits.to_string());
+}
+
+/// Replacing a SECURITY DEFINER function retains its owner, even when another
+/// admin installs new private helpers needed by that function.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_upgrade_preserves_trigger_owner_helper_access() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut conn).await.unwrap();
+    drop(conn);
+
+    let owner = format!("ddl_owner_{}", Uuid::new_v4().simple());
+    let quoted_owner = quote_identifier(&owner);
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(&format!(
+            "create role {quoted_owner};
+             grant usage on schema etl to {quoted_owner};
+             grant execute on function etl.describe_table_schema(oid), \
+             etl.describe_table_identity(oid) to {quoted_owner};
+             create table public.owner_table (id integer primary key);
+             create publication owner_pub for table public.owner_table;
+             alter function etl.emit_schema_change_messages() owner to {quoted_owner};
+             alter table public.owner_table add column before_upgrade integer"
+        ))
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    let retained_owner: String = client
+        .query_one(
+            "select pg_catalog.pg_get_userbyid(proowner) from pg_catalog.pg_proc where oid = \
+             'etl.emit_schema_change_messages()'::pg_catalog.regprocedure",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(retained_owner, owner);
+    client
+        .batch_execute(
+            "alter table public.owner_table add column after_upgrade integer;
+             alter publication owner_pub set (publish = 'insert')",
+        )
+        .await
+        .unwrap();
+
+    client
+        .batch_execute(&format!(
+            "alter function etl.emit_schema_change_messages() owner to current_user;
+             drop owned by {quoted_owner}; drop role {quoted_owner}"
+        ))
+        .await
+        .unwrap();
 }
 
 /// Admin-installed source upgrades retain role access without exposing helpers

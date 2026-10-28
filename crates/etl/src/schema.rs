@@ -1136,7 +1136,8 @@ pub enum SchemaOperation {
     },
     /// Add a new logical column.
     AddColumn {
-        /// The state expected immediately after the column is added.
+        /// The target logical state, including the current source default and
+        /// captured add-time value. Destinations render their own DDL steps.
         after_column_schema: ColumnSchema,
         /// Why the column entered the replicated endpoint.
         reason: ColumnPresenceChangeReason,
@@ -1673,26 +1674,16 @@ impl SchemaOperationPlanner {
         Ok(())
     }
 
-    /// Phase 3: adds columns with captured missing values, then restores their
-    /// future defaults.
+    /// Phase 3: emits additions with their final schema and captured add-time
+    /// values for destinations to interpret according to their capabilities.
     fn plan_additions(&mut self, added_columns: &[ColumnAddition]) {
         for change in added_columns {
-            let final_column =
-                self.column_name_mapping.map_column_schema(&change.after_column_schema);
-            let mut initial_column = final_column.clone();
-            if change.reason == ColumnPresenceChangeReason::TableSchema
-                && let Some(expression) = &final_column.missing_value_expression
-            {
-                initial_column.default_expression =
-                    (!expression.eq_ignore_ascii_case("null")).then(|| expression.clone());
-            }
             self.operations.push(SchemaOperation::AddColumn {
-                after_column_schema: initial_column.clone(),
+                after_column_schema: self
+                    .column_name_mapping
+                    .map_column_schema(&change.after_column_schema),
                 reason: change.reason,
             });
-            if initial_column.default_expression != final_column.default_expression {
-                self.push_alteration(initial_column, final_column, ColumnAlterationKind::Default);
-            }
         }
     }
 
@@ -2568,10 +2559,10 @@ mod tests {
         assert!(diff.altered_columns.is_empty());
     }
 
-    /// Physical additions preserve missing values before installing the future
-    /// default.
+    /// Logical additions retain both source values without synthesizing a
+    /// destination-specific default change in the shared plan.
     #[test]
-    fn schema_plan_separates_missing_values_from_future_defaults() {
+    fn schema_plan_retains_missing_values_and_future_defaults() {
         for (future_default, missing_value, initial_default) in
             [(Some("2"), "1", Some("1")), (Some("2"), "null", None), (None, "1", Some("1"))]
         {
@@ -2582,20 +2573,14 @@ mod tests {
                 .with_missing_value_expression(Some(missing_value.to_owned()));
             let after = create_replicated_schema(vec![id, column]);
             let plan = plan_schema_change(&before, &after, ColumnNameMapping::Identity);
-            let [
-                SchemaOperation::AddColumn { after_column_schema, reason },
-                SchemaOperation::AlterColumn { alteration },
-            ] = plan.ordered_operations()
+            let [SchemaOperation::AddColumn { after_column_schema, reason }] =
+                plan.ordered_operations()
             else {
-                panic!("the plan must add the column before restoring its default");
+                panic!("a logical addition must retain its metadata in one operation");
             };
             assert_eq!(*reason, ColumnPresenceChangeReason::TableSchema);
-            assert_eq!(after_column_schema.default_expression.as_deref(), initial_default);
-            assert_eq!(alteration.kind(), ColumnAlterationKind::Default);
-            assert_eq!(
-                alteration.after_column_schema().default_expression.as_deref(),
-                future_default
-            );
+            assert_eq!(after_column_schema.default_expression.as_deref(), future_default);
+            assert_eq!(after_column_schema.initial_default_expression(), initial_default);
             assert_operations_converge(&before, &after);
         }
     }

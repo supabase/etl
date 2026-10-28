@@ -67,7 +67,7 @@ use crate::{
             parse_event_from_insert_message, parse_event_from_truncate_message,
             parse_event_from_update_message, parse_replica_identity_column_names,
             parse_replicated_column_names, schema_snapshot_id_from_message,
-            update_message_payload_bytes,
+            update_message_payload_bytes, validate_relation_schema,
         },
     },
     replication::{
@@ -2156,42 +2156,31 @@ where
         .increment(1);
     }
 
-    /// Handles Postgres MESSAGE messages (pg_logical_emit_message).
+    /// Persists DDL snapshots and emits relation barriers in WAL order.
     ///
-    /// For `supabase_etl_ddl`, we persist the new table schema and emit a
-    /// synthetic relation event in this connection's WAL order using the
-    /// publication columns and identity captured by the trigger. This
-    /// preserves intermediate DDL effects even without later rows. Real
-    /// PostgreSQL relation messages keep their normal path; destinations
-    /// treat an identical snapshot and mask as an idempotent notification.
+    /// Captured publication columns and identity produce a synthetic relation
+    /// immediately, preserving intermediate DDL effects without later rows.
+    /// This includes publication column-list changes whose full-table schema
+    /// stays identical. Real PostgreSQL relations follow their normal path;
+    /// destinations treat repeated snapshots and masks idempotently.
     ///
     /// Table-sync workers emit events only for their owned table, while apply
     /// skips that table until handover. This preserves per-worker order, not
     /// global schema order between independently owned tables.
     ///
-    /// Supported publication DDL also advances this cursor: a column-list
-    /// change needs an ordered snapshot for its new replication mask even
-    /// though the stored full-table columns can remain identical.
-    ///
-    /// `pgoutput_message()` emits the decoded logical message directly. A
-    /// protocol relation follows lazily before a row or truncate when
-    /// PostgreSQL's relation cache needs refreshing. This is independent of
-    /// ETL's snapshot lineage: maintenance can resend a relation without a
-    /// DDL message, and no-op DDL can emit a message without invalidating
-    /// the relation cache.
+    /// PostgreSQL's relation cache is independent of ETL's snapshot lineage:
+    /// maintenance can resend a relation without DDL, and no-op DDL can emit a
+    /// message without invalidating that cache.
     ///
     /// Legacy payloads without publication columns retain the pending-relation
-    /// fallback. When no relation follows DDL, the first row combines the
-    /// pending schema with the previous masks and emits a
-    /// destination-facing relation event. A received relation replaces
-    /// those fallback masks before row decoding. Without previous masks, a
-    /// table-sync worker must wait for a relation before handing over its
-    /// decoding state.
+    /// fallback. The next row combines the pending schema with previous masks
+    /// and emits a relation barrier unless a real relation replaces them
+    /// first. Without previous masks, table sync must wait for a relation
+    /// before handing over its decoding state.
     async fn handle_message(
         &mut self,
         message: &protocol::MessageBody,
     ) -> EtlResult<HandleMessageResult> {
-        // If the prefix is unknown, we don't want to process it.
         let prefix = message.prefix()?;
         if prefix != DDL_MESSAGE_PREFIX {
             warn!(
@@ -2287,7 +2276,6 @@ where
             "received ddl schema change message"
         );
 
-        // Store the new schema version in the store.
         let table_schema = match self.schema_store.store_table_schema(table_schema).await {
             Ok(table_schema) => table_schema,
             Err(err) => {
@@ -2480,6 +2468,7 @@ where
                 schema_selection,
                 &replicated_columns,
                 &identity_columns,
+                message,
             )
             .await?;
 
@@ -2611,6 +2600,7 @@ where
         schema_selection: RelationSchemaSelection,
         replicated_columns: &HashSet<String>,
         identity_columns: &HashSet<String>,
+        message: &protocol::RelationBody,
     ) -> EtlResult<ReplicatedTableSchema> {
         let table_schema = self.get_table_schema_for_relation(table_id, schema_selection).await?;
 
@@ -2618,6 +2608,7 @@ where
         let identity_mask = IdentityMask::try_build(&table_schema, identity_columns)?;
         let replicated_table_schema =
             ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+        validate_relation_schema(&replicated_table_schema, message)?;
 
         self.table_decoding_states
             .insert(table_id, TableDecodingState::WithSchema(replicated_table_schema.clone()));
@@ -4187,8 +4178,8 @@ mod apply_worker {
     /// Apply-side decoding state is cleared before table sync starts.
     /// Consequently, a later [`TableDecodingState::WithSchema`] proves that
     /// this connection now has a complete decoder: relation-less DML restored
-    /// it from `SyncDone`, or an owned relation materialized it. Only then may
-    /// `Ready` discard the durable fallback.
+    /// it from `SyncDone`, or owned DDL or relation metadata materialized it.
+    /// Only then may `Ready` discard the durable fallback.
     ///
     /// The `WithSchema` check does not make a table that is already `Ready`
     /// safer across restart. The persisted-checkpoint condition provides that
@@ -4196,14 +4187,13 @@ mod apply_worker {
     /// same check only because the restarted loop is now the current connection
     /// whose decoder must be established before it stores `Ready`.
     ///
-    /// A handled DDL records a pending relation while retaining any previous
-    /// masks. PostgreSQL's following relation materializes the new exact
-    /// snapshot and masks. A relation-less row instead combines the retained
-    /// masks with the stored new table schema and transitions to `WithSchema`.
+    /// Complete DDL metadata installs `WithSchema` immediately. Legacy DDL
+    /// instead retains previous masks in a pending relation until a protocol
+    /// relation or relation-less row materializes its new snapshot.
     ///
     /// A table which lacks local decoding state remains in `SyncDone`; this
     /// does not block owned changes at or after the boundary. Its first
-    /// relation or DML can materialize the decoder on demand.
+    /// DDL, relation, or DML can materialize the decoder on demand.
     fn can_transition_to_ready(
         current_lsn: PgLsn,
         persisted_checkpoint_lsn: Option<PgLsn>,
@@ -4870,15 +4860,18 @@ mod tests {
         use proptest::{
             bool::weighted,
             collection::vec,
-            prop_assert, prop_assert_eq, prop_oneof,
+            prop_assert_eq, prop_oneof,
             strategy::{Just, Strategy},
             test_runner::TestCaseError,
         };
-        use tokio_postgres::types::Type;
+        use tokio_postgres::types::{Kind, Type};
 
         use crate::{
             error::EtlResult,
-            postgres::codec::{parse_replica_identity_column_names, parse_replicated_column_names},
+            postgres::codec::{
+                parse_replica_identity_column_names, parse_replicated_column_names,
+                validate_relation_schema,
+            },
             schema::{
                 ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, TableId,
                 TableName, TableSchema,
@@ -5006,14 +4999,17 @@ mod tests {
                 )
         }
 
-        /// Generates staleness that keeps relation order and types aligned
-        /// with the snapshot whenever every relation name is known.
-        fn order_preserving_staleness() -> impl Strategy<Value = StaleSnapshot> {
+        /// Generates current snapshots and stale names, types, and columns.
+        fn snapshot_staleness() -> impl Strategy<Value = StaleSnapshot> {
             prop_oneof![
                 Just(StaleSnapshot::Current),
                 (0..MAX_COLUMNS).prop_map(StaleSnapshot::ColumnAdded),
                 (0..=MAX_COLUMNS, 0..COLUMN_TYPES.len()).prop_map(|(index, type_index)| {
                     StaleSnapshot::ColumnDropped(index, type_index)
+                }),
+                vec((0..MAX_COLUMNS, 0..MAX_COLUMNS), 1..=3).prop_map(StaleSnapshot::NamesPermuted),
+                (0..MAX_COLUMNS, 0..COLUMN_TYPES.len()).prop_map(|(index, type_index)| {
+                    StaleSnapshot::TypeChanged(index, type_index)
                 }),
             ]
         }
@@ -5031,7 +5027,7 @@ mod tests {
                 bytes.put_i8(i8::from(*flagged));
                 bytes.put_slice(name.as_bytes());
                 bytes.put_u8(0);
-                bytes.put_i32(i32::try_from(typ.oid()).unwrap());
+                bytes.put_u32(typ.oid());
                 bytes.put_i32(-1);
             }
             bytes.freeze()
@@ -5077,14 +5073,27 @@ mod tests {
             let replication_mask = ReplicationMask::try_build(&table_schema, &replicated_columns)?;
             let identity_mask = IdentityMask::try_build(&table_schema, &identity_columns)?;
 
-            Ok(ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask))
+            let schema =
+                ReplicatedTableSchema::from_masks(table_schema, replication_mask, identity_mask);
+            validate_relation_schema(&schema, relation)?;
+            Ok(schema)
         }
 
-        /// Checks that a successful materialization agrees with the relation
-        /// position by position.
+        /// Checks that materialization succeeds exactly when the stored
+        /// publication projection agrees with every source tuple position.
         fn check_relation_agreement(case: &RelationCase) -> Result<(), TestCaseError> {
             let relation = parse_relation(&encode_relation(case));
-            let Ok(replicated_table_schema) = materialize(stored_schema(case), &relation) else {
+            let stored_projection: Vec<_> = case
+                .stored_columns
+                .iter()
+                .filter(|(name, _)| case.relation_columns.iter().any(|(sent, _, _)| sent == name))
+                .map(|(name, typ)| (name, typ))
+                .collect();
+            let source_columns: Vec<_> =
+                case.relation_columns.iter().map(|(name, typ, _)| (name, typ)).collect();
+            let result = materialize(stored_schema(case), &relation);
+            prop_assert_eq!(result.is_ok(), stored_projection == source_columns);
+            let Ok(replicated_table_schema) = result else {
                 return Ok(());
             };
 
@@ -5100,10 +5109,6 @@ mod tests {
                 })
                 .collect();
             prop_assert_eq!(decoder_columns, relation_columns);
-            prop_assert_eq!(
-                replicated_table_schema.column_schemas().len(),
-                relation.columns().len()
-            );
 
             let decoder_identity: Vec<&str> = replicated_table_schema
                 .identity_column_schemas()
@@ -5119,10 +5124,6 @@ mod tests {
                 .map(|column| column.name().unwrap())
                 .collect();
             prop_assert_eq!(decoder_identity, relation_identity);
-            prop_assert!(
-                replicated_table_schema.identity_column_schemas().len()
-                    == replicated_table_schema.identity_column_schemas().count()
-            );
 
             Ok(())
         }
@@ -5145,68 +5146,63 @@ mod tests {
             }
         }
 
-        // Name-permuting and type-changing staleness is excluded here because
-        // materialization currently accepts it with misaligned columns; see
-        // the ignored `relation_materialization_rejects_permuted_names` and
-        // `relation_materialization_rejects_changed_types`.
+        /// Current and stale snapshots must preserve tuple and identity
+        /// alignment or fail before they become decoders.
         #[test]
         fn relation_materialization_agrees_with_relation_columns() {
             run_property(
                 "relation materialization agreement",
-                &relation_case(order_preserving_staleness()),
+                &relation_case(snapshot_staleness()),
                 check_relation_agreement,
             );
         }
 
+        /// A stale snapshot after a name swap would exchange the row's values.
         #[test]
-        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
-                    positions"]
-        fn relation_materialization_rejects_permuted_names() {
-            let swaps = vec((0..MAX_COLUMNS, 0..MAX_COLUMNS), 1..=3);
-            run_property(
-                "relation materialization with permuted names",
-                &relation_case(swaps.prop_map(StaleSnapshot::NamesPermuted)),
-                check_relation_agreement,
-            );
-        }
-
-        #[test]
-        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
-        fn relation_materialization_rejects_changed_types() {
-            let type_change = (0..MAX_COLUMNS, 0..COLUMN_TYPES.len())
-                .prop_map(|(index, type_index)| StaleSnapshot::TypeChanged(index, type_index));
-            run_property(
-                "relation materialization with changed types",
-                &relation_case(type_change),
-                check_relation_agreement,
-            );
-        }
-
-        // Minimal counterexample: `alter table root rename a to tmp; rename b
-        // to a; rename tmp to b` reaches a partition leaf with no DDL message,
-        // so its stored snapshot still says (a, b) while the relation says
-        // (b, a). Rows would put source `b` into destination `a`.
-        #[test]
-        #[ignore = "known defect: relation masks match by name, so renamed columns decode at stale \
-                    positions"]
         fn relation_with_swapped_column_names_is_not_materialized_at_stale_positions() {
             let case = published_case(
                 &[("b", Type::INT4), ("a", Type::INT4)],
                 &[("a", Type::INT4), ("b", Type::INT4)],
             );
 
-            check_relation_agreement(&case).unwrap();
+            let relation = parse_relation(&encode_relation(&case));
+            let error = materialize(stored_schema(&case), &relation).unwrap_err();
+            assert_eq!(error.kind(), crate::error::ErrorKind::InvalidState);
         }
 
-        // Minimal counterexample: `alter table root alter column a type int8`
-        // reaches a partition leaf with no DDL message, so its stored
-        // snapshot still decodes `a` as `int4`.
+        /// A stale integer type would reject or misrepresent later row values.
         #[test]
-        #[ignore = "known defect: relation column types are never compared with the stored snapshot"]
         fn relation_with_changed_column_type_is_not_materialized_with_the_stale_type() {
             let case = published_case(&[("a", Type::INT8)], &[("a", Type::INT4)]);
 
-            check_relation_agreement(&case).unwrap();
+            let relation = parse_relation(&encode_relation(&case));
+            let error = materialize(stored_schema(&case), &relation).unwrap_err();
+            assert_eq!(error.kind(), crate::error::ErrorKind::InvalidState);
+        }
+
+        /// A precision or length change must not keep stale destination
+        /// metadata.
+        #[test]
+        fn relation_with_changed_type_modifier_is_rejected() {
+            let case = published_case(&[("a", Type::VARCHAR)], &[("a", Type::VARCHAR)]);
+            let mut bytes = encode_relation(&case).to_vec();
+            *bytes.last_chunk_mut::<4>().unwrap() = 14_i32.to_be_bytes();
+            let relation = parse_relation(&Bytes::from(bytes));
+
+            let error = materialize(stored_schema(&case), &relation).unwrap_err();
+            assert_eq!(error.kind(), crate::error::ErrorKind::InvalidState);
+        }
+
+        /// Custom type OIDs retain the captured schema's text fallback.
+        #[test]
+        fn relation_with_unknown_type_uses_text_metadata() {
+            let custom_type =
+                Type::new("custom".to_owned(), u32::MAX, Kind::Simple, "public".to_owned());
+            let case = published_case(&[("a", custom_type)], &[("a", Type::TEXT)]);
+            let relation = parse_relation(&encode_relation(&case));
+
+            let schema = materialize(stored_schema(&case), &relation).unwrap();
+            assert_eq!(schema.column_schemas().next().unwrap().typ, Type::TEXT);
         }
     }
 }

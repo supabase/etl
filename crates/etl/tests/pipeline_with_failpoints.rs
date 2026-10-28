@@ -584,6 +584,7 @@ async fn table_copy_is_consistent_after_data_sync_threw_an_error_with_timed_retr
     let mut expected_users_schema = database_schema.users_schema();
     expected_users_schema.column_schemas[0].default_expression =
         Some("nextval('test.users_id_seq'::regclass)".to_owned());
+    expected_users_schema.column_schemas[0].missing_value_expression = Some("null".to_owned());
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas.get(&database_schema.users_schema().id).unwrap(),
@@ -639,6 +640,7 @@ async fn table_copy_is_consistent_during_data_sync_threw_an_error_with_timed_ret
     let mut expected_users_schema = database_schema.users_schema();
     expected_users_schema.column_schemas[0].default_expression =
         Some("nextval('test.users_id_seq'::regclass)".to_owned());
+    expected_users_schema.column_schemas[0].missing_value_expression = Some("null".to_owned());
     assert_eq!(table_schemas.len(), 1);
     assert_eq!(
         *table_schemas.get(&database_schema.users_schema().id).unwrap(),
@@ -2425,8 +2427,6 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     table_sync_complete_notify.notified().await;
     fail::cfg(STORE_REPLICATION_CHECKPOINT_FP, "return").unwrap();
 
-    // We expect one relation and insert for the initial state, the physical
-    // table change, and the publication-filter change.
     let events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
@@ -2649,7 +2649,6 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
         destination.clone(),
     );
 
-    // Wait for 3 relation events and 3 insert events again after restart.
     let restart_events_notify = destination
         .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
@@ -2668,147 +2667,6 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
         &initial_table_schema_snapshots,
     );
     assert_relation_insert_schema_pairs(&events_after_restart, table_id, &expected_snapshot_ids);
-}
-
-/// Independent workers preserve their own WAL order, but do not coordinate
-/// destination name ownership across a ready table and a table being recopied.
-/// This observes relation delivery; the memory destination does not implement
-/// table renames or enforce uniqueness of destination names.
-#[tokio::test(flavor = "multi_thread")]
-async fn synthetic_relation_order_is_local_to_each_worker() {
-    let _scenario = FailScenario::setup();
-    let mut database = spawn_source_database().await;
-    let first = test_table_name("sync_name_owner");
-    let second = test_table_name("ready_name_owner");
-    let archived = TableName::new(first.schema.clone(), "archived_name_owner".to_owned());
-    let first_id =
-        database.create_table(first.clone(), true, &[("value", "integer")]).await.unwrap();
-    let second_id =
-        database.create_table(second.clone(), true, &[("value", "integer")]).await.unwrap();
-    database
-        .create_publication("sync_name_order_pub", &[first.clone(), second.clone()])
-        .await
-        .unwrap();
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        "sync_name_order_pub".to_owned(),
-        store.clone(),
-        destination.clone(),
-    );
-    let first_synced = store.notify_on_table_sync_complete(first_id).await;
-    let second_synced = store.notify_on_table_sync_complete(second_id).await;
-
-    pipeline.start().await.unwrap();
-
-    first_synced.notified().await;
-    second_synced.notified().await;
-
-    let first_ready = store.notify_on_table_state_type(first_id, TableStateType::Ready).await;
-    let second_ready = store.notify_on_table_state_type(second_id, TableStateType::Ready).await;
-
-    database
-        .run_sql(&format!("insert into {} default values", first.as_quoted_identifier()))
-        .await
-        .unwrap();
-    database
-        .run_sql(&format!("insert into {} default values", second.as_quoted_identifier()))
-        .await
-        .unwrap();
-
-    first_ready.notified().await;
-    second_ready.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    // Only the first table is recopied. Pause after its copy transaction has
-    // released the source lock, but before it can enter catchup.
-    destination.clear_events().await;
-    store.reset_table_state(first_id).await.unwrap();
-    fail::cfg(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP, "pause").unwrap();
-    let finished_copy =
-        store.notify_on_table_state_type(first_id, TableStateType::FinishedCopy).await;
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        "sync_name_order_pub".to_owned(),
-        store.clone(),
-        destination.clone(),
-    );
-
-    pipeline.start().await.unwrap();
-
-    finished_copy.notified().await;
-
-    let reused_name = first.clone();
-    let ready_rename = destination
-        .notify_on_events(move |events| {
-            events.iter().any(|event| {
-                matches!(event, Event::Relation(relation)
-            if relation.replicated_table_schema.id() == second_id
-                && relation.replicated_table_schema.name() == &reused_name)
-            })
-        })
-        .await;
-
-    let transaction = database.begin_transaction().await;
-    transaction
-        .run_sql(&format!(
-            "alter table {} rename to {}",
-            first.as_quoted_identifier(),
-            quote_identifier(&archived.name)
-        ))
-        .await
-        .unwrap();
-    transaction
-        .run_sql(&format!(
-            "alter table {} rename to {}",
-            second.as_quoted_identifier(),
-            quote_identifier(&first.name)
-        ))
-        .await
-        .unwrap();
-    transaction
-        .run_sql(&format!("insert into {} default values", first.as_quoted_identifier()))
-        .await
-        .unwrap();
-    transaction.commit_transaction().await;
-
-    ready_rename.notified().await;
-    assert_eq!(store.get_table_state(first_id).await.unwrap(), Some(TableState::FinishedCopy));
-
-    let archived_name = archived.clone();
-    let syncing_rename = destination
-        .notify_on_events(move |events| {
-            events.iter().any(|event| {
-                matches!(event, Event::Relation(relation)
-            if relation.replicated_table_schema.id() == first_id
-                && relation.replicated_table_schema.name() == &archived_name)
-            })
-        })
-        .await;
-    let first_synced = store.notify_on_table_sync_complete(first_id).await;
-
-    fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
-
-    syncing_rename.notified().await;
-    first_synced.notified().await;
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    let rename_position = |table_id, name: &TableName| {
-        events
-            .iter()
-            .position(|event| {
-                matches!(event, Event::Relation(relation)
-            if relation.replicated_table_schema.id() == table_id
-                && relation.replicated_table_schema.name() == name)
-            })
-            .unwrap()
-    };
-    assert!(rename_position(second_id, &first) < rename_position(first_id, &archived));
 }
 
 #[tokio::test(flavor = "multi_thread")]

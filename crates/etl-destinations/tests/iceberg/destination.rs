@@ -54,13 +54,20 @@ async fn unchanged_relation_refresh_preserves_rows_and_replay_guards() {
         .store_table_schema(TableSchema::new(
             TableId::new(1),
             TableName::new("public".to_owned(), "unchanged_refresh".to_owned()),
-            vec![ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false).with_primary_key(1)],
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1)
+                    .with_default_expression("2".to_owned())
+                    .with_missing_value_expression(Some("1".to_owned())),
+            ],
         ))
         .await
         .unwrap();
     let old = ReplicatedTableSchema::all(Arc::clone(&schema));
     let mut newer = (*schema).clone();
     newer.snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(10));
+    // A source heap rewrite can clear the hint without changing its schema.
+    newer.column_schemas[0].missing_value_expression = Some("null".to_owned());
     let new = ReplicatedTableSchema::all(store.store_table_schema(newer).await.unwrap());
     let destination = IcebergDestination::new(
         client.clone(),
@@ -111,14 +118,10 @@ async fn unchanged_relation_refresh_preserves_rows_and_replay_guards() {
     invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, vec![relation(&new)])
         .await
         .unwrap();
-    let stale = invoke_write_events(
-        &restarted,
-        WriteEventsDurability::RequireDurable,
-        vec![relation(&old)],
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(stale.kind(), etl::error::ErrorKind::DestinationSchemaRewind);
+    // An older relation is a replay marker and leaves metadata unchanged.
+    invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, vec![relation(&old)])
+        .await
+        .unwrap();
     let mut changed = new.inner().clone();
     changed.snapshot_id = SnapshotId::new(PgLsn::from(30), PgLsn::from(25));
     changed.column_schemas.push(ColumnSchema::new("extra".to_owned(), Type::INT4, -1, 2, true));

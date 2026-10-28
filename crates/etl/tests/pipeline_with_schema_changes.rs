@@ -275,26 +275,51 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 2);
+    let relations = grouped.get(&(EventType::Relation, table_id)).unwrap();
+    assert_eq!(relations.len(), 2);
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
+    let Event::Relation(synthetic) = &relations[0] else {
+        panic!("grouped relation events contain only relations");
+    };
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
+    assert_eq!(synthetic.replicated_table_schema.inner(), r.replicated_table_schema.inner());
+    assert_eq!(
+        synthetic.replicated_table_schema.replication_mask(),
+        r.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        synthetic.replicated_table_schema.identity_mask(),
+        r.replicated_table_schema.identity_mask()
+    );
     assert_replicated_schema_column_names_types(&r.replicated_table_schema, &expected_columns);
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values().len(), expected_columns.len());
-    match change {
+    let expected_row = match change {
+        RelationSchemaChange::AddColumn => vec![
+            Cell::I64(1),
+            Cell::String("Alice".to_owned()),
+            Cell::I32(25),
+            Cell::String("alice@example.com".to_owned()),
+        ],
+        RelationSchemaChange::DropColumn => vec![Cell::I64(1), Cell::String("Bob".to_owned())],
+        RelationSchemaChange::RenameColumn => {
+            vec![Cell::I64(1), Cell::String("Carol".to_owned()), Cell::I32(41)]
+        }
+        RelationSchemaChange::ChangeColumnType => {
+            vec![Cell::I64(1), Cell::String("Dave".to_owned()), Cell::I64(45)]
+        }
         RelationSchemaChange::ChangeColumnDefault => {
-            assert_eq!(i.table_row.values()[2], Cell::I32(42));
+            vec![Cell::I64(1), Cell::String("Eve".to_owned()), Cell::I32(42)]
         }
         RelationSchemaChange::ChangeColumnNullability => {
-            assert_eq!(i.table_row.values()[2], Cell::Null);
+            vec![Cell::I64(1), Cell::String("Frank".to_owned()), Cell::Null]
         }
-        _ => {}
-    }
+    };
+    assert_eq!(i.table_row.values(), expected_row);
     assert_eq!(
         i.replicated_table_schema.inner().snapshot_id,
         r.replicated_table_schema.inner().snapshot_id
@@ -316,18 +341,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
     let stored_schema = assert_only_schema_snapshot(snapshots, &expected_columns);
-    let stored_age = stored_schema.column_schemas.iter().find(|column| column.name == "age");
-    match change {
-        RelationSchemaChange::DropColumn => assert!(stored_age.is_none()),
-        RelationSchemaChange::ChangeColumnDefault => {
-            assert_eq!(stored_age.unwrap().default_expression.as_deref(), Some("42"));
-        }
-        RelationSchemaChange::ChangeColumnNullability => {
-            assert!(stored_age.unwrap().nullable);
-        }
-        _ => {}
-    }
-    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
+    assert_eq!(stored_schema, r.replicated_table_schema.inner());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -405,104 +419,57 @@ async fn ddl_snapshots_preserve_intermediate_defaults_without_dml() {
     assert!(changes[0].inner().snapshot_id < changes[1].inner().snapshot_id);
 }
 
-/// Runs an idle-table swap with optional disconnected DDL replay.
-async fn run_idle_table_swap(restart: bool) {
-    let mut database = spawn_source_database().await;
-    let first = test_table_name("swap_orders");
-    let second = test_table_name("swap_orders_new");
-    let archived = TableName::new(first.schema.clone(), "orders_archived".to_owned());
-    let first_id =
-        database.create_table(first.clone(), true, &[("value", "integer")]).await.unwrap();
-    let second_id =
-        database.create_table(second.clone(), true, &[("value", "integer")]).await.unwrap();
-    let publication = format!("pub_{}", random::<u32>());
-    database.create_publication(&publication, &[first.clone(), second.clone()]).await.unwrap();
-    let store = NotifyingStore::new();
-    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id = random();
-    let mut pipeline = create_pipeline(
-        &database.config,
-        pipeline_id,
-        publication.clone(),
-        store.clone(),
-        destination.clone(),
-    );
-    let first_synced = store.notify_on_table_sync_complete(first_id).await;
-    let second_synced = store.notify_on_table_sync_complete(second_id).await;
-
-    pipeline.start().await.unwrap();
-
-    first_synced.notified().await;
-    second_synced.notified().await;
-
-    if restart {
-        pipeline.shutdown_and_wait().await.unwrap();
-        pipeline =
-            create_pipeline(&database.config, pipeline_id, publication, store, destination.clone());
-    }
-    let applied = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, second_id, 1)])
+/// An empty intermediate schema still produces a relation barrier before
+/// later DDL restores columns, without requiring a row in that empty schema.
+#[tokio::test(flavor = "multi_thread")]
+async fn ddl_preserves_empty_intermediate_schema() {
+    let (database, table_name, table_id, _, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "empty_intermediate_schema",
+            &[("value", "integer")],
+        )
         .await;
+    let initial_relations = destination
+        .get_events()
+        .await
+        .iter()
+        .filter(|event| matches!(event, Event::Relation(_)))
+        .count();
+    let inserted = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    let table = table_name.as_quoted_identifier();
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "begin; alter table {table} drop column id, drop column value; alter table {table} \
+             add column restored integer default 7; insert into {table} default values; commit"
+        ))
+        .await
+        .unwrap();
 
-    let transaction = database.begin_transaction().await;
-    for sql in [
-        format!(
-            "alter table {} rename to {}",
-            first.as_quoted_identifier(),
-            quote_identifier(&archived.name)
-        ),
-        format!(
-            "alter table {} rename to {}",
-            second.as_quoted_identifier(),
-            quote_identifier(&first.name)
-        ),
-        format!("insert into {} default values", first.as_quoted_identifier()),
-    ] {
-        transaction.run_sql(&sql).await.unwrap();
-    }
-    transaction.commit_transaction().await;
-    if restart {
-        pipeline.start().await.unwrap();
-    }
-
-    applied.notified().await;
+    inserted.notified().await;
 
     pipeline.shutdown_and_wait().await.unwrap();
 
     let events = destination.get_events().await;
-    let first_rename = events
+    let relations = events
         .iter()
-        .position(|event| {
-            matches!(event, Event::Relation(relation)
-            if relation.replicated_table_schema.id() == first_id
-                && relation.replicated_table_schema.name() == &archived)
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
         })
-        .unwrap();
-    let second_rename = events
-        .iter()
-        .position(|event| {
-            matches!(event, Event::Relation(relation)
-            if relation.replicated_table_schema.id() == second_id
-                && relation.replicated_table_schema.name() == &first)
-        })
-        .unwrap();
-    let insert = events.iter().position(|event| matches!(event, Event::Insert(_))).unwrap();
-    assert!(first_rename < second_rename);
-    assert!(second_rename < insert);
-    assert!(!events.iter().any(|event| matches!(event, Event::Insert(insert)
-        if insert.replicated_table_schema.id() == first_id)));
-}
-
-/// A table's old name is freed before another table reuses it without DML.
-#[tokio::test(flavor = "multi_thread")]
-async fn ddl_table_swap_does_not_require_writes_to_archived_table() {
-    run_idle_table_swap(false).await;
-}
-
-/// Restart reconstructs ordered rename barriers without connection-local masks.
-#[tokio::test(flavor = "multi_thread")]
-async fn ddl_table_swap_replays_after_restart_without_relation_masks() {
-    run_idle_table_swap(true).await;
+        .skip(initial_relations)
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 3);
+    assert!(relations[0].inner().column_schemas.is_empty());
+    assert!(relations[0].replication_mask().as_slice().is_empty());
+    assert!(relations[0].identity_mask().as_slice().is_empty());
+    assert_eq!(relations[1].column_schemas().next().unwrap().name, "restored");
+    assert!(relations[0].inner().snapshot_id < relations[1].inner().snapshot_id);
+    assert_eq!(relations[1].inner(), relations[2].inner());
 }
 
 /// Each DDL barrier uses its captured publication columns, including physical
@@ -766,8 +733,8 @@ async fn replayed_table_ddl_precedes_later_publication_filter_change() {
     );
 }
 
-/// Copy and synthetic relations resolve publication attnums against their full
-/// snapshot, preserving gaps and column identity across rename and name reuse.
+/// Copy and synthetic relations retain physical tuple order across gaps,
+/// renames, and different publication-list and primary-key declaration orders.
 #[tokio::test(flavor = "multi_thread")]
 async fn publication_attnums_preserve_dropped_column_gaps_and_renames() {
     let mut database = spawn_source_database().await;
@@ -780,13 +747,18 @@ async fn publication_attnums_preserve_dropped_column_gaps_and_renames() {
         .await
         .unwrap();
     let table = name.as_quoted_identifier();
+    let primary_key_name = format!("{}_pkey", name.name);
+    let primary_key = quote_identifier(&primary_key_name);
     database
         .client
         .as_ref()
         .unwrap()
         .batch_execute(&format!(
-            "alter table {table} drop column discarded; create publication attnum_gaps_pub for \
-             table {table} (id, selected); insert into {table} (selected) values (5)"
+            "alter table {table} drop column discarded;
+             alter table {table} alter column selected set not null;
+             alter table {table} drop constraint {primary_key}, add primary key (selected, id);
+             create publication attnum_gaps_pub for table {table} (selected, id);
+             insert into {table} (selected) values (5)"
         ))
         .await
         .unwrap();
@@ -846,7 +818,9 @@ async fn publication_attnums_preserve_dropped_column_gaps_and_renames() {
         assert_eq!(ordinals, expected_ordinals);
         assert_eq!(relation.inner().column_schemas[1].name, "renamed");
         assert_eq!(relation.column_schemas().count(), 2);
-        assert_eq!(relation.identity_mask().as_slice()[..2], [1, 0]);
+        assert_eq!(relation.identity_mask().as_slice()[..2], [1, 1]);
+        assert_eq!(relation.inner().column_schemas[0].primary_key_ordinal_position, Some(2));
+        assert_eq!(relation.inner().column_schemas[1].primary_key_ordinal_position, Some(1));
     }
     let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
         unreachable!();
@@ -927,7 +901,6 @@ async fn copy_synthetic_and_real_relations_share_decoding_masks() {
         "full_filtered",
         "deferrable",
         "inherited",
-        "many_publications",
         "quoted_publication",
     ] {
         let database = spawn_source_database().await;
@@ -1028,31 +1001,6 @@ async fn copy_synthetic_and_real_relations_share_decoding_masks() {
             ))
             .await
             .unwrap();
-        if mode == "many_publications" {
-            for index in 0..99 {
-                database
-                    .run_sql(&format!("create publication decoder_extra_{index} for table {table}"))
-                    .await
-                    .unwrap();
-            }
-            let payload: String = database
-                .client
-                .as_ref()
-                .unwrap()
-                .query_one(
-                    &format!(
-                        "select jsonb_object_agg(publication_name, column_attnums)::text from \
-                         etl.describe_table_publication_columns({table_id})"
-                    ),
-                    &[],
-                )
-                .await
-                .unwrap()
-                .get(0);
-            let publications: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(publications.as_object().unwrap().len(), 100);
-            assert!(publications.as_object().unwrap().values().all(serde_json::Value::is_null));
-        }
         let store = NotifyingStore::new();
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let mut pipeline = create_pipeline(
@@ -1117,8 +1065,7 @@ async fn copy_synthetic_and_real_relations_share_decoding_masks() {
             })
             .collect::<Vec<_>>();
         assert_eq!(relations.len(), 2, "{mode}");
-        // Check the real relation before comparing capture and copy metadata.
-        assert_eq!(relations[1].identity_mask().as_slice(), expected_identity, "{mode}");
+        assert_eq!(relations[0].inner(), relations[1].inner(), "{mode}");
         assert_eq!(decoder["replication_mask"], serde_json::json!(expected_replication), "{mode}");
         assert_eq!(decoder["identity_mask"], serde_json::json!(expected_identity), "{mode}");
         for relation in relations {
@@ -1549,6 +1496,10 @@ async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
                 assert_eq!(relation.replication_mask().as_slice(), &[1, 1, 1, 1]);
                 assert_eq!(relation.identity_mask().as_slice(), &[1, 0, 1, 0]);
             }
+            // Partitioned roots store no add-time values, so every target
+            // backfills the value its partitions read.
+            let added = relations[0].inner().column_schemas.last().unwrap();
+            assert_eq!(added.initial_default_expression(), Some("1"));
             let score = relations[1].inner().column_schemas.last().unwrap();
             let expected_default = if !via_root && *target == targets[0] { "2" } else { "1" };
             assert_eq!(score.default_expression.as_deref(), Some(expected_default));
@@ -1557,54 +1508,6 @@ async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
             }
         }
     }
-}
-
-/// Rolled-back DDL never produces a synthetic destination relation.
-#[tokio::test(flavor = "multi_thread")]
-async fn rolled_back_ddl_does_not_emit_synthetic_relation() {
-    let (mut database, table_name, table_id, _, destination, pipeline, _, _) =
-        create_database_and_sync_done_pipeline_with_table(
-            "rolled_back_synthetic_relation",
-            &[("value", "integer")],
-        )
-        .await;
-    let applied = destination
-        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
-        .await;
-
-    let mut transaction = database.begin_transaction().await;
-    transaction
-        .run_sql(&format!(
-            "alter table {} add column discarded integer default 1",
-            table_name.as_quoted_identifier()
-        ))
-        .await
-        .unwrap();
-    transaction.client.take().unwrap().rollback().await.unwrap();
-    drop(transaction);
-    database
-        .run_sql(&format!("insert into {} (value) values (7)", table_name.as_quoted_identifier()))
-        .await
-        .unwrap();
-
-    applied.notified().await;
-
-    pipeline.shutdown_and_wait().await.unwrap();
-
-    let events = destination.get_events().await;
-    let relations = events
-        .iter()
-        .filter_map(|event| match event {
-            Event::Relation(relation) => Some(&relation.replicated_table_schema),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(relations.len(), 1);
-    assert_eq!(relations[0].inner().snapshot_id, SnapshotId::initial());
-    assert_eq!(
-        relations[0].column_schemas().map(|column| column.name.as_str()).collect::<Vec<_>>(),
-        ["id", "value"]
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

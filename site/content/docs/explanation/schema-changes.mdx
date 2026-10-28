@@ -172,6 +172,11 @@ without loading column metadata for unrelated tables. Explicit publication
 filters use column numbers already recorded in the snapshot, avoiding repeated
 column-name lookups for each publication.
 
+Default expressions are deparsed without opening each described table. This
+avoids extra relation-lock waits on published members or partition siblings;
+the source DDL still takes its normal PostgreSQL locks. Catalog scans, snapshot
+size, and WAL work still grow with the affected schemas and publications.
+
 The message includes only metadata needed for decoding and routing. Submitted
 SQL and detailed command descriptions are omitted, reducing WAL size and avoiding
 copying unrelated row literals from queries containing both DDL and DML.
@@ -187,7 +192,9 @@ A **real relation message** is PostgreSQL's `RELATION` protocol message, which
 normally arrives before a row change or truncate when its relation cache needs
 refreshing. ETL converts it to the same `Event::Relation`. Both notifications
 reach the destination; repeating an identical snapshot and replication mask
-does not reapply DDL.
+does not reapply DDL. A newer snapshot with the same replicated definition and
+table name advances destination metadata without physical schema DDL or an
+intermediate `Applying` state. Derived views can still need reconciliation.
 
 Real relation handling remains active for changes beyond the trigger's supported
 commands. For example, dropping a replica-identity index can change the real
@@ -212,9 +219,14 @@ A single statement can also assign different defaults to existing and future
 rows. For fast column additions, ETL captures PostgreSQL's stored missing value
 separately from the current default. For example, `ADD COLUMN score integer
 DEFAULT 1, ALTER COLUMN score SET DEFAULT 2` adds the destination column using
-`1` before installing `2`, where the destination supports those operations.
-Adding a column without a default and setting one in the same statement keeps
-existing rows `NULL`. This applies to supported built-in scalar literals;
+`1` where the destination supports add-time defaults. DuckLake then installs
+`2` for future omitted-column inserts. ClickHouse and Snowflake retain the
+add-time default; subsequent replicated rows carry their source values
+explicitly. BigQuery leaves existing rows `NULL` and installs only the current
+default. Adding a column without a default and setting one in the same statement
+keeps existing rows `NULL`. Partitioned tables store no missing values, so
+publishing through a partition root uses the current default. This applies to
+supported built-in scalar literals;
 arrays, custom types, heap rewrites, and volatile defaults retain the existing
 portability limitations. Publication-revealed columns still receive no
 historical backfill.
@@ -353,7 +365,7 @@ which affects only future inserts.
 | **[ClickHouse](https://clickhouse.com/docs/reference/statements/alter/column)** | Applies add, drop, rename, `NOT NULL` relaxation, create-time defaults, and supported literal add-column defaults. Later existing-column default changes are skipped because ClickHouse would apply them to rows stored before the column was added. Publication-added scalars are nullable and default-free; publication-added arrays are default-free and read as empty arrays for existing rows, because [`Nullable(Array(...))`](https://clickhouse.com/docs/reference/data-types/nullable) is unsupported. Type changes that change the ClickHouse type, and changes between `timestamp` and `timestamptz`, are rejected and require a resynchronization; changes that keep the ClickHouse type, such as a longer `varchar`, need no DDL. `ReplacingMergeTree` also rejects primary-key changes. |
 | **[DuckLake](https://ducklake.select/docs/stable/duckdb/usage/schema_evolution)** | Applies add, drop, rename, `NOT NULL` relaxation, and supported literal defaults transactionally. Publication-added columns are nullable and omit DuckLake initial defaults. ETL does not emit `DEFAULT(NULL)`; some catalog clients display an omitted default as `NULL`. Type DDL is skipped. |
 | **[Snowflake](https://docs.snowflake.com/en/sql-reference/sql/alter-table)** | Applies add, drop, rename, create-time defaults, and supported literal add-column defaults. Destination columns remain nullable. Publication-added columns omit defaults because Snowflake would populate old rows. Later existing-column default changes are skipped. Type DDL is skipped. |
-| **[Iceberg](https://iceberg.apache.org/spec/#schema-evolution)** | Deprecated. Accepts repeated relations and newer snapshots with identical source column metadata, table name, and publication mask. Rejects actual schema and publication-mask changes. |
+| **[Iceberg](https://iceberg.apache.org/spec/#schema-evolution)** | Deprecated. Accepts repeated relations and newer snapshots with unchanged column definitions, table name, and publication mask. Add-time missing-value hints do not change existing columns. Rejects actual schema and publication-mask changes. |
 
 See [Destinations](/reference/destinations/) for maturity, setup requirements,
 and broader destination limitations.
@@ -412,13 +424,13 @@ ETL does not infer missing recovery state:
 - An equal snapshot with a different replication mask is rejected because it
   has no valid schema ordering.
 
-Older relations never rewind destination DDL. ClickHouse, BigQuery, Snowflake,
-and Iceberg reject a replayed relation older than their applied destination
-snapshot. DuckLake skips older relations and uses durable per-table progress
-to discard already-applied rows and truncates before validating the remaining
-events against the applied schema. DuckLake commits that progress in the same
-transaction as the data changes; an older schema on an event outside that
-durable progress still fails validation.
+Older relations never rewind destination DDL. Every DDL statement has its own
+relation, so recovery can replay one after its successors were applied; all
+built-in destinations skip a relation older than their applied snapshot. Rows
+replayed at that older schema still fail validation. DuckLake first uses
+durable per-table progress to discard already-applied rows and truncates; it
+commits that progress in the same transaction as the data changes, so only
+events outside that progress are validated against the applied schema.
 
 Recovery then follows each destination's DDL guarantees:
 
@@ -501,9 +513,11 @@ PostgreSQL cache lookup.
 
 ETL combines stored schema snapshots with PostgreSQL `RELATION` messages to
 identify replicated columns. A column missing from a relation message can
-mean publication filtering or inconsistent schema history. Unknown columns
-can be rejected, but a valid-looking subset does not prove that the selected
-schema is correct.
+mean publication filtering or inconsistent schema history. ETL rejects unknown
+columns and mismatches in tuple order, decoded types, or type modifiers before
+installing a real relation's decoder. A valid-looking subset still does not
+prove that the selected schema is correct, and custom source types retain their
+text fallback.
 
 If schema history is inconsistent, resolve the source changes and
 resynchronize the affected table. Restarting the pipeline alone cannot repair

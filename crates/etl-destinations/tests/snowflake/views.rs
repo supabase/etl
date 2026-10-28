@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use etl::{
-    data::{Cell, TableRow},
+    data::{Cell, OldTableRow, TableRow},
     destination::{Destination as _, DestinationTableMetadata, WriteEventsDurability},
-    event::{Event, RelationEvent},
+    event::{DeleteEvent, Event, RelationEvent},
     schema::{
-        ColumnSchema, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema, Type,
+        ColumnSchema, IdentityMask, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
+        TableName, TableSchema, Type,
     },
     store::{SchemaStore, StateStore, TableState, TableStateLifecycleStore},
     test_utils::{
@@ -19,6 +20,102 @@ use serde_json::json;
 use crate::snowflake::common::{
     build_auth, companion_name, companion_query, quote, with_table_cleanup,
 };
+
+/// Replays authoritative relation metadata without writing source rows.
+async fn apply_relation(
+    destination: &Destination<NotifyingStore>,
+    schema: &ReplicatedTableSchema,
+) -> etl::error::EtlResult<()> {
+    write_events(
+        destination,
+        WriteEventsDurability::RequireDurable,
+        vec![Event::Relation(RelationEvent { replicated_table_schema: schema.clone() })],
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Restart must not invent a primary-key identity for raw history whose
+/// deletes identify rows through a different unique column.
+#[tokio::test]
+#[ignore = "requires Snowflake test credentials"]
+async fn alternative_replica_identity_remains_raw_only_after_restart() {
+    let auth = build_auth();
+    let config = auth.config().clone_without_credentials();
+    let sql = SqlClient::new(
+        config.clone_without_credentials(),
+        Arc::clone(&auth),
+        reqwest::Client::new(),
+    );
+    let name = format!("alternate_identity{}", uuid::Uuid::new_v4().simple());
+    let physical = format!("PUBLIC_{}", name.replace('_', "__")).to_uppercase();
+    let store = NotifyingStore::new();
+    let table = store
+        .store_table_schema(TableSchema::new(
+            TableId::new(1181),
+            TableName::new("public".into(), name),
+            vec![
+                ColumnSchema::new("id".into(), Type::INT4, -1, 1, false).with_primary_key(1),
+                ColumnSchema::new("external_id".into(), Type::INT4, -1, 2, false),
+            ],
+        ))
+        .await
+        .unwrap();
+    let schema = ReplicatedTableSchema::from_masks(
+        table,
+        ReplicationMask::from_bytes(vec![1, 1]),
+        IdentityMask::from_bytes(vec![0, 1]),
+    );
+    let destination = Destination::new(Client::new(Arc::clone(&auth), 1181), store.clone());
+    with_table_cleanup(&sql, &[&physical], || async {
+        write_table_rows(
+            &destination,
+            &schema,
+            vec![TableRow::new(vec![Cell::I32(1), Cell::I32(10)])],
+        )
+        .await
+        .unwrap();
+        write_table_rows(&destination, &schema, vec![]).await.unwrap();
+        store.update_table_state(schema.id(), TableState::Ready).await.unwrap();
+        write_events(
+            &destination,
+            WriteEventsDurability::RequireDurable,
+            vec![Event::Delete(DeleteEvent {
+                commit_lsn: 10_u64.into(),
+                tx_ordinal: 1,
+                replicated_table_schema: schema.clone(),
+                old_table_row: Some(OldTableRow::Key(TableRow::new(vec![Cell::I32(10)]))),
+            })],
+        )
+        .await
+        .unwrap();
+        let raw =
+            format!("{}.{}.{}", quote(config.database()), quote(config.schema()), quote(&physical));
+        assert_eq!(
+            query_rows(
+                &sql,
+                &format!(
+                    "select count(*) from {raw} where \"_cdc_operation\" = 'delete' and \"id\" is \
+                     null and \"external_id\" = 10 and array_contains(1::variant, \
+                     \"_cdc_missing_columns\")"
+                ),
+            )
+            .await
+            .unwrap(),
+            vec![vec![json!("1")]]
+        );
+        let query = companion_query(&config, &physical);
+        assert!(query_rows(&sql, &query).await.is_err());
+
+        let restarted = Destination::new(Client::new(Arc::clone(&auth), 1181), store.clone());
+        restarted.startup().await.unwrap();
+
+        assert!(query_rows(&sql, &query).await.is_err());
+        apply_relation(&restarted, &schema).await.unwrap();
+        assert!(query_rows(&sql, &query).await.is_err());
+    })
+    .await;
+}
 
 /// Covers view ownership, restart recovery, grants, mappings, and raw-only
 /// tables with three tiny tables. Row correctness across real pgoutput DDL is
@@ -118,10 +215,13 @@ async fn companion_view_lifecycle_and_ownership() {
         )));
 
         let applied = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
-        // Interrupted after parking but before raw DDL: startup restores the
-        // applied schema even if this table receives no subsequent events.
+        // Startup lacks replica identity and leaves the view parked until an
+        // authoritative relation arrives, including a replay without DML.
         sql.execute_ddl(&format!("alter view {public} rename to {pending}")).await.unwrap();
-        fresh().startup().await.unwrap();
+        let restarted = fresh();
+        restarted.startup().await.unwrap();
+        assert!(query_rows(&sql, &query).await.is_err());
+        apply_relation(&restarted, &schema).await.unwrap();
         assert_eq!(query_rows(&sql, &query).await.unwrap(), expected);
 
         let mut renamed_columns = schema.inner().column_schemas.clone();
@@ -151,7 +251,10 @@ async fn companion_view_lifecycle_and_ownership() {
         .await
         .unwrap();
         store.store_destination_table_metadata(schema.id(), applying.to_applied()).await.unwrap();
-        fresh().startup().await.unwrap();
+        let restarted = fresh();
+        restarted.startup().await.unwrap();
+        assert!(query_rows(&sql, &query).await.is_err());
+        apply_relation(&restarted, &renamed).await.unwrap();
         assert_eq!(query_rows(&sql, &query).await.unwrap(), expected);
         assert_eq!(
             query_rows(&sql, &format!("select {} from {public}", quote("details\"'")))
@@ -162,7 +265,10 @@ async fn companion_view_lifecycle_and_ownership() {
 
         // The replaced definition may also be left under the pending name.
         sql.execute_ddl(&format!("alter view {public} rename to {pending}")).await.unwrap();
-        fresh().startup().await.unwrap();
+        let restarted = fresh();
+        restarted.startup().await.unwrap();
+        assert!(query_rows(&sql, &query).await.is_err());
+        apply_relation(&restarted, &renamed).await.unwrap();
         assert_eq!(query_rows(&sql, &query).await.unwrap(), expected);
 
         // Add-only DDL updates the public definition without leaving a pending
@@ -230,13 +336,15 @@ async fn companion_view_lifecycle_and_ownership() {
         // Conflicting public/pending objects are never silently overwritten.
         sql.execute_ddl(&format!("alter view {public} rename to {pending}")).await.unwrap();
         sql.execute_ddl(&format!("create view {public} as select 42 as sentinel")).await.unwrap();
-        assert!(fresh().startup().await.is_err());
+        let restarted = fresh();
+        restarted.startup().await.unwrap();
+        assert!(apply_relation(&restarted, &added).await.is_err());
         assert_eq!(
             query_rows(&sql, &format!("select sentinel from {public}")).await.unwrap(),
             vec![vec![json!("42")]]
         );
         sql.execute_ddl(&format!("drop view {public}")).await.unwrap();
-        fresh().startup().await.unwrap();
+        apply_relation(&restarted, &added).await.unwrap();
 
         // This name is legal for raw CDC, but reserved by the query helper.
         // Failed restoration must retain Applied raw metadata and the parked
@@ -388,7 +496,16 @@ async fn companion_view_lifecycle_and_ownership() {
             )
             .await
             .unwrap();
-        fresh().startup().await.unwrap();
+        let restarted = fresh();
+        restarted.startup().await.unwrap();
+        assert!(query_rows(&sql, &companion_query(&config, &long_physical)).await.is_err());
+        // A schema-only snapshot refresh reaches view reconciliation without
+        // requiring the unrelated long Snowpipe channel identifiers.
+        let mut refreshed = long.inner().clone();
+        refreshed.snapshot_id = SnapshotId::new(60_u64.into(), 61_u64.into());
+        let refreshed =
+            ReplicatedTableSchema::all(store.store_table_schema(refreshed).await.unwrap());
+        apply_relation(&restarted, &refreshed).await.unwrap();
         assert!(
             query_rows(&sql, &companion_query(&config, &long_physical)).await.unwrap().is_empty()
         );
@@ -397,7 +514,14 @@ async fn companion_view_lifecycle_and_ownership() {
         sql.execute_ddl(&format!("alter view {long_public} rename to {long_pending}"))
             .await
             .unwrap();
-        fresh().startup().await.unwrap();
+        let restarted = fresh();
+        restarted.startup().await.unwrap();
+        assert!(query_rows(&sql, &companion_query(&config, &long_physical)).await.is_err());
+        let mut refreshed = refreshed.inner().clone();
+        refreshed.snapshot_id = SnapshotId::new(70_u64.into(), 71_u64.into());
+        let refreshed =
+            ReplicatedTableSchema::all(store.store_table_schema(refreshed).await.unwrap());
+        apply_relation(&restarted, &refreshed).await.unwrap();
         assert!(
             query_rows(&sql, &companion_query(&config, &long_physical)).await.unwrap().is_empty()
         );

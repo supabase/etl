@@ -474,8 +474,10 @@ mod tests {
     #[test]
     fn column_default_sql_uses_complete_column_schema() {
         let without_default = ColumnSchema::new("status".to_owned(), Type::TEXT, -1, 1, true);
-        let supported_default =
-            without_default.clone().with_default_expression("'pending'::text".to_owned());
+        let supported_default = without_default
+            .clone()
+            .with_default_expression("'pending'::text".to_owned())
+            .with_missing_value_expression(Some("'old'".to_owned()));
         let unsupported_default =
             without_default.clone().with_default_expression("lower('PENDING')".to_owned());
         let primary_key_default = ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
