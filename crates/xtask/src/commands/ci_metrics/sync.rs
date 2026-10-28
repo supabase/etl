@@ -34,8 +34,9 @@ use crate::{
 const PER_PAGE: usize = 100;
 /// GitHub returns at most this many results for one run listing query.
 const LISTING_CAP: u64 = 1000;
-/// Stop before GitHub's own limit leaves less than this many requests.
-const RATE_LIMIT_RESERVE: u64 = 50;
+/// Stop while GitHub's shared limit still leaves this many requests for
+/// other workflows on the same `GITHUB_TOKEN` (1,000 per hour per repository).
+const RATE_LIMIT_RESERVE: u64 = 300;
 /// Requests held back from day syncing so a long backfill never starves the
 /// code-scanning refresh.
 const CODE_SCANNING_RESERVE: u64 = 20;
@@ -121,6 +122,8 @@ struct RunDetails {
     manifests: Vec<ManifestRow>,
     rejections: Vec<RejectionRow>,
     artifact_status: Option<&'static str>,
+    /// Whether an earlier sync already stored a manifest for this run.
+    known_stored: bool,
 }
 
 /// State of one sync run.
@@ -383,17 +386,22 @@ impl Syncer<'_> {
         let known_artifacts = store::load_known_artifacts(conn, start, end).await?;
         for run in &batch.runs {
             let stored_run = stored.get(&run.id);
-            if !plan::needs_details(
-                stored_run.map(|(run, _)| run),
-                run.run_attempt,
-                run.updated_at,
-                task.refetch_details,
-            ) {
-                continue;
-            }
             let stored_attempts =
                 stored_run.map(|(_, attempts)| attempts.as_slice()).unwrap_or_default();
-            for attempt in plan::missing_attempts(stored_attempts, run.run_attempt) {
+            // Earlier attempts stored while still running are refreshed even
+            // when the latest attempt is settled; their jobs come along below.
+            let refresh = plan::attempts_to_refresh(stored_attempts, run.run_attempt);
+            if refresh.is_empty()
+                && !plan::needs_details(
+                    stored_run.map(|(run, _)| run),
+                    run.run_attempt,
+                    run.updated_at,
+                    task.refetch_details,
+                )
+            {
+                continue;
+            }
+            for attempt in refresh {
                 let response = self
                     .request(&format!("actions/runs/{}/attempts/{attempt}", run.id), &[])
                     .await?;
@@ -405,8 +413,9 @@ impl Syncer<'_> {
                 }
             }
             let jobs = self.fetch_jobs(run.id).await?;
+            let known = known_artifacts.get(&run.id).cloned().unwrap_or_default();
+            let known_stored = known.values().any(|stored| *stored);
             let (manifests, rejections, artifact_status) = if accepts_manifests(run) {
-                let known = known_artifacts.get(&run.id).cloned().unwrap_or_default();
                 self.fetch_manifests(run, &jobs, &known).await?
             } else {
                 (Vec::new(), Vec::new(), None)
@@ -418,6 +427,7 @@ impl Syncer<'_> {
                 manifests,
                 rejections,
                 artifact_status,
+                known_stored,
             });
         }
 
@@ -440,6 +450,7 @@ impl Syncer<'_> {
                 store::upsert_job(&mut tx, job, detail_status(self.now, job), failed_step).await?;
                 self.totals.jobs += 1;
             }
+            let mut inserted = 0;
             for manifest in &details.manifests {
                 // A manifest's job belongs to its attempt. If GitHub no longer
                 // returns that attempt, neither it nor the job was stored, so
@@ -452,17 +463,23 @@ impl Syncer<'_> {
                     continue;
                 }
                 store::insert_manifest(&mut tx, manifest).await?;
-                self.totals.manifests += 1;
+                inserted += 1;
             }
             for rejection in &details.rejections {
                 store::insert_rejection(&mut tx, rejection, self.now).await?;
             }
-            if let Some(status) = details.artifact_status {
+            // `available` must mean a manifest is stored: if every new one was
+            // skipped and none was stored before, leave the status unchanged.
+            let status = match details.artifact_status {
+                Some("available") if inserted == 0 && !details.known_stored => None,
+                status => status,
+            };
+            if let Some(status) = status {
                 store::set_artifact_status(&mut tx, details.run_id, status).await?;
             }
+            self.totals.manifests += inserted;
             store::mark_details_fetched(&mut tx, details.run_id, details.run_attempt, self.now)
                 .await?;
-            // Stored manifests are counted above.
             self.totals.rejections += details.rejections.len() as u64;
         }
 
@@ -708,20 +725,25 @@ impl Syncer<'_> {
         loop {
             let (analyses, has_next): (Vec<CodeScanningAnalysis>, bool) =
                 self.fetch_json("code-scanning/analyses", &page_query(page)).await?;
+            // Each page and its flag update commit together: an interrupted
+            // page leaves no partial rows that a later pass would mistake for
+            // the boundary of what is already stored.
+            let mut tx = conn.begin().await?;
             let mut new = 0;
             for analysis in &analyses {
-                if store::insert_analysis(conn, analysis).await? {
+                if store::insert_analysis(&mut tx, analysis).await? {
                     new += 1;
                 }
             }
-            self.totals.new_analyses += new;
             // A full page of new analyses means the pass may span pages. Until
             // it ends cleanly, older analyses might be missing, so record that:
             // an interrupted pass then resumes paging to the start next sync.
             if backfilled && has_next && new > 0 && new as usize == analyses.len() {
-                store::set_analyses_backfilled(conn, false).await?;
+                store::set_analyses_backfilled(&mut tx, false).await?;
                 backfilled = false;
             }
+            tx.commit().await?;
+            self.totals.new_analyses += new;
             let reached_history = analyses
                 .iter()
                 .map(|analysis| analysis.created_at)
@@ -880,13 +902,14 @@ async fn run_unzip(
     Ok(status.success().then_some(output))
 }
 
-/// Returns whether a run's manifests may be ingested: manifest workflows from
-/// this repository's trusted events only, never forks.
+/// Returns whether a run's manifests may be ingested: only runs of the
+/// workflow as committed to `main` (scheduled, or dispatched or pushed on
+/// `main`), never pull requests or forks. A branch can edit the workflow and
+/// write any manifest it likes, so its runs are not trusted.
 fn accepts_manifests(run: &Run) -> bool {
     let trusted_event = match run.event.as_str() {
-        "schedule" | "workflow_dispatch" => true,
-        "push" => run.head_branch.as_deref() == Some("main"),
-        "pull_request" => true,
+        "schedule" => true,
+        "workflow_dispatch" | "push" => run.head_branch.as_deref() == Some("main"),
         _ => false,
     };
     run.status == "completed"

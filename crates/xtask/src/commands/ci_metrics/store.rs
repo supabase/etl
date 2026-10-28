@@ -129,12 +129,12 @@ pub(super) async fn load_day_states(
 }
 
 /// Stored runs of one day: the latest attempt's state plus every stored
-/// attempt number.
+/// attempt number with whether that attempt has completed.
 pub(super) async fn load_stored_runs(
     conn: &mut PgConnection,
     start: DateTime<Utc>,
     end: DateTime<Utc>,
-) -> Result<HashMap<i64, (StoredRun, Vec<i32>)>> {
+) -> Result<HashMap<i64, (StoredRun, Vec<(i32, bool)>)>> {
     let rows = sqlx::query(
         "select run_id, run_attempt, updated_at, status, detail_fetched_at
          from ci.run
@@ -146,7 +146,7 @@ pub(super) async fn load_stored_runs(
     .fetch_all(&mut *conn)
     .await?;
 
-    let mut runs: HashMap<i64, (StoredRun, Vec<i32>)> = HashMap::new();
+    let mut runs: HashMap<i64, (StoredRun, Vec<(i32, bool)>)> = HashMap::new();
     for row in rows {
         let run_id: i64 = row.try_get("run_id")?;
         let stored = StoredRun {
@@ -155,7 +155,7 @@ pub(super) async fn load_stored_runs(
             status: row.try_get("status")?,
             detail_fetched_at: row.try_get("detail_fetched_at")?,
         };
-        let attempt = stored.latest_attempt;
+        let attempt = (stored.latest_attempt, stored.status == "completed");
         // Rows arrive in attempt order, so the last one is the latest.
         let entry = runs.entry(run_id).or_insert_with(|| (stored.clone(), Vec::new()));
         entry.0 = stored;

@@ -162,9 +162,15 @@ pub(super) fn needs_details(
     refetch || run_attempt > stored.latest_attempt || updated_at > stored.updated_at || !settled
 }
 
-/// Returns the attempts below `latest` that are not stored yet.
-pub(super) fn missing_attempts(stored: &[i32], latest: i32) -> Vec<i32> {
-    (1..latest).filter(|attempt| !stored.contains(attempt)).collect()
+/// Returns the attempts below `latest` to fetch: those not stored yet, and
+/// those stored before they completed. The run listing only returns the
+/// latest attempt, so an earlier attempt would otherwise stay unfinished.
+pub(super) fn attempts_to_refresh(stored: &[(i32, bool)], latest: i32) -> Vec<i32> {
+    (1..latest)
+        .filter(|attempt| {
+            !stored.iter().any(|&(stored, completed)| stored == *attempt && completed)
+        })
+        .collect()
 }
 
 /// Returns when a day that has now failed `failures` times may be retried.
@@ -320,10 +326,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_attempts_lists_gaps_below_latest() {
-        assert_eq!(missing_attempts(&[], 1), Vec::<i32>::new());
-        assert_eq!(missing_attempts(&[3], 3), [1, 2]);
-        assert_eq!(missing_attempts(&[1, 3], 3), [2]);
+    fn earlier_attempts_are_fetched_until_completed() {
+        assert_eq!(attempts_to_refresh(&[], 1), Vec::<i32>::new());
+        assert_eq!(attempts_to_refresh(&[(3, false)], 3), [1, 2]);
+        assert_eq!(attempts_to_refresh(&[(1, true), (3, true)], 3), [2]);
+        // An attempt stored while running is fetched again once a re-run
+        // exists.
+        assert_eq!(attempts_to_refresh(&[(1, false), (2, true)], 2), [1]);
+        assert_eq!(attempts_to_refresh(&[(1, true), (2, false)], 2), Vec::<i32>::new());
     }
 
     #[test]
