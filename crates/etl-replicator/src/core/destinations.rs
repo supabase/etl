@@ -171,10 +171,58 @@ mod clickhouse {
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::clickhouse::{
         ClickHouseClientConfig, ClickHouseDestination, ClickHouseInserterConfig,
+        ClickHouseProductInfo,
     };
     use secrecy::ExposeSecret;
+    use tracing::warn;
 
-    use crate::{core::ReplicatorStore, error::ReplicatorResult};
+    use crate::{APP_VERSION_ENV_NAME, core::ReplicatorStore, error::ReplicatorResult};
+
+    /// Product name this replicator reports to ClickHouse.
+    const CLICKHOUSE_PRODUCT_NAME: &str = "supabase-etl";
+
+    /// Extracts the release version from an `APP_VERSION` value.
+    ///
+    /// Accepts a bare version (`v1.2.3`) or an image reference
+    /// (`registry/etl-replicator:v1.2.3`), whose tag is the version. Returns
+    /// [`None`] for an image reference without a tag.
+    fn release_version(app_version: &str) -> Option<&str> {
+        // A digest pins content, not a release, so only the name part can carry
+        // a tag.
+        let (reference, has_digest) = match app_version.split_once('@') {
+            Some((name, _)) => (name, true),
+            None => (app_version, false),
+        };
+        if !has_digest && !reference.contains(['/', ':']) {
+            return Some(reference);
+        }
+
+        // A colon before the last slash belongs to a registry port, not a tag.
+        let last_segment = reference.rsplit_once('/').map_or(reference, |(_, segment)| segment);
+        last_segment.split_once(':').map(|(_, tag)| tag)
+    }
+
+    /// Returns the product identity this replicator reports to ClickHouse.
+    ///
+    /// Falls back to the crate version when `APP_VERSION` is unset or carries
+    /// no usable release version.
+    fn product_info() -> ReplicatorResult<ClickHouseProductInfo> {
+        let app_version = std::env::var(APP_VERSION_ENV_NAME).ok();
+        let release = app_version.as_deref().and_then(release_version);
+        if let Some(release) = release
+            && let Ok(product_info) = ClickHouseProductInfo::new(CLICKHOUSE_PRODUCT_NAME, release)
+        {
+            return Ok(product_info);
+        }
+
+        if app_version.is_some() {
+            warn!(
+                "app version has no usable release version, reporting crate version to clickhouse"
+            );
+        }
+
+        Ok(ClickHouseProductInfo::new(CLICKHOUSE_PRODUCT_NAME, env!("CARGO_PKG_VERSION"))?)
+    }
 
     /// Returns whether a ClickHouse configuration requires public HTTPS
     /// enforcement.
@@ -195,7 +243,8 @@ mod clickhouse {
 
         let password = password.as_ref().map(|password| password.expose_secret().to_owned());
         let inserter_config = ClickHouseInserterConfig { engine: *engine, ..Default::default() };
-        let client_config = ClickHouseClientConfig::default();
+        let client_config =
+            ClickHouseClientConfig { product_info: Some(product_info()?), ..Default::default() };
 
         // Managed configurations must use public HTTPS. Standalone HTTPS also
         // uses the guard, while trusted standalone HTTP remains available for
@@ -239,6 +288,23 @@ mod clickhouse {
             assert!(requires_public_network_policy(true, "https"));
             assert!(requires_public_network_policy(false, "https"));
             assert!(!requires_public_network_policy(false, "http"));
+        }
+
+        #[test]
+        fn extracts_release_version_from_app_version() {
+            let cases = [
+                ("v1.2.3", Some("v1.2.3")),
+                ("etl-replicator:v1.2.3", Some("v1.2.3")),
+                ("ghcr.io/supabase/etl-replicator:v1.2.3", Some("v1.2.3")),
+                ("localhost:5000/etl-replicator:v1.2.3", Some("v1.2.3")),
+                ("localhost:5000/etl-replicator", None),
+                ("etl-replicator:v1.2.3@sha256:abc", Some("v1.2.3")),
+                ("etl-replicator@sha256:abc", None),
+            ];
+
+            for (app_version, expected) in cases {
+                assert_eq!(release_version(app_version), expected, "{app_version}");
+            }
         }
     }
 }
