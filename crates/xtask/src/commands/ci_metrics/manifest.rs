@@ -7,13 +7,17 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::commands::benchmark_compare::CONFIG_KEYS;
 
-/// Artifact name prefix of benchmark result uploads.
-pub(super) const BENCHMARK_ARTIFACT_PREFIX: &str = "benchmark-results-";
+/// Artifact name prefixes of benchmark result uploads: nightly and manual
+/// runs, and backfills of older commits. Backfills are never comparison
+/// baselines, but they are benchmark history; the manifest `trigger` tells
+/// them apart.
+const BENCHMARK_ARTIFACT_PREFIXES: &[&str] = &["benchmark-results-", "benchmark-backfill-"];
 /// Largest artifact archive downloaded.
 pub(super) const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024;
 /// Largest single file read from an archive.
@@ -56,6 +60,11 @@ impl Rejection {
             Self::Unsupported => "unsupported",
         }
     }
+}
+
+/// Returns whether an artifact name carries benchmark results.
+pub(super) fn is_benchmark_artifact(name: &str) -> bool {
+    BENCHMARK_ARTIFACT_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 /// One file named in an archive listing.
@@ -138,7 +147,8 @@ pub(super) struct BenchmarkManifest {
 #[derive(Debug, Deserialize)]
 struct ManifestCommit {
     sha: String,
-    committed_at: Option<String>,
+    /// RFC 3339 with the committer's offset; stored normalized to UTC.
+    committed_at: Option<DateTime<FixedOffset>>,
 }
 
 /// Run identity recorded by the producing job.
@@ -212,7 +222,6 @@ pub(super) fn parse_benchmark_manifest(
         && is_identifier(&manifest.trigger)
         && is_identifier(&manifest.destination)
         && is_commit_sha(&manifest.commit.sha)
-        && manifest.commit.committed_at.as_deref().is_none_or(|at| at.len() <= MAX_STRING_LEN)
         && is_identifier(&manifest.runner.label)
         && !manifest.reports.is_empty()
         && manifest.reports.len() < MAX_ENTRIES
@@ -270,7 +279,13 @@ pub(super) fn benchmark_payload(
     Ok(json!({
         "trigger": manifest.trigger,
         "destination": manifest.destination,
-        "commit": { "sha": manifest.commit.sha, "committed_at": manifest.commit.committed_at },
+        "commit": {
+            "sha": manifest.commit.sha,
+            "committed_at": manifest
+                .commit
+                .committed_at
+                .map(|at| at.with_timezone(&Utc).to_rfc3339_opts(SecondsFormat::Secs, true)),
+        },
         "runner": {
             "label": manifest.runner.label,
             "cpus": manifest.runner.cpus,
@@ -380,6 +395,33 @@ mod tests {
             "  Length      Date    Time    Name\n---------  ---------- -----   ----\n       10  \
              10-27-2026 05:38   table_copy.json\n---------                     -------\n";
         assert_eq!(parse_archive_listing(without_manifest), Err(Rejection::InvalidArchive));
+    }
+
+    #[test]
+    fn benchmark_artifacts_include_backfills() {
+        assert!(is_benchmark_artifact("benchmark-results-snowflake"));
+        assert!(is_benchmark_artifact("benchmark-backfill-null"));
+        assert!(!is_benchmark_artifact("benchmark-failed-snowflake"));
+        assert!(!is_benchmark_artifact("fuzz-artifacts-parse_text_cell"));
+    }
+
+    #[test]
+    fn commit_time_is_normalized_to_utc_or_rejected() {
+        let manifest = parse(&manifest_json(Value::Null)).unwrap();
+        let reports = BTreeMap::from([("table_copy.json".to_owned(), b"{}".to_vec())]);
+        let payload = benchmark_payload(&manifest, &reports).unwrap();
+        assert_eq!(payload["commit"]["committed_at"], json!("2026-10-27T01:04:12Z"));
+
+        let mut missing = manifest_json(Value::Null);
+        missing["commit"]["committed_at"] = Value::Null;
+        let payload = benchmark_payload(&parse(&missing).unwrap(), &reports).unwrap();
+        assert_eq!(payload["commit"]["committed_at"], Value::Null);
+
+        for value in ["yesterday", "2026-10-27", "2026-13-01T00:00:00Z", ""] {
+            let mut invalid = manifest_json(Value::Null);
+            invalid["commit"]["committed_at"] = json!(value);
+            assert_eq!(parse(&invalid).unwrap_err(), Rejection::Invalid, "{value}");
+        }
     }
 
     #[test]

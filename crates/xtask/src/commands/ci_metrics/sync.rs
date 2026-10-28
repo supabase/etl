@@ -19,10 +19,7 @@ use tokio::{io::AsyncReadExt, process::Command};
 
 use crate::{
     commands::ci_metrics::{
-        manifest::{
-            self, BENCHMARK_ARTIFACT_PREFIX, MANIFEST_FILE_NAME, MAX_ARCHIVE_BYTES,
-            MAX_ENTRY_BYTES, Rejection,
-        },
+        manifest::{self, MANIFEST_FILE_NAME, MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, Rejection},
         model::{
             ArtifactPage, CodeScanningAlert, CodeScanningAnalysis, Job, JobPage, Run, RunPage,
             WorkflowPage,
@@ -587,7 +584,7 @@ impl Syncer<'_> {
                 || listing.artifacts.is_empty()
                 || u64::try_from(page * PER_PAGE).unwrap_or(u64::MAX) >= listing.total_count;
             for artifact in listing.artifacts {
-                if !artifact.name.starts_with(BENCHMARK_ARTIFACT_PREFIX)
+                if !manifest::is_benchmark_artifact(&artifact.name)
                     || known.contains_key(&artifact.id)
                 {
                     continue;
