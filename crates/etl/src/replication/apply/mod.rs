@@ -72,8 +72,8 @@ use crate::{
         },
     },
     replication::{
-        PreviousRelationMasks, ReplicationLagMetrics, ReplicationLagMonitor, TableDecodingState,
-        WorkerType, apply::tasks::ApplyLoopTasks, state::TableState,
+        DurabilityMonitor, PreviousRelationMasks, ReplicationLagMetrics, ReplicationLagMonitor,
+        TableDecodingState, WorkerType, apply::tasks::ApplyLoopTasks, state::TableState,
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, MemoryMonitorSubscription, TableSyncWorkerPool,
@@ -185,6 +185,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) destination: D,
     /// Shared source sampler and copy/CDC progress registrations.
     pub(crate) replication_lag_monitor: ReplicationLagMonitor,
+    /// Pipeline-owned durability age, retained through worker retries.
+    pub(crate) durability_monitor: DurabilityMonitor,
     /// Cancellation token for graceful termination.
     pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -981,6 +983,10 @@ where
         // at the restart LSN. Its persisted DDL must not affect schema
         // selection until this connection reaches that DDL again.
         let bootstrap_snapshot_id = SnapshotId::before_lsn(start_lsn);
+
+        if let WorkerContext::Apply(ctx) = &worker_context {
+            ctx.durability_monitor.begin_attempt();
+        }
 
         let replication_progress = ReplicationProgress::new(start_lsn);
         let replication_lag_metrics = replication_lag_monitor.register_cdc(worker_type, start_lsn);
@@ -1797,6 +1803,10 @@ where
                         // progress, which may precede relations in this batch.
                         self.try_queue_schema_cleanup().await;
                     }
+
+                    if let WorkerContext::Apply(ctx) = &self.worker_context {
+                        ctx.durability_monitor.confirmed(metadata.commit_end_lsn);
+                    }
                 }
             }
 
@@ -2050,6 +2060,21 @@ where
             streaming_payload_metadata,
             dispatched_at: Instant::now(),
         };
+
+        if event_count > 0
+            && let WorkerContext::Apply(ctx) = &self.worker_context
+        {
+            // Start before calling the destination: even dispatch itself can
+            // wait. Buffered successors have not been dispatched yet.
+            // Heartbeats can advance received WAL beyond this batch. Replay
+            // only needs to cover its transactions, including an unfinished
+            // transaction whose final commit position is already known.
+            let replay_frontier = metadata
+                .commit_end_lsn
+                .max(self.state.remote_final_lsn)
+                .unwrap_or(self.state.replication_progress.last_flush_lsn());
+            ctx.durability_monitor.dispatched(replay_frontier);
+        }
 
         // Create the flush result channel: the sender is handed to the
         // destination and the pending receiver is stored on the loop state

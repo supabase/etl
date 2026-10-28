@@ -455,13 +455,16 @@ sample spread, and the comparison diff against the previous successful run when
 one is available.
 
 If no previous successful run exists, the comparison writes a "no previous
-benchmark artifact" summary and passes. If a comparable previous run exists, the
-comparison fails the workflow when median throughput and timing metrics regress
-beyond their per-metric thresholds. Row counts and TPC-C streaming event counts
-are informational because the transaction workload is duration-based and
-naturally varies between runs. If benchmark configuration differs, the
-comparison still prints the diff table but skips the regression gate for that
-benchmark.
+benchmark artifact" summary. If a comparable previous run exists, the
+comparison flags median throughput and timing metrics that regress beyond their
+per-metric thresholds, in the step summary and as workflow warnings. Regressions
+are advisory and never fail the job: run-to-run noise on shared runners and
+remote destinations can exceed the thresholds, and because only successful jobs
+become baselines, failing on an accepted regression would keep failing every
+later run. Row counts and TPC-C streaming event counts are informational
+because the transaction workload is duration-based and naturally varies between
+runs. If benchmark configuration differs, the comparison still prints the diff
+table but skips the regression check for that benchmark.
 
 The comparison is also available locally when you have two result directories:
 
