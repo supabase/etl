@@ -699,6 +699,10 @@ impl Syncer<'_> {
         self.totals.alerts = alert_numbers.len() as u64;
 
         let history_start = history_since.and_hms_opt(0, 0, 0).map(|start| start.and_utc());
+        // Whether stored analyses had no gaps before this pass. Only then does
+        // reaching a stored analysis prove every older one is stored.
+        let prior_complete = analyses_backfilled;
+        // The durable flag, cleared while a multi-page pass is in flight.
         let mut backfilled = analyses_backfilled;
         let mut page = 1;
         loop {
@@ -730,9 +734,13 @@ impl Syncer<'_> {
                 }
                 return Ok(());
             }
-            // Pages are newest first. With no gaps behind us, a page holding
-            // an already stored analysis means every older one is stored too.
-            if backfilled && (new as usize) < analyses.len() {
+            // Pages are newest first. With no gaps before this pass, a page
+            // holding an already stored analysis means every older one is
+            // stored too, so the pass is complete.
+            if prior_complete && (new as usize) < analyses.len() {
+                if !backfilled {
+                    store::set_analyses_backfilled(conn, true).await?;
+                }
                 return Ok(());
             }
             page += 1;
