@@ -12,7 +12,7 @@ use etl_postgres::{
     test_utils::{local_tls_config_from_env, test_database_port_from_env},
     tokio::test_utils::PgDatabase,
 };
-use pg_escape::quote_literal;
+use pg_escape::{quote_identifier, quote_literal};
 use tokio_postgres::{
     Client, Config as PgConfig,
     config::{Host, SslMode},
@@ -20,14 +20,42 @@ use tokio_postgres::{
 use url::Url;
 use uuid::Uuid;
 
-const DUCKDB_EXTENSION_VERSION: &str = "1.5.6";
+const DUCKDB_EXTENSION_VERSION: &str = "2.0.0";
 const DUCKLAKE_EXTENSION_FILE: &str = "ducklake.duckdb_extension";
 const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
 pub struct DuckLakeTestEnv {
-    _catalog_database: PgDatabase<Client>,
+    catalog_database: PgDatabase<Client>,
     pub catalog_url: Url,
     pub data_dir: PathBuf,
     pub data_url: Url,
+}
+
+impl DuckLakeTestEnv {
+    /// Reads the persisted format version without attaching or migrating the
+    /// lake.
+    pub async fn catalog_version(&self) -> String {
+        let client = self.catalog_database.client.as_ref().unwrap();
+        let schema: String = client
+            .query_one(
+                "select table_schema from information_schema.tables where table_name = \
+                 'ducklake_metadata' and table_type = 'BASE TABLE'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        client
+            .query_one(
+                &format!(
+                    "select value from {}.ducklake_metadata where key = 'version'",
+                    quote_identifier(&schema)
+                ),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0)
+    }
 }
 
 fn current_vendored_extension_dir() -> Option<PathBuf> {
@@ -114,10 +142,9 @@ pub async fn create_test_lake(test_name: &str) -> DuckLakeTestEnv {
     let (catalog_database, catalog_url) = create_catalog_database().await;
     let data_url = path_to_file_url(&data_dir);
 
-    println!("[{test_name}] catalog : {catalog_url}");
     println!("[{test_name}] data    : {}", data_dir.display());
 
-    DuckLakeTestEnv { _catalog_database: catalog_database, catalog_url, data_dir, data_url }
+    DuckLakeTestEnv { catalog_database, catalog_url, data_dir, data_url }
 }
 
 pub fn catalog_attach_target(catalog_url: &Url) -> String {

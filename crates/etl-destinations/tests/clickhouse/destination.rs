@@ -69,7 +69,7 @@ use etl_destinations::clickhouse::{
     client::{ClickHouseClient, arm_pause_before_insert_statement_for_tests},
     test_utils::{
         ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
-        setup_clickhouse_database,
+        redact_clickhouse_error, setup_clickhouse_database,
     },
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -211,10 +211,10 @@ async fn boundary_underscore_names_survive_lifecycle_replacing_merge_tree() {
     boundary_underscore_names_survive_lifecycle(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-/// Preserves ClickHouse's native length error without truncating or hashing a
-/// length-prefixed name to fit the database's metadata filename budget.
+/// Preserves ClickHouse's native length rejection without truncating or hashing
+/// a length-prefixed name to fit the database's metadata filename budget.
 #[tokio::test(flavor = "multi_thread")]
-async fn overlong_encoded_names_preserve_native_clickhouse_error() {
+async fn overlong_encoded_names_preserve_native_clickhouse_error_code() {
     init_test_tracing();
     install_crypto_provider();
     let database = setup_clickhouse_database().await;
@@ -235,7 +235,9 @@ async fn overlong_encoded_names_preserve_native_clickhouse_error() {
             .await
             .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
-    assert!(error.source().unwrap().to_string().contains("max length of table name"));
+    assert_eq!(error.retryability(), Retryability::Permanent);
+    assert!(error.source().unwrap().to_string().contains("Code: 69."));
+
     destination.shutdown().await.unwrap();
     assert!(
         database
@@ -1208,12 +1210,14 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
         )
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     database
         .db_client()
         .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: a new destination attempts to write without upgrading the table.
@@ -1255,6 +1259,7 @@ async fn legacy_merge_tree_resumes_only_after_manual_ordinal_upgrade() {
         .query("alter table retained_rows add column cdc_tx_ordinal UInt64 default 0 after cdc_lsn")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     let restarted =
         database.build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree).await;
@@ -1307,12 +1312,14 @@ async fn legacy_merge_tree_rejects_schema_change_before_altering() {
         )
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     database
         .db_client()
         .query("insert into retained_rows values (1, 'retained', 'INSERT', 10)")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: a newer source snapshot adds a column before any row is written.
@@ -1389,6 +1396,7 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
         )
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     database
         .db_client()
@@ -1398,12 +1406,14 @@ async fn existing_replacing_merge_tree_resumes_without_layout_changes() {
         )
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     database
         .db_client()
         .query("insert into retained_rows values (1, 'old', 0, 0), (2, 'retained', 0, 0)")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: a new destination writes an update without changing the layout.
@@ -1487,6 +1497,7 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
         .query("alter table public_replay add constraint reject_two check id != 2")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: a key change fails after writing its old-key tombstone.
@@ -1520,6 +1531,7 @@ async fn partial_key_change_restart_replay_inner(engine: ClickHouseEngine) {
         .query("alter table public_replay drop constraint reject_two")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     let restarted = database.build_destination_with_config(store, config).await;
     restarted.write_events(vec![replay_key_change(&schema, 1, 2, "moved", 7)]).await.unwrap();
@@ -1582,6 +1594,7 @@ async fn copy_batches_deduplicate_by_batch_id_not_content() {
         .query("alter table public_clicks modify setting non_replicated_deduplication_window = 100")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     let batch =
         || (0..100).map(|_| TableRow::new(vec![Cell::String("/home".to_owned())])).collect();
@@ -1625,7 +1638,13 @@ async fn timed_out_queued_insert_does_not_land_after_truncate() {
     // reports a timeout here, and replay then moves on to the truncate.
     let _ = destination.write_events(vec![lifecycle_insert(&schema, 1, "restored")]).await;
     destination.write_events(vec![lifecycle_truncate(&schema)]).await.unwrap();
-    database.db_client().query("system flush async insert queue").execute().await.unwrap();
+    database
+        .db_client()
+        .query("system flush async insert queue")
+        .execute()
+        .await
+        .map_err(redact_clickhouse_error)
+        .unwrap();
 
     // THEN: the truncate leaves the table empty.
     assert_eq!(database.query::<u64>("select count() from public_queued").await, vec![0]);
@@ -1695,6 +1714,7 @@ async fn computed_columns_added_outside_etl_do_not_block_writes_inner(engine: Cl
         )
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: a restarted destination streams a row, adds a source column, makes
@@ -1886,6 +1906,7 @@ async fn column_default_with_quotes_and_backslashes_keeps_source_value() {
         )
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     assert_eq!(
@@ -2210,6 +2231,7 @@ async fn timestamp_filters_match_source_values_in_any_session_time_zone() {
         .with_option("session_timezone", "America/New_York")
         .fetch_all::<u64>()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // THEN: the source literal matches the row.
@@ -2251,6 +2273,7 @@ async fn clickhouse_column_type_drift_fails_writes() {
         .query("alter table public_amountdrift modify column amount Float64")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // THEN: ClickHouse rejects the cached layout's insert header, and the
@@ -2306,6 +2329,7 @@ async fn clickhouse_column_type_drift_reloads_layout_after_large_insert() {
         .query("alter table public_amountlarge modify column amount LowCardinality(String)")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: about 4 MiB of rows is copied in one insert statement, far past the
@@ -2355,6 +2379,7 @@ async fn non_layout_insert_failure_keeps_cached_layout() {
         .query("alter table public_amountkeep add constraint reject_two check id != 2")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: the constraint rejects an insert, and the column type then changes
@@ -2365,6 +2390,7 @@ async fn non_layout_insert_failure_keeps_cached_layout() {
         .query("alter table public_amountkeep modify column amount Float64")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // THEN: the next write still uses the cached layout, so ClickHouse rejects
@@ -3203,6 +3229,7 @@ async fn write_events_reports_insert_failure_through_async_result() {
         .query("alter table \"public_rejected\" add constraint reject_two check id != 2")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
 
     // WHEN: a rejected insert and then an accepted insert are dispatched.
@@ -3584,6 +3611,7 @@ async fn table_reset_succeeds_after_failed_write() {
         .query("alter table \"public_failing\" add constraint reject_two check id != 2")
         .execute()
         .await
+        .map_err(redact_clickhouse_error)
         .unwrap();
     let error = write_events_via_trait(
         &destination,

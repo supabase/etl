@@ -1,14 +1,17 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use std::{
     env, fs,
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use etl_config::shared::PipelineConfig;
 use serde_json::json;
+use tempfile::TempDir;
 
 use crate::utils::workspace_root;
 
@@ -258,7 +261,12 @@ struct DeployFiles {
 impl DeployFiles {
     /// Writes required config files into a temporary deploy directory.
     fn prepare(config: &DeployLocalConfig) -> Result<Self> {
-        let temp_dir = TempDir::create("etl-deploy-local")?;
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("etl-deploy-local-");
+        // Restrict access at creation, before writing any credentials.
+        #[cfg(unix)]
+        builder.permissions(fs::Permissions::from_mode(0o700));
+        let temp_dir = builder.tempdir().context("Failed to create temporary deploy directory")?;
         let base_path = temp_dir.path().join(BASE_CONFIG_FILE);
         let environment_file_name = format!("{}.json", config.app_environment);
         let environment_path = temp_dir.path().join(&environment_file_name);
@@ -276,38 +284,6 @@ impl DeployFiles {
             environment_file_name,
             build_context_dir,
         })
-    }
-}
-
-/// Temporary directory that removes itself on drop.
-struct TempDir {
-    /// Temporary directory path.
-    path: PathBuf,
-}
-
-impl TempDir {
-    /// Creates a unique temporary directory.
-    fn create(prefix: &str) -> Result<Self> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("System clock is before the Unix epoch")?
-            .as_nanos();
-        let path = env::temp_dir().join(format!("{prefix}-{}-{timestamp}", std::process::id()));
-        fs::create_dir_all(&path)
-            .with_context(|| format!("Failed to create temporary directory {}", path.display()))?;
-        Ok(Self { path })
-    }
-
-    /// Returns the temporary directory path.
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    /// Removes the temporary directory.
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
     }
 }
 
@@ -637,7 +613,7 @@ spec:
       labels:
         app.kubernetes.io/name: {name}
     spec:
-      terminationGracePeriodSeconds: 30
+      terminationGracePeriodSeconds: {termination_grace_period_seconds}
       containers:
       - name: replicator
         image: {image}
@@ -674,5 +650,100 @@ spec:
         memory_request = config.memory_request,
         name = config.name,
         stateful_set_name = config.stateful_set_name(),
+        // Allow 30 seconds for native cleanup and 30 seconds of scheduling headroom.
+        termination_grace_period_seconds =
+            PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS.div_ceil(1000) + 60,
     )
+}
+
+/// Tests the generated deploy files and their lifetime.
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf};
+
+    use serde_json::{Value, json};
+
+    use crate::commands::deploy_local::{DeployFiles, DeployLocalConfig};
+
+    /// Generated config has private Unix permissions and remains readable until
+    /// cleanup.
+    #[test]
+    fn prepare_keeps_config_private_until_cleanup() {
+        let config = DeployLocalConfig {
+            workspace_root: PathBuf::new(),
+            context: "orbstack".to_owned(),
+            namespace: "etl-data-plane".to_owned(),
+            name: "local-replicator".to_owned(),
+            image: "etl-replicator:local".to_owned(),
+            app_environment: "dev".to_owned(),
+            rust_log: "info".to_owned(),
+            enable_tracing: "1".to_owned(),
+            cpu_request: "125m".to_owned(),
+            memory_request: "250Mi".to_owned(),
+            skip_build: true,
+            skip_wait: true,
+            allow_non_local_context: false,
+            pipeline_id: 1,
+            publication_name: "seed_pub".to_owned(),
+            postgres_host: "127.0.0.1".to_owned(),
+            postgres_port: 5430,
+            postgres_database: "etl_testdata".to_owned(),
+            postgres_user: "postgres".to_owned(),
+            postgres_password: "placeholder-postgres-password".to_owned(),
+            clickhouse_url: "http://127.0.0.1:8123".to_owned(),
+            clickhouse_user: "etl".to_owned(),
+            clickhouse_password: "placeholder-clickhouse-password".to_owned(),
+            clickhouse_database: "default".to_owned(),
+        };
+
+        let files = DeployFiles::prepare(&config).unwrap();
+        let directory = files._temp_dir.path().to_path_buf();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            assert_eq!(fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+
+        assert_eq!(files.base_path, directory.join("base.json"));
+        assert_eq!(files.environment_file_name, "dev.json");
+        assert_eq!(files.environment_path, directory.join("dev.json"));
+        assert_eq!(files.build_context_dir, directory.join("build-context"));
+        assert_eq!(fs::read_to_string(&files.base_path).unwrap(), "{}\n");
+        let generated: Value =
+            serde_json::from_slice(&fs::read(&files.environment_path).unwrap()).unwrap();
+        assert_eq!(
+            generated,
+            json!({
+                "destination": {
+                    "clickhouse": {
+                        "url": "http://127.0.0.1:8123",
+                        "user": "etl",
+                        "password": "placeholder-clickhouse-password",
+                        "database": "default",
+                    }
+                },
+                "pipeline": {
+                    "id": 1,
+                    "publication_name": "seed_pub",
+                    "pg_connection": {
+                        "host": "127.0.0.1",
+                        "port": 5430,
+                        "name": "etl_testdata",
+                        "username": "postgres",
+                        "password": "placeholder-postgres-password",
+                        "tls": {
+                            "trusted_root_certs": "",
+                            "enabled": false,
+                        }
+                    }
+                }
+            })
+        );
+
+        drop(files);
+
+        assert!(!directory.exists());
+    }
 }

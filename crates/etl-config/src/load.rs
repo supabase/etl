@@ -100,6 +100,53 @@ pub enum LoadConfigError {
     Builder(#[source] config::ConfigError),
 }
 
+/// Redacts parser errors that can quote configuration values, retaining
+/// structural context.
+fn redact_config_error(error: config::ConfigError) -> config::ConfigError {
+    match error {
+        config::ConfigError::Type { expected, key, .. } => {
+            let key = key.unwrap_or_else(|| "<root>".to_owned());
+
+            config::ConfigError::Message(format!(
+                "Invalid configuration value for `{key}`; expected {expected}"
+            ))
+        }
+        config::ConfigError::FileParse { uri, .. } => config::ConfigError::FileParse {
+            uri,
+            cause: io::Error::new(io::ErrorKind::InvalidData, "Invalid configuration file syntax")
+                .into(),
+        },
+        config::ConfigError::Message(ref message)
+            if message.starts_with("missing field `") && message.ends_with('`') =>
+        {
+            error
+        }
+        config::ConfigError::Message(message) if message.starts_with("unknown field `") => {
+            config::ConfigError::Message("Unknown configuration field".to_owned())
+        }
+        config::ConfigError::Message(message)
+            if message.starts_with("unknown variant `")
+                || (message.starts_with("enum ")
+                    && message.contains(" does not have variant constructor ")) =>
+        {
+            config::ConfigError::Message("Unknown configuration variant".to_owned())
+        }
+        config::ConfigError::Foreign(cause) => match cause.downcast::<io::Error>() {
+            Ok(error) => config::ConfigError::Foreign(
+                error
+                    .raw_os_error()
+                    .map_or_else(|| io::Error::from(error.kind()), io::Error::from_raw_os_error)
+                    .into(),
+            ),
+            Err(_) => config::ConfigError::Message("Invalid configuration value".to_owned()),
+        },
+        config::ConfigError::Message(_) => {
+            config::ConfigError::Message("Invalid configuration value".to_owned())
+        }
+        error => error,
+    }
+}
+
 /// Loads hierarchical configuration from base, environment, and
 /// environment-variable sources.
 ///
@@ -158,9 +205,13 @@ where
         .add_source(environment_file_source)
         .add_source(environment_source);
 
-    let settings = builder.build().map_err(LoadConfigError::Builder)?;
+    let settings =
+        builder.build().map_err(redact_config_error).map_err(LoadConfigError::Builder)?;
 
-    settings.try_deserialize::<T>().map_err(LoadConfigError::Deserialization)
+    settings
+        .try_deserialize::<T>()
+        .map_err(redact_config_error)
+        .map_err(LoadConfigError::Deserialization)
 }
 
 /// Finds the configuration file that matches the requested kind and supported
@@ -205,6 +256,99 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// Malformed secret fields cannot reach debug output or an error source
+    /// chain.
+    #[test]
+    fn configuration_errors_omit_secret_values() {
+        use std::error::Error as _;
+
+        #[derive(Debug, Deserialize)]
+        struct SecretConfig {
+            #[serde(rename = "password")]
+            _password: crate::SerializableSecretString,
+        }
+
+        for value in [
+            serde_json::json!({"password": {"placeholder-secret": "placeholder-value"}}),
+            serde_json::json!({"password": ["placeholder-secret"]}),
+        ] {
+            let settings = config::Config::builder()
+                .add_source(config::File::from_str(&value.to_string(), config::FileFormat::Json))
+                .build()
+                .unwrap();
+
+            let error = settings.try_deserialize::<SecretConfig>().unwrap_err();
+            let error = LoadConfigError::Deserialization(redact_config_error(error));
+
+            assert!(!format!("{error:?}").contains("placeholder-secret"));
+
+            let mut source = error.source();
+
+            while let Some(error) = source {
+                assert!(!format!("{error:?}").contains("placeholder-secret"));
+                assert!(!error.to_string().contains("placeholder-secret"));
+
+                source = error.source();
+            }
+        }
+
+        let error = config::Config::builder()
+            .add_source(config::File::from_str(
+                "password: [placeholder-secret",
+                config::FileFormat::Yaml,
+            ))
+            .build()
+            .unwrap_err();
+        let error = LoadConfigError::Builder(redact_config_error(error));
+
+        assert!(!format!("{error:?}").contains("placeholder-secret"));
+    }
+
+    #[test]
+    fn configuration_errors_preserve_structural_diagnostics() {
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Settings {
+            #[serde(rename = "mode")]
+            _mode: StorageMode,
+        }
+
+        for (value, expected) in [
+            (serde_json::json!({}), "missing field `mode`"),
+            (
+                serde_json::json!({"mode": "memory", "placeholder-secret": true}),
+                "Unknown configuration field",
+            ),
+            (serde_json::json!({"mode": "placeholder-secret"}), "Unknown configuration variant"),
+        ] {
+            let settings = config::Config::builder()
+                .add_source(config::File::from_str(&value.to_string(), config::FileFormat::Json))
+                .build()
+                .unwrap();
+
+            let error = redact_config_error(settings.try_deserialize::<Settings>().unwrap_err());
+
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn configuration_io_errors_preserve_codes_without_custom_messages() {
+        for error in [io::Error::from_raw_os_error(13), io::Error::other("placeholder-secret")] {
+            let expected_kind = error.kind();
+            let expected_code = error.raw_os_error();
+            let error = redact_config_error(config::ConfigError::Foreign(error.into()));
+            let config::ConfigError::Foreign(source) = &error else {
+                unreachable!("I/O errors remain foreign errors");
+            };
+            let source = source.downcast_ref::<io::Error>().unwrap();
+
+            assert_eq!(source.kind(), expected_kind);
+            assert_eq!(source.raw_os_error(), expected_code);
+            assert!(!error.to_string().contains("placeholder-secret"));
+        }
+    }
 
     /// Mutex to serialize tests that modify environment variables or current
     /// directory.

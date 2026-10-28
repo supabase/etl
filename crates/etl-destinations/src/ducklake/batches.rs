@@ -35,15 +35,15 @@ use pg_escape::quote_literal;
 use rand::Rng;
 use tokio::{sync::Semaphore, time::Instant};
 use tokio_postgres::types::PgLsn;
-use tracing::{debug, trace, warn};
+use tracing::{Instrument, debug, trace, warn};
 
 use crate::{
     ducklake::{
         DUCKLAKE_COLUMN_NAME_MAPPING, DuckLakeTableName, LAKE_CATALOG,
         client::{
-            DuckLakeBlockingOperationContext, DuckLakeConnectionManager, format_query_error_detail,
-            is_ducklake_shutdown_requested_error, run_duckdb_blocking,
-            run_duckdb_blocking_with_context,
+            DuckLakeBlockingOperationContext, DuckLakeConnectionManager, FOREGROUND_QUERY_TIMEOUT,
+            format_query_error_detail, is_ducklake_shutdown_requested_error, run_duckdb_blocking,
+            run_duckdb_blocking_with_timeout_and_context,
         },
         core::{DuckLakeWriteGuard, is_create_table_conflict},
         duckdb_error::{DuckDbErrorType, duckdb_error_retryability, duckdb_error_type},
@@ -356,8 +356,17 @@ enum PreparedDuckLakeTableBatchAction {
     Truncate,
 }
 
+/// Test-only transaction hook, scoped to one batch rather than global state.
+#[cfg(test)]
+type BatchTestHook = Arc<
+    dyn Fn(&duckdb::Connection, &DuckLakeBlockingOperationContext) -> EtlResult<()> + Send + Sync,
+>;
+
 /// Prepared atomic DuckLake table batch with replay metadata.
 pub(super) struct PreparedDuckLakeTableBatch {
+    /// Pauses or faults this batch's transaction in deterministic unit tests.
+    #[cfg(test)]
+    test_hook: Option<BatchTestHook>,
     table_name: DuckLakeTableName,
     replay_epoch: String,
     batch_id: String,
@@ -451,6 +460,16 @@ impl PreparedDuckLakeTableBatch {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TableStreamingProgress {
     last_event_position: EventPosition,
+}
+
+/// Replay progress retained while the sequence's table write guard is held.
+#[derive(Clone, Debug, Default)]
+struct TableStreamingProgressCache {
+    /// `None` requires a catalog read; `Some(None)` records an empty catalog.
+    progress: Option<Option<TableStreamingProgress>>,
+    /// Counts real catalog reads across successful and failed test attempts.
+    #[cfg(test)]
+    reads: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Ensures the ETL-managed replay marker table exists.
@@ -656,80 +675,90 @@ fn helper_table_has_column(
     })
 }
 
-/// Applies all prepared atomic batches for one table, reusing one DuckDB
-/// connection per attempt and skipping already committed segments.
+/// Applies ordered atomic batches with independent deadlines and retry budgets.
+/// The write guard remains held across the sequence, including retry backoff.
 pub(super) async fn apply_table_batches_with_retry(
     pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
     blocking_slots: Arc<Semaphore>,
     batches: Vec<PreparedDuckLakeTableBatch>,
     write_guard: DuckLakeWriteGuard,
 ) -> EtlResult<()> {
-    if batches.is_empty() {
-        return Ok(());
-    }
-
-    let batch_count = batches.len();
-    let batches = Arc::new(batches);
-    let table_name = batches[0].table_name.clone();
-
-    retry_with_backoff(
-        RetryPolicy {
-            max_retries: MAX_COMMIT_RETRIES,
-            initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
-            max_delay: Duration::from_millis(MAX_RETRY_DELAY_MS),
-        },
-        is_ducklake_shutdown_requested_error,
-        jitter_ducklake_retry_delay,
-        |attempt: RetryAttempt<'_, etl::error::EtlError>| {
-            counter!(
-                ETL_DUCKLAKE_RETRIES_TOTAL,
-                BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
-                RETRY_SCOPE_LABEL => "table_sequence",
-            )
-            .increment(1);
-            warn!(
-                attempt = attempt.retry_index,
-                max = attempt.max_retries,
-                table = %table_name,
-                batch_count,
-                error = %attempt.error,
-                "ducklake table batch sequence failed, retrying"
-            );
-        },
-        move || {
-            let attempt_batches = Arc::clone(&batches);
-            let pool = Arc::clone(&pool);
-            let blocking_slots = Arc::clone(&blocking_slots);
-            let write_guard = write_guard.clone();
-            async move {
-                run_duckdb_blocking_with_context(pool, blocking_slots, move |conn, context| {
-                    let _write_guard = write_guard;
-                    apply_table_batches(conn, attempt_batches.as_ref(), context)?;
-                    Ok(())
-                })
-                .await
-            }
-        },
+    apply_table_batches_with_policy(
+        pool,
+        blocking_slots,
+        batches,
+        write_guard,
+        FOREGROUND_QUERY_TIMEOUT,
+        batch_retry_policy(),
     )
     .await
-    .map_err(|failure| {
-        if is_ducklake_shutdown_requested_error(&failure.last_error) {
-            return failure.last_error;
-        }
+    .map(|_| ())
+}
 
-        counter!(
-            ETL_DUCKLAKE_FAILED_BATCHES_TOTAL,
-            BATCH_KIND_LABEL => DuckLakeTableBatchKind::Mutation.as_str(),
-            RETRY_SCOPE_LABEL => "table_sequence",
+/// Returns the retry policy shared by sequence and standalone atomic batches.
+fn batch_retry_policy() -> RetryPolicy {
+    RetryPolicy {
+        max_retries: MAX_COMMIT_RETRIES,
+        initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
+        max_delay: Duration::from_millis(
+            MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
+        ),
+    }
+}
+
+/// Runs a sequence with explicit per-attempt limits, also used by deadline
+/// tests.
+async fn apply_table_batches_with_policy(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    batches: Vec<PreparedDuckLakeTableBatch>,
+    write_guard: DuckLakeWriteGuard,
+    timeout: Duration,
+    retry_policy: RetryPolicy,
+) -> EtlResult<TableStreamingProgressCache> {
+    let batch_count = batches.len();
+    let sequence_started = Instant::now();
+    let mut streaming_progress = TableStreamingProgressCache::default();
+    for (batch_index, batch) in batches.into_iter().enumerate() {
+        let span = tracing::info_span!(
+            "ducklake_table_batch",
+            table = %batch.table_name,
+            batch_id = %batch.batch_id,
+            batch_index = batch_index + 1,
+            batch_count,
+            completed_batches = batch_index,
+        );
+        #[cfg(feature = "test-utils")]
+        let table_name = batch.table_name.id();
+        let result = apply_table_batch_with_policy(
+            Arc::clone(&pool),
+            Arc::clone(&blocking_slots),
+            batch,
+            write_guard.clone(),
+            timeout,
+            retry_policy,
+            streaming_progress,
         )
-        .increment(1);
-        classified_error_with_detail(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake atomic table batch sequence failed after retries",
-            format!("table={table_name}, batch_count={batch_count}"),
-            failure.last_error,
-        )
-    })
+        .instrument(span.clone())
+        .await;
+        let _entered = span.enter();
+        if result.is_err() {
+            warn!(
+                sequence_elapsed_ms = sequence_started.elapsed().as_millis() as u64,
+                "ducklake table batch sequence failed"
+            );
+        } else {
+            debug!(
+                sequence_elapsed_ms = sequence_started.elapsed().as_millis() as u64,
+                completed_batches = batch_index + 1,
+                "ducklake table batch sequence advanced"
+            );
+        }
+        streaming_progress = result?;
+        #[cfg(feature = "test-utils")]
+        wait_after_atomic_batch_commit_for_tests(&table_name).await;
+    }
+    Ok(streaming_progress)
 }
 
 /// Applies one atomic per-table batch and retries on failure.
@@ -739,19 +768,39 @@ pub(super) async fn apply_table_batch_with_retry(
     batch: PreparedDuckLakeTableBatch,
     write_guard: DuckLakeWriteGuard,
 ) -> EtlResult<()> {
+    apply_table_batch_with_policy(
+        pool,
+        blocking_slots,
+        batch,
+        write_guard,
+        FOREGROUND_QUERY_TIMEOUT,
+        batch_retry_policy(),
+        TableStreamingProgressCache::default(),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Retries one atomic batch, giving each attempt a new bounded native
+/// operation.
+async fn apply_table_batch_with_policy(
+    pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+    blocking_slots: Arc<Semaphore>,
+    batch: PreparedDuckLakeTableBatch,
+    write_guard: DuckLakeWriteGuard,
+    timeout: Duration,
+    retry_policy: RetryPolicy,
+    streaming_progress: TableStreamingProgressCache,
+) -> EtlResult<TableStreamingProgressCache> {
+    let batch_started = Instant::now();
     let table_name = batch.table_name.clone();
     let batch_id = batch.batch_id.clone();
     let batch_kind = batch.batch_kind;
     let batch = Arc::new(batch);
+    let mut first_attempt = true;
 
     retry_with_backoff(
-        RetryPolicy {
-            max_retries: MAX_COMMIT_RETRIES,
-            initial_delay: Duration::from_millis(INITIAL_RETRY_DELAY_MS),
-            max_delay: Duration::from_millis(
-                MAX_RETRY_DELAY_MS.max(TRANSIENT_DELETE_FILE_RETRY_DELAY_MS),
-            ),
-        },
+        retry_policy,
         is_ducklake_shutdown_requested_error,
         jitter_ducklake_retry_delay,
         |attempt: RetryAttempt<'_, etl::error::EtlError>| {
@@ -764,6 +813,7 @@ pub(super) async fn apply_table_batch_with_retry(
             warn!(
                 attempt = attempt.retry_index,
                 max = attempt.max_retries,
+                batch_retry_elapsed_ms = batch_started.elapsed().as_millis() as u64,
                 table = %table_name,
                 batch_id = %batch_id,
                 error = %attempt.error,
@@ -771,32 +821,47 @@ pub(super) async fn apply_table_batch_with_retry(
             );
         },
         move || {
+            let mut streaming_progress = streaming_progress.clone();
+            if !first_attempt {
+                // An interrupted commit can have reached durable storage.
+                // Resolve its outcome from the catalog before replaying it.
+                streaming_progress.progress = None;
+            }
+            first_attempt = false;
             let attempt_batch = Arc::clone(&batch);
             let pool = Arc::clone(&pool);
             let blocking_slots = Arc::clone(&blocking_slots);
             let write_guard = write_guard.clone();
+            let span = tracing::Span::current();
             async move {
-                run_duckdb_blocking_with_context(pool, blocking_slots, move |conn, context| {
-                    let _write_guard = write_guard;
-                    if batch_kind == DuckLakeTableBatchKind::Copy {
-                        #[cfg(feature = "test-utils")]
-                        crate::ducklake::core::wait_if_copy_append_paused_for_tests();
-                        if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
-                            record_replayed_batch_skip(attempt_batch.as_ref());
-                            return Ok(());
+                run_duckdb_blocking_with_timeout_and_context(
+                    pool,
+                    blocking_slots,
+                    timeout,
+                    move |conn, context| {
+                        let _entered = span.enter();
+                        let _write_guard = write_guard;
+                        if batch_kind == DuckLakeTableBatchKind::Copy {
+                            #[cfg(feature = "test-utils")]
+                            crate::ducklake::core::wait_if_copy_append_paused_for_tests();
+                            if applied_batch_marker_exists(conn, attempt_batch.as_ref())? {
+                                record_replayed_batch_skip(attempt_batch.as_ref());
+                                return Ok(streaming_progress);
+                            }
+
+                            apply_table_batch(conn, attempt_batch.as_ref(), context)?;
+                            return Ok(streaming_progress);
                         }
 
-                        apply_table_batch(conn, attempt_batch.as_ref(), context)?;
-                        return Ok(());
-                    }
-
-                    apply_table_batches(
-                        conn,
-                        std::slice::from_ref(attempt_batch.as_ref()),
-                        context,
-                    )?;
-                    Ok(())
-                })
+                        apply_table_batches(
+                            conn,
+                            std::slice::from_ref(attempt_batch.as_ref()),
+                            context,
+                            &mut streaming_progress,
+                        )?;
+                        Ok(streaming_progress)
+                    },
+                )
                 .await
             }
         },
@@ -872,6 +937,8 @@ pub(super) fn prepare_copy_table_batch(
         table_rows.iter().map(SizeHint::size_hint).fold(0usize, usize::saturating_add);
     Ok(PreparedDuckLakeCopyBatch {
         batch: PreparedDuckLakeTableBatch {
+            #[cfg(test)]
+            test_hook: None,
             table_name,
             replay_epoch,
             batch_id: batch_id.to_string(),
@@ -899,6 +966,8 @@ pub(super) fn prepare_copy_complete_table_batch(
 ) -> PreparedDuckLakeTableBatch {
     let identity = build_copy_complete_batch_identity(&table_name);
     PreparedDuckLakeTableBatch {
+        #[cfg(test)]
+        test_hook: None,
         table_name,
         replay_epoch,
         batch_id: identity.batch_id,
@@ -920,6 +989,8 @@ pub(super) fn prepare_truncate_table_batch(
 ) -> PreparedDuckLakeTableBatch {
     let identity = build_truncate_batch_identity(&table_name, &tracked_truncates);
     PreparedDuckLakeTableBatch {
+        #[cfg(test)]
+        test_hook: None,
         table_name,
         replay_epoch,
         batch_id: identity.batch_id,
@@ -1130,16 +1201,21 @@ fn apply_table_batches(
     conn: &duckdb::Connection,
     batches: &[PreparedDuckLakeTableBatch],
     operation_context: &DuckLakeBlockingOperationContext,
+    streaming_progress: &mut TableStreamingProgressCache,
 ) -> EtlResult<()> {
     if batches.is_empty() {
         return Ok(());
     }
 
-    let mut streaming_progress = if batches[0].uses_streaming_progress() {
-        read_table_streaming_progress(conn, batches[0].table_name(), &batches[0].replay_epoch)?
-    } else {
-        None
-    };
+    if batches[0].uses_streaming_progress() && streaming_progress.progress.is_none() {
+        #[cfg(test)]
+        streaming_progress.reads.fetch_add(1, Ordering::Relaxed);
+        streaming_progress.progress = Some(read_table_streaming_progress(
+            conn,
+            batches[0].table_name(),
+            &batches[0].replay_epoch,
+        )?);
+    }
 
     for batch in batches {
         if !batch.uses_streaming_progress() {
@@ -1166,7 +1242,7 @@ fn apply_table_batches(
             continue;
         }
 
-        if let Some(progress) = streaming_progress {
+        if let Some(Some(progress)) = streaming_progress.progress {
             match streaming_replay_decision(progress, batch)? {
                 StreamingReplayDecision::Skip => {
                     record_replayed_batch_skip(batch);
@@ -1190,9 +1266,11 @@ fn apply_table_batches(
             )
         })?;
 
-        streaming_progress = batch
-            .last_event_position
-            .map(|last_event_position| TableStreamingProgress { last_event_position });
+        streaming_progress.progress = Some(
+            batch
+                .last_event_position
+                .map(|last_event_position| TableStreamingProgress { last_event_position }),
+        );
     }
 
     Ok(())
@@ -1217,6 +1295,8 @@ fn push_prepared_mutation_batch(
     let mutations = tracked_mutations.into_iter().map(|tracked| tracked.mutation).collect();
 
     prepared_batches.push(PreparedDuckLakeTableBatch {
+        #[cfg(test)]
+        test_hook: None,
         table_name: table_name.clone(),
         replay_epoch: replay_epoch.to_owned(),
         batch_id: identity.batch_id,
@@ -2182,6 +2262,27 @@ fn apply_table_batch(
     operation_context: &DuckLakeBlockingOperationContext,
 ) -> EtlResult<()> {
     let batch_started = Instant::now();
+    let result = apply_table_batch_inner(conn, batch, operation_context);
+    if result.is_err() {
+        warn!(
+            table = %batch.table_name, batch_id = %batch.batch_id,
+            batch_elapsed_ms = batch_started.elapsed().as_millis() as u64,
+            ducklake_operation_id = operation_context.operation_id(),
+            operation_elapsed_ms = operation_context.elapsed_ms(),
+            remaining_timeout_ms = operation_context.remaining_timeout_ms(),
+            "ducklake atomic batch attempt failed"
+        );
+    }
+    result
+}
+
+/// Executes the transaction and its replay watermark on the same connection.
+fn apply_table_batch_inner(
+    conn: &duckdb::Connection,
+    batch: &PreparedDuckLakeTableBatch,
+    operation_context: &DuckLakeBlockingOperationContext,
+) -> EtlResult<()> {
+    let batch_started = Instant::now();
 
     conn.execute_batch("BEGIN TRANSACTION").map_err(|error| {
         let error = RedactedDuckDbError::from(error);
@@ -2196,6 +2297,10 @@ fn apply_table_batch(
     let mut reusable_staging_table =
         ReusableStagingTable::new(&batch.table_name, batch.insert_column_names.clone());
     let result = (|| -> EtlResult<()> {
+        #[cfg(test)]
+        if let Some(hook) = &batch.test_hook {
+            hook(conn, operation_context)?;
+        }
         match &batch.action {
             PreparedDuckLakeTableBatchAction::Mutation(prepared_mutations) => {
                 for prepared_mutation in prepared_mutations {
@@ -2250,6 +2355,10 @@ fn apply_table_batch(
                 last_commit_lsn = %format_optional_lsn(batch.last_commit_lsn),
                 sub_batch_kind = batch_log_kind(batch),
                 insert_sub_batch_rows = apply_sub_batch_rows(batch),
+                batch_elapsed_ms = batch_started.elapsed().as_millis() as u64,
+                ducklake_operation_id = operation_context.operation_id(),
+                operation_elapsed_ms = operation_context.elapsed_ms(),
+                remaining_timeout_ms = operation_context.remaining_timeout_ms(),
                 "ducklake batch committed"
             );
 
@@ -2366,6 +2475,8 @@ fn apply_delete_mutation(
             chunk.iter().map(|predicate| format!("({predicate})")).collect::<Vec<_>>().join(" OR ");
 
         let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
+        let statement_started = Instant::now();
+        let statement_budget_ms = operation_context.remaining_timeout_ms();
         conn.execute_batch(&sql_query).map_err(|error| {
             let error = DuckDbSensitiveQueryError::new(&error);
             tracing::error!(
@@ -2383,6 +2494,10 @@ fn apply_delete_mutation(
                 delete_chunk_count = chunk_count,
                 delete_chunk_predicate_count = chunk.len(),
                 duckdb_interrupted = error.is_interrupt(),
+                statement_elapsed_ms = statement_started.elapsed().as_millis() as u64,
+                statement_budget_ms,
+                operation_elapsed_ms = operation_context.elapsed_ms(),
+                remaining_timeout_ms = operation_context.remaining_timeout_ms(),
                 ducklake_interrupt_reason = operation_context.interrupt_reason_label(),
                 ducklake_operation_id = operation_context.operation_id(),
                 ducklake_operation_kind = operation_context.operation_kind(),
@@ -2523,6 +2638,50 @@ fn insert_rows_into_staging_with_sql(
     Ok(())
 }
 
+/// One-shot asynchronous barrier after a real atomic commit, before the
+/// remaining sequence can run or acknowledge the upstream write.
+#[cfg(feature = "test-utils")]
+struct PausedAtomicCommit {
+    table_name: String,
+    reached: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(feature = "test-utils")]
+static PAUSED_ATOMIC_COMMIT: LazyLock<Mutex<Option<PausedAtomicCommit>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Pauses one table's next committed atomic batch without blocking a native
+/// thread. Dropping the returned sender releases the barrier.
+#[cfg(feature = "test-utils")]
+pub fn pause_after_atomic_batch_commit_for_tests(
+    table_name: &str,
+) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+    let (reached, receiver) = tokio::sync::oneshot::channel();
+    let (sender, resume) = tokio::sync::oneshot::channel();
+    *PAUSED_ATOMIC_COMMIT.lock() =
+        Some(PausedAtomicCommit { table_name: table_name.to_owned(), reached, resume });
+    (receiver, sender)
+}
+
+/// Waits outside the transaction so shutdown can cancel a partially committed
+/// sequence while its replay watermark remains durable.
+#[cfg(feature = "test-utils")]
+async fn wait_after_atomic_batch_commit_for_tests(table_name: &str) {
+    let hook = {
+        let mut hook = PAUSED_ATOMIC_COMMIT.lock();
+        if hook.as_ref().is_some_and(|hook| hook.table_name == table_name) {
+            hook.take()
+        } else {
+            None
+        }
+    };
+    if let Some(PausedAtomicCommit { reached, resume, .. }) = hook {
+        let _ = reached.send(());
+        let _ = resume.await;
+    }
+}
+
 #[cfg(feature = "test-utils")]
 static FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE: LazyLock<Mutex<Option<String>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -2550,6 +2709,7 @@ pub fn arm_fail_after_copy_batch_commit_once_for_tests(table_name: &str) {
 /// Clears DuckLake destination test hooks.
 #[cfg(feature = "test-utils")]
 pub fn reset_ducklake_test_hooks() {
+    PAUSED_ATOMIC_COMMIT.lock().take();
     *FAIL_AFTER_ATOMIC_BATCH_COMMIT_TABLE.lock() = None;
     *FAIL_AFTER_COPY_BATCH_COMMIT_TABLE.lock() = None;
     STAGING_TABLE_CREATIONS_BY_TABLE.lock().clear();
@@ -2629,6 +2789,282 @@ mod tests {
 
     use super::*;
 
+    /// In-memory SQL fixture for the real transaction, watchdog, and replay
+    /// paths.
+    struct BatchDeadlineFixture {
+        pool: Arc<r2d2::Pool<DuckLakeConnectionManager>>,
+        slots: Arc<Semaphore>,
+        guard: DuckLakeWriteGuard,
+        reader: duckdb::Connection,
+    }
+
+    impl BatchDeadlineFixture {
+        /// Creates only synthetic, process-local tables; no extensions or
+        /// services.
+        async fn new() -> Self {
+            use crate::ducklake::{
+                client::{DuckLakeInterruptRegistry, build_warm_ducklake_pool},
+                config::{DuckLakeSetupPlan, DuckLakeSetupStep},
+            };
+            let setup = DuckLakeSetupPlan::from_steps(vec![DuckLakeSetupStep {
+                label: "test_tables",
+                sql: "attach ':memory:' as lake;
+                    create schema lake.public;
+                    create table lake.public.users (id integer, name varchar);
+                    create table lake.public.attempts (id integer);
+                    create table lake.__etl_streaming_progress (
+                        table_name varchar, replay_epoch varchar, last_commit_lsn ubigint,
+                        last_tx_ordinal ubigint, updated_at timestamptz
+                    );"
+                .to_owned(),
+            }]);
+            let manager = DuckLakeConnectionManager::new(
+                Arc::new(setup),
+                true,
+                Arc::new(DuckLakeInterruptRegistry::default()),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await
+            .unwrap();
+            let pool =
+                Arc::new(build_warm_ducklake_pool(manager, 1, "batch-test", ()).await.unwrap());
+            let reader =
+                run_duckdb_blocking(Arc::clone(&pool), Arc::new(Semaphore::new(1)), |conn| {
+                    Ok(conn.try_clone().unwrap())
+                })
+                .await
+                .unwrap();
+            let permit = Arc::new(Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap());
+            let checkpoint = Arc::new(Arc::new(tokio::sync::RwLock::new(())).read_owned().await);
+            Self {
+                pool,
+                slots: Arc::new(Semaphore::new(1)),
+                guard: DuckLakeWriteGuard::new(&permit, &checkpoint),
+                reader,
+            }
+        }
+
+        /// Verifies that data and replay watermarks committed exactly once.
+        fn assert_committed(&self, rows: i64, batches: i64) {
+            let count: i64 = self
+                .reader
+                .query_row("select count(*) from lake.public.users", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, rows);
+            let attempts: i64 = self
+                .reader
+                .query_row("select count(*) from lake.public.attempts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(attempts, batches);
+            let progress: i64 = self
+                .reader
+                .query_row("select count(*) from lake.__etl_streaming_progress", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(progress, batches);
+        }
+    }
+
+    /// A transaction barrier lets the test advance time without wall-clock
+    /// sleeps.
+    struct BatchDeadlineEvent {
+        batch_index: usize,
+        operation_id: u64,
+        remaining_timeout_ms: u64,
+        release: std::sync::mpsc::Sender<bool>,
+    }
+
+    /// Builds two real CDC batches and optional barriers inside their
+    /// transactions.
+    fn deadline_test_batches(
+        events: Option<tokio::sync::mpsc::UnboundedSender<BatchDeadlineEvent>>,
+    ) -> Vec<PreparedDuckLakeTableBatch> {
+        let mutations = (0..=CDC_MUTATION_BATCH_SIZE)
+            .map(|index| {
+                TrackedTableMutation::new(
+                    EventPosition::new(PgLsn::from(1), u64::try_from(index).unwrap()),
+                    TableMutation::Insert(TableRow::new(vec![
+                        Cell::I32(i32::try_from(index).unwrap()),
+                        Cell::String("synthetic".to_owned()),
+                    ])),
+                )
+            })
+            .collect();
+        let mut batches = prepare_mutation_table_batches(
+            &make_replicated_schema(),
+            ducklake_table_name(),
+            LEGACY_REPLAY_EPOCH.to_owned(),
+            mutations,
+        )
+        .unwrap();
+        for (batch_index, batch) in batches.iter_mut().enumerate() {
+            if let Some(events) = &events {
+                let events = events.clone();
+                batch.test_hook = Some(Arc::new(move |conn, context| {
+                    // A timed-out attempt must roll back this write together
+                    // with its watermark.
+                    conn.execute(
+                        "insert into lake.public.attempts values (?)",
+                        [i64::try_from(batch_index).unwrap()],
+                    )
+                    .unwrap();
+                    let (release, wait) = std::sync::mpsc::channel();
+                    events
+                        .send(BatchDeadlineEvent {
+                            batch_index,
+                            operation_id: context.operation_id(),
+                            remaining_timeout_ms: context.remaining_timeout_ms(),
+                            release,
+                        })
+                        .map_err(|_| etl_error!(ErrorKind::InvalidState, "Test receiver closed"))?;
+                    let expect_timeout = wait
+                        .recv()
+                        .map_err(|_| etl_error!(ErrorKind::InvalidState, "Test barrier closed"))?;
+                    if expect_timeout {
+                        while context.interrupt_reason_label() == "none" {
+                            std::thread::yield_now();
+                        }
+                        assert_eq!(context.interrupt_reason_label(), "query_timeout");
+                        return Err(etl_error!(
+                            ErrorKind::DestinationTimeout,
+                            "Test transaction interrupted"
+                        ));
+                    }
+                    Ok(())
+                }));
+            }
+        }
+        batches
+    }
+
+    /// Keeps Tokio from automatically jumping to a watchdog while native SQL
+    /// runs.
+    fn hold_test_clock() -> tokio_util::task::AbortOnDropHandle<()> {
+        tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async {
+            loop {
+                tokio::task::yield_now().await;
+            }
+        }))
+    }
+
+    /// Uses the production timeout but removes retry sleeps from barrier-driven
+    /// tests.
+    fn deadline_test_policy(max_retries: u32) -> RetryPolicy {
+        RetryPolicy { max_retries, initial_delay: Duration::ZERO, max_delay: Duration::ZERO }
+    }
+
+    /// Each batch fits its budget even though the sequence takes more than 180
+    /// seconds.
+    #[tokio::test]
+    async fn table_sequence_renews_timeout_for_each_atomic_batch() {
+        let fixture = BatchDeadlineFixture::new().await;
+        let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let batches = deadline_test_batches(Some(events));
+        tokio::time::pause();
+        let _clock = hold_test_clock();
+        let started = Instant::now();
+        let task = tokio::spawn(apply_table_batches_with_policy(
+            Arc::clone(&fixture.pool),
+            Arc::clone(&fixture.slots),
+            batches,
+            fixture.guard.clone(),
+            FOREGROUND_QUERY_TIMEOUT,
+            deadline_test_policy(0),
+        ));
+        let mut operation_ids = Vec::new();
+        for batch_index in 0..2 {
+            let event = observed.recv().await.unwrap();
+            assert_eq!(event.batch_index, batch_index);
+            operation_ids.push(event.operation_id);
+            tokio::time::advance(Duration::from_secs(100)).await;
+            event.release.send(false).unwrap();
+        }
+        let progress = task.await.unwrap().unwrap();
+        assert_eq!(progress.reads.load(Ordering::Relaxed), 1);
+        assert_ne!(operation_ids[0], operation_ids[1]);
+        assert!(started.elapsed() > FOREGROUND_QUERY_TIMEOUT);
+        fixture.assert_committed(17, 2);
+        // Replay the complete input through the same async path, without
+        // duplicating rows.
+        let replay_progress = apply_table_batches_with_policy(
+            Arc::clone(&fixture.pool),
+            Arc::clone(&fixture.slots),
+            deadline_test_batches(None),
+            fixture.guard.clone(),
+            FOREGROUND_QUERY_TIMEOUT,
+            deadline_test_policy(0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay_progress.reads.load(Ordering::Relaxed), 1);
+        fixture.assert_committed(17, 2);
+    }
+
+    /// Earlier commits survive a later timeout, whose partial writes are rolled
+    /// back.
+    #[tokio::test]
+    async fn table_sequence_retries_only_timed_out_batch() {
+        let fixture = BatchDeadlineFixture::new().await;
+        let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let batches = deadline_test_batches(Some(events));
+        tokio::time::pause();
+        let _clock = hold_test_clock();
+        let task = tokio::spawn(apply_table_batches_with_policy(
+            Arc::clone(&fixture.pool),
+            Arc::clone(&fixture.slots),
+            batches,
+            fixture.guard.clone(),
+            FOREGROUND_QUERY_TIMEOUT,
+            deadline_test_policy(1),
+        ));
+        let first = observed.recv().await.unwrap();
+        assert_eq!(first.batch_index, 0);
+        first.release.send(false).unwrap();
+        let interrupted = observed.recv().await.unwrap();
+        assert_eq!(interrupted.batch_index, 1);
+        fixture.assert_committed(16, 1);
+        tokio::time::advance(FOREGROUND_QUERY_TIMEOUT + Duration::from_secs(1)).await;
+        interrupted.release.send(true).unwrap();
+        // Let the ordinary zero-delay retry timer run after the controlled
+        // timeout.
+        tokio::time::resume();
+        let retry = observed.recv().await.unwrap();
+        assert_eq!(retry.batch_index, 1);
+        assert_ne!(interrupted.operation_id, retry.operation_id);
+        assert!(retry.remaining_timeout_ms > 170_000);
+        retry.release.send(false).unwrap();
+        let progress = task.await.unwrap().unwrap();
+        assert_eq!(progress.reads.load(Ordering::Relaxed), 2);
+        fixture.assert_committed(17, 2);
+    }
+
+    /// A slow atomic transaction still fails, without acknowledging unfinished
+    /// data.
+    #[tokio::test]
+    async fn table_sequence_enforces_single_batch_timeout() {
+        let fixture = BatchDeadlineFixture::new().await;
+        let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let mut batches = deadline_test_batches(Some(events));
+        batches.truncate(1);
+        tokio::time::pause();
+        let _clock = hold_test_clock();
+        let task = tokio::spawn(apply_table_batches_with_policy(
+            Arc::clone(&fixture.pool),
+            Arc::clone(&fixture.slots),
+            batches,
+            fixture.guard.clone(),
+            FOREGROUND_QUERY_TIMEOUT,
+            deadline_test_policy(0),
+        ));
+        let event = observed.recv().await.unwrap();
+        tokio::time::advance(FOREGROUND_QUERY_TIMEOUT + Duration::from_secs(1)).await;
+        event.release.send(true).unwrap();
+        let error = task.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("timeout_ms=180000"));
+        fixture.assert_committed(0, 0);
+    }
+
     #[test]
     fn event_position_format_preserves_fixed_width_hex_encoding() {
         let event_position = EventPosition::new(PgLsn::from(1), 2);
@@ -2679,6 +3115,8 @@ mod tests {
 
     fn make_prepared_batch(table_name: DuckLakeTableName) -> PreparedDuckLakeTableBatch {
         PreparedDuckLakeTableBatch {
+            #[cfg(test)]
+            test_hook: None,
             table_name,
             replay_epoch: LEGACY_REPLAY_EPOCH.to_owned(),
             batch_id: "test-batch".to_owned(),
@@ -2708,7 +3146,7 @@ mod tests {
         assert!(!source.to_string().contains(sensitive_value));
         assert_eq!(
             source.to_string(),
-            "DuckDB query failed with a Binder error; error message omitted because it may \
+            "DuckDB query failed with a Catalog error; error message omitted because it may \
              contain row values"
         );
     }
@@ -3763,22 +4201,7 @@ mod tests {
             Bool,
         }
 
-        /// Payload kinds whose identity predicates DuckLake matches today.
-        ///
-        /// Floats are excluded because SQL float literals can parse one ULP
-        /// away from the stored value; that defect is pinned by
-        /// `identity_predicates_match_rows_with_float_columns` and
-        /// `full_identity_delete_matches_appended_float8_value`.
-        const EXACT_PAYLOAD_KINDS: [PayloadKind; 6] = [
-            PayloadKind::Json,
-            PayloadKind::Decimal,
-            PayloadKind::VarcharNumeric,
-            PayloadKind::Int4Array,
-            PayloadKind::Text,
-            PayloadKind::Bool,
-        ];
-
-        /// Every payload kind, including floats.
+        /// Every payload kind.
         const ALL_PAYLOAD_KINDS: [PayloadKind; 8] = [
             PayloadKind::Float8,
             PayloadKind::Float4,
@@ -4020,7 +4443,12 @@ mod tests {
                 LEGACY_REPLAY_EPOCH.to_owned(),
                 tracked,
             )?;
-            apply_table_batches(conn, &batches, &DuckLakeBlockingOperationContext::for_tests())
+            apply_table_batches(
+                conn,
+                &batches,
+                &DuckLakeBlockingOperationContext::for_tests(),
+                &mut TableStreamingProgressCache::default(),
+            )
         }
 
         /// Reads the destination table as rows of comparable values.
@@ -4148,7 +4576,7 @@ mod tests {
                 "ducklake_identity_predicates_change_one_row",
                 &identity_case(
                     vec![IdentityKind::PrimaryKey, IdentityKind::Full],
-                    &EXACT_PAYLOAD_KINDS,
+                    &ALL_PAYLOAD_KINDS,
                 ),
                 |case| check_identity_case(case, false),
             );
@@ -4159,18 +4587,8 @@ mod tests {
         fn full_identity_changes_exactly_one_row_with_duplicates() {
             run_property(
                 "ducklake_full_identity_duplicates_change_one_row",
-                &identity_case(vec![IdentityKind::Full], &EXACT_PAYLOAD_KINDS),
-                |case| check_identity_case(case, true),
-            );
-        }
-
-        #[test]
-        #[ignore = "known defect: float sql literals drift one ulp, corrupting float rows"]
-        fn identity_predicates_match_rows_with_float_columns() {
-            run_property(
-                "ducklake_identity_predicates_match_floats",
                 &identity_case(vec![IdentityKind::Full], &ALL_PAYLOAD_KINDS),
-                |case| check_identity_case(case, false),
+                |case| check_identity_case(case, true),
             );
         }
 
@@ -4200,7 +4618,6 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: float8 delete literal 1e-30 misses the appended value"]
         fn full_identity_delete_matches_appended_float8_value() {
             let case = IdentityCase {
                 identity: IdentityKind::Full,
@@ -4402,13 +4819,28 @@ mod tests {
             match crash_after {
                 Some(committed) => {
                     let committed = committed.index(batches.len() + 1);
-                    apply_table_batches(conn, &batches[..committed], &context)?;
+                    apply_table_batches(
+                        conn,
+                        &batches[..committed],
+                        &context,
+                        &mut TableStreamingProgressCache::default(),
+                    )?;
                     if retry {
-                        apply_table_batches(conn, &batches, &context)?;
+                        apply_table_batches(
+                            conn,
+                            &batches,
+                            &context,
+                            &mut TableStreamingProgressCache::default(),
+                        )?;
                     }
                     Ok(())
                 }
-                None => apply_table_batches(conn, &batches, &context),
+                None => apply_table_batches(
+                    conn,
+                    &batches,
+                    &context,
+                    &mut TableStreamingProgressCache::default(),
+                ),
             }
         }
 

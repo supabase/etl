@@ -45,12 +45,14 @@ ducklake = [
 bigquery = [
     "dep:uuid",
     "dep:gcp-bigquery-client",
+    "dep:serde",
     "dep:serde_json",
     "dep:prost",
     "dep:rand",
     "dep:tonic",
     "dep:tracing",
     "dep:tokio",
+    "tokio/fs",
     "dep:metrics",
 ]
 iceberg = [
@@ -65,6 +67,7 @@ iceberg = [
     "dep:async-trait",
     "dep:serde",
     "dep:serde_json",
+    "dep:secrecy",
 ]
 clickhouse = [
     "dep:clickhouse",
@@ -135,9 +138,9 @@ pkcs8 = { workspace = true, optional = true }
 prost = { workspace = true, optional = true }
 r2d2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true, features = ["thread_rng"] }
-reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true, optional = true, features = ["json", "rustls-tls", "rustls-tls-native-roots"] }
 rustls = { workspace = true, optional = true, features = ["aws-lc-rs"] }
-secrecy = { workspace = true, optional = true }
+secrecy = { workspace = true, optional = true, features = ["serde"] }
 serde = { workspace = true, optional = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true, features = ["arbitrary_precision", "std"] }
 sha2 = { workspace = true, optional = true }

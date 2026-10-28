@@ -53,7 +53,14 @@ async function resolveFile(pathname) {
 }
 
 const server = createServer(async (request, response) => {
-  const url = new URL(request.url ?? '/', `http://${host}:${port}`);
+  let url;
+  try {
+    url = new URL(request.url ?? '/', `http://${host}:${port}`);
+  } catch {
+    response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    response.end('Bad Request');
+    return;
+  }
 
   if (url.pathname === basePath) {
     response.writeHead(308, { Location: `${basePath}/` });
@@ -67,7 +74,16 @@ const server = createServer(async (request, response) => {
     return;
   }
 
-  const file = await resolveFile(decodeURIComponent(url.pathname));
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+    response.end('Bad Request');
+    return;
+  }
+
+  const file = await resolveFile(pathname);
   if (!file) {
     response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     response.end('Not found');

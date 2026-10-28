@@ -257,9 +257,6 @@ fn run_clickhouse_tests(config: &TestClickhouseConfig, sccache: bool) -> Result<
     println!("🧪 Running ClickHouse destination test with:");
     println!("   TESTS_DATABASE_HOST={}", test_env.database_host);
     println!("   TESTS_DATABASE_PORT={}", test_env.database_port);
-    println!("   TESTS_DATABASE_USERNAME={}", test_env.database_username);
-    println!("   TESTS_CLICKHOUSE_URL={}", test_env.clickhouse_url);
-    println!("   TESTS_CLICKHOUSE_USER={}", test_env.clickhouse_user);
     println!(
         "   TESTS_CLICKHOUSE_PASSWORD={}",
         if test_env.clickhouse_password.is_empty() { "" } else { "[set]" }

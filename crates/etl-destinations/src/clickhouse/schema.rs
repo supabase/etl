@@ -103,7 +103,9 @@ pub(super) fn clickhouse_default_clause(col: &ColumnSchema) -> Option<String> {
     let default_clause = col
         .default_expression
         .as_deref()
-        .and_then(|default_expression| clickhouse_default_expression(default_expression, &col.typ))
+        .and_then(|default_expression| {
+            clickhouse_default_expression(default_expression, &col.typ, col.modifier)
+        })
         .map(|rendered_default_expression| format!(" DEFAULT {rendered_default_expression}"));
     if default_clause.is_none() && col.default_expression.is_some() {
         warn!(
@@ -116,16 +118,17 @@ pub(super) fn clickhouse_default_clause(col: &ColumnSchema) -> Option<String> {
 }
 
 /// Returns whether a column default can be represented in ClickHouse SQL.
-pub(super) fn supports_column_default(default_expression: &str, typ: &Type) -> bool {
-    clickhouse_default_expression(default_expression, typ).is_some()
+pub(super) fn supports_column_default(default_expression: &str, typ: &Type, modifier: i32) -> bool {
+    clickhouse_default_expression(default_expression, typ, modifier).is_some()
 }
 
 /// Returns a rendered ClickHouse default expression for a column, if supported.
 pub(super) fn clickhouse_default_expression(
     default_expression: &str,
     typ: &Type,
+    modifier: i32,
 ) -> Option<String> {
-    parse_default_expression(default_expression, typ)
+    parse_default_expression(default_expression, typ, modifier)
         .and_then(|expression| render_clickhouse_default_expression(&expression, typ))
 }
 

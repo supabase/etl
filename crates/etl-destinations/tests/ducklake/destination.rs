@@ -49,7 +49,7 @@ use etl::{
         write_table_rows as write_table_rows_with_status, write_table_rows_with_batch_id,
     },
 };
-use etl_config::shared::DuckLakeCopyBufferConfig;
+use etl_config::shared::{DuckLakeCopyBufferConfig, DuckLakeWriterConfig};
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, S3Config, table_name_to_ducklake_table_name,
 };
@@ -62,6 +62,11 @@ use etl_destinations::ducklake::{
     release_paused_copy_append_for_tests, reset_drop_table_for_copy_failure_for_tests,
     reset_ducklake_test_hooks, reset_paused_copy_append_for_tests,
     reset_pool_refresh_failure_for_tests, run_external_maintenance_watcher,
+};
+use etl_maintenance::ducklake::{
+    CleanupOldFilesMaintenanceConfig, DuckLakeMaintenanceConfig, ExpireSnapshotsMaintenanceConfig,
+    InlineFlushMaintenanceConfig, MergeAdjacentFilesMaintenanceConfig, RedactedDuckDbError,
+    RewriteDataFilesMaintenanceConfig, run_maintenance_once,
 };
 #[cfg(feature = "test-utils")]
 use etl_maintenance::{
@@ -288,16 +293,17 @@ fn make_replicated_table_schema(schema: &TableSchema) -> ReplicatedTableSchema {
 ///
 /// Returns `Err` when the catalog cannot be attached (e.g. DuckDB WAL
 /// checkpoint mismatch while another connection is still flushing).
-fn try_open_lake_conn(catalog: &Url, data: &Url) -> Result<Connection, duckdb::Error> {
+fn try_open_lake_conn(catalog: &Url, data: &Url) -> Result<Connection, RedactedDuckDbError> {
     let conn = open_verification_connection();
     let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
-        "{} ATTACH {} AS {} (DATA_PATH {});",
+        "{} ATTACH {} AS {} (DATA_PATH {}, AUTOMATIC_MIGRATION false);",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),
         quote_literal(data.as_str())
-    ))?;
+    ))
+    .map_err(RedactedDuckDbError::from)?;
     Ok(conn)
 }
 
@@ -496,6 +502,7 @@ fn count_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 {
         [],
         |r| r.get(0),
     )
+    .map_err(RedactedDuckDbError::from)
     .unwrap()
 }
 
@@ -507,10 +514,13 @@ fn table_column_names(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<
         quote_literal(table_name.schema()),
         quote_literal(table_name.table()),
     ))
+    .map_err(RedactedDuckDbError::from)
     .unwrap()
     .query_map([], |row| row.get::<_, String>(0))
+    .map_err(RedactedDuckDbError::from)
     .unwrap()
     .collect::<Result<Vec<_>, _>>()
+    .map_err(RedactedDuckDbError::from)
     .unwrap()
 }
 
@@ -530,6 +540,7 @@ fn count_applied_batches(
         [],
         |r| r.get(0),
     )
+    .map_err(RedactedDuckDbError::from)
     .unwrap()
 }
 
@@ -544,6 +555,7 @@ fn count_streaming_progress_rows(conn: &Connection, table_name: &DuckLakeTableNa
         [],
         |r| r.get(0),
     )
+    .map_err(RedactedDuckDbError::from)
     .unwrap()
 }
 
@@ -604,6 +616,7 @@ fn flush_inlined_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 
         [],
         |r| r.get(0),
     )
+    .map_err(RedactedDuckDbError::from)
     .unwrap()
 }
 
@@ -618,13 +631,14 @@ fn flush_inlined_rows(conn: &Connection, table_name: &DuckLakeTableName) -> i64 
 /// deterministically.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("CHECKPOINT").unwrap();
+    conn.execute_batch("CHECKPOINT").map_err(RedactedDuckDbError::from).unwrap();
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// `write_table_rows` inserts rows that can be queried back through the
-/// DuckLake catalog using a separate DuckDB connection.
+/// DuckLake catalog using a separate DuckDB connection, retaining format 1.1
+/// when creating and reopening the catalog.
 #[tokio::test(flavor = "multi_thread")]
 async fn write_table_rows_basic() {
     let lake = create_test_lake("write_table_rows_basic").await;
@@ -647,7 +661,7 @@ async fn write_table_rows_basic() {
         None,
         None,
         None,
-        store,
+        store.clone(),
     )
     .await
     .unwrap();
@@ -663,6 +677,15 @@ async fn write_table_rows_basic() {
         .await
         .unwrap();
 
+    destination.shutdown().await.unwrap();
+    drop(destination);
+    assert_eq!(lake.catalog_version().await, "1.1");
+
+    let restarted_destination = new_test_destination(&catalog_url, &data_url, store).await;
+    restarted_destination.shutdown().await.unwrap();
+    drop(restarted_destination);
+    assert_eq!(lake.catalog_version().await, "1.1");
+
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     assert_eq!(count_rows(&conn, &table_name), 3);
 
@@ -675,9 +698,70 @@ async fn write_table_rows_basic() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name.as_deref(), Some("Alice"));
+}
+
+/// Maintenance discovers the PostgreSQL metadata schema through its named
+/// DuckDB catalog and flushes inline rows without upgrading an existing 1.0
+/// catalog.
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_discovers_metadata_schema_and_flushes_rows() {
+    let lake = create_test_lake("maintenance_discovers_metadata_schema_and_flushes_rows").await;
+    let conn = open_verification_connection();
+    conn.execute_batch(&format!(
+        "{} attach {} as lake (data_path {}, ducklake_version '1.0'); create table \
+         lake.main.maintenance_rows (id bigint); insert into lake.main.maintenance_rows values \
+         (1), (2);",
+        ducklake_load_sql(),
+        quote_literal(&format!("ducklake:{}", catalog_attach_target(&lake.catalog_url))),
+        quote_literal(lake.data_url.as_str()),
+    ))
+    .map_err(RedactedDuckDbError::from)
+    .unwrap();
+    drop(conn);
+    assert_eq!(lake.catalog_version().await, "1.0");
+
+    let writer_config = DuckLakeWriterConfig::default();
+    let target_file_size = writer_config.target_file_size().to_owned();
+    let outcome = run_maintenance_once(DuckLakeMaintenanceConfig {
+        catalog_url: lake.catalog_url.clone(),
+        data_path: lake.data_url.clone(),
+        s3: None,
+        metadata_schema: None,
+        writer_config,
+        inline_flush: InlineFlushMaintenanceConfig { enabled: true, min_inlined_bytes: 0 },
+        merge_adjacent_files: MergeAdjacentFilesMaintenanceConfig {
+            enabled: false,
+            max_compacted_files: 40,
+            max_tables_per_run: 1,
+            target_file_size,
+        },
+        rewrite_data_files: RewriteDataFilesMaintenanceConfig {
+            enabled: false,
+            min_active_data_files: 0,
+            max_tables_per_run: 1,
+        },
+        expire_snapshots: ExpireSnapshotsMaintenanceConfig {
+            enabled: false,
+            older_than: "7 days".to_owned(),
+        },
+        cleanup_old_files: CleanupOldFilesMaintenanceConfig { enabled: false },
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.inline_flush_tables, 1);
+    assert_eq!(outcome.inline_flush_rows, 2);
+    assert_eq!(lake.catalog_version().await, "1.0");
+    let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+    let rows: i64 = conn
+        .query_row("select count(*) from lake.main.maintenance_rows", [], |row| row.get(0))
+        .map_err(RedactedDuckDbError::from)
+        .unwrap();
+    assert_eq!(rows, 2);
 }
 
 /// COPY connections should retain direct-to-Parquet behavior while sharing the
@@ -1013,10 +1097,13 @@ async fn buffered_copy_reset_waits_for_cancelled_blocking_append() {
     let conn = open_lake_conn_when_tables_visible(&catalog_url, &data_url, &[&table_name]).await;
     let rows = conn
         .prepare(&format!("select id, name from {}", qualified_lake_table_name(&table_name)))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(rows, vec![(1, "recopied".to_owned())]);
     reset_paused_copy_append_for_tests();
@@ -1481,6 +1568,7 @@ async fn buffered_copy_restart_recopies_without_loss_or_duplicates() {
                     [],
                     |row| row.get(0),
                 )
+                .map_err(RedactedDuckDbError::from)
                 .unwrap();
             (count_rows(conn, table_name), distinct_ids)
         },
@@ -2020,10 +2108,12 @@ async fn concurrent_same_table_copy_batches_complete() {
             quote_literal("copy"),
             quote_literal("__legacy__"),
         );
-        let mut stmt = conn.prepare(&sql).unwrap();
+        let mut stmt = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
         stmt.query_map([], |row| row.get::<_, i64>(0))
+            .map_err(RedactedDuckDbError::from)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
+            .map_err(RedactedDuckDbError::from)
             .unwrap()
     };
 
@@ -2037,7 +2127,7 @@ async fn concurrent_same_table_copy_batches_complete() {
             quote_literal(&table_name.id()),
             quote_literal("copy"),
         );
-        let mut stmt = conn.prepare(&sql).unwrap();
+        let mut stmt = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
         stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -2046,8 +2136,10 @@ async fn concurrent_same_table_copy_batches_complete() {
                 row.get::<_, Option<u64>>(3)?,
             ))
         })
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
     };
 
@@ -2157,6 +2249,7 @@ async fn truncate_clears_rows() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(col_count, 2, "table should still have 2 columns after truncate");
 }
@@ -2275,6 +2368,7 @@ async fn write_events() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name, "Gadget");
@@ -2341,13 +2435,16 @@ async fn write_events_splits_same_table_batch_by_replicated_schema() {
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(
@@ -2451,13 +2548,16 @@ async fn write_events_recovers_applying_metadata_before_relation_event() {
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(
@@ -2640,13 +2740,16 @@ async fn write_events_skips_applied_stale_prefix_and_rejects_pending_stale_row()
             "select id, name, email from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
         })
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(
         rows,
@@ -2745,6 +2848,7 @@ async fn write_events_applies_defaulted_schema_change() {
             "select id, name, status, score, active from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let rows = rows_statement
         .query_map([], |row| {
@@ -2756,8 +2860,10 @@ async fn write_events_applies_defaulted_schema_change() {
                 row.get::<_, Option<bool>>(4)?,
             ))
         })
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     // DuckLake records supported add-time defaults as metadata without
@@ -2869,10 +2975,13 @@ async fn write_events_reveals_publication_column_nullable_without_default() {
             "select id, status from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?)))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(rows, vec![(1, None), (2, Some("pending".to_owned()))]);
 
@@ -2889,6 +2998,7 @@ async fn write_events_reveals_publication_column_nullable_without_default() {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(is_nullable, "YES");
     // DuckLake exposes an omitted default as the implicit SQL default `NULL`.
@@ -2988,6 +3098,7 @@ async fn write_events_does_not_reconcile_missing_columns_after_applied_metadata(
             [],
             |row| row.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(row_count, 1);
 }
@@ -3072,13 +3183,16 @@ async fn write_events_supports_drop_and_add_same_column_name() {
             "select id, name, status from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let rows = statement
         .query_map([], |row| {
             Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i32>>(2)?))
         })
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(rows, vec![(1, "Alice".to_owned(), None), (2, "Bob".to_owned(), Some(7))]);
@@ -3182,11 +3296,14 @@ async fn write_events_supports_repeated_drop_and_add_same_column_name() {
             "select id, status from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?)))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(rows, vec![(1, None), (2, None), (3, Some("ready".to_owned()))]);
@@ -3238,6 +3355,7 @@ async fn write_table_rows_preserves_active_column_with_tombstone_prefix() {
             [],
             |row| row.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(value, "kept");
@@ -3445,10 +3563,13 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
             "select id, status from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, Option<String>>(1)?)))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(rows, vec![(1, None), (2, Some("pending".to_owned()))]);
 
@@ -3465,6 +3586,7 @@ async fn startup_after_restart_recovers_publication_mask_expansion() {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(is_nullable, "YES");
     assert_eq!(column_default.as_deref(), Some("NULL"));
@@ -3524,6 +3646,7 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
         quote_identifier("ddl_col_4_0"),
         quote_identifier("ddl_col_4_1"),
     ))
+    .map_err(RedactedDuckDbError::from)
     .unwrap();
     drop(conn);
 
@@ -3564,11 +3687,14 @@ async fn startup_after_restart_drops_stale_rename_source_when_target_exists() {
             "select id, ddl_col_4_0 from {} order by id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(rows, vec![(1, "existing".to_owned()), (2, "new".to_owned())]);
@@ -3827,6 +3953,7 @@ async fn write_events_with_old_row_update() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name, "Gadget");
@@ -3910,6 +4037,7 @@ async fn write_events_with_partial_updates() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(name, "ripe");
 }
@@ -3994,6 +4122,7 @@ async fn write_events_without_replica_identity_rejects_mutations() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(name, "seed");
 }
@@ -4084,6 +4213,7 @@ async fn write_events_replay_is_idempotent() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(id, 1);
     assert_eq!(name, "paid");
@@ -4156,6 +4286,7 @@ async fn write_events_same_commit_lsn_higher_tx_ordinal_still_applies() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(name, "posted");
 }
@@ -4260,10 +4391,13 @@ async fn write_events_restart_overlap_rebatches_only_pending_suffix() {
             "SELECT name FROM {} ORDER BY id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .query_map([], |row| row.get(0))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(names.len(), 16);
     assert_eq!(names[0], "name-1");
@@ -4555,10 +4689,13 @@ async fn write_events_reuses_one_staging_table_per_atomic_batch() {
             "SELECT id, name FROM {} ORDER BY id",
             qualified_lake_table_name(&table_name)
         ))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?)))
+        .map_err(RedactedDuckDbError::from)
         .unwrap()
         .collect::<Result<Vec<_>, _>>()
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(rows, vec![(1, "after".to_owned()), (2, "tail".to_owned())]);
 
@@ -4721,6 +4858,7 @@ async fn write_events_mixed_multi_table_batches() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     let name_b: String = conn
         .query_row(
@@ -4728,6 +4866,7 @@ async fn write_events_mixed_multi_table_batches() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(name_a, "a-one-updated");
@@ -4821,6 +4960,7 @@ async fn write_events_truncate_retry_after_post_commit_failure_is_idempotent() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(name, "after-truncate");
 
@@ -4919,6 +5059,7 @@ async fn write_events_retry_after_post_commit_failure_is_idempotent() {
             [],
             |r| r.get(0),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(name, "posted");
 
@@ -5179,6 +5320,7 @@ async fn type_mapping_round_trip() {
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
 
     assert_eq!(row.0, 42);
@@ -5186,4 +5328,25 @@ async fn type_mapping_round_trip() {
     assert!((row.2 - PI).abs() < 1e-9);
     assert!(row.3);
     assert_eq!(row.4, "2024-06-15");
+}
+
+/// Keeps credentials out of verification panics while preserving the DuckDB
+/// error.
+#[test]
+fn verification_query_errors_redact_credentials() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("attach ':memory:' as lake").unwrap();
+    let table_name = DuckLakeTableName::new("main", "password='placeholder-password'");
+    let sql = format!("SELECT COUNT(*) FROM {}", qualified_lake_table_name(&table_name));
+    let error = conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).unwrap_err();
+    assert!(error.to_string().contains("placeholder-password"));
+
+    let panic =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| count_rows(&conn, &table_name)))
+            .unwrap_err();
+
+    let message = panic.downcast_ref::<String>().unwrap();
+    assert!(!message.contains("placeholder-password"));
+    assert!(message.contains("[redacted]"));
+    assert!(message.contains("Catalog Error"));
 }

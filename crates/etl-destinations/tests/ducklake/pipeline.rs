@@ -21,6 +21,7 @@ use etl::{
 use etl_destinations::ducklake::{
     DuckLakeDestination, DuckLakeTableName, table_name_to_ducklake_table_name,
 };
+use etl_maintenance::ducklake::RedactedDuckDbError;
 use etl_postgres::{below_version, tokio::test_utils::TableModification, version::POSTGRES_15};
 use etl_telemetry::tracing::init_test_tracing;
 use pg_escape::{quote_identifier, quote_literal};
@@ -91,12 +92,13 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
     let conn = open_verification_connection();
     let catalog_attach_target = catalog_attach_target(catalog);
     conn.execute_batch(&format!(
-        "{} attach {} as {} (data_path {});",
+        "{} attach {} as {} (data_path {}, automatic_migration false);",
         ducklake_load_sql(),
         quote_literal(&format!("ducklake:{catalog_attach_target}")),
         quote_identifier("lake"),
         quote_literal(data.as_str())
     ))
+    .map_err(RedactedDuckDbError::from)
     .unwrap();
 
     conn
@@ -116,7 +118,7 @@ fn open_lake_conn(catalog: &Url, data: &Url) -> Connection {
 /// `run_duckdb_blocking`.
 fn checkpoint_lake(catalog: &Url, data: &Url) {
     let conn = open_lake_conn(catalog, data);
-    conn.execute_batch("checkpoint").unwrap();
+    conn.execute_batch("checkpoint").map_err(RedactedDuckDbError::from).unwrap();
 }
 
 fn qualified_lake_table_name(table_name: &DuckLakeTableName) -> String {
@@ -141,7 +143,7 @@ fn count_applied_batches(
         quote_literal(&table_name.id()),
         quote_literal(batch_kind),
     );
-    conn.query_row(&sql, [], |row| row.get(0)).unwrap()
+    conn.query_row(&sql, [], |row| row.get(0)).map_err(RedactedDuckDbError::from).unwrap()
 }
 
 /// Summarizes copied payload rows without loading their contents into the test
@@ -151,7 +153,9 @@ fn query_payload_summary(conn: &Connection, table_name: &DuckLakeTableName) -> (
         "select count(*), count(distinct payload), min(length(payload)) from {}",
         qualified_lake_table_name(table_name)
     );
-    conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap()
+    conn.query_row(&sql, [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(RedactedDuckDbError::from)
+        .unwrap()
 }
 
 /// Queries replicated user rows using blocking DuckDB APIs.
@@ -161,11 +165,11 @@ fn query_payload_summary(conn: &Connection, table_name: &DuckLakeTableName) -> (
 fn query_user_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i64, String, i32)> {
     let sql =
         format!("select id, name, age from {} order by id", qualified_lake_table_name(table_name));
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
     }
 
@@ -181,11 +185,11 @@ fn query_order_rows(conn: &Connection, table_name: &DuckLakeTableName) -> Vec<(i
         "select id, description from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap()));
     }
 
@@ -204,11 +208,11 @@ fn query_table_columns(conn: &Connection, table_name: &DuckLakeTableName) -> Vec
         quote_literal(table_name.schema()),
         quote_literal(table_name.table())
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(row.get(0).unwrap());
     }
 
@@ -221,11 +225,11 @@ fn query_case_mapped_rows(conn: &Connection, table_name: &DuckLakeTableName) -> 
         "select id, display_name from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap()));
     }
 
@@ -241,11 +245,11 @@ fn query_schema_add_rows(conn: &Connection, table_name: &DuckLakeTableName) -> V
         "select id, name, age, email, score from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(SchemaAddRow {
             id: row.get(0).unwrap(),
             name: row.get(1).unwrap(),
@@ -267,11 +271,11 @@ fn query_publication_add_rows(
         "select id, name, status from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push((row.get(0).unwrap(), row.get(1).unwrap(), row.get(2).unwrap()));
     }
 
@@ -291,11 +295,11 @@ fn query_schema_multi_rows(
         "select id, status, name, age from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(SchemaMultiRow {
             id: row.get(0).unwrap(),
             status: row.get(1).unwrap(),
@@ -320,11 +324,11 @@ fn query_schema_mutation_rows(
         "select id, full_name, visits, email from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(SchemaMutationRow {
             id: row.get(0).unwrap(),
             full_name: row.get(1).unwrap(),
@@ -349,11 +353,11 @@ fn query_ddl_rotation_rows(
         "select id, text_col, ddl_col_0_0 from {} order by id",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
-    let mut rows = statement.query([]).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
+    let mut rows = statement.query([]).map_err(RedactedDuckDbError::from).unwrap();
     let mut result = Vec::new();
 
-    while let Some(row) = rows.next().unwrap() {
+    while let Some(row) = rows.next().map_err(RedactedDuckDbError::from).unwrap() {
         result.push(DdlRotationRow {
             id: row.get(0).unwrap(),
             text_col: row.get(1).unwrap(),
@@ -375,7 +379,7 @@ fn query_ddl_type_row(conn: &Connection, table_name: &DuckLakeTableName) -> DdlT
          ddl_col_4_0 from {} where id = 5",
         qualified_lake_table_name(table_name)
     );
-    let mut statement = conn.prepare(&sql).unwrap();
+    let mut statement = conn.prepare(&sql).map_err(RedactedDuckDbError::from).unwrap();
     let row = statement.query_row([], |row| {
         Ok(DdlTypeRow {
             id: row.get(0)?,
@@ -388,7 +392,7 @@ fn query_ddl_type_row(conn: &Connection, table_name: &DuckLakeTableName) -> DdlT
         })
     });
 
-    row.unwrap()
+    row.map_err(RedactedDuckDbError::from).unwrap()
 }
 
 async fn build_destination(
@@ -2036,6 +2040,7 @@ async fn special_temporal_values_survive_copy_and_cdc() {
         qualified_lake_table_name(&table_name_to_ducklake_table_name(&table_name).unwrap());
     let total: i64 = conn
         .query_row(&format!("select count(*) from {destination_table}"), [], |row| row.get(0))
+        .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(total, 2);
     for (name, predicate) in [
@@ -2062,7 +2067,333 @@ async fn special_temporal_values_survive_copy_and_cdc() {
                 [],
                 |row| row.get(0),
             )
+            .map_err(RedactedDuckDbError::from)
             .unwrap();
         assert_eq!(valid, 2, "{name}");
     }
+}
+
+/// Keeps credentials out of verification panics while preserving the DuckDB
+/// error.
+#[test]
+fn verification_query_errors_redact_credentials() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("attach ':memory:' as lake").unwrap();
+    let table_name = DuckLakeTableName::new("main", "password='placeholder-password'");
+    let sql =
+        format!("select id, name, age from {} order by id", qualified_lake_table_name(&table_name));
+    let error = conn.prepare(&sql).err().unwrap();
+    assert!(error.to_string().contains("placeholder-password"));
+
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        query_user_rows(&conn, &table_name)
+    }))
+    .unwrap_err();
+
+    let message = panic.downcast_ref::<String>().unwrap();
+    assert!(!message.contains("placeholder-password"));
+    assert!(message.contains("[redacted]"));
+    assert!(message.contains("Catalog Error"));
+}
+
+/// Builds each restart with a cold, persistent state store and a new DuckDB
+/// instance, matching the resources reconstructed by the replicator process.
+#[cfg(feature = "test-utils")]
+async fn build_shutdown_replay_pipeline(
+    config: &etl::config::PgConnectionConfig,
+    pipeline_id: PipelineId,
+    publication: String,
+    catalog: &Url,
+    data: &Url,
+) -> (
+    etl::pipeline::Pipeline<
+        etl::store::PostgresStore,
+        DuckLakeDestination<etl::store::PostgresStore>,
+    >,
+    etl::store::PostgresStore,
+) {
+    let store = etl::store::PostgresStore::new(pipeline_id, config.clone()).await.unwrap();
+    let destination = DuckLakeDestination::new(
+        catalog.clone(),
+        data.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store.clone(),
+    )
+    .await
+    .unwrap();
+    let pipeline = etl::test_utils::pipeline::PipelineBuilder::new(
+        config.clone(),
+        pipeline_id,
+        publication,
+        store.clone(),
+        destination,
+    )
+    .with_shutdown_drain_timeout_ms(250)
+    .with_batch_config(BatchConfig { max_fill_ms: 100, ..BatchConfig::default() })
+    .build();
+    (pipeline, store)
+}
+
+/// Generates mixed CDC with repeated updates, deletes, key reuse, and two
+/// tables. Every cycle is a short source transaction; the initial burst is
+/// committed together to force a partially applied destination sequence.
+#[cfg(feature = "test-utils")]
+fn shutdown_traffic_sql(users: &str, orders: &str, id: i64) -> String {
+    let existing = id % 100 + 1;
+    format!(
+        "insert into {users} (id, name, age) values ({id}, repeat('payload', 64), 1);
+         update {users} set age = age + 1, name = 'updated_' || age where id = {existing};
+         delete from {users} where id = {id};
+         insert into {users} (id, name, age) values ({id}, 'reused', 2);
+         insert into {orders} (id, description) values ({id}, 'new_order');
+         update {orders} set description = 'updated_{id}' where id = {existing};
+         delete from {orders} where id = {id};"
+    )
+}
+
+/// A bounded stop during a partially committed sequence must preserve both
+/// source checkpoints and DuckLake replay watermarks. Traffic continues during
+/// shutdown and while stopped, then two cold restarts verify every row.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use etl::{
+        store::{PostgresStore, TableState, WorkerType},
+        test_utils::database::{replication_slot_state, wait_for_replication_slot_flush_lsn},
+    };
+    use etl_destinations::ducklake::pause_after_atomic_batch_commit_for_tests;
+    use etl_postgres::slots::EtlReplicationSlot;
+    use tokio_postgres::types::PgLsn;
+
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::Both).await;
+    let lake = create_test_lake("bounded_shutdown_replay").await;
+    let pipeline_id: PipelineId = random();
+    let slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    // Scope the test hook to this table even when another test uses the same
+    // fixture table names in a different database concurrently.
+    let mut users_name = schema.users_schema().name;
+    users_name.name = format!("shutdown_users_{pipeline_id}");
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "alter table {} rename to {}",
+            schema.users_schema().name.as_quoted_identifier(),
+            quote_identifier(&users_name.name),
+        ))
+        .await
+        .unwrap();
+    let users = users_name.as_quoted_identifier();
+    let orders = schema.orders_schema().name.as_quoted_identifier();
+    let lake_users = table_name_to_ducklake_table_name(&users_name).unwrap();
+    let lake_orders = table_name_to_ducklake_table_name(&schema.orders_schema().name).unwrap();
+    let client = Arc::new(database.client.take().unwrap());
+    client
+        .batch_execute(&format!(
+            "insert into {users} (id, name, age) select i, 'seed_' || i, 0 from \
+             generate_series(1,100) i;
+         insert into {orders} (id, description) select i, 'seed_' || i from generate_series(1,100) \
+             i;"
+        ))
+        .await
+        .unwrap();
+
+    let (mut pipeline, store) = build_shutdown_replay_pipeline(
+        &database.config,
+        pipeline_id,
+        schema.publication_name(),
+        &lake.catalog_url,
+        &lake.data_url,
+    )
+    .await;
+    pipeline.start().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if store
+                .get_table_state(schema.users_schema().id)
+                .await
+                .unwrap()
+                .is_some_and(|state| state.as_type().has_completed_table_sync())
+                && store
+                    .get_table_state(schema.orders_schema().id)
+                    .await
+                    .unwrap()
+                    .is_some_and(|state| state.as_type().has_completed_table_sync())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    drop(store);
+    println!("initial copy completed");
+
+    for round in 0..2 {
+        let (committed, release) = pause_after_atomic_batch_commit_for_tests(&lake_users.id());
+        let base = 1000 + round * 1000;
+        let mut burst = "begin;".to_owned();
+        // Consecutive operations on one table form a sequence longer than one
+        // atomic destination batch, without relation changes splitting it.
+        for id in base..base + 64 {
+            let existing = id % 100 + 1;
+            burst.push_str(&format!(
+                "insert into {users} (id, name, age) values ({id}, repeat('payload', 64), 1);
+                 update {users} set age = age + 1 where id = {existing};
+                 delete from {users} where id = {id};
+                 insert into {users} (id, name, age) values ({id}, 'reused', 2);"
+            ));
+        }
+        burst.push_str("commit;");
+        client.batch_execute(&burst).await.unwrap();
+        let burst_lsn: PgLsn =
+            client.query_one("select pg_current_wal_lsn()", &[]).await.unwrap().get(0);
+        tokio::time::timeout(Duration::from_secs(60), committed).await.unwrap().unwrap();
+
+        // Keep producing while shutdown runs. The barrier is only released by
+        // cancellation, never by a time-based test signal.
+        let producer_client = Arc::clone(&client);
+        let producer_users = users.clone();
+        let producer_orders = orders.clone();
+        let producer = tokio::spawn(async move {
+            for id in base + 64..base + 128 {
+                producer_client
+                    .batch_execute(&format!(
+                        "begin;{}commit;",
+                        shutdown_traffic_sql(&producer_users, &producer_orders, id)
+                    ))
+                    .await
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let started = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), pipeline.shutdown_and_wait())
+            .await
+            .unwrap()
+            .unwrap();
+        let shutdown_elapsed = started.elapsed();
+        println!("round={round} stopped after {} ms", shutdown_elapsed.as_millis());
+        assert!(shutdown_elapsed >= Duration::from_millis(250));
+        assert!(release.is_closed(), "the partial sequence must be cancelled and joined");
+        producer.await.unwrap();
+        drop(release);
+
+        let cold_store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+        assert!(
+            cold_store.get_replication_checkpoint(WorkerType::Apply).await.unwrap()
+                < Some(burst_lsn)
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while replication_slot_state(&client, &slot).await.1.is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(replication_slot_state(&client, &slot).await.0 < burst_lsn);
+        drop(cold_store);
+
+        // Prove this was partial execution, not a stop before the write began.
+        checkpoint_lake(&lake.catalog_url, &lake.data_url);
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        let partial = query_user_rows(&conn, &lake_users);
+        assert!(partial.iter().any(|(id, _, _)| *id >= base));
+        assert!(!partial.iter().any(|(id, _, _)| *id == base + 63));
+        drop(conn);
+
+        let restart_started = Instant::now();
+        let (mut restarted, restarted_store) = build_shutdown_replay_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            &lake.catalog_url,
+            &lake.data_url,
+        )
+        .await;
+        restarted.start().await.unwrap();
+        // New traffic after restart proves the pipeline resumes live CDC too.
+        client
+            .batch_execute(&format!(
+                "begin;{}commit;",
+                shutdown_traffic_sql(&users, &orders, base + 128)
+            ))
+            .await
+            .unwrap();
+        let target: PgLsn =
+            client.query_one("select pg_current_wal_lsn()", &[]).await.unwrap().get(0);
+        wait_for_replication_slot_flush_lsn(&client, &slot, target).await;
+        let catchup_elapsed = restart_started.elapsed();
+        restarted.shutdown_and_wait().await.unwrap();
+        assert!(matches!(
+            restarted_store.get_table_state(schema.users_schema().id).await.unwrap(),
+            Some(TableState::Ready)
+        ));
+        drop(restarted_store);
+
+        let expected_users: Vec<(i64, String, i32)> = client
+            .query(&format!("select id::bigint, name, age from {users} order by id"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1), row.get(2)))
+            .collect();
+        let expected_orders: Vec<(i64, String)> = client
+            .query(&format!("select id::bigint, description from {orders} order by id"), &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect();
+        checkpoint_lake(&lake.catalog_url, &lake.data_url);
+        let conn = open_lake_conn(&lake.catalog_url, &lake.data_url);
+        assert_eq!(query_user_rows(&conn, &lake_users), expected_users);
+        assert_eq!(query_order_rows(&conn, &lake_orders), expected_orders);
+        assert_eq!(count_applied_batches(&conn, &lake_users, "copy_complete"), 1);
+        // Each table entered initial copy exactly once. Marker counts alone
+        // cannot prove this because resetting a table also clears its markers.
+        let copies: i64 = client
+            .query_one(
+                "select count(*) from etl.replication_state where pipeline_id = $1 and state = \
+                 'data_sync'",
+                &[&(pipeline_id as i64)],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(copies, 2, "restart must replay rather than re-copy either table");
+        println!(
+            "round={round} shutdown_ms={} restart_and_catchup_ms={} users={} orders={} \
+             full_rows_match=true",
+            shutdown_elapsed.as_millis(),
+            catchup_elapsed.as_millis(),
+            expected_users.len(),
+            expected_orders.len()
+        );
+        drop(conn);
+        let (mut next, _) = build_shutdown_replay_pipeline(
+            &database.config,
+            pipeline_id,
+            schema.publication_name(),
+            &lake.catalog_url,
+            &lake.data_url,
+        )
+        .await;
+        next.start().await.unwrap();
+        pipeline = next;
+    }
+    pipeline.shutdown_and_wait().await.unwrap();
 }

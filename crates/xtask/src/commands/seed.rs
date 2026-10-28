@@ -18,7 +18,12 @@ pub(crate) struct SeedArgs {
     user: String,
 
     /// PostgreSQL password.
-    #[arg(long, env = "TESTS_DATABASE_PASSWORD", default_value = "postgres")]
+    #[arg(
+        long,
+        env = "TESTS_DATABASE_PASSWORD",
+        default_value = "postgres",
+        hide_env_values = true
+    )]
     password: String,
 
     /// Database name to create and seed.
@@ -68,7 +73,7 @@ impl SeedArgs {
             println!(
                 "[seed] keeping existing database {database} (use --force to drop and recreate)"
             );
-            println!("[seed] connect with: psql -h {host} -p {port} -U {user} -d {database}");
+            println!("[seed] connect with: psql -h {host} -p {port} -U <user> -d {database}");
             return Ok(());
         }
 
@@ -117,7 +122,7 @@ impl SeedArgs {
             }
         }
         println!("[seed] publication: {publication}");
-        println!("[seed] connect with: psql -h {host} -p {port} -U {user} -d {database}");
+        println!("[seed] connect with: psql -h {host} -p {port} -U <user> -d {database}");
 
         Ok(())
     }

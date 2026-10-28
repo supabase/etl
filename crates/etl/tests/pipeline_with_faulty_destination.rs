@@ -1045,3 +1045,50 @@ async fn apply_disconnect_at_randomized_positions_converges_without_loss() {
         block_on(run_walsender_roulette_case(*case))
     });
 }
+
+/// A held acknowledgement cannot consume the entire process termination grace.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_deadline_abandons_pending_write_without_checkpointing() {
+    init_test_tracing();
+    let mut database = spawn_source_database().await;
+    let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
+    let table_id = schema.users_schema().id;
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let pipeline_id: PipelineId = random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        schema.publication_name(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_shutdown_drain_timeout_ms(200)
+    .build();
+    let copied = store.notify_on_table_sync_complete(table_id).await;
+    pipeline.start().await.unwrap();
+    copied.notified().await;
+    let hold = destination.hold_next(FaultyOp::WriteEvents).await;
+    insert_users_data(&mut database, &schema.users_schema().name, 1..=1).await;
+    let client = database.client.as_ref().unwrap();
+    let insert_lsn = current_wal_lsn(client).await;
+    hold.wait_reached().await;
+
+    let started = std::time::Instant::now();
+    let shutdown = tokio::spawn(pipeline.shutdown_and_wait());
+    let reached_teardown = tokio::time::timeout(Duration::from_secs(5), async {
+        while !destination.shutdown_called().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    // Always release the test wrapper's own hold, including on test failure.
+    // Production destinations must cancel their abandoned writes in shutdown.
+    hold.release_ok();
+    shutdown.await.unwrap().unwrap();
+    reached_teardown.unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    let slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let (confirmed, _) = replication_slot_state(client, &slot).await;
+    assert!(confirmed < insert_lsn, "abandoned writes must replay on restart");
+}

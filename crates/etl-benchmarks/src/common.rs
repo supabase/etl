@@ -41,7 +41,7 @@ use etl_destinations::ducklake::DuckLakeDestination;
 #[cfg(feature = "snowflake")]
 use etl_destinations::snowflake::{
     AuthManager, Client as SnowflakeClient, Config as SnowflakeConfig,
-    Destination as SnowflakeDestination,
+    Destination as SnowflakeDestination, SqlClient as SnowflakeSqlClient, test_utils::query_rows,
 };
 use etl_telemetry::tracing::{LogFlusher, init_tracing_for_environment};
 use serde::Serialize;
@@ -50,12 +50,16 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::{info, warn};
 #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
 use url::Url;
 
 /// Default batch fill time for benchmark runs.
 pub const BENCHMARK_DEFAULT_BATCH_MAX_FILL_MS: u64 = 1_000;
+
+/// Age after which a leftover Snowflake run schema is dropped.
+#[cfg(feature = "snowflake")]
+const SNOWFLAKE_STALE_RUN_SCHEMA_DAYS: u32 = 1;
 
 /// Ensures crypto provider is only initialized once.
 #[cfg(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))]
@@ -102,9 +106,10 @@ pub enum DestinationType {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use clap::ValueEnum;
 
-    use crate::common::{DestinationType, parse_clickhouse_database_prefix};
+    use crate::common::{DestinationType, finish_run, parse_clickhouse_database_prefix};
 
     #[test]
     fn bigquery_destination_uses_bigquery_for_cli() {
@@ -127,10 +132,25 @@ mod tests {
             assert!(parse_clickhouse_database_prefix(value).is_err(), "{value:?}");
         }
     }
+
+    #[test]
+    fn finish_run_returns_run_error_before_cleanup_errors() {
+        assert_eq!(finish_run(Ok(1), [Ok(()), Ok(())]).unwrap(), 1);
+
+        let error = finish_run(Ok(1), [Err(anyhow!("slots")), Ok(())]).unwrap_err();
+        assert_eq!(error.to_string(), "slots");
+
+        let error =
+            finish_run(Ok(1), [Err(anyhow!("slots")), Err(anyhow!("destination"))]).unwrap_err();
+        assert_eq!(error.to_string(), "slots");
+
+        let error = finish_run::<()>(Err(anyhow!("run")), [Err(anyhow!("slots"))]).unwrap_err();
+        assert_eq!(error.to_string(), "run");
+    }
 }
 
 /// Postgres connection arguments shared by benchmark commands.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Clone)]
 pub struct PgConnectionArgs {
     /// Postgres host.
     #[arg(long, default_value = "localhost")]
@@ -195,7 +215,7 @@ fn parse_clickhouse_database_prefix(value: &str) -> Result<String, String> {
 }
 
 /// Destination arguments shared by benchmark commands.
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Clone)]
 pub struct DestinationArgs {
     /// Destination type to use.
     #[arg(long, value_enum, default_value = "null")]
@@ -545,7 +565,12 @@ pub enum BenchDestination {
 impl BenchDestination {
     /// Creates a benchmark destination from CLI arguments.
     #[cfg_attr(
-        not(any(feature = "bigquery", feature = "clickhouse", feature = "ducklake")),
+        not(any(
+            feature = "bigquery",
+            feature = "clickhouse",
+            feature = "ducklake",
+            feature = "snowflake"
+        )),
         expect(clippy::unused_async)
     )]
     #[cfg_attr(
@@ -683,9 +708,25 @@ impl BenchDestination {
             DestinationType::Snowflake => {
                 install_crypto_provider();
 
-                let config = SnowflakeConfig::require_bench_env()?;
-                let auth = Arc::new(AuthManager::new(config)?);
-                let client = SnowflakeClient::new(auth, pipeline_id);
+                let target = snowflake_run_target(pipeline_id)?;
+                // Housekeeping only: a failed sweep must not fail the run.
+                if let Err(error) = drop_stale_snowflake_run_schemas(&target).await {
+                    warn!(error = %error, "failed to drop stale snowflake run schemas");
+                }
+                // Replace, not reuse: a crashed run with this pipeline id
+                // leaves tables that this run's fresh store does not own.
+                target
+                    .sql
+                    .execute_ddl(&format!(
+                        "create or replace schema {}",
+                        quote_snowflake_identifier(&target.schema)
+                    ))
+                    .await
+                    .with_context(|| {
+                        format!("failed to create Snowflake schema {}", target.schema)
+                    })?;
+
+                let client = SnowflakeClient::new(target.auth, pipeline_id);
                 let destination = SnowflakeDestination::new(client, store);
 
                 Ok(Self::Snowflake(CountingDestination::new(destination)))
@@ -997,6 +1038,7 @@ pub fn pipeline_config(
         max_copy_connections_per_table: tuning.max_copy_connections_per_table,
         run_source_migrations: true,
         drain_on_shutdown: true,
+        shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
     }
 }
 
@@ -1020,8 +1062,11 @@ pub async fn cleanup_replication_slots(
 
 /// Drops the destination state created by a benchmark run.
 #[cfg_attr(
-    not(feature = "clickhouse"),
-    expect(unused_variables, reason = "only ClickHouse runs create destination state")
+    not(any(feature = "clickhouse", feature = "snowflake")),
+    expect(
+        unused_variables,
+        reason = "only ClickHouse and Snowflake runs create destination state"
+    )
 )]
 pub async fn cleanup_destination(
     destination_args: &DestinationArgs,
@@ -1051,7 +1096,44 @@ pub async fn cleanup_destination(
             .with_context(|| format!("failed to drop ClickHouse database {database}"))?;
     }
 
+    #[cfg(feature = "snowflake")]
+    if matches!(destination_args.destination, DestinationType::Snowflake) {
+        let target = snowflake_run_target(pipeline_id)?;
+        target
+            .sql
+            .execute_ddl(&format!(
+                "drop schema if exists {} cascade",
+                quote_snowflake_identifier(&target.schema)
+            ))
+            .await
+            .with_context(|| format!("failed to drop Snowflake schema {}", target.schema))?;
+    }
+
     Ok(())
+}
+
+/// Combines a benchmark run result with the results of cleanup steps that ran
+/// after it, such as pipeline shutdown or slot and destination cleanup.
+///
+/// Returns the run error first, then the first cleanup error. Cleanup errors
+/// hidden by an earlier error are logged so the root cause is returned and
+/// leaked slots or destination state stay visible.
+pub fn finish_run<T>(
+    run_result: Result<T>,
+    cleanup_results: impl IntoIterator<Item = Result<()>>,
+) -> Result<T> {
+    let mut result = run_result;
+    for cleanup_result in cleanup_results {
+        if let Err(error) = cleanup_result {
+            if result.is_ok() {
+                result = Err(error);
+            } else {
+                warn!(error = %error, "benchmark cleanup failed after an earlier error");
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(feature = "clickhouse")]
@@ -1066,6 +1148,98 @@ fn clickhouse_root_client(url: &Url, user: &str, password: Option<&str>) -> clic
         Some(password) => client.with_password(password),
         None => client,
     }
+}
+
+/// Snowflake benchmark target for one run.
+#[cfg(feature = "snowflake")]
+struct SnowflakeRunTarget {
+    /// Credentials whose config targets the run schema.
+    auth: Arc<AuthManager>,
+    /// SQL client on the configured base schema, which must exist, for
+    /// creating and dropping run schemas.
+    sql: SnowflakeSqlClient<AuthManager>,
+    /// Configured base schema that names every run schema.
+    base_schema: String,
+    /// This run's schema, `{base_schema}_{pipeline_id}`.
+    schema: String,
+}
+
+/// Connects to the Snowflake benchmark target for one run.
+///
+/// Each run writes to its own schema, `{schema}_{pipeline_id}`, so tables left
+/// by earlier runs never collide with a new pipeline.
+#[cfg(feature = "snowflake")]
+fn snowflake_run_target(pipeline_id: u64) -> Result<SnowflakeRunTarget> {
+    let config = SnowflakeConfig::require_bench_env()?;
+    let base_config = config.clone_without_credentials();
+    let base_schema = config.schema().to_owned();
+    let schema = format!("{base_schema}_{pipeline_id}");
+    let auth = Arc::new(AuthManager::new(config.with_schema(&schema))?);
+    let sql = SnowflakeSqlClient::new(base_config, Arc::clone(&auth), reqwest::Client::new());
+
+    Ok(SnowflakeRunTarget { auth, sql, base_schema, schema })
+}
+
+/// Drops run schemas that earlier runs left behind.
+///
+/// Failed runs drop their own schema, but cancelled, killed, or timed-out runs
+/// never reach cleanup, so each run sweeps `{base_schema}_<digits>` schemas
+/// older than [`SNOWFLAKE_STALE_RUN_SCHEMA_DAYS`]. The age bound leaves
+/// schemas of runs that are still in progress alone.
+#[cfg(feature = "snowflake")]
+async fn drop_stale_snowflake_run_schemas(target: &SnowflakeRunTarget) -> Result<()> {
+    let prefix = format!("{}_", target.base_schema);
+    let rows = query_rows(
+        &target.sql,
+        &format!(
+            "select schema_name from information_schema.schemata where startswith(schema_name, \
+             {}) and created < dateadd(day, -{SNOWFLAKE_STALE_RUN_SCHEMA_DAYS}, \
+             current_timestamp())",
+            snowflake_string_literal(&prefix)
+        ),
+    )
+    .await
+    .context("failed to list stale Snowflake run schemas")?;
+
+    for name in rows.iter().filter_map(|row| row.first()?.as_str()) {
+        // Only drop names this benchmark generates.
+        let is_run_schema = name
+            .strip_prefix(&prefix)
+            .is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()));
+        if !is_run_schema {
+            continue;
+        }
+
+        info!(schema = name, "dropping stale snowflake run schema");
+        target
+            .sql
+            .execute_ddl(&format!(
+                "drop schema if exists {} cascade",
+                quote_snowflake_identifier(name)
+            ))
+            .await
+            .with_context(|| format!("failed to drop stale Snowflake schema {name}"))?;
+    }
+
+    Ok(())
+}
+
+/// Quotes a Snowflake identifier without changing its case.
+///
+/// The destination quotes its schema, so the run schema must be created with
+/// the same exact-case name.
+#[cfg(feature = "snowflake")]
+fn quote_snowflake_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Quotes a Snowflake string literal.
+///
+/// Snowflake single-quoted strings treat backslash as an escape character, so
+/// both backslashes and quotes are escaped.
+#[cfg(feature = "snowflake")]
+fn snowflake_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
 }
 
 /// Writes a machine-readable benchmark report.

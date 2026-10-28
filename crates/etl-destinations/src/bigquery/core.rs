@@ -644,6 +644,7 @@ where
     async fn schedule_table_cleanup(&self, obsolete_table_ids: HashSet<VersionedBigQueryTableId>) {
         let client = self.client.clone();
         let dataset_id = self.dataset_id.clone();
+
         self.tasks
             .spawn_with(move || async move {
                 delete_table_versions(&client, &dataset_id, obsolete_table_ids).await;

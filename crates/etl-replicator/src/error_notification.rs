@@ -2,9 +2,11 @@ use std::{
     collections::hash_map::DefaultHasher,
     error::Error,
     hash::{Hash, Hasher},
+    net::{IpAddr, Ipv6Addr},
     time::Duration,
 };
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -53,8 +55,6 @@ struct PipelineErrorEmailFields<'a> {
 /// whether it was deduplicated.
 #[derive(Debug, Deserialize)]
 struct EtlEmailResponse {
-    /// Success message from the API.
-    message: String,
     /// Whether the email was deduplicated.
     deduplicated: bool,
 }
@@ -62,8 +62,9 @@ struct EtlEmailResponse {
 /// Client for sending error notifications to Supabase API.
 ///
 /// Provides async methods to notify external systems about errors that occur
-/// during replication. Uses reqwest for HTTP communication and handles errors
-/// gracefully without blocking pipeline operations.
+/// during replication. Callers dispatch requests in owned background tasks with
+/// bounded timeouts. Failures are logged without propagating them to the
+/// pipeline.
 #[derive(Debug, Clone)]
 pub(crate) struct ErrorNotificationClient {
     /// HTTP client for making requests.
@@ -71,7 +72,7 @@ pub(crate) struct ErrorNotificationClient {
     /// Supabase API URL for error notifications.
     api_url: String,
     /// Supabase API key for authentication.
-    api_key: String,
+    api_key: SecretString,
     /// Supabase project reference.
     project_ref: String,
     /// Pipeline identifier.
@@ -85,27 +86,33 @@ impl ErrorNotificationClient {
     /// send error notifications to the Supabase API.
     pub(crate) fn new(
         api_url: String,
-        api_key: String,
+        api_key: SecretString,
         project_ref: String,
         pipeline_id: String,
-    ) -> Self {
-        let client =
-            reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap_or_default();
+    ) -> Result<Self, reqwest::Error> {
+        // Require direct IPv6 connections to the Supabase API, without IPv4
+        // fallback.
+        let client = reqwest::Client::builder()
+            .local_address(IpAddr::V6(Ipv6Addr::UNSPECIFIED))
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
 
-        Self {
+        Ok(Self {
             client,
             api_url: api_url.trim_end_matches('/').to_owned(),
             api_key,
             project_ref,
             pipeline_id,
-        }
+        })
     }
 
     /// Sends an error notification to the Supabase API.
     ///
-    /// This method is fire-and-forget - it logs any failures but does not
-    /// propagate them to avoid disrupting the pipeline. The notification is
-    /// sent asynchronously without blocking pipeline operations.
+    /// Waits for the request to complete or time out. Failures are logged
+    /// without propagating them to the pipeline.
     pub(crate) async fn notify_error<H: Hash>(&self, error_message: String, error_hash: H) {
         let error_hash = compute_error_hash(error_hash);
         let dedup_key = pipeline_error_dedup_key(&self.pipeline_id, &error_hash);
@@ -120,7 +127,6 @@ impl ErrorNotificationClient {
         match self.send_email(&email).await {
             Ok(response) => {
                 info!(
-                    message = %response.message,
                     deduplicated = %response.deduplicated,
                     "error notification sent successfully"
                 );
@@ -163,7 +169,18 @@ impl ErrorNotificationClient {
         &self,
         email: &EtlEmailRequest<'_>,
     ) -> Result<reqwest::Request, reqwest::Error> {
-        self.client.post(self.etl_email_url()).header("apikey", &self.api_key).json(email).build()
+        let mut request = self
+            .client
+            .post(self.etl_email_url())
+            .header("apikey", self.api_key.expose_secret())
+            .json(email)
+            .build()?;
+
+        if let Some(api_key) = request.headers_mut().get_mut("apikey") {
+            api_key.set_sensitive(true);
+        }
+
+        Ok(request)
     }
 
     /// Sends an ETL email request to the API endpoint.
@@ -172,16 +189,15 @@ impl ErrorNotificationClient {
         email: &EtlEmailRequest<'_>,
     ) -> Result<EtlEmailResponse, Box<dyn Error>> {
         let request = self.build_email_request(email)?;
-        let response = self.client.execute(request).await?;
+        let response = self.client.execute(request).await.map_err(reqwest::Error::without_url)?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_else(|_| "<unable to read body>".to_owned());
-            return Err(format!("API returned status {status}: {body}").into());
+
+            return Err(std::io::Error::other(format!("API returned status {status}")).into());
         }
 
-        let email_response = response.json::<EtlEmailResponse>().await?;
-        Ok(email_response)
+        response.json().await.map_err(|error| error.without_url().into())
     }
 }
 
@@ -204,17 +220,77 @@ fn compute_error_hash<H: Hash>(error_hash: H) -> String {
 
 #[cfg(test)]
 mod tests {
+    use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
     use etl::error::{ErrorKind, EtlError};
+    use tokio::net::TcpListener;
+    use tokio_util::task::AbortOnDropHandle;
 
     use super::*;
 
     fn error_notification_client(api_url: &str) -> ErrorNotificationClient {
         ErrorNotificationClient::new(
             api_url.to_owned(),
-            "fake-api-key".to_owned(),
+            "fake-api-key".into(),
             "abcdefghijklmnopqrst".to_owned(),
             "42".to_owned(),
         )
+        .unwrap()
+    }
+
+    /// Serves one notification endpoint without involving external services.
+    async fn notification_server(
+        status: StatusCode,
+        body: &'static str,
+    ) -> (String, AbortOnDropHandle<()>) {
+        let listener = TcpListener::bind("[::1]:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/system/replication/abcdefghijklmnopqrst/emails",
+            post(move || async move {
+                let mut response = (status, body).into_response();
+                response.headers_mut().insert(
+                    axum::http::header::LOCATION,
+                    "http://127.0.0.1:1/placeholder-redirect".parse().unwrap(),
+                );
+
+                response
+            }),
+        );
+        let server = AbortOnDropHandle::new(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        }));
+
+        (url, server)
+    }
+
+    /// Failed response bodies are omitted and redirects are not followed.
+    #[tokio::test]
+    async fn notification_errors_omit_response_bodies_and_reject_redirects() {
+        for (status, body) in [
+            (StatusCode::BAD_REQUEST, "placeholder-response-secret"),
+            (StatusCode::TEMPORARY_REDIRECT, "placeholder-response-secret"),
+        ] {
+            let (url, server) = notification_server(status, body).await;
+            let client = error_notification_client(&url);
+            let email = client.pipeline_error_email_request("test-key", "test-error");
+
+            let error = client.send_email(&email).await.unwrap_err();
+
+            assert!(error.to_string().contains(status.as_str()));
+            assert!(!format!("{error:?}").contains("placeholder-response-secret"));
+
+            etl::task::abort_and_join(server).await.unwrap();
+        }
+
+        let (url, server) = notification_server(StatusCode::OK, r#"{"deduplicated":true}"#).await;
+        let client = error_notification_client(&url);
+        let email = client.pipeline_error_email_request("test-key", "test-error");
+
+        let response = client.send_email(&email).await.unwrap();
+
+        assert!(response.deduplicated);
+
+        etl::task::abort_and_join(server).await.unwrap();
     }
 
     #[test]
@@ -226,6 +302,7 @@ mod tests {
         let request = client.build_email_request(&email).expect("request should build");
 
         assert_eq!(request.method(), reqwest::Method::POST);
+        assert!(request.headers()["apikey"].is_sensitive());
         assert_eq!(
             request.url().as_str(),
             "https://api.supabase.com/system/replication/abcdefghijklmnopqrst/emails"
@@ -264,27 +341,9 @@ mod tests {
         );
     }
 
+    /// Dynamic table details do not create separate notification groups.
     #[test]
-    fn builds_pipeline_error_dedup_key() {
-        assert_eq!(pipeline_error_dedup_key("42", "abc123"), "pipeline-error:42:abc123");
-    }
-
-    #[test]
-    fn compute_error_hash_stability() {
-        let err1 =
-            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
-        let err2 =
-            EtlError::from((ErrorKind::SourceConnectionFailed, "Database connection failed"));
-
-        let hash1 = compute_error_hash(&err1);
-        let hash2 = compute_error_hash(&err2);
-
-        // Hashes should be identical for the same error kind and description.
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn compute_error_hash_with_detail() {
+    fn compute_error_hash_ignores_detail() {
         let err1 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query execution failed",
@@ -293,7 +352,7 @@ mod tests {
         let err2 = EtlError::from((
             ErrorKind::SourceQueryFailed,
             "Query execution failed",
-            "Table 'users' not found".to_owned(),
+            "Table 'orders' not found".to_owned(),
         ));
 
         let hash1 = compute_error_hash(&err1);
@@ -313,5 +372,41 @@ mod tests {
 
         // Different errors should produce different hashes.
         assert_ne!(hash1, hash2);
+    }
+
+    /// An IPv4-only endpoint must fail instead of bypassing IPv6 enforcement.
+    #[tokio::test]
+    async fn rejects_ipv4_connections() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client = error_notification_client(&url);
+        let error = client.client.get(&url).send().await.unwrap_err();
+        assert!(error.is_connect());
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    /// A stalled TLS handshake hits the connection timeout, not the request
+    /// timeout.
+    #[tokio::test]
+    async fn notification_connection_timeout_bounds_tls_handshake() {
+        let listener = TcpListener::bind("[::1]:0").await.unwrap();
+        let url = format!("https://{}", listener.local_addr().unwrap());
+        let server = AbortOnDropHandle::new(tokio::spawn(async move {
+            // Keep TCP open without completing TLS to exercise the connection
+            // deadline.
+            let (_connection, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        }));
+        let client = error_notification_client(&url);
+        let email = client.pipeline_error_email_request("test-key", "test-error");
+
+        let error = client.send_email(&email).await.unwrap_err();
+
+        let error = error.downcast_ref::<reqwest::Error>().unwrap();
+        assert!(error.is_connect());
+        assert!(error.is_timeout());
+
+        etl::task::abort_and_join(server).await.unwrap();
     }
 }

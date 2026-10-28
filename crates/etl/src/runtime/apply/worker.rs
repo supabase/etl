@@ -21,8 +21,8 @@ use crate::{
     pipeline::PipelineId,
     postgres::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
     replication::{
-        ApplyLoop, ApplyLoopResult, ApplyWorkerContext, ReplicationLagMonitor, WorkerContext,
-        WorkerType,
+        ApplyLoop, ApplyLoopResult, ApplyWorkerContext, DurabilityMonitor, ReplicationLagMonitor,
+        WorkerContext, WorkerType,
     },
     runtime::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
@@ -48,8 +48,25 @@ impl ApplyWorkerHandle {
     /// This method blocks until the apply worker finishes processing, either
     /// due to successful completion, shutdown signal, or error. It properly
     /// handles panics that might occur within the worker task.
-    pub(crate) async fn wait(self) -> EtlResult<()> {
-        self.handle.await.map_err(|err| {
+    ///
+    /// The owner's force-stop token escalates a graceful drain to cancellation.
+    /// Requested cancellation succeeds only after the worker has been joined;
+    /// completed errors and panics still propagate.
+    pub(crate) async fn wait(mut self, force_stop: &CancellationToken) -> EtlResult<()> {
+        let result = tokio::select! {
+            biased;
+
+            result = &mut self.handle => result,
+
+            () = force_stop.cancelled() => {
+                self.handle.abort();
+                match self.handle.await {
+                    Err(error) if error.is_cancelled() => return Ok(()),
+                    result => result,
+                }
+            }
+        };
+        result.map_err(|err| {
             if err.is_cancelled() {
                 etl_error!(ErrorKind::ApplyWorkerCancelled, "Apply worker was cancelled", source: err)
             } else {
@@ -78,6 +95,8 @@ pub(crate) struct ApplyWorker<S, D> {
     destination: D,
     /// Shared sampler and worker progress registrations.
     replication_lag_monitor: ReplicationLagMonitor,
+    /// Outstanding durability survives individual apply-loop attempts.
+    durability_monitor: DurabilityMonitor,
     shutdown_token: CancellationToken,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -99,6 +118,7 @@ impl<S, D> ApplyWorker<S, D> {
         store: S,
         destination: D,
         replication_lag_monitor: ReplicationLagMonitor,
+        durability_monitor: DurabilityMonitor,
         shutdown_token: CancellationToken,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
@@ -117,6 +137,7 @@ impl<S, D> ApplyWorker<S, D> {
             store,
             destination,
             replication_lag_monitor,
+            durability_monitor,
             shutdown_token,
             table_sync_worker_permits,
             memory_monitor,
@@ -284,6 +305,7 @@ where
             store: self.store.clone(),
             destination: self.destination.clone(),
             replication_lag_monitor: self.replication_lag_monitor.clone(),
+            durability_monitor: self.durability_monitor.clone(),
             shutdown_token: self.shutdown_token.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),

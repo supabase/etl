@@ -1,9 +1,10 @@
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -14,10 +15,19 @@ use serde_json::Value;
 const DEFAULT_ARTIFACT_NAME: &str = "benchmark-results";
 const DEFAULT_CURRENT_DIR: &str = "target/bench-results";
 const DEFAULT_WORKFLOW: &str = "benchmark.yml";
+/// Run manifest uploaded beside the reports; not itself a report.
+const MANIFEST_FILE_NAME: &str = "manifest.json";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "supabase-etl-benchmark-compare";
+/// Workflow runs requested per listing page.
+const RUNS_PER_PAGE: usize = 30;
+/// Listing pages searched for a baseline before giving up.
+///
+/// Runs without the artifact, such as backfills or other destinations, can
+/// fill whole pages; a bound keeps the search cheap when no baseline exists.
+const MAX_RUN_PAGES: usize = 5;
 
 const TABLE_COPY_METRICS: &[Metric] = &[
     Metric { key: "copied_rows", label: "Rows copied", policy: RegressionPolicy::Informational },
@@ -142,7 +152,6 @@ struct WorkflowRun {
     id: u64,
     run_number: u64,
     html_url: String,
-    conclusion: Option<String>,
     head_sha: Option<String>,
 }
 
@@ -164,9 +173,14 @@ struct PreviousSource {
     code_compare: Option<CodeCompare>,
 }
 
+/// Rendered comparison and the regressions it found.
+///
+/// Regressions are advisory: they are reported but never fail the command.
+/// Run-to-run noise can exceed the thresholds, and a failed run never becomes
+/// a baseline, so failing on them would keep accepted regressions failing.
 struct Comparison {
     markdown: String,
-    failures: Vec<String>,
+    regressions: Vec<String>,
 }
 
 struct CodeCompare {
@@ -180,6 +194,8 @@ struct GitHubContext {
     repo: String,
     current_run_id: u64,
     ref_name: String,
+    /// Event that triggered the current run; baselines must share it.
+    event_name: String,
     current_sha: Option<String>,
 }
 
@@ -189,8 +205,16 @@ struct GitHubClient {
     repo: String,
 }
 
-struct TempDir {
-    path: PathBuf,
+/// Creates a temporary directory for downloading and extracting previous
+/// reports.
+fn create_previous_reports_dir() -> Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("etl-benchmark-previous-");
+    // Other users must not be able to plant archive or extraction paths.
+    #[cfg(unix)]
+    builder.permissions(fs::Permissions::from_mode(0o700));
+
+    builder.tempdir().context("Failed to create previous benchmark reports directory")
 }
 
 impl BenchmarkCompareArgs {
@@ -207,7 +231,9 @@ impl BenchmarkCompareArgs {
                 previous.run.as_ref(),
                 previous.code_compare.as_ref(),
             ),
-            None => Comparison { markdown: render_missing_previous(&self), failures: Vec::new() },
+            None => {
+                Comparison { markdown: render_missing_previous(&self), regressions: Vec::new() }
+            }
         };
 
         if let Some(parent) = output.parent()
@@ -219,12 +245,14 @@ impl BenchmarkCompareArgs {
         fs::write(&output, format!("{}\n", comparison.markdown))
             .with_context(|| format!("failed to write {}", output.display()))?;
         println!("{}", comparison.markdown);
-        if !comparison.failures.is_empty() {
-            bail!(
-                "benchmark comparison failed with {} regression(s): {}",
-                comparison.failures.len(),
-                comparison.failures.join("; ")
-            );
+        // Surface regressions as workflow annotations without failing the job.
+        if env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+            for regression in &comparison.regressions {
+                println!(
+                    "::warning title=Benchmark regression::{}",
+                    escape_workflow_command_data(regression)
+                );
+            }
         }
 
         Ok(())
@@ -261,8 +289,9 @@ impl BenchmarkCompareArgs {
         let repo = env::var("GITHUB_REPOSITORY").ok()?;
         let current_run_id = env::var("GITHUB_RUN_ID").ok()?.parse().ok()?;
         let ref_name = self.ref_name.clone().or_else(|| env::var("GITHUB_REF_NAME").ok())?;
+        let event_name = env::var("GITHUB_EVENT_NAME").ok()?;
         let current_sha = env::var("GITHUB_SHA").ok();
-        Some(GitHubContext { token, repo, current_run_id, ref_name, current_sha })
+        Some(GitHubContext { token, repo, current_run_id, ref_name, event_name, current_sha })
     }
 
     async fn load_github_previous_reports(
@@ -270,36 +299,54 @@ impl BenchmarkCompareArgs {
         client: &GitHubClient,
         context: &GitHubContext,
     ) -> Result<Option<(Reports, WorkflowRun, Option<CodeCompare>)>> {
-        let runs = client.workflow_runs(&self.workflow, &context.ref_name).await?;
-        for run in runs {
-            if run.id == context.current_run_id || run.conclusion.as_deref() != Some("success") {
-                continue;
+        for page in 1..=MAX_RUN_PAGES {
+            let runs = client
+                .workflow_runs(&self.workflow, &context.ref_name, &context.event_name, page)
+                .await?;
+            let last_page = runs.len() < RUNS_PER_PAGE;
+            for run in runs {
+                // One failed destination job fails the whole run, so the run
+                // conclusion is not checked. Only successful jobs upload the
+                // artifact, so its presence marks a usable baseline.
+                if run.id == context.current_run_id {
+                    continue;
+                }
+
+                let Some(artifact) = client.find_artifact(run.id, &self.artifact_name).await?
+                else {
+                    continue;
+                };
+
+                let temp_dir = create_previous_reports_dir()?;
+                let archive_path = temp_dir.path().join("benchmark-results.zip");
+                let extract_dir = temp_dir.path().join("extract");
+                fs::create_dir_all(&extract_dir)
+                    .with_context(|| format!("failed to create {}", extract_dir.display()))?;
+                client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
+                unzip_archive(&archive_path, &extract_dir)?;
+                let reports = load_reports(&extract_dir).with_context(|| {
+                    format!(
+                        "failed to load benchmark reports from artifact {} in run {}",
+                        self.artifact_name, run.run_number
+                    )
+                })?;
+                let code_compare =
+                    code_compare(&context.repo, &run, context.current_sha.as_deref());
+                return Ok(Some((reports, run, code_compare)));
             }
 
-            let Some(artifact) = client.find_artifact(run.id, &self.artifact_name).await? else {
-                continue;
-            };
-
-            let temp_dir = TempDir::new("etl-benchmark-previous")?;
-            let archive_path = temp_dir.path.join("benchmark-results.zip");
-            let extract_dir = temp_dir.path.join("extract");
-            fs::create_dir_all(&extract_dir)
-                .with_context(|| format!("failed to create {}", extract_dir.display()))?;
-            client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
-            unzip_archive(&archive_path, &extract_dir)?;
-            let reports = load_reports(&extract_dir).with_context(|| {
-                format!(
-                    "failed to load benchmark reports from artifact {} in run {}",
-                    self.artifact_name, run.run_number
-                )
-            })?;
-            let code_compare = code_compare(&context.repo, &run, context.current_sha.as_deref());
-            return Ok(Some((reports, run, code_compare)));
+            if last_page {
+                break;
+            }
         }
 
         eprintln!(
-            "No previous successful benchmark artifact named '{}' was found for ref '{}'.",
-            self.artifact_name, context.ref_name
+            "No previous successful benchmark artifact named '{}' was found for ref '{}' in up to \
+             {} recent '{}' runs.",
+            self.artifact_name,
+            context.ref_name,
+            MAX_RUN_PAGES * RUNS_PER_PAGE,
+            context.event_name
         );
         Ok(None)
     }
@@ -314,7 +361,18 @@ impl GitHubClient {
         Ok(Self { client, token, repo })
     }
 
-    async fn workflow_runs(&self, workflow: &str, ref_name: &str) -> Result<Vec<WorkflowRun>> {
+    /// Lists one page of completed runs on `ref_name` triggered by
+    /// `event_name`, newest first.
+    ///
+    /// Scheduled runs compare only with scheduled runs, so a manual run with a
+    /// larger runner or custom inputs never becomes the nightly baseline.
+    async fn workflow_runs(
+        &self,
+        workflow: &str,
+        ref_name: &str,
+        event_name: &str,
+        page: usize,
+    ) -> Result<Vec<WorkflowRun>> {
         let url = format!(
             "{GITHUB_API_BASE}/repos/{}/actions/workflows/{}/runs",
             self.repo,
@@ -323,12 +381,8 @@ impl GitHubClient {
         let response = self
             .client
             .get(url)
-            .query(&[
-                ("branch", ref_name),
-                ("event", "workflow_dispatch"),
-                ("status", "completed"),
-                ("per_page", "30"),
-            ])
+            .query(&[("branch", ref_name), ("event", event_name), ("status", "completed")])
+            .query(&[("per_page", RUNS_PER_PAGE), ("page", page)])
             .bearer_auth(&self.token)
             .header("Accept", GITHUB_ACCEPT)
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
@@ -383,31 +437,14 @@ impl GitHubClient {
     }
 }
 
-impl TempDir {
-    fn new(prefix: &str) -> Result<Self> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .context("system clock is before Unix epoch")?
-            .as_millis();
-        let path = env::temp_dir().join(format!("{prefix}-{timestamp}-{}", std::process::id()));
-        fs::create_dir_all(&path)
-            .with_context(|| format!("failed to create {}", path.display()))?;
-        Ok(Self { path })
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
 fn load_reports(dir: &Path) -> Result<Reports> {
     let mut reports = Reports::new();
     let entries = fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?;
     for entry in entries {
         let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json")
+            || path.file_name().and_then(|name| name.to_str()) == Some(MANIFEST_FILE_NAME)
+        {
             continue;
         }
 
@@ -442,6 +479,11 @@ fn render_missing_previous(args: &BenchmarkCompareArgs) -> String {
     )
 }
 
+/// Escapes data for a GitHub Actions workflow command such as `::warning::`.
+fn escape_workflow_command_data(data: &str) -> String {
+    data.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
+}
+
 fn compare_reports(
     previous_reports: &Reports,
     current_reports: &Reports,
@@ -449,7 +491,7 @@ fn compare_reports(
     code_compare: Option<&CodeCompare>,
 ) -> Comparison {
     let mut lines = vec!["## 📈 Benchmark comparison".to_owned(), String::new()];
-    let mut failures = Vec::new();
+    let mut regressions = Vec::new();
     if let Some(previous_run) = previous_run {
         lines.push(format!(
             "Compared with previous successful run [#{}]({}) at `{}`.",
@@ -477,7 +519,7 @@ fn compare_reports(
         .collect::<Vec<_>>();
     if common_benchmarks.is_empty() {
         lines.push("No benchmark reports had matching names between the two runs.".to_owned());
-        return Comparison { markdown: lines.join("\n"), failures };
+        return Comparison { markdown: lines.join("\n"), regressions };
     }
 
     for benchmark in common_benchmarks {
@@ -512,25 +554,28 @@ fn compare_reports(
             ));
         }
 
-        let benchmark_failures = if changes.is_empty() {
+        let benchmark_regressions = if changes.is_empty() {
             regression_failures(&benchmark, previous, current)
         } else {
             Vec::new()
         };
         lines.push(String::new());
         if changes.is_empty() {
-            if benchmark_failures.is_empty() {
-                lines.push("✅ Regression gate: passed.".to_owned());
+            if benchmark_regressions.is_empty() {
+                lines.push("✅ No regressions beyond thresholds.".to_owned());
             } else {
-                lines.push("🚨 Regression gate: failed.".to_owned());
-                for failure in &benchmark_failures {
-                    lines.push(format!("- 🚨 {failure}"));
+                lines.push(
+                    "🚨 Regressions beyond thresholds (advisory; the job does not fail):"
+                        .to_owned(),
+                );
+                for regression in &benchmark_regressions {
+                    lines.push(format!("- 🚨 {regression}"));
                 }
-                failures.extend(benchmark_failures);
+                regressions.extend(benchmark_regressions);
             }
         } else {
             lines.push(
-                "⚠️ Regression gate: skipped because benchmark configuration differs.".to_owned(),
+                "⚠️ Regression check skipped because benchmark configuration differs.".to_owned(),
             );
         }
         lines.push(String::new());
@@ -553,7 +598,7 @@ fn compare_reports(
         lines.push(format!("ℹ️ Current-only reports: {}.", current_only.join(", ")));
     }
 
-    Comparison { markdown: lines.join("\n"), failures }
+    Comparison { markdown: lines.join("\n"), regressions }
 }
 
 fn metrics_for(benchmark: &str) -> &'static [Metric] {
@@ -821,6 +866,52 @@ mod tests {
         CodeCompare, Reports, WorkflowRun, compare_reports, config_changes, regression_failures,
     };
 
+    /// Checks directory usability and Unix owner-only permissions.
+    #[test]
+    fn previous_reports_dir_is_usable() {
+        use std::fs;
+
+        use crate::commands::benchmark_compare::create_previous_reports_dir;
+
+        let temp_dir = create_previous_reports_dir().unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let permissions = temp_dir.path().metadata().unwrap().permissions();
+            assert_eq!(permissions.mode() & 0o077, 0);
+        }
+
+        let report_path = temp_dir.path().join("report.json");
+        let report_contents = br#"{"benchmark":"test"}"#;
+
+        fs::write(&report_path, report_contents).unwrap();
+
+        assert_eq!(fs::read(&report_path).unwrap(), report_contents);
+    }
+
+    /// The run manifest is not loaded as a benchmark report.
+    #[test]
+    fn load_reports_ignores_run_manifest() {
+        use std::fs;
+
+        use crate::commands::benchmark_compare::{create_previous_reports_dir, load_reports};
+
+        let temp_dir = create_previous_reports_dir().unwrap();
+        fs::write(temp_dir.path().join("table_copy.json"), br#"{"benchmark":"table_copy"}"#)
+            .unwrap();
+        fs::write(
+            temp_dir.path().join("manifest.json"),
+            br#"{"schema_version":1,"destination":"null"}"#,
+        )
+        .unwrap();
+
+        let reports = load_reports(temp_dir.path()).unwrap();
+
+        assert_eq!(reports.keys().collect::<Vec<_>>(), ["table_copy"]);
+    }
+
     #[test]
     fn config_changes_detects_changed_and_missing_fields() {
         let previous = json!({
@@ -987,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_reports_skips_regression_gate_when_config_differs() {
+    fn compare_reports_skips_regression_check_when_config_differs() {
         let mut previous = Reports::new();
         previous.insert(
             "table_streaming".to_owned(),
@@ -1016,11 +1107,11 @@ mod tests {
 
         let comparison = compare_reports(&previous, &current, None, None);
 
-        assert!(comparison.failures.is_empty());
+        assert!(comparison.regressions.is_empty());
         assert!(
             comparison
                 .markdown
-                .contains("Regression gate: skipped because benchmark configuration differs.")
+                .contains("Regression check skipped because benchmark configuration differs.")
         );
     }
 
@@ -1052,7 +1143,6 @@ mod tests {
             id: 1,
             run_number: 42,
             html_url: "https://github.com/supabase/etl/actions/runs/42".to_owned(),
-            conclusion: Some("success".to_owned()),
             head_sha: Some("abc123456789".to_owned()),
         };
         let code_compare = CodeCompare {

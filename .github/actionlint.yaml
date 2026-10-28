@@ -11,3 +11,6 @@ paths:
   .github/workflows/reusable-publish-image.yml:
     ignore:
       - '^unexpected key "queue" for "concurrency" section\.'
+  .github/workflows/benchmark.yml:
+    ignore:
+      - '^unexpected key "queue" for "concurrency" section\.'

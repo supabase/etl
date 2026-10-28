@@ -60,7 +60,7 @@ fn install_crypto_provider() {
 }
 
 // Main application arguments combining database and BigQuery configurations
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 #[command(name = "bigquery", version, about, arg_required_else_help = true)]
 struct AppArgs {
     // Postgres connection parameters
@@ -76,7 +76,7 @@ struct AppArgs {
 }
 
 // Postgres database connection configuration
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct DbArgs {
     /// Host on which Postgres is running (e.g., localhost or IP address)
     #[arg(long)]
@@ -96,7 +96,7 @@ struct DbArgs {
 }
 
 // BigQuery destination configuration
-#[derive(Debug, Args)]
+#[derive(Args)]
 struct BqArgs {
     /// Path to GCP service account key JSON file (download from GCP Console >
     /// IAM & Admin > Service Accounts)
@@ -191,6 +191,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         publication_name: args.publication,
         run_source_migrations: true,
         drain_on_shutdown: true,
+        shutdown_drain_timeout_ms: PipelineConfig::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
         replication_slot: Default::default(),
         pg_connection: pg_connection_config,
         store_pg_connection: None,

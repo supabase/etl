@@ -596,30 +596,23 @@ fn array_cell_to_sql_literal(arr: ArrayCell) -> String {
 }
 
 /// Returns a DuckDB SQL literal for a floating-point value.
+///
+/// DuckDB types a bare numeric literal by its text: a plain decimal becomes
+/// DECIMAL, which rounds again on the way to the float column, `-0` becomes
+/// integer zero, and a list literal takes a DECIMAL type from its elements
+/// that later elements may not fit. Casting the shortest round-trip text
+/// parses it directly as the target type, so the stored value keeps its bits.
+/// `FLOAT` values arrive widened to `f64`, which represents them exactly.
 fn float_literal(value: f64, is_double: bool) -> String {
+    let sql_type = if is_double { "DOUBLE" } else { "FLOAT" };
     if value.is_nan() {
-        return if is_double {
-            "CAST('NaN' AS DOUBLE)".to_owned()
-        } else {
-            "CAST('NaN' AS FLOAT)".to_owned()
-        };
+        format!("CAST('NaN' AS {sql_type})")
+    } else if value.is_infinite() {
+        let sign = if value.is_sign_negative() { "-" } else { "" };
+        format!("CAST('{sign}Infinity' AS {sql_type})")
+    } else {
+        format!("CAST('{value:e}' AS {sql_type})")
     }
-    if value == f64::INFINITY {
-        return if is_double {
-            "CAST('Infinity' AS DOUBLE)".to_owned()
-        } else {
-            "CAST('Infinity' AS FLOAT)".to_owned()
-        };
-    }
-    if value == f64::NEG_INFINITY {
-        return if is_double {
-            "CAST('-Infinity' AS DOUBLE)".to_owned()
-        } else {
-            "CAST('-Infinity' AS FLOAT)".to_owned()
-        };
-    }
-
-    value.to_string()
 }
 
 /// Encodes bytes as uppercase hexadecimal for DuckDB's `from_hex`.
@@ -1027,7 +1020,6 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: float8 sql literals drift one ulp, drop -0, or change magnitude"]
         fn float8_sql_literals_parse_bit_exact() {
             let conn = duckdb::Connection::open_in_memory().unwrap();
             run_property("ducklake_float8_sql_literal_bit_exact", &any_f64(), |&value| {
@@ -1036,7 +1028,6 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: float4 sql literals can drift one ulp or drop -0"]
         fn float4_sql_literals_parse_bit_exact() {
             let conn = duckdb::Connection::open_in_memory().unwrap();
             run_property("ducklake_float4_sql_literal_bit_exact", &any_f32(), |&value| {
@@ -1045,36 +1036,32 @@ pub(super) mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: float8 sql literal for 1e-30 parses one ulp low"]
         fn float8_sql_literal_keeps_decimal_fraction_exact() {
-            // DuckDB reads short plain decimals as DECIMAL and rounds again
-            // when casting to DOUBLE, landing on 9.999999999999999e-31.
+            // As a plain decimal, DuckDB reads 1e-30 as DECIMAL and rounds
+            // again when casting to DOUBLE, landing on 9.999999999999999e-31.
             assert_f64_literal_bit_exact(1e-30);
         }
 
         #[test]
-        #[ignore = "known defect: float4 literal for 9.849754e-19 parses one ulp high"]
         fn float4_sql_literal_keeps_decimal_fraction_exact() {
-            // The widened f64 text rounds through DECIMAL to 0x21915b53.
+            // As a plain decimal, the widened f64 text rounds through DECIMAL
+            // to 0x21915b53.
             assert_f32_literal_bit_exact(f32::from_bits(0x2191_5b52));
         }
 
         #[test]
-        #[ignore = "known defect: 274-digit float8 literals parse to a value near 9.2e17"]
         fn float8_sql_literal_keeps_magnitude_of_huge_values() {
-            // 9.223372036854776e273 prints as 274 integer digits, which DuckDB
-            // reads back as 9.223372036854776e17.
+            // Plain notation spells 9.223372036854776e273 with 274 integer
+            // digits, wider than any DuckDB integer or DECIMAL type.
             assert_f64_literal_bit_exact(f64::from_bits(0x78d1_0cb1_32c2_ff63));
         }
 
         #[test]
-        #[ignore = "known defect: float8 -0.0 prints as integer -0 and is stored as +0.0"]
         fn float8_sql_literal_keeps_negative_zero() {
             assert_f64_literal_bit_exact(-0.0);
         }
 
         #[test]
-        #[ignore = "known defect: float4 -0.0 prints as integer -0 and is stored as +0.0"]
         fn float4_sql_literal_keeps_negative_zero() {
             assert_f32_literal_bit_exact(-0.0);
         }
@@ -1555,30 +1542,8 @@ pub(super) mod tests {
                 .unwrap())
         }
 
-        /// Returns whether `path` writes cells of `typ` as SQL float
-        /// literals.
-        ///
-        /// Arrays always fall back to SQL literals, including on the COPY path.
-        fn writes_float_literals(typ: &PgType, path: EncoderPath) -> bool {
-            match *typ {
-                PgType::FLOAT4 | PgType::FLOAT8 => matches!(path, EncoderPath::SqlLiteral),
-                PgType::FLOAT4_ARRAY | PgType::FLOAT8_ARRAY => {
-                    !matches!(path, EncoderPath::Appender)
-                }
-                _ => false,
-            }
-        }
-
         /// Checks that every encoder path stores each cell unchanged.
-        ///
-        /// With `check_float_literals` false, paths that write floats as SQL
-        /// literals are skipped; their drift is pinned by
-        /// `sql_literal_encoder_stores_floats_bit_exact` and the
-        /// `float*_sql_literal*` tests.
-        fn check_encoders_agree(
-            case: &EncoderCase,
-            check_float_literals: bool,
-        ) -> Result<(), TestCaseError> {
+        fn check_encoders_agree(case: &EncoderCase) -> Result<(), TestCaseError> {
             let conn = duckdb::Connection::open_in_memory().unwrap();
             conn.execute_batch("attach ':memory:' as lake;").unwrap();
             let schema = case_schema(case);
@@ -1594,9 +1559,6 @@ pub(super) mod tests {
                 .collect::<Vec<_>>();
 
             for path in [EncoderPath::SqlLiteral, EncoderPath::Appender, EncoderPath::Copy] {
-                if !check_float_literals && writes_float_literals(&case.typ, path) {
-                    continue;
-                }
                 // Production never appends cells that need SQL literals, so the
                 // appender path only sees cells `prepare_rows` would append.
                 let path_rows = rows
@@ -1632,13 +1594,10 @@ pub(super) mod tests {
 
         #[test]
         fn sql_literal_appender_and_copy_encoders_store_the_same_value() {
-            run_property("ducklake_encoders_agree", &encoder_case(), |case| {
-                check_encoders_agree(case, false)
-            });
+            run_property("ducklake_encoders_agree", &encoder_case(), check_encoders_agree);
         }
 
         #[test]
-        #[ignore = "known defect: float sql literals can drift one ulp or drop -0"]
         fn sql_literal_encoder_stores_floats_bit_exact() {
             let float_case = Union::new(vec![
                 case_for(PgType::FLOAT4, -1, any_f32().prop_map(Cell::F32)),
@@ -1646,9 +1605,22 @@ pub(super) mod tests {
                 array_case(PgType::FLOAT4_ARRAY, any_f32(), ArrayCell::F32),
                 array_case(PgType::FLOAT8_ARRAY, any_f64(), ArrayCell::F64),
             ]);
-            run_property("ducklake_float_sql_literal_encoder", &float_case, |case| {
-                check_encoders_agree(case, true)
-            });
+            run_property("ducklake_float_sql_literal_encoder", &float_case, check_encoders_agree);
+        }
+
+        #[test]
+        fn float4_array_sql_literal_accepts_tiny_and_large_elements() {
+            // As plain decimals, the tiny element types the list as a DECIMAL
+            // with too few integer digits for 100000, so the insert fails.
+            let case = EncoderCase {
+                typ: PgType::FLOAT4_ARRAY,
+                modifier: -1,
+                cells: vec![Cell::Array(ArrayCell::F32(vec![
+                    Some(1.234_567_8e-20),
+                    Some(100_000.0),
+                ]))],
+            };
+            check_encoders_agree(&case).unwrap();
         }
     }
 }

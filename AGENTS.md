@@ -124,6 +124,36 @@ implementation details private.
   or `cargo --locked xtask`; Cargo commands spawned by the task runner need their
   own `--locked` flag.
 
+### Temporary dependency audit deferral
+
+Iceberg still pulls in `zstd 0.13.3` and `zstd-safe 7.2.4` through its own,
+Apache Avro, and Parquet dependencies. The remaining audit findings
+`RUSTSEC-2026-0391`, `RUSTSEC-2026-0398`, and `RUSTSEC-2026-0403` are deferred to
+[destination removal in PR #1159](https://github.com/supabase/etl/pull/1159).
+Keep the audit enabled; do not add advisory ignores, forks, or vendored patches
+for this deferred chain. When integrating that removal, remove this note and
+verify that the affected versions and findings are gone. Investigate any
+findings that remain after removal or involve another dependency path.
+
+### Deprecated destination scope
+
+Iceberg is deprecated. Unless the user explicitly requests Iceberg work,
+exclude it from non-security refactoring scans, test-improvement reviews,
+and cross-destination bug investigations or fixes. Requests covering
+"all destinations" or the whole repository do not override this exclusion.
+
+When applying this exclusion to a cross-destination or repository-wide
+request, state in the result that Iceberg was excluded.
+
+This exclusion does not apply to security scans: include Iceberg whenever
+it falls within the requested security scope.
+
+Keep existing Iceberg code, tests, features and CI coverage intact. If a
+shared change requires an Iceberg adjustment to prevent a runtime
+regression or keep existing builds and checks passing, make only the
+necessary compatibility adjustment.
+Do not expand that work into Iceberg-specific cleanup.
+
 ### Destination compatibility
 
 | Situation | Do |
@@ -265,9 +295,10 @@ cleanup. Recovery correctness still applies: never checkpoint unfinished work.
   cancellation-safe waits. Keep a running pipeline's pinned completion future
   alive when requesting shutdown, then await it to finish cleanup.
 - **Apply:** stop intake and drain buffered batches and pending write results
-  under existing deadlines, durability, and error policies. Do not force early
-  flushes or cancel in-flight apply writes. `drain_on_shutdown = false` is the
-  one opt-out: it abandons that work unacknowledged, for replay after restart.
+  under existing durability and error policies within `shutdown_drain_timeout_ms`.
+  At that deadline, cancel and join workers before destination teardown; never
+  checkpoint abandoned work. Do not force early flushes. `drain_on_shutdown = false`
+  skips the apply drain and leaves unacknowledged work for replay after restart.
   Coordination waits must observe shutdown when a stopping worker may never
   publish the awaited state.
 - **Copy and startup:** initial sync is replayable. Keep copy waits, including
@@ -313,6 +344,23 @@ counts, lengths, LSNs, IDs, operations). Production errors: `error = %err` or
 Prefer `Display` (`%`) over `Debug` (`?`) unless the type is known not to
 contain sensitive values. Table state: `table_state_type` (one) and
 `table_state_types` (list).
+
+The same rule applies to `Debug`/`Display` implementations, error messages and
+source chains, panics/assertions, Sentry events, and any other diagnostic output
+that can be printed, captured, or sent to telemetry. `SecretString` redacts
+itself; inspect plain strings, byte arrays, URLs, nested types, and third-party
+errors before formatting them. Use custom formatting only where the contained
+types do not already redact secrets.
+
+Prefer `SecretString` for owned credentials; use `SerializableSecretString` only
+when serialization is required. Use `Zeroizing` for temporary cryptographic keys
+and plaintext encryption buffers. Expose secrets only at protocol or storage
+boundaries.
+
+Keep useful structural context, status/error codes, and retry classifications;
+omit credentials, payload values, and raw provider text that can echo them.
+Prefer redaction at the output boundary over removing validation or changing
+runtime behavior.
 
 ## Tests
 

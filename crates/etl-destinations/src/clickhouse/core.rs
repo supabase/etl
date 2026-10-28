@@ -213,7 +213,11 @@ fn clickhouse_add_column_definition(
     let preserve_not_null = !after_column_schema.nullable
         && destination_column_schema.default_expression.as_deref().is_some_and(
             |default_expression| {
-                supports_column_default(default_expression, &after_column_schema.typ)
+                supports_column_default(
+                    default_expression,
+                    &after_column_schema.typ,
+                    after_column_schema.modifier,
+                )
             },
         );
     (destination_column_schema, !preserve_not_null)
@@ -596,11 +600,58 @@ impl Default for ClickHouseInserterConfig {
     }
 }
 
+/// Product identity that the [`ClickHouseClient`] reports to ClickHouse.
+///
+/// The client prepends `name/version` to the driver's default `User-Agent`,
+/// which lets ClickHouse attribute integration traffic. Both parts are HTTP
+/// tokens, so a value can never make a request header invalid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClickHouseProductInfo {
+    /// Product name, such as `supabase-etl`.
+    name: String,
+    /// Product version, such as `v1.2.3`.
+    version: String,
+}
+
+impl ClickHouseProductInfo {
+    /// Creates product info from an HTTP-token name and version.
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> EtlResult<Self> {
+        let name = name.into();
+        let version = version.into();
+        if !is_http_token(&name) || !is_http_token(&version) {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "ClickHouse product name and version must be HTTP tokens"
+            ));
+        }
+
+        Ok(Self { name, version })
+    }
+
+    /// Returns the product name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the product version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// Returns whether `value` is a non-empty RFC 9110 `token`.
+fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
 /// Configuration for the [`ClickHouseClient`].
 ///
 /// Holds the server-side and client-side timeouts applied to each operation
-/// bucket. Additional client-level knobs can be added here over time.
-#[derive(Copy, Clone)]
+/// bucket and the optional product identity reported to ClickHouse.
+#[derive(Clone)]
 pub struct ClickHouseClientConfig {
     /// Server-side budget for the connectivity check (`SELECT 1`).
     pub connectivity_check_timeout: Duration,
@@ -615,6 +666,9 @@ pub struct ClickHouseClientConfig {
     /// Slack added to the server-side budget to derive the client-side
     /// `tokio::time::timeout`.
     pub client_timeout_epsilon: Duration,
+    /// Product identity added to the `User-Agent` of every request. [`None`]
+    /// sends only the driver's default `User-Agent`.
+    pub product_info: Option<ClickHouseProductInfo>,
 }
 
 impl ClickHouseClientConfig {
@@ -654,6 +708,7 @@ impl Default for ClickHouseClientConfig {
             ddl_timeout: Self::DEFAULT_DDL_TIMEOUT,
             insert_timeout: Self::DEFAULT_INSERT_TIMEOUT,
             client_timeout_epsilon: Self::DEFAULT_CLIENT_TIMEOUT_EPSILON,
+            product_info: None,
         }
     }
 }
@@ -1104,9 +1159,12 @@ where
                     ErrorKind::DestinationTableAlreadyExists,
                     "ClickHouse destination table already exists",
                     format!(
-                        "Table '{name}' exists, but this pipeline has no destination metadata \
-                         proving ownership. Drop the table or use another database before \
-                         retrying."
+                        "Destination table or view '{name}' already exists, but this pipeline has \
+                         no destination metadata proving ownership. If you previously deleted a \
+                         pipeline, its replicated data was preserved. Choose an unused \
+                         destination database, or remove the conflicting object only after \
+                         confirming its data is no longer needed and another pipeline is not \
+                         using it."
                     )
                 ));
             }
@@ -3050,6 +3108,23 @@ mod tests {
 
             assert_eq!(column.default_expression.as_deref(), expected_default);
             assert_eq!(clickhouse_column_type(&column, force_nullable), expected_type);
+        }
+    }
+
+    /// Historical defaults must pass the source modifier guard before an
+    /// added column can retain NOT NULL, independently of its future default.
+    #[test]
+    fn column_addition_checks_historical_default_with_type_modifier() {
+        for (missing, force_nullable) in [("'abc'::text", false), ("'abcd'::text", true)] {
+            let source = ColumnSchema::new("code".to_owned(), Type::VARCHAR, 7, 1, false)
+                .with_default_expression("'future'::text".to_owned())
+                .with_missing_value_expression(Some(missing.to_owned()));
+
+            let (column, actual_force_nullable) =
+                clickhouse_add_column_definition(&source, ColumnPresenceChangeReason::TableSchema);
+
+            assert_eq!(column.default_expression.as_deref(), Some(missing));
+            assert_eq!(actual_force_nullable, force_nullable);
         }
     }
 

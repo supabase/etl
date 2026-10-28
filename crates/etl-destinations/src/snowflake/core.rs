@@ -174,11 +174,14 @@ where
                     format!(
                         "Cannot create destination table '{table_name}' for source table '{}': \
                          the destination already exists and is not registered to this source \
-                         table. If it belongs to another renamed source table, resynchronize that \
-                         table first and wait for completion, then retry this one. \
-                         Resynchronization deletes previous destination data and history; source \
-                         rows are copied again only when initial copying is enabled. Otherwise, \
-                         use a new pipeline targeting an unused destination schema.",
+                         table. If you previously deleted a pipeline, its replicated data was \
+                         preserved. Choose an unused destination schema, or remove the \
+                         conflicting table only after confirming its data is no longer needed and \
+                         another pipeline is not using it. If it belongs to another renamed \
+                         source table, resynchronize that table first and wait for completion, \
+                         then retry this one. Resynchronization deletes previous destination data \
+                         and history; source rows are copied again only when initial copying is \
+                         enabled.",
                         table_schema.name()
                     )
                 );

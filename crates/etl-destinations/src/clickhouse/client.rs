@@ -68,6 +68,37 @@ fn floor_secs(d: Duration) -> String {
     d.as_secs().max(1).to_string()
 }
 
+/// Escapes `?` in SQL that is sent without bind arguments.
+///
+/// The `clickhouse` client reads `?` in query text as a bind placeholder and
+/// `??` as a literal `?`. DDL embeds quoted names and default literals that
+/// may contain `?`, so each one is doubled to reach the server unchanged.
+fn escape_query_text(sql: &str) -> String {
+    sql.replace('?', "??")
+}
+
+/// Removes response text that can quote source values, retaining classification
+/// codes.
+pub(super) fn redact_clickhouse_error(error: clickhouse::error::Error) -> clickhouse::error::Error {
+    match error {
+        clickhouse::error::Error::BadResponse(message) => {
+            let message = if let Some(code) = clickhouse_error_code(&message) {
+                format!("Code: {code}. Response body omitted")
+            } else if let Some(status) = http_status(&message) {
+                format!("{status} Response body omitted")
+            } else {
+                "Response body omitted".to_owned()
+            };
+
+            clickhouse::error::Error::BadResponse(message)
+        }
+        clickhouse::error::Error::Custom(_) => {
+            clickhouse::error::Error::Custom("Encoded value omitted".to_owned())
+        }
+        error => error,
+    }
+}
+
 /// Runs `fut` under `tokio::time::timeout` using the client-side timeout for
 /// `op` from `config`. Inner ClickHouse errors map onto `op.failed_kind()` and
 /// keep their own [`ClassifiedError::retryability`]; client-side deadlines map
@@ -97,7 +128,7 @@ where
             op.failed_kind(),
             "ClickHouse call failed",
             detail(op, "failed", context),
-            err,
+            redact_clickhouse_error(err),
         )),
         Err(_) => Err(etl_error!(
             ErrorKind::DestinationTimeout,
@@ -501,6 +532,12 @@ impl ClickHouseClient {
         Self {
             inner: Arc::new({
                 let client = client.with_url(url.to_string()).with_user(user);
+                let client = match &config.product_info {
+                    Some(product_info) => {
+                        client.with_product_info(product_info.name(), product_info.version())
+                    }
+                    None => client,
+                };
                 let client = match database {
                     Some(database) => client.with_database(database),
                     None => client,
@@ -618,7 +655,7 @@ impl ClickHouseClient {
         let ddl_secs = floor_secs(self.config.ddl_timeout);
         let query = self
             .inner
-            .query(sql)
+            .query(&escape_query_text(sql))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
         let result =
@@ -746,7 +783,7 @@ impl ClickHouseClient {
         let ddl_secs = floor_secs(self.config.ddl_timeout);
         let query = self
             .inner
-            .query(&build_truncate_table_sql(table_name))
+            .query(&escape_query_text(&build_truncate_table_sql(table_name)))
             .with_option("max_execution_time", &ddl_secs)
             .with_option("lock_acquire_timeout", &ddl_secs);
         let result = timeout_call(
@@ -968,6 +1005,39 @@ mod tests {
     use etl::schema::{ColumnSchema, Type};
 
     use super::*;
+
+    /// Redaction preserves retry and layout classification without retaining
+    /// row values.
+    #[tokio::test]
+    async fn clickhouse_response_errors_omit_source_values() {
+        for message in [
+            "Code: 117. DB::Exception: placeholder-source-value",
+            "Code: 241. DB::Exception: placeholder-source-value",
+            "503 placeholder-source-value",
+            "placeholder-source-value",
+        ] {
+            let raw = clickhouse::error::Error::BadResponse(message.to_owned());
+            let expected_retryability = raw.retryability();
+            let expected_layout_rejection = is_insert_layout_rejection(&raw);
+
+            let redacted = redact_clickhouse_error(raw);
+
+            assert_eq!(redacted.retryability(), expected_retryability);
+            assert_eq!(is_insert_layout_rejection(&redacted), expected_layout_rejection);
+
+            let error = timeout_call(
+                ClickHouseOperationKind::Insert,
+                &ClickHouseClientConfig::default(),
+                None,
+                async { Err::<(), _>(redacted) },
+            )
+            .await
+            .unwrap_err();
+
+            assert!(!error.to_string().contains("placeholder-source-value"));
+            assert!(!format!("{error:?}").contains("placeholder-source-value"));
+        }
+    }
 
     fn column_schema(name: &str) -> ColumnSchema {
         ColumnSchema {

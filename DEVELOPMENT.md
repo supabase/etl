@@ -111,6 +111,57 @@ Postgres is already running. Persistent volume paths: `POSTGRES_DATA_VOLUME`,
 `cargo xtask postgres start` starts only the test Postgres clusters.
 `cargo xtask multigres --help` covers the optional Multigres cluster.
 
+### DuckDB version
+
+DuckLake uses the Git-pinned `duckdb-rs` revision in `Cargo.toml`, which bundles
+stable DuckDB **v2.0.0** (`d54cbbe3df`). A matching crates.io release is
+not yet available. The destination and maintenance runner must load extensions
+for that exact engine version; update their extension-version constants, the
+test helpers, and `scripts/bin/vendor-duckdb-extensions.sh` together when changing
+the dependency.
+
+The destination and maintenance runner attach with `AUTOMATIC_MIGRATION false`
+and omit `DUCKLAKE_VERSION`. Existing `1.0` catalogs stay on that format, while
+new catalogs use the DuckLake extension's default format, currently `1.1`.
+Existing `1.1` catalogs also remain unchanged. Do not set a global
+`ducklake_default_version` override: it also affects existing catalogs.
+The previous DuckDB 1.5.6 extension can still read existing `1.0` catalogs
+after a rollback, but new `1.1` catalogs require compatible clients and cannot
+be downgraded. Other clients sharing a `1.0` catalog must also avoid migrating it.
+
+Catalogs below `1.0` must be migrated before deploying this build. Startup in
+both the destination and maintenance runner rejects them with a catalog-version
+mismatch showing the existing and required versions; it leaves the catalog
+unchanged. Use the previous DuckDB 1.5.6 build with automatic migration enabled
+to upgrade such catalogs to `1.0`, verify the version, then deploy DuckDB 2.0.
+Do not enable automatic migration under DuckDB 2.0 as a workaround for this
+error. Quaxy attaches with `READ_ONLY`, so it cannot create or migrate catalogs.
+
+This upstream revision stamps its bundled sources with a development version
+instead of the published release label. `.cargo/config.toml` supplies the
+matching `CXXFLAGS` version definitions so signed extensions load. Keep those
+definitions in sync with the Git pin as well. If you supply your own `CXXFLAGS`
+or consume these crates from another workspace, include both definitions from
+that config; Cargo does not inherit dependency workspaces' configuration.
+The pinned `cc` build helper also accepts `CXXFLAGS_<target>`,
+`CXXFLAGS_<target_with_underscores>`, and `HOST_CXXFLAGS` or `TARGET_CXXFLAGS`.
+It combines those with `CXXFLAGS`, applying more specific flags last; do not
+redefine or undefine the version macros there. The destination and maintenance
+runner check the linked release label before loading extensions and return a
+rebuild instruction on mismatch. The version unit test also checks the source
+hash to catch a stale override.
+
+The `libduckdb-sys` profile overrides in `Cargo.toml` keep the bundled C++ engine
+compatible with the published release extensions during development, tests, and
+benchmarks. This revision enables DuckDB's debug allocator bookkeeping when
+Cargo requests debug information, which conflicts with release extensions.
+Other workspaces consuming these crates must also apply those overrides.
+
+Run `cargo x vendor-duckdb --platform osx_arm64` for local Apple Silicon testing
+and set `ETL_DUCKDB_EXTENSION_ROOT` to the absolute path of
+`vendor/duckdb/extensions`. The stable release publishes extensions for
+`linux_amd64`, `linux_arm64`, `osx_amd64`, and `osx_arm64`.
+
 ## Migrations
 
 SQL is grouped by its owning subsystem:
@@ -312,3 +363,49 @@ Blacksmith before increasing runner sizes; local rebuild timings do not measure
 Blacksmith performance. See [Docker caching](https://docs.blacksmith.sh/blacksmith-caching/docker-builds),
 [dependency caching](https://docs.blacksmith.sh/blacksmith-caching/dependencies-actions),
 and [sticky disk protection](https://docs.blacksmith.sh/blacksmith-caching/dependencies-sticky-disks).
+
+## Shutdown and replay validation
+
+`pipeline.shutdown_drain_timeout_ms` defaults to `30000`. The first shutdown
+request stops intake and starts one shared drain budget for apply and table-sync
+workers. Repeated shutdown calls and late completion waiters do not extend it.
+When it expires, the owner cancels and joins workers, then tears down the
+destination. `drain_on_shutdown = false` still skips the apply drain; setting the
+timeout to zero skips the worker grace period altogether.
+
+DuckLake teardown stops admission, interrupts active connections, cancels its
+async tasks, and waits for native work to release its permits. If native cleanup
+still has not finished after 30 seconds, it aborts the process instead of
+returning success or hanging in runtime teardown. Keep the container termination
+grace above the drain budget plus native cleanup time and scheduling headroom.
+`cargo x deploy-local` reserves the default drain budget plus 60 seconds for
+cleanup and scheduling headroom, giving pods 90 seconds with the current default.
+Custom manifests must set `terminationGracePeriodSeconds` explicitly; Kubernetes'
+30-second default is too short for both phases. Increase the pod grace when
+increasing the drain budget. Other destinations retain their own teardown
+contracts and limits.
+
+Only acknowledged durable work can advance source checkpoints. DuckLake commits
+its row changes and replay watermark atomically, so a restarted instance can
+replay an interrupted sequence without duplicating its already committed prefix.
+Shutdown logs identify forced draining, destination cleanup duration, and total
+shutdown duration.
+
+Run the local regression with the test Postgres service from `cargo x init`:
+
+```bash
+TESTS_DATABASE_HOST=127.0.0.1 TESTS_DATABASE_PORT=5430 \
+TESTS_DATABASE_USERNAME=postgres TESTS_DATABASE_PASSWORD=postgres \
+TESTS_DATABASE_TLS_ENABLED=false \
+cargo nextest run --locked -p etl-destinations --features ducklake,test-utils \
+  --test main -E 'test(bounded_shutdown_replays_partial_commits_under_mixed_traffic)' \
+  --success-output immediate
+```
+
+This uses synthetic data, a temporary local DuckLake data directory, and isolated
+source and catalog databases. It stops after a real partial commit, continues
+mixed insert/update/delete traffic across shutdown, recreates the Postgres state
+store and DuckDB instance, and compares every row after two restarts. It also
+checks that the old source slot is released and unfinished writes were not
+checkpointed. The test uses a 250 ms drain budget to exercise escalation quickly;
+unit coverage checks the default 30-second deadline using a paused clock.
