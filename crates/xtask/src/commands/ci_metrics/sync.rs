@@ -388,10 +388,10 @@ impl Syncer<'_> {
             let stored_run = stored.get(&run.id);
             let stored_attempts =
                 stored_run.map(|(_, attempts)| attempts.as_slice()).unwrap_or_default();
-            // Earlier attempts stored while still running are refreshed even
-            // when the latest attempt is settled; their jobs come along below.
-            let refresh = plan::attempts_to_refresh(stored_attempts, run.run_attempt);
-            if refresh.is_empty()
+            // A run with an earlier attempt stored while still running is
+            // re-fetched even when its latest attempt is settled, so that
+            // attempt and its jobs catch up.
+            if !plan::has_unfinished_attempt(stored_attempts, run.run_attempt)
                 && !plan::needs_details(
                     stored_run.map(|(run, _)| run),
                     run.run_attempt,
@@ -401,7 +401,7 @@ impl Syncer<'_> {
             {
                 continue;
             }
-            for attempt in refresh {
+            for attempt in plan::attempts_to_refresh(stored_attempts, run.run_attempt) {
                 let response = self
                     .request(&format!("actions/runs/{}/attempts/{attempt}", run.id), &[])
                     .await?;
