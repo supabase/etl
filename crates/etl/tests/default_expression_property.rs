@@ -95,6 +95,8 @@ struct DescribedColumn {
     typname: String,
     /// `format_type` output, including the type modifier.
     formatted_type: String,
+    /// `atttypmod` of the column.
+    modifier: i32,
     /// `pg_get_expr` output for the column default.
     default_expression: Option<String>,
 }
@@ -167,8 +169,9 @@ impl Harness {
             .etl
             .query_one(
                 &format!(
-                    "select s.atttypid, s.typname, s.formatted_type, s.default_expression from \
-                     etl.describe_table_schema('{CASE_TABLE}'::regclass) s where s.attname = 'c'"
+                    "select s.atttypid, s.typname, s.formatted_type, s.default_expression, \
+                     s.atttypmod from etl.describe_table_schema('{CASE_TABLE}'::regclass) s where \
+                     s.attname = 'c'"
                 ),
                 &[],
             )
@@ -180,6 +183,7 @@ impl Harness {
             typname: row.get(1),
             formatted_type: row.get(2),
             default_expression: row.get(3),
+            modifier: row.get(4),
         }
     }
 
@@ -218,6 +222,7 @@ impl Harness {
             typname: column["typname"].as_str().unwrap().to_owned(),
             formatted_type: column["formatted_type"].as_str().unwrap().to_owned(),
             default_expression: column["default_expression"].as_str().map(ToOwned::to_owned),
+            modifier: i32::try_from(column["atttypmod"].as_i64().unwrap()).unwrap(),
         }
     }
 
@@ -245,7 +250,11 @@ impl Harness {
         column: &DescribedColumn,
         target_type: &str,
     ) -> Option<(&'static str, Result<String, String>)> {
-        let parsed = parse_default_expression(column.default_expression.as_deref()?, &column.typ)?;
+        let parsed = parse_default_expression(
+            column.default_expression.as_deref()?,
+            &column.typ,
+            column.modifier,
+        )?;
         let (variant, literal) = plain_literal(&parsed);
         let source_type = if variant == "numeric" { "numeric" } else { "text" };
         let value = self
@@ -261,6 +270,15 @@ impl Harness {
             });
 
         Some((variant, value))
+    }
+
+    /// Returns whether two numeric texts denote the same value.
+    async fn numerics_equal(&self, left: &str, right: &str) -> bool {
+        self.etl
+            .query_one("select $1::text::numeric = $2::text::numeric", &[&left, &right])
+            .await
+            .unwrap()
+            .get(0)
     }
 }
 
@@ -555,7 +573,7 @@ fn json_case() -> impl Strategy<Value = DefaultCase> {
 ///
 /// `value_changing_casts` enables explicit casts that change the literal's
 /// value before the column type applies; see
-/// `parsed_default_keeps_value_changing_cast`.
+/// `parsed_default_skips_value_changing_cast`.
 fn default_case(value_changing_casts: bool) -> impl Strategy<Value = DefaultCase> {
     prop_oneof![
         integer_case(),
@@ -610,10 +628,18 @@ fn check_literal_denotes_backfill(
         let column = harness.bootstrap_column().await;
         let target_type =
             if ignore_type_modifier { &column.typname } else { &column.formatted_type };
-        let Some((variant, denoted)) = harness.denoted_value(&column, target_type).await else {
+        let Some((variant, mut denoted)) = harness.denoted_value(&column, target_type).await else {
             return Ok(());
         };
         let backfilled = harness.backfilled_value().await.ok_or_else(|| "null".to_owned());
+        // `numeric(p,s)` pads to its scale, so `0` and `0.0` are the same
+        // value.
+        if column.typ == Type::NUMERIC
+            && let (Ok(left), Ok(right)) = (&denoted, &backfilled)
+            && harness.numerics_equal(left, right).await
+        {
+            denoted = backfilled.clone();
+        }
 
         prop_assert_eq!(
             denoted,
@@ -735,15 +761,13 @@ async fn parsed_default_literal_denotes_backfilled_value() {
     init_test_tracing();
     let harness = Harness::new().await;
 
-    // Value-changing casts are excluded; they are a known defect pinned by
-    // `parsed_default_literal_denotes_backfilled_value_with_value_changing_casts`
-    // and `parsed_default_keeps_value_changing_cast`.
+    // Value-changing casts are covered separately by
+    // `parsed_default_literal_denotes_backfilled_value_with_value_changing_casts`.
     run_property("parsed default denotes backfilled value", &default_case(false), |case| {
         check_literal_denotes_backfill(&harness, case, false)
     });
 }
 
-#[ignore = "known defect: the parser strips explicit casts that change the literal's value"]
 #[tokio::test(flavor = "multi_thread")]
 async fn parsed_default_literal_denotes_backfilled_value_with_value_changing_casts() {
     init_test_tracing();
@@ -756,9 +780,8 @@ async fn parsed_default_literal_denotes_backfilled_value_with_value_changing_cas
     );
 }
 
-#[ignore = "known defect: the parser strips explicit casts that change the literal's value"]
 #[tokio::test(flavor = "multi_thread")]
-async fn parsed_default_keeps_value_changing_cast() {
+async fn parsed_default_skips_value_changing_cast() {
     init_test_tracing();
 
     // `pg_get_expr` renders these as `'abcdef'::character varying(3)`,
@@ -775,7 +798,6 @@ async fn parsed_default_keeps_value_changing_cast() {
     .await;
 }
 
-#[ignore = "known defect: parsed defaults drop the column type modifier that Postgres applied"]
 #[tokio::test(flavor = "multi_thread")]
 async fn parsed_default_literal_denotes_backfilled_value_without_type_modifier() {
     init_test_tracing();
@@ -788,13 +810,12 @@ async fn parsed_default_literal_denotes_backfilled_value_without_type_modifier()
     );
 }
 
-#[ignore = "known defect: parsed defaults drop the column type modifier that Postgres applied"]
 #[tokio::test(flavor = "multi_thread")]
-async fn parsed_default_applies_column_type_modifier() {
+async fn parsed_default_skips_values_changed_by_type_modifier() {
     init_test_tracing();
 
-    // Destinations map these columns without the modifier, so they store the
-    // literal as written while Postgres backfills `1.24`, `ab   `, `abc` and
+    // Destinations map these columns without the modifier, so the parser must
+    // skip defaults that Postgres backfills as `1.24`, `ab   `, `abc` and
     // `12:00:01`.
     assert_literals_denote_backfill(
         &[
@@ -806,6 +827,35 @@ async fn parsed_default_applies_column_type_modifier() {
         true,
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parsed_default_keeps_values_the_type_modifier_preserves() {
+    init_test_tracing();
+    let harness = Harness::new().await;
+
+    // The backfill properties pass whenever the parser skips a default, so
+    // this pins that defaults Postgres stores unchanged still reach
+    // destinations. Rails declares every datetime column as `timestamp(6)`.
+    for (column_type, literal) in [
+        ("timestamp(6)", "'2099-01-01 00:00:00'"),
+        ("timestamptz(3)", "'2099-01-01 00:00:00.12+02'"),
+        ("time(0)", "'12:00:00'"),
+        ("varchar(3)", "'abc'"),
+        ("character(3)", "'abc'"),
+        ("numeric(10,2)", "1.5"),
+    ] {
+        let case = DefaultCase { column_type: column_type.to_owned(), literal: literal.to_owned() };
+        assert!(harness.add_defaulted_column(&case, &SessionSettings::etl()).await);
+        let column = harness.bootstrap_column().await;
+        let parsed = parse_default_expression(
+            column.default_expression.as_deref().unwrap(),
+            &column.typ,
+            column.modifier,
+        );
+
+        assert!(parsed.is_some(), "{column_type} default {literal}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
