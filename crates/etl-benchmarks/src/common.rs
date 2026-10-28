@@ -50,9 +50,7 @@ use sqlx::{
     postgres::{PgConnectOptions, PgPoolOptions, PgSslMode},
 };
 use tokio::sync::Notify;
-use tracing::info;
-#[cfg(feature = "snowflake")]
-use tracing::warn;
+use tracing::{info, warn};
 #[cfg(any(feature = "clickhouse", feature = "ducklake"))]
 use url::Url;
 
@@ -108,9 +106,10 @@ pub enum DestinationType {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use clap::ValueEnum;
 
-    use crate::common::{DestinationType, parse_clickhouse_database_prefix};
+    use crate::common::{DestinationType, finish_run, parse_clickhouse_database_prefix};
 
     #[test]
     fn bigquery_destination_uses_bigquery_for_cli() {
@@ -132,6 +131,21 @@ mod tests {
         for value in ["", "123", "1bench", "a`b", "x\\x41", "bench-1", "bé", "a b", "bench;drop"] {
             assert!(parse_clickhouse_database_prefix(value).is_err(), "{value:?}");
         }
+    }
+
+    #[test]
+    fn finish_run_returns_run_error_before_cleanup_errors() {
+        assert_eq!(finish_run(Ok(1), [Ok(()), Ok(())]).unwrap(), 1);
+
+        let error = finish_run(Ok(1), [Err(anyhow!("slots")), Ok(())]).unwrap_err();
+        assert_eq!(error.to_string(), "slots");
+
+        let error =
+            finish_run(Ok(1), [Err(anyhow!("slots")), Err(anyhow!("destination"))]).unwrap_err();
+        assert_eq!(error.to_string(), "slots");
+
+        let error = finish_run::<()>(Err(anyhow!("run")), [Err(anyhow!("slots"))]).unwrap_err();
+        assert_eq!(error.to_string(), "run");
     }
 }
 
@@ -1098,6 +1112,30 @@ pub async fn cleanup_destination(
     Ok(())
 }
 
+/// Combines a benchmark run result with the results of cleanup steps that ran
+/// after it, such as pipeline shutdown or slot and destination cleanup.
+///
+/// Returns the run error first, then the first cleanup error. Cleanup errors
+/// hidden by an earlier error are logged so the root cause is returned and
+/// leaked slots or destination state stay visible.
+pub fn finish_run<T>(
+    run_result: Result<T>,
+    cleanup_results: impl IntoIterator<Item = Result<()>>,
+) -> Result<T> {
+    let mut result = run_result;
+    for cleanup_result in cleanup_results {
+        if let Err(error) = cleanup_result {
+            if result.is_ok() {
+                result = Err(error);
+            } else {
+                warn!(error = %error, "benchmark cleanup failed after an earlier error");
+            }
+        }
+    }
+
+    result
+}
+
 #[cfg(feature = "clickhouse")]
 fn clickhouse_run_database(database: &str, pipeline_id: u64) -> String {
     format!("{database}_{pipeline_id}")
@@ -1144,10 +1182,10 @@ fn snowflake_run_target(pipeline_id: u64) -> Result<SnowflakeRunTarget> {
 
 /// Drops run schemas that earlier runs left behind.
 ///
-/// Cleanup is skipped when a run fails early, is cancelled, or times out, so
-/// each run sweeps `{base_schema}_<digits>` schemas older than
-/// [`SNOWFLAKE_STALE_RUN_SCHEMA_DAYS`]. The age bound leaves schemas of runs
-/// that are still in progress alone.
+/// Failed runs drop their own schema, but cancelled, killed, or timed-out runs
+/// never reach cleanup, so each run sweeps `{base_schema}_<digits>` schemas
+/// older than [`SNOWFLAKE_STALE_RUN_SCHEMA_DAYS`]. The age bound leaves
+/// schemas of runs that are still in progress alone.
 #[cfg(feature = "snowflake")]
 async fn drop_stale_snowflake_run_schemas(target: &SnowflakeRunTarget) -> Result<()> {
     let prefix = format!("{}_", target.base_schema);

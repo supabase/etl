@@ -173,9 +173,14 @@ struct PreviousSource {
     code_compare: Option<CodeCompare>,
 }
 
+/// Rendered comparison and the regressions it found.
+///
+/// Regressions are advisory: they are reported but never fail the command.
+/// Run-to-run noise can exceed the thresholds, and a failed run never becomes
+/// a baseline, so failing on them would keep accepted regressions failing.
 struct Comparison {
     markdown: String,
-    failures: Vec<String>,
+    regressions: Vec<String>,
 }
 
 struct CodeCompare {
@@ -226,7 +231,9 @@ impl BenchmarkCompareArgs {
                 previous.run.as_ref(),
                 previous.code_compare.as_ref(),
             ),
-            None => Comparison { markdown: render_missing_previous(&self), failures: Vec::new() },
+            None => {
+                Comparison { markdown: render_missing_previous(&self), regressions: Vec::new() }
+            }
         };
 
         if let Some(parent) = output.parent()
@@ -238,12 +245,14 @@ impl BenchmarkCompareArgs {
         fs::write(&output, format!("{}\n", comparison.markdown))
             .with_context(|| format!("failed to write {}", output.display()))?;
         println!("{}", comparison.markdown);
-        if !comparison.failures.is_empty() {
-            bail!(
-                "benchmark comparison failed with {} regression(s): {}",
-                comparison.failures.len(),
-                comparison.failures.join("; ")
-            );
+        // Surface regressions as workflow annotations without failing the job.
+        if env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+            for regression in &comparison.regressions {
+                println!(
+                    "::warning title=Benchmark regression::{}",
+                    escape_workflow_command_data(regression)
+                );
+            }
         }
 
         Ok(())
@@ -470,6 +479,11 @@ fn render_missing_previous(args: &BenchmarkCompareArgs) -> String {
     )
 }
 
+/// Escapes data for a GitHub Actions workflow command such as `::warning::`.
+fn escape_workflow_command_data(data: &str) -> String {
+    data.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
+}
+
 fn compare_reports(
     previous_reports: &Reports,
     current_reports: &Reports,
@@ -477,7 +491,7 @@ fn compare_reports(
     code_compare: Option<&CodeCompare>,
 ) -> Comparison {
     let mut lines = vec!["## 📈 Benchmark comparison".to_owned(), String::new()];
-    let mut failures = Vec::new();
+    let mut regressions = Vec::new();
     if let Some(previous_run) = previous_run {
         lines.push(format!(
             "Compared with previous successful run [#{}]({}) at `{}`.",
@@ -505,7 +519,7 @@ fn compare_reports(
         .collect::<Vec<_>>();
     if common_benchmarks.is_empty() {
         lines.push("No benchmark reports had matching names between the two runs.".to_owned());
-        return Comparison { markdown: lines.join("\n"), failures };
+        return Comparison { markdown: lines.join("\n"), regressions };
     }
 
     for benchmark in common_benchmarks {
@@ -540,25 +554,28 @@ fn compare_reports(
             ));
         }
 
-        let benchmark_failures = if changes.is_empty() {
+        let benchmark_regressions = if changes.is_empty() {
             regression_failures(&benchmark, previous, current)
         } else {
             Vec::new()
         };
         lines.push(String::new());
         if changes.is_empty() {
-            if benchmark_failures.is_empty() {
-                lines.push("✅ Regression gate: passed.".to_owned());
+            if benchmark_regressions.is_empty() {
+                lines.push("✅ No regressions beyond thresholds.".to_owned());
             } else {
-                lines.push("🚨 Regression gate: failed.".to_owned());
-                for failure in &benchmark_failures {
-                    lines.push(format!("- 🚨 {failure}"));
+                lines.push(
+                    "🚨 Regressions beyond thresholds (advisory; the job does not fail):"
+                        .to_owned(),
+                );
+                for regression in &benchmark_regressions {
+                    lines.push(format!("- 🚨 {regression}"));
                 }
-                failures.extend(benchmark_failures);
+                regressions.extend(benchmark_regressions);
             }
         } else {
             lines.push(
-                "⚠️ Regression gate: skipped because benchmark configuration differs.".to_owned(),
+                "⚠️ Regression check skipped because benchmark configuration differs.".to_owned(),
             );
         }
         lines.push(String::new());
@@ -581,7 +598,7 @@ fn compare_reports(
         lines.push(format!("ℹ️ Current-only reports: {}.", current_only.join(", ")));
     }
 
-    Comparison { markdown: lines.join("\n"), failures }
+    Comparison { markdown: lines.join("\n"), regressions }
 }
 
 fn metrics_for(benchmark: &str) -> &'static [Metric] {
@@ -1061,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn compare_reports_skips_regression_gate_when_config_differs() {
+    fn compare_reports_skips_regression_check_when_config_differs() {
         let mut previous = Reports::new();
         previous.insert(
             "table_streaming".to_owned(),
@@ -1090,11 +1107,11 @@ mod tests {
 
         let comparison = compare_reports(&previous, &current, None, None);
 
-        assert!(comparison.failures.is_empty());
+        assert!(comparison.regressions.is_empty());
         assert!(
             comparison
                 .markdown
-                .contains("Regression gate: skipped because benchmark configuration differs.")
+                .contains("Regression check skipped because benchmark configuration differs.")
         );
     }
 
