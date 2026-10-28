@@ -198,6 +198,23 @@ from ci.run r
 where r.deleted_at is null
 order by r.run_id, r.run_attempt desc;
 
+-- Workflows with a display label. GitHub's CodeQL default setup and the
+-- `codeql.yml` workflow share the name "CodeQL"; the label keeps them apart.
+-- Deleted workflows are stored with their path as the name; the label drops
+-- the directory.
+create view ci_report.workflow as
+select
+    w.workflow_id,
+    w.path,
+    w.name,
+    case
+        when w.path = 'dynamic/github-code-scanning/codeql' then 'CodeQL · default setup'
+        when w.path = '.github/workflows/codeql.yml' then 'CodeQL · workflow'
+        when w.name = w.path then regexp_replace(w.path, '^\.github/workflows/', '')
+        else w.name
+    end as label
+from ci.workflow w;
+
 create view ci_report.run_summary as
 select
     r.run_id,
@@ -205,6 +222,7 @@ select
     r.workflow_id,
     w.path as workflow_path,
     w.name as workflow_name,
+    w.label as workflow_label,
     r.event,
     r.head_branch,
     r.head_sha,
@@ -223,7 +241,7 @@ select
         as run_url,
     'https://github.com/supabase/etl/commit/' || r.head_sha as commit_url
 from ci.run r
-join ci.workflow w using (workflow_id)
+join ci_report.workflow w using (workflow_id)
 left join lateral (
     select max(job.completed_at) as last_completed_at
     from ci.job job
@@ -249,6 +267,7 @@ select
     r.workflow_id,
     w.path as workflow_path,
     w.name as workflow_name,
+    w.label as workflow_label,
     r.event,
     r.head_branch,
     r.head_sha,
@@ -285,7 +304,7 @@ select
     end as failed_step_url
 from ci.job j
 join ci.run r using (run_id, run_attempt)
-join ci.workflow w on w.workflow_id = r.workflow_id
+join ci_report.workflow w on w.workflow_id = r.workflow_id
 left join lateral (
     select p.usd_per_minute
     from ci.runner_price p
@@ -296,25 +315,101 @@ left join lateral (
 ) price on true
 where r.deleted_at is null;
 
--- Daily outcome of scheduled workflows, using each run's latest attempt.
+-- Daily state of each workflow that runs on a schedule, by the worst
+-- conclusion among that day's latest attempts (`failed` beats `cancelled`
+-- beats `passed`). CodeQL's default setup has no schedule event but runs
+-- continuously, so it is included for every trigger. Days without a completed
+-- run have no row.
 create view ci_report.scheduled_daily as
 select
     (r.created_at at time zone 'utc')::date as day,
     r.workflow_id,
-    w.name as workflow_name,
+    r.workflow_label,
+    case
+        when bool_or(r.conclusion = 'failure') then 'failed'
+        when bool_or(r.conclusion is distinct from 'success') then 'cancelled'
+        else 'passed'
+    end as state,
     count(*) as runs,
-    count(*) filter (where r.conclusion = 'success') as successes,
     count(*) filter (where r.conclusion = 'failure') as failures,
-    count(*) filter (where r.conclusion = 'cancelled') as cancellations,
-    count(*) filter (where r.status <> 'completed') as unfinished,
-    (array_agg(
-        'https://github.com/supabase/etl/actions/runs/' || r.run_id || '/attempts/' || r.run_attempt
-        order by r.created_at desc
-    ) filter (where r.conclusion = 'failure'))[1] as latest_failure_url
-from ci_report.run_latest r
-join ci.workflow w using (workflow_id)
-where r.event = 'schedule'
+    (array_agg(r.run_url order by r.created_at desc) filter (where r.conclusion = 'failure'))[1]
+        as latest_failure_url
+from ci_report.run_summary r
+where r.is_latest_attempt
+    and r.status = 'completed'
+    and (r.event = 'schedule' or r.workflow_path = 'dynamic/github-code-scanning/codeql')
 group by 1, 2, 3;
+
+-- Jobs that failed in one attempt and passed in a later attempt of the same
+-- run (same commit): one row per failed attempt. Only flakes someone re-ran
+-- are visible. Required-check gate jobs fail whenever another job fails, so
+-- they mirror flakes rather than being flaky themselves and are excluded.
+create view ci_report.flaky_job as
+select
+    failed.run_id,
+    failed.run_attempt,
+    failed.workflow_id,
+    failed.workflow_path,
+    failed.workflow_label,
+    failed.event,
+    failed.head_branch,
+    case when failed.head_branch = 'main' then 'main' else 'pull request' end as scope,
+    failed.job_name,
+    failed.completed_at,
+    failed.job_url
+from ci_report.job_cost failed
+where failed.conclusion = 'failure'
+    and not failed.carried_over
+    and failed.event in ('push', 'pull_request')
+    and failed.job_name <> 'CI passed'
+    and exists (
+        select
+        from ci_report.job_cost retried
+        where retried.run_id = failed.run_id
+            and retried.job_name = failed.job_name
+            and retried.run_attempt > failed.run_attempt
+            and retried.conclusion = 'success'
+    );
+
+-- Time for a pull-request commit's checks to turn green, one row per commit
+-- with a CI run on a pull request. Checks are CI, Docs and the dependency
+-- audit on `pull_request`, plus CodeQL default setup off `main`.
+--
+-- The clock starts when the final round of checks started: the earliest
+-- latest-attempt start, or the most recent re-run if any check was re-run, so
+-- idle time before a re-run is excluded. Starts use each run's actual start,
+-- so time waiting for approval (`action_required`) is excluded too.
+create view ci_report.pr_time_to_green as
+with check_run as (
+    select head_sha, workflow_path, event, run_attempt, is_latest_attempt, completed_at, conclusion,
+        coalesce(run_started_at, created_at) as started_at
+    from ci_report.run_summary
+    where (event = 'pull_request'
+            and workflow_path in (
+                '.github/workflows/ci.yml', '.github/workflows/docs.yml',
+                '.github/workflows/dependency-audit.yml'
+            ))
+        or (workflow_path = 'dynamic/github-code-scanning/codeql' and head_branch <> 'main')
+)
+select
+    head_sha,
+    greatest(
+        min(started_at) filter (where is_latest_attempt),
+        max(started_at) filter (where is_latest_attempt and run_attempt > 1)
+    ) as checks_started_at,
+    max(completed_at) filter (where is_latest_attempt) as finished_at,
+    coalesce(bool_and(conclusion in ('success', 'skipped', 'neutral')) filter (where is_latest_attempt), false)
+        as all_green,
+    extract(epoch from
+        max(completed_at) filter (where is_latest_attempt)
+        - greatest(
+            min(started_at) filter (where is_latest_attempt),
+            max(started_at) filter (where is_latest_attempt and run_attempt > 1)
+        )
+    ) as seconds
+from check_run
+group by head_sha
+having bool_or(workflow_path = '.github/workflows/ci.yml' and event = 'pull_request');
 
 -- One row per benchmark metric value.
 create view ci_report.benchmark_metric as
@@ -332,7 +427,10 @@ select
     metric.key as metric,
     (metric.value #>> '{}')::double precision as value,
     'https://github.com/supabase/etl/actions/runs/' || m.run_id || '/attempts/' || m.run_attempt
-        as run_url
+        as run_url,
+    -- The measured commit's time: backfills plot where the code was written.
+    -- RFC 3339 in the payload, normalized to UTC at ingest.
+    (m.payload -> 'commit' ->> 'committed_at')::timestamptz as committed_at
 from ci.manifest m
 join ci.run r using (run_id, run_attempt)
 cross join lateral jsonb_each(m.payload -> 'reports') report
