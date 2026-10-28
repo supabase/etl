@@ -173,6 +173,15 @@ pub(super) fn attempts_to_refresh(stored: &[(i32, bool)], latest: i32) -> Vec<i3
         .collect()
 }
 
+/// Returns whether an attempt below `latest` was stored before it completed.
+///
+/// Such a run is re-fetched even when its latest attempt is settled. Attempts
+/// never stored are not counted: GitHub may no longer return them, and they
+/// would otherwise be requested on every sync.
+pub(super) fn has_unfinished_attempt(stored: &[(i32, bool)], latest: i32) -> bool {
+    stored.iter().any(|&(attempt, completed)| attempt < latest && !completed)
+}
+
 /// Returns when a day that has now failed `failures` times may be retried.
 pub(super) fn retry_after(now: DateTime<Utc>, failures: u32) -> DateTime<Utc> {
     let exponent = failures.saturating_sub(1).min(16);
@@ -334,6 +343,11 @@ mod tests {
         // exists.
         assert_eq!(attempts_to_refresh(&[(1, false), (2, true)], 2), [1]);
         assert_eq!(attempts_to_refresh(&[(1, true), (2, false)], 2), Vec::<i32>::new());
+        assert!(has_unfinished_attempt(&[(1, false), (2, true)], 2));
+        // The latest attempt is not earlier; never-stored attempts do not
+        // count.
+        assert!(!has_unfinished_attempt(&[(1, true), (2, false)], 2));
+        assert!(!has_unfinished_attempt(&[(3, true)], 3));
     }
 
     #[test]
