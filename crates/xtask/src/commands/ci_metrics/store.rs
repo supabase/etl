@@ -78,6 +78,9 @@ pub(super) struct SyncSettings {
 }
 
 /// Reads settings, storing `history_since` when given.
+///
+/// Moving `history_since` earlier clears `analyses_backfilled`, because the
+/// stored analyses only reach back to the previous start.
 pub(super) async fn load_settings(
     conn: &mut PgConnection,
     history_since: Option<NaiveDate>,
@@ -85,7 +88,10 @@ pub(super) async fn load_settings(
 ) -> Result<SyncSettings> {
     let row = sqlx::query(
         "insert into ci.sync_state (history_since) values (coalesce($1, $2))
-         on conflict (id) do update set history_since = coalesce($1, ci.sync_state.history_since)
+         on conflict (id) do update set
+             history_since = coalesce($1, ci.sync_state.history_since),
+             analyses_backfilled = ci.sync_state.analyses_backfilled
+                 and coalesce($1, ci.sync_state.history_since) >= ci.sync_state.history_since
          returning history_since, analyses_backfilled",
     )
     .bind(history_since)
@@ -592,9 +598,16 @@ pub(super) async fn insert_analysis(
     Ok(result.rows_affected() == 1)
 }
 
-/// Records that analyses are paged back to `history_since`.
-pub(super) async fn set_analyses_backfilled(conn: &mut PgConnection) -> Result<()> {
-    sqlx::query("update ci.sync_state set analyses_backfilled = true").execute(&mut *conn).await?;
+/// Records whether stored analyses reach back to `history_since` without
+/// gaps.
+pub(super) async fn set_analyses_backfilled(
+    conn: &mut PgConnection,
+    backfilled: bool,
+) -> Result<()> {
+    sqlx::query("update ci.sync_state set analyses_backfilled = $1")
+        .bind(backfilled)
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 

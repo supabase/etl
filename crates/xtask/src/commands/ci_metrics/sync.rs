@@ -56,8 +56,16 @@ enum SyncError {
     Exhausted,
     /// The day failed and will back off; other days continue.
     Day { kind: &'static str, source: anyhow::Error },
-    /// The sync cannot continue: auth, database or schema errors.
+    /// GitHub refused the token (401 or 403). Fatal for Actions data; code
+    /// scanning treats a 403 as unavailable and continues.
+    Denied { status: StatusCode },
+    /// The sync cannot continue: database or schema errors.
     Fatal(anyhow::Error),
+}
+
+/// Error for a GitHub denial where the sync cannot continue.
+fn denied_error(status: StatusCode) -> anyhow::Error {
+    anyhow!("GitHub denied access with HTTP status {status}")
 }
 
 impl From<sqlx::Error> for SyncError {
@@ -81,6 +89,7 @@ struct Totals {
     detailed_runs: u64,
     jobs: u64,
     manifests: u64,
+    skipped_manifests: u64,
     rejections: u64,
     deleted_runs: u64,
     stale_runs: u64,
@@ -164,6 +173,7 @@ async fn run_locked(
         Ok(()) => {}
         Err(SyncError::Exhausted) => exhausted = true,
         Err(SyncError::Fatal(error)) => return Err(error),
+        Err(SyncError::Denied { status }) => return Err(denied_error(status)),
         Err(SyncError::Day { source, .. }) => {
             return Err(source.context("Failed to sync workflows"));
         }
@@ -180,6 +190,7 @@ async fn run_locked(
                     break;
                 }
                 Err(SyncError::Fatal(error)) => return Err(error),
+                Err(SyncError::Denied { status }) => return Err(denied_error(status)),
                 Err(SyncError::Day { kind, source }) => {
                     syncer.totals.failed_days += 1;
                     eprintln!("ci-metrics: day {} failed ({kind}): {source:#}", task.day);
@@ -201,6 +212,11 @@ async fn run_locked(
         {
             Ok(()) | Err(SyncError::Exhausted) => {}
             Err(SyncError::Fatal(error)) => return Err(error),
+            // A token without code-scanning access should not stop the sync.
+            Err(SyncError::Denied { status: StatusCode::FORBIDDEN }) => {
+                eprintln!("ci-metrics: code scanning unavailable (HTTP 403); skipped");
+            }
+            Err(SyncError::Denied { status }) => return Err(denied_error(status)),
             Err(SyncError::Day { source, .. }) => {
                 eprintln!("ci-metrics: code scanning sync failed: {source:#}");
             }
@@ -210,14 +226,16 @@ async fn run_locked(
     store::record_success(conn, Utc::now()).await?;
     let totals = &syncer.totals;
     eprintln!(
-        "ci-metrics: synced {} days ({} failed), {} runs ({} detailed), {} jobs, {} manifests, {} \
-         rejections, {} deleted, {} stale, {} alerts, {} new analyses using {} requests{}",
+        "ci-metrics: synced {} days ({} failed), {} runs ({} detailed), {} jobs, {} manifests ({} \
+         skipped), {} rejections, {} deleted, {} stale, {} alerts, {} new analyses using {} \
+         requests{}",
         totals.days,
         totals.failed_days,
         totals.runs,
         totals.detailed_runs,
         totals.jobs,
         totals.manifests,
+        totals.skipped_manifests,
         totals.rejections,
         totals.deleted_runs,
         totals.stale_runs,
@@ -295,9 +313,7 @@ impl Syncer<'_> {
 
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
-                return Err(SyncError::Fatal(anyhow!(
-                    "GitHub denied access with HTTP status {status}"
-                )));
+                return Err(SyncError::Denied { status });
             }
             if status.is_server_error() {
                 if attempt < MAX_TRIES {
@@ -425,7 +441,18 @@ impl Syncer<'_> {
                 self.totals.jobs += 1;
             }
             for manifest in &details.manifests {
+                // A manifest's job belongs to its attempt. If GitHub no longer
+                // returns that attempt, neither it nor the job was stored, so
+                // the manifest cannot be either; skip it rather than failing
+                // the foreign keys on every sync.
+                if !store::run_attempt_exists(&mut tx, manifest.run_id, manifest.run_attempt)
+                    .await?
+                {
+                    self.totals.skipped_manifests += 1;
+                    continue;
+                }
                 store::insert_manifest(&mut tx, manifest).await?;
+                self.totals.manifests += 1;
             }
             for rejection in &details.rejections {
                 store::insert_rejection(&mut tx, rejection, self.now).await?;
@@ -435,7 +462,7 @@ impl Syncer<'_> {
             }
             store::mark_details_fetched(&mut tx, details.run_id, details.run_attempt, self.now)
                 .await?;
-            self.totals.manifests += details.manifests.len() as u64;
+            // Stored manifests are counted above.
             self.totals.rejections += details.rejections.len() as u64;
         }
 
@@ -672,6 +699,7 @@ impl Syncer<'_> {
         self.totals.alerts = alert_numbers.len() as u64;
 
         let history_start = history_since.and_hms_opt(0, 0, 0).map(|start| start.and_utc());
+        let mut backfilled = analyses_backfilled;
         let mut page = 1;
         loop {
             let (analyses, has_next): (Vec<CodeScanningAnalysis>, bool) =
@@ -683,6 +711,13 @@ impl Syncer<'_> {
                 }
             }
             self.totals.new_analyses += new;
+            // A full page of new analyses means the pass may span pages. Until
+            // it ends cleanly, older analyses might be missing, so record that:
+            // an interrupted pass then resumes paging to the start next sync.
+            if backfilled && has_next && new > 0 && new as usize == analyses.len() {
+                store::set_analyses_backfilled(conn, false).await?;
+                backfilled = false;
+            }
             let reached_history = analyses
                 .iter()
                 .map(|analysis| analysis.created_at)
@@ -690,14 +725,14 @@ impl Syncer<'_> {
                 .zip(history_start)
                 .is_some_and(|(oldest, start)| oldest < start);
             if !has_next || reached_history {
-                if !analyses_backfilled {
-                    store::set_analyses_backfilled(conn).await?;
+                if !backfilled {
+                    store::set_analyses_backfilled(conn, true).await?;
                 }
                 return Ok(());
             }
-            // Pages are newest first: once a page brings nothing new and the
-            // history is complete, older pages are already stored.
-            if new == 0 && analyses_backfilled {
+            // Pages are newest first. With no gaps behind us, a page holding
+            // an already stored analysis means every older one is stored too.
+            if backfilled && (new as usize) < analyses.len() {
                 return Ok(());
             }
             page += 1;

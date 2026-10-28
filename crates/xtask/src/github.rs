@@ -95,6 +95,9 @@ impl GitHubClient {
             .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
             .send()
             .await
+            // Errors carry the request URL, which after a redirect is a signed
+            // blob-storage URL. Drop it so callers can log errors safely.
+            .map_err(reqwest::Error::without_url)
             .context("GitHub request failed")?;
 
         let status = response.status();
@@ -108,7 +111,12 @@ impl GitHubClient {
 
         let mut body = Vec::new();
         let mut truncated = false;
-        while let Some(chunk) = response.chunk().await.context("Failed to read GitHub response")? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("Failed to read GitHub response")?
+        {
             if let Some(max) = max_body_bytes
                 && body.len() + chunk.len() > max
             {
