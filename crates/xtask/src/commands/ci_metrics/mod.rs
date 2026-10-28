@@ -12,18 +12,25 @@ mod plan;
 mod store;
 mod sync;
 
-use std::{env, str::FromStr};
+use std::{env, net::IpAddr, str::FromStr};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{Days, NaiveDate, Utc};
 use clap::{Args, Subcommand};
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::{Connection, PgConnection, postgres::PgConnectOptions};
+use sqlx::{
+    Connection, PgConnection,
+    postgres::{PgConnectOptions, PgSslMode},
+};
 
 use crate::github::GitHubClient;
 
 /// Environment variable holding the database URL.
 const DATABASE_URL_ENV: &str = "CI_METRICS_DATABASE_URL";
+/// Environment variable naming the CA file that verifies the database server.
+/// Overrides any `sslrootcert` in the URL, so the trusted CA is visible in the
+/// workflow rather than hidden in a secret.
+const SSL_ROOT_CERT_ENV: &str = "CI_METRICS_SSL_ROOT_CERT";
 /// Environment variable holding the GitHub token.
 const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
 /// User agent sent to GitHub.
@@ -99,15 +106,61 @@ impl CiMetricsArgs {
     }
 }
 
+/// Fails unless the connection verifies the server's certificate and host
+/// name. Loopback hosts and Unix sockets are exempt for local development.
+fn require_verified_tls(host: &str, mode: PgSslMode) -> Result<()> {
+    let local = host.starts_with('/')
+        || host == "localhost"
+        || host.trim_matches(['[', ']']).parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if local || matches!(mode, PgSslMode::VerifyFull) {
+        return Ok(());
+    }
+    bail!("{DATABASE_URL_ENV} must use sslmode=verify-full for non-local hosts");
+}
+
 /// Connects using `CI_METRICS_DATABASE_URL` without echoing it.
 async fn connect() -> Result<PgConnection> {
     let url = SecretString::from(
         env::var(DATABASE_URL_ENV).with_context(|| format!("{DATABASE_URL_ENV} is not set"))?,
     );
-    let options = PgConnectOptions::from_str(url.expose_secret())
+    let mut options = PgConnectOptions::from_str(url.expose_secret())
         .with_context(|| format!("{DATABASE_URL_ENV} is not a valid Postgres URL"))?
         .application_name(APPLICATION_NAME);
+    if let Ok(path) = env::var(SSL_ROOT_CERT_ENV) {
+        options = options.ssl_root_cert(path);
+    }
+    require_verified_tls(options.get_host(), options.get_ssl_mode())?;
     PgConnection::connect_with(&options)
         .await
         .context("Failed to connect to the CI metrics database")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_hosts_require_verify_full() {
+        let host = "pooler.example.com";
+        assert!(require_verified_tls(host, PgSslMode::VerifyFull).is_ok());
+        for mode in [
+            PgSslMode::Disable,
+            PgSslMode::Allow,
+            PgSslMode::Prefer,
+            PgSslMode::Require,
+            PgSslMode::VerifyCa,
+        ] {
+            assert!(require_verified_tls(host, mode).is_err(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn local_hosts_may_skip_tls() {
+        for host in ["localhost", "127.0.0.1", "::1", "[::1]", "/var/run/postgresql"] {
+            assert!(require_verified_tls(host, PgSslMode::Disable).is_ok(), "{host}");
+        }
+        // A name that merely starts like a loopback host is remote.
+        assert!(require_verified_tls("localhost.example.com", PgSslMode::Require).is_err());
+        assert!(require_verified_tls("127.0.0.1.example.com", PgSslMode::Require).is_err());
+    }
 }

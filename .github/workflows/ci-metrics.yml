@@ -1,0 +1,53 @@
+name: CI metrics
+
+on:
+  schedule:
+    # Hourly, off the whole hour and away from the other scheduled workflows.
+    - cron: "37 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_requests:
+        description: GitHub requests this sync may send; raise for a manual catch-up.
+        required: false
+        default: "800"
+
+# Syncs never overlap; the collector also takes an advisory lock.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync CI metrics
+    # Only `main` can use the environment holding the database secret.
+    if: github.ref == 'refs/heads/main'
+    environment: ci-metrics
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          rustflags: ''
+          cache-key: ci-metrics
+          cache-on-failure: false
+
+      - name: Sync
+        env:
+          CI_METRICS_DATABASE_URL: ${{ secrets.CI_METRICS_DATABASE_URL }}
+          CI_METRICS_SSL_ROOT_CERT: ${{ github.workspace }}/.github/ci-metrics/supabase-ca.crt
+          GITHUB_TOKEN: ${{ github.token }}
+          MAX_REQUESTS: ${{ inputs.max_requests || '800' }}
+        run: cargo --locked xtask ci-metrics sync --repo "$GITHUB_REPOSITORY" --max-requests "$MAX_REQUESTS"
