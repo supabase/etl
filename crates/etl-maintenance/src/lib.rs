@@ -19,5 +19,6 @@ pub use coordination::{
 pub use materialization::{
     DisabledMaintenanceMaterializer, DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy,
     MaintenanceIdentity, MaintenanceMaterializationError, MaintenanceMaterializer,
-    MaintenanceMaterializerKind, MaintenanceRuntimeRefs, PostgresMaintenanceMaterializer,
+    MaintenanceMaterializerKind, MaintenancePipelineId, MaintenanceRuntimeRefs,
+    PostgresMaintenanceMaterializer,
 };
