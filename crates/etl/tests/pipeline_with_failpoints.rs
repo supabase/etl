@@ -3215,10 +3215,18 @@ async fn durability_deadline_during_split_transaction_keeps_commit_boundary() {
         .await
         .unwrap()
         .unwrap();
-    let DeferredEventsWrite::PartialBatch { durability, result } = write else {
-        panic!("expected a required-durability transaction fragment");
+    // The deadline may fire before the next fragment is buffered. Both an
+    // empty barrier and a buffered fragment must confirm only earlier commits.
+    let result = match write {
+        DeferredEventsWrite::PartialBatch { durability, result } => {
+            assert_eq!(durability, WriteEventsDurability::RequireDurable);
+            result
+        }
+        DeferredEventsWrite::DurabilityBarrier { result } => result,
+        DeferredEventsWrite::Batch { .. } => {
+            panic!("expected durability confirmation before the transaction commit");
+        }
     };
-    assert_eq!(durability, WriteEventsDurability::RequireDurable);
     assert!(test.confirmed_lsn().await < first_lsn);
     result.send(Ok(DestinationWriteStatus::Durable));
 
