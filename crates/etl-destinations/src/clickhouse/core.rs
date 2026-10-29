@@ -593,11 +593,58 @@ impl Default for ClickHouseInserterConfig {
     }
 }
 
+/// Product identity that the [`ClickHouseClient`] reports to ClickHouse.
+///
+/// The client prepends `name/version` to the driver's default `User-Agent`,
+/// which lets ClickHouse attribute integration traffic. Both parts are HTTP
+/// tokens, so a value can never make a request header invalid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClickHouseProductInfo {
+    /// Product name, such as `supabase-etl`.
+    name: String,
+    /// Product version, such as `v1.2.3`.
+    version: String,
+}
+
+impl ClickHouseProductInfo {
+    /// Creates product info from an HTTP-token name and version.
+    pub fn new(name: impl Into<String>, version: impl Into<String>) -> EtlResult<Self> {
+        let name = name.into();
+        let version = version.into();
+        if !is_http_token(&name) || !is_http_token(&version) {
+            return Err(etl_error!(
+                ErrorKind::ConfigError,
+                "ClickHouse product name and version must be HTTP tokens"
+            ));
+        }
+
+        Ok(Self { name, version })
+    }
+
+    /// Returns the product name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Returns the product version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+}
+
+/// Returns whether `value` is a non-empty RFC 9110 `token`.
+fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+}
+
 /// Configuration for the [`ClickHouseClient`].
 ///
 /// Holds the server-side and client-side timeouts applied to each operation
-/// bucket. Additional client-level knobs can be added here over time.
-#[derive(Copy, Clone)]
+/// bucket and the optional product identity reported to ClickHouse.
+#[derive(Clone)]
 pub struct ClickHouseClientConfig {
     /// Server-side budget for the connectivity check (`SELECT 1`).
     pub connectivity_check_timeout: Duration,
@@ -612,6 +659,9 @@ pub struct ClickHouseClientConfig {
     /// Slack added to the server-side budget to derive the client-side
     /// `tokio::time::timeout`.
     pub client_timeout_epsilon: Duration,
+    /// Product identity added to the `User-Agent` of every request. [`None`]
+    /// sends only the driver's default `User-Agent`.
+    pub product_info: Option<ClickHouseProductInfo>,
 }
 
 impl ClickHouseClientConfig {
@@ -651,6 +701,7 @@ impl Default for ClickHouseClientConfig {
             ddl_timeout: Self::DEFAULT_DDL_TIMEOUT,
             insert_timeout: Self::DEFAULT_INSERT_TIMEOUT,
             client_timeout_epsilon: Self::DEFAULT_CLIENT_TIMEOUT_EPSILON,
+            product_info: None,
         }
     }
 }
