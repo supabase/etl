@@ -208,12 +208,64 @@ pub(super) enum TableMutation {
     Replace(TableRow),
 }
 
+/// Destination rows selected by one replica-identity predicate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowMatch {
+    /// Every row matching the predicate.
+    ///
+    /// A source primary key makes the identity unique, so the only match is
+    /// the source tuple and predicates can share one statement.
+    All,
+    /// The first row matching the predicate, selected by DuckDB `rowid`.
+    ///
+    /// Without a primary key, `REPLICA IDENTITY FULL` rows can be duplicates,
+    /// and one source event changes exactly one of them. Each predicate needs
+    /// its own statement so a later predicate sees the earlier change.
+    First,
+}
+
+impl RowMatch {
+    /// Returns the row match that applies one source event to one destination
+    /// row of `replicated_table_schema`.
+    ///
+    /// A replicated column named `rowid` shadows DuckDB's row id, so such
+    /// tables keep [`RowMatch::All`].
+    fn for_schema(replicated_table_schema: &ReplicatedTableSchema) -> Self {
+        let has_primary_key = replicated_table_schema.primary_key_column_schemas().len() > 0;
+        let shadows_rowid = replicated_table_schema.column_schemas().any(|column_schema| {
+            DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name).eq_ignore_ascii_case("rowid")
+        });
+
+        if has_primary_key || shadows_rowid { Self::All } else { Self::First }
+    }
+
+    /// Returns the maximum number of predicates one statement may combine.
+    fn statement_predicate_limit(self) -> usize {
+        match self {
+            Self::All => SQL_DELETE_BATCH_SIZE,
+            Self::First => 1,
+        }
+    }
+
+    /// Returns a `WHERE` clause term selecting the rows `predicate` changes.
+    fn row_filter(self, target_table: &str, predicate: &str) -> String {
+        match self {
+            Self::All => format!("({predicate})"),
+            Self::First => {
+                format!("rowid = (SELECT rowid FROM {target_table} WHERE {predicate} LIMIT 1)")
+            }
+        }
+    }
+}
+
 /// Prepared table mutations ready for execution and retries.
 enum PreparedTableMutation {
     Upsert(PreparedRows),
     Delete {
         // For WHERE clause predicates used in DELETE statements.
         predicates: Vec<String>,
+        // Destination rows each predicate deletes.
+        row_match: RowMatch,
         // To know if it's coming from an update or delete operation.
         origin: &'static str,
     },
@@ -223,6 +275,8 @@ enum PreparedTableMutation {
         // For the WHERE clause predicate used in the UPDATE statement. Example: "id = 4 AND
         // content = 'hello'"
         predicate: String,
+        // Destination rows the predicate updates.
+        row_match: RowMatch,
     },
 }
 
@@ -1320,6 +1374,7 @@ fn prepare_table_mutations(
     replicated_table_schema: &ReplicatedTableSchema,
     mutations: Vec<TableMutation>,
 ) -> EtlResult<Vec<PreparedTableMutation>> {
+    let row_match = RowMatch::for_schema(replicated_table_schema);
     let mut prepared_mutations = Vec::new();
     let mut upsert_rows = Vec::new();
     let mut delete_predicates = Vec::new();
@@ -1330,6 +1385,7 @@ fn prepare_table_mutations(
                 if !delete_predicates.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Delete {
                         predicates: std::mem::take(&mut delete_predicates),
+                        row_match,
                         origin: "delete",
                     });
                 }
@@ -1352,6 +1408,7 @@ fn prepare_table_mutations(
                 if !delete_predicates.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Delete {
                         predicates: std::mem::take(&mut delete_predicates),
+                        row_match,
                         origin: "delete",
                     });
                 }
@@ -1362,6 +1419,7 @@ fn prepare_table_mutations(
                                 replicated_table_schema,
                                 &delete_row,
                             )?],
+                            row_match,
                             origin: "update",
                         });
                         prepared_mutations
@@ -1377,6 +1435,7 @@ fn prepare_table_mutations(
                                 replicated_table_schema,
                                 &delete_row,
                             )?,
+                            row_match,
                         });
                     }
                 }
@@ -1390,12 +1449,14 @@ fn prepare_table_mutations(
                 if !delete_predicates.is_empty() {
                     prepared_mutations.push(PreparedTableMutation::Delete {
                         predicates: std::mem::take(&mut delete_predicates),
+                        row_match,
                         origin: "delete",
                     });
                 }
 
                 prepared_mutations.push(PreparedTableMutation::Delete {
                     predicates: vec![delete_predicate_from_row(replicated_table_schema, &row)?],
+                    row_match,
                     origin: "replace",
                 });
                 prepared_mutations.push(PreparedTableMutation::Upsert(prepare_rows(vec![row])));
@@ -1409,6 +1470,7 @@ fn prepare_table_mutations(
     if !delete_predicates.is_empty() {
         prepared_mutations.push(PreparedTableMutation::Delete {
             predicates: delete_predicates,
+            row_match,
             origin: "delete",
         });
     }
@@ -2423,21 +2485,31 @@ fn apply_table_mutation(
             .record(prepared_rows_count(prepared_rows) as f64);
             apply_upsert_mutation(conn, prepared_rows, reusable_staging_table)
         }
-        PreparedTableMutation::Delete { predicates, origin } => {
+        PreparedTableMutation::Delete { predicates, row_match, origin } => {
             histogram!(
                 ETL_DUCKLAKE_DELETE_PREDICATES,
                 BATCH_KIND_LABEL => batch.batch_kind.as_str(),
                 DELETE_ORIGIN_LABEL => *origin,
             )
             .record(predicates.len() as f64);
-            apply_delete_mutation(conn, batch, predicates.as_slice(), origin, operation_context)
+            apply_delete_mutation(
+                conn,
+                batch,
+                predicates.as_slice(),
+                *row_match,
+                origin,
+                operation_context,
+            )
         }
-        PreparedTableMutation::Update { assignments, predicate } => apply_update_mutation(
-            conn,
-            &reusable_staging_table.table_name,
-            assignments.as_slice(),
-            predicate,
-        ),
+        PreparedTableMutation::Update { assignments, predicate, row_match } => {
+            apply_update_mutation(
+                conn,
+                &reusable_staging_table.table_name,
+                assignments.as_slice(),
+                predicate,
+                *row_match,
+            )
+        }
     }
 }
 
@@ -2461,6 +2533,7 @@ fn apply_delete_mutation(
     conn: &duckdb::Connection,
     batch: &PreparedDuckLakeTableBatch,
     predicates: &[String],
+    row_match: RowMatch,
     origin: &'static str,
     operation_context: &DuckLakeBlockingOperationContext,
 ) -> EtlResult<()> {
@@ -2469,10 +2542,14 @@ fn apply_delete_mutation(
     }
 
     let target_table = qualified_lake_table_name(&batch.table_name);
-    let chunk_count = predicates.len().div_ceil(SQL_DELETE_BATCH_SIZE);
-    for (chunk_index, chunk) in predicates.chunks(SQL_DELETE_BATCH_SIZE).enumerate() {
-        let where_clause =
-            chunk.iter().map(|predicate| format!("({predicate})")).collect::<Vec<_>>().join(" OR ");
+    let chunk_size = row_match.statement_predicate_limit();
+    let chunk_count = predicates.len().div_ceil(chunk_size);
+    for (chunk_index, chunk) in predicates.chunks(chunk_size).enumerate() {
+        let where_clause = chunk
+            .iter()
+            .map(|predicate| row_match.row_filter(&target_table, predicate))
+            .collect::<Vec<_>>()
+            .join(" OR ");
 
         let sql_query = format!("DELETE FROM {target_table} WHERE {where_clause};");
         let statement_started = Instant::now();
@@ -2528,6 +2605,7 @@ fn apply_update_mutation(
     table_name: &DuckLakeTableName,
     assignments: &[String],
     predicate: &str,
+    row_match: RowMatch,
 ) -> EtlResult<()> {
     if assignments.is_empty() {
         return Ok(());
@@ -2535,7 +2613,8 @@ fn apply_update_mutation(
 
     let set_clause = assignments.join(", ");
     let target_table = qualified_lake_table_name(table_name);
-    let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {predicate};");
+    let row_filter = row_match.row_filter(&target_table, predicate);
+    let sql_query = format!("UPDATE {target_table} SET {set_clause} WHERE {row_filter};");
     conn.execute_batch(&sql_query).map_err(|error| {
         let error = DuckDbSensitiveQueryError::new(&error);
         tracing::error!(error = %error, "error updating rows");
@@ -3345,6 +3424,7 @@ mod tests {
             &conn,
             &batch,
             predicates.as_slice(),
+            RowMatch::All,
             "delete",
             &operation_context,
         )
@@ -3369,6 +3449,7 @@ mod tests {
             &ducklake_table_name(),
             assignments.as_slice(),
             &predicate,
+            RowMatch::All,
         )
         .unwrap_err();
 
@@ -3483,7 +3564,7 @@ mod tests {
 
         assert_eq!(prepared.len(), 2);
         match &prepared[0] {
-            PreparedTableMutation::Delete { predicates, origin } => {
+            PreparedTableMutation::Delete { predicates, origin, .. } => {
                 assert_eq!(predicates, &vec!["\"id\" = 1".to_owned()]);
                 assert_eq!(origin, &"replace");
             }
@@ -3525,7 +3606,7 @@ mod tests {
 
         assert_eq!(prepared.len(), 1);
         match &prepared[0] {
-            PreparedTableMutation::Update { assignments, predicate } => {
+            PreparedTableMutation::Update { assignments, predicate, .. } => {
                 assert_eq!(
                     assignments,
                     &vec!["\"id\" = 1".to_owned(), "\"name\" = 'after'".to_owned()]
@@ -3577,7 +3658,7 @@ mod tests {
 
         assert_eq!(prepared.len(), 1);
         match &prepared[0] {
-            PreparedTableMutation::Update { assignments, predicate } => {
+            PreparedTableMutation::Update { assignments, predicate, .. } => {
                 assert_eq!(
                     assignments,
                     &vec![
@@ -3636,7 +3717,7 @@ mod tests {
 
         assert_eq!(prepared.len(), 1);
         match &prepared[0] {
-            PreparedTableMutation::Update { assignments, predicate } => {
+            PreparedTableMutation::Update { assignments, predicate, .. } => {
                 assert_eq!(
                     assignments,
                     &vec![
@@ -3790,7 +3871,7 @@ mod tests {
             PreparedDuckLakeTableBatchAction::Mutation(prepared) => {
                 assert_eq!(prepared.len(), 1);
                 match &prepared[0] {
-                    PreparedTableMutation::Delete { predicates, origin } => {
+                    PreparedTableMutation::Delete { predicates, origin, .. } => {
                         assert_eq!(origin, &"delete");
                         assert_eq!(
                             predicates,
@@ -4583,7 +4664,6 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: replica identity full deletes or updates every duplicate tuple"]
         fn full_identity_changes_exactly_one_row_with_duplicates() {
             run_property(
                 "ducklake_full_identity_duplicates_change_one_row",
@@ -4605,16 +4685,135 @@ mod tests {
         }
 
         #[test]
-        #[ignore = "known defect: replica identity full delete removes every duplicate tuple"]
         fn full_identity_delete_removes_only_one_of_duplicate_rows() {
             check_identity_case(&duplicate_text_case(None), true).unwrap();
         }
 
         #[test]
-        #[ignore = "known defect: replica identity full update rewrites every duplicate tuple"]
         fn full_identity_update_changes_only_one_of_duplicate_rows() {
             let new_row = TableRow::new(vec![Cell::I32(1), Cell::String("b".to_owned())]);
             check_identity_case(&duplicate_text_case(Some(new_row)), true).unwrap();
+        }
+
+        #[test]
+        fn full_identity_deletes_in_one_batch_each_remove_one_duplicate() {
+            let row = TableRow::new(vec![Cell::I32(1), Cell::String("a".to_owned())]);
+            let case = IdentityCase {
+                identity: IdentityKind::Full,
+                payload: vec![PayloadKind::Text],
+                rows: vec![row.clone(), row.clone(), row.clone()],
+                target: 0,
+                update: None,
+            };
+            let schema = case.schema();
+            let conn = lake_connection(&schema);
+            apply_mutations(
+                &conn,
+                &schema,
+                1,
+                case.rows.iter().cloned().map(TableMutation::Insert).collect(),
+            )
+            .unwrap();
+
+            apply_mutations(
+                &conn,
+                &schema,
+                4,
+                vec![
+                    TableMutation::Delete(case.old_row(&row)),
+                    TableMutation::Delete(case.old_row(&row)),
+                ],
+            )
+            .unwrap();
+
+            assert!(rows_match_model(&schema, &read_rows(&conn, &schema), &[row]));
+        }
+
+        #[test]
+        fn full_identity_partial_update_changes_only_one_of_duplicate_rows() {
+            let row = TableRow::new(vec![
+                Cell::I32(1),
+                Cell::String("a".to_owned()),
+                Cell::String("unchanged".to_owned()),
+            ]);
+            let case = IdentityCase {
+                identity: IdentityKind::Full,
+                payload: vec![PayloadKind::Text, PayloadKind::Text],
+                rows: vec![row.clone(), row.clone()],
+                target: 0,
+                update: None,
+            };
+            let schema = case.schema();
+            let conn = lake_connection(&schema);
+            apply_mutations(
+                &conn,
+                &schema,
+                1,
+                case.rows.iter().cloned().map(TableMutation::Insert).collect(),
+            )
+            .unwrap();
+
+            // The last column is an unchanged TOAST value, so the new tuple
+            // omits it.
+            apply_mutations(
+                &conn,
+                &schema,
+                3,
+                vec![TableMutation::Update {
+                    delete_row: case.old_row(&row),
+                    new_row: UpdatedTableRow::Partial(PartialTableRow::new(
+                        3,
+                        TableRow::new(vec![Cell::I32(2), Cell::String("a".to_owned())]),
+                        vec![2],
+                    )),
+                }],
+            )
+            .unwrap();
+
+            let updated = TableRow::new(vec![
+                Cell::I32(2),
+                Cell::String("a".to_owned()),
+                Cell::String("unchanged".to_owned()),
+            ]);
+            assert!(rows_match_model(&schema, &read_rows(&conn, &schema), &[row, updated]));
+        }
+
+        #[test]
+        fn full_identity_delete_on_table_with_rowid_column_removes_only_matching_rows() {
+            // A user column named `rowid` shadows DuckDB's row id.
+            let table_schema = Arc::new(TableSchema::new(
+                TableId::new(1),
+                TableName::new("public".to_owned(), "users".to_owned()),
+                vec![
+                    ColumnSchema::new("RowId".to_owned(), PgType::INT4, -1, 1, false),
+                    ColumnSchema::new("v".to_owned(), PgType::TEXT, -1, 2, true),
+                ],
+            ));
+            let schema = ReplicatedTableSchema::from_masks(
+                Arc::clone(&table_schema),
+                ReplicationMask::all(&table_schema),
+                IdentityMask::from_bytes(vec![1, 1]),
+            );
+            let conn = lake_connection(&schema);
+            let deleted = TableRow::new(vec![Cell::I32(7), Cell::String("a".to_owned())]);
+            let kept = TableRow::new(vec![Cell::I32(7), Cell::String("b".to_owned())]);
+            apply_mutations(
+                &conn,
+                &schema,
+                1,
+                vec![TableMutation::Insert(deleted.clone()), TableMutation::Insert(kept.clone())],
+            )
+            .unwrap();
+
+            apply_mutations(
+                &conn,
+                &schema,
+                3,
+                vec![TableMutation::Delete(OldTableRow::Full(deleted))],
+            )
+            .unwrap();
+
+            assert!(rows_match_model(&schema, &read_rows(&conn, &schema), &[kept]));
         }
 
         #[test]
