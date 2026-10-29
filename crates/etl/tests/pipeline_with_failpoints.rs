@@ -2912,6 +2912,46 @@ impl IdleDurabilityTest {
     }
 }
 
+/// Directly durable writes publish feedback while intake is suspended without
+/// acknowledging a buffered successor whose destination result is unresolved.
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_flush_updates_feedback_with_intake_suspended() {
+    let _scenario = FailScenario::setup();
+    let mut test = IdleDurabilityTest::start().await;
+
+    test.insert(1).await;
+    let (first_lsn, first_result) = test.next_batch().await;
+    let received = test.database.current_wal_flush_lsn().await.unwrap();
+
+    test.insert(2).await;
+    test.wait_for_received(received).await;
+    assert!(test.writes_rx.try_recv().is_err());
+    assert!(test.confirmed_lsn().await < first_lsn);
+
+    // The successor is buffered before intake stops. Completing the first
+    // write must publish its own commit without another source keepalive.
+    fail::cfg(APPLY_LOOP_PAUSE_INTAKE_FP, "return").unwrap();
+    first_result.send(Ok(DestinationWriteStatus::Durable));
+
+    let (second_lsn, second_result) = test.next_batch().await;
+    assert!(second_lsn > first_lsn);
+    let checkpoint = test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
+    assert!(checkpoint >= Some(first_lsn));
+    assert!(checkpoint < Some(second_lsn));
+
+    tokio::time::timeout(IDLE_DURABILITY_WRITE_TIMEOUT, test.wait_for_flush(first_lsn))
+        .await
+        .unwrap();
+    assert!(test.confirmed_lsn().await < second_lsn);
+
+    second_result.send(Ok(DestinationWriteStatus::Durable));
+
+    test.wait_for_flush(second_lsn).await;
+    test.pipeline.shutdown_and_wait().await.unwrap();
+    assert_checkpoint_reached(&test.store, &test.received_end_lsn, second_lsn).await;
+    assert!(test.writes_rx.try_recv().is_err());
+}
+
 /// Only successful replay may checkpoint a batch dispatched by a failed
 /// attempt, even when the original write completed durably.
 #[tokio::test(flavor = "multi_thread")]

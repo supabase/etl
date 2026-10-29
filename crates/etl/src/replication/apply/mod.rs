@@ -1784,11 +1784,7 @@ where
                     // going to do anything because we can only track progress
                     // at commit boundaries.
                     if let Some(commit_end_lsn) = metadata.commit_end_lsn {
-                        self.process_syncing_tables_after_flush(
-                            commit_end_lsn,
-                            deferred_interval.is_some(),
-                        )
-                        .await?;
+                        self.process_syncing_tables_after_flush(commit_end_lsn).await?;
 
                         // Progress and table-sync state are now durable. Freeze
                         // cleanup boundaries for pending tables using persisted
@@ -3198,14 +3194,9 @@ where
     /// Processes syncing tables after a batch has been flushed.
     ///
     /// Dispatches to worker-specific implementation based on the worker
-    /// context. When this flush confirms deferred writes, also publishes the
-    /// persisted commit boundary to the feedback task unless draining for
-    /// shutdown.
-    async fn process_syncing_tables_after_flush(
-        &mut self,
-        current_lsn: PgLsn,
-        confirmed_deferred_writes: bool,
-    ) -> EtlResult<()> {
+    /// context. Publishes the persisted commit boundary to the feedback task
+    /// unless draining for shutdown.
+    async fn process_syncing_tables_after_flush(&mut self, current_lsn: PgLsn) -> EtlResult<()> {
         debug!(
             worker_type = %self.worker_context.worker_type(),
             %current_lsn,
@@ -3269,7 +3260,7 @@ where
         // intake may still be paused by backpressure. Publish only this
         // flush's captured commit, never a received or buffered successor.
         // Shutdown retains its existing no-final-feedback rule.
-        if confirmed_deferred_writes && !self.state.is_draining_for_shutdown() {
+        if !self.state.is_draining_for_shutdown() {
             self.tasks
                 .enqueue_status_update(self.state.last_received_lsn(), current_lsn, false)
                 .await?;
