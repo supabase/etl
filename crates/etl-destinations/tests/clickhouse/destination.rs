@@ -2777,11 +2777,12 @@ fn lifecycle_insert(schema: &ReplicatedTableSchema, id: i64, value: &str) -> Eve
     })
 }
 
-/// Records how long the `write_events` trait dispatch itself takes,
-/// independent of when its asynchronous result completes.
+/// Records event-dispatch timing and the copy-dispatch result independently
+/// of asynchronous write completion.
 struct DispatchTimingProbe<D> {
     inner: D,
     write_events_dispatch: Mutex<Option<Duration>>,
+    write_table_rows_dispatch: Mutex<Option<EtlResult<()>>>,
 }
 
 impl<D> Destination for DispatchTimingProbe<D>
@@ -2807,9 +2808,12 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        self.inner
+        let result = self
+            .inner
             .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
-            .await
+            .await;
+        *self.write_table_rows_dispatch.lock() = Some(result.clone());
+        result
     }
 
     async fn write_events(
@@ -2872,6 +2876,7 @@ async fn write_events_dispatch_returns_while_insert_is_pending() {
     let probe = Arc::new(DispatchTimingProbe {
         inner: destination,
         write_events_dispatch: Mutex::new(None),
+        write_table_rows_dispatch: Mutex::new(None),
     });
     let write_handle = tokio::spawn({
         let probe = Arc::clone(&probe);
@@ -2898,6 +2903,144 @@ async fn write_events_dispatch_returns_while_insert_is_pending() {
     release.send(()).unwrap();
     assert_eq!(write_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
     assert_eq!(clickhouse_db.query::<i64>("select id from \"public_deferred\"").await, vec![1]);
+}
+
+/// Copy dispatch reports completion through its async result, including
+/// native INSERT errors, after returning to the caller.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_dispatch_delivers_success_and_error() {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let schema = lifecycle_schema("copydispatch");
+    let destination = database.build_destination(MemoryStore::new()).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+    let probe = Arc::new(DispatchTimingProbe {
+        inner: destination,
+        write_events_dispatch: Mutex::new(None),
+        write_table_rows_dispatch: Mutex::new(None),
+    });
+    let write = tokio::spawn({
+        let probe = Arc::clone(&probe);
+        let schema = schema.clone();
+        async move {
+            write_table_rows_via_trait(
+                probe.as_ref(),
+                &schema,
+                vec![TableRow::new(vec![Cell::I64(1), Cell::String("copied".to_owned())])],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+    yield_until(|| probe.write_table_rows_dispatch.lock().is_some()).await;
+    assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
+    assert!(!write.is_finished());
+    assert!(database.query::<i64>("select id from public_copydispatch").await.is_empty());
+
+    release.send(()).unwrap();
+
+    assert_eq!(write.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(database.query::<i64>("select id from public_copydispatch").await, vec![1]);
+
+    database
+        .db_client()
+        .query("alter table public_copydispatch add constraint reject_two check id != 2")
+        .execute()
+        .await
+        .map_err(redact_clickhouse_error)
+        .unwrap();
+    *probe.write_table_rows_dispatch.lock() = None;
+    let error = write_table_rows_via_trait(
+        probe.as_ref(),
+        &schema,
+        vec![TableRow::new(vec![Cell::I64(2), Cell::String("rejected".to_owned())])],
+    )
+    .await
+    .unwrap_err();
+
+    assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
+    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+    probe.inner.shutdown().await.unwrap();
+    assert_eq!(database.query::<i64>("select id from public_copydispatch").await, vec![1]);
+}
+
+/// Cancelling the copy caller leaves its admitted operation owned by the
+/// destination until reset drains it, before the next snapshot is copied.
+async fn reset_waits_for_cancelled_copy_owner(engine: ClickHouseEngine) {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = lifecycle_schema("copyreset");
+    let destination = database.build_destination_with_engine(store.clone(), engine).await;
+    destination.write_table_rows(&schema, vec![]).await.unwrap();
+    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
+
+    let owner = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_table_rows_via_trait(
+                &destination,
+                &schema,
+                vec![TableRow::new(vec![Cell::I64(1), Cell::String("old snapshot".to_owned())])],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    // This is a lifecycle barrier, not a timing check: the admitted write
+    // must still own the pause receiver after the caller has been joined.
+    assert!(!release.is_closed());
+
+    let reset = drop_table_for_copy_via_trait(&destination, &schema);
+    let mut reset = std::pin::pin!(reset);
+    // Keep polling the same reset below the INSERT deadline. Timing out
+    // this borrowed future leaves the drain alive for the release below.
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut reset).await.is_err());
+    assert!(database.query::<i64>("select id from public_copyreset").await.is_empty());
+
+    release.send(()).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), reset).await.unwrap().unwrap();
+    assert!(
+        database
+            .query::<String>(
+                "select name from system.tables where database = currentDatabase() and name in \
+                 ('public_copyreset', 'public_copyreset__current')",
+            )
+            .await
+            .is_empty()
+    );
+    store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+    let status = write_table_rows_via_trait(
+        &destination,
+        &schema,
+        vec![TableRow::new(vec![Cell::I64(2), Cell::String("new snapshot".to_owned())])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    destination.shutdown().await.unwrap();
+    // Read the physical table so deduplication cannot hide an old row.
+    assert_eq!(database.query::<i64>("select id from public_copyreset").await, vec![2]);
+}
+
+/// Reset drains a cancelled caller's copy before recreating a MergeTree table.
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_waits_for_cancelled_copy_owner_merge_tree() {
+    reset_waits_for_cancelled_copy_owner(ClickHouseEngine::MergeTree).await;
+}
+
+/// Reset also drains copy before recreating the current-state table and view.
+#[tokio::test(flavor = "multi_thread")]
+async fn reset_waits_for_cancelled_copy_owner_replacing_merge_tree() {
+    reset_waits_for_cancelled_copy_owner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
 /// A destructive table reset drains the admitted write before dropping the
