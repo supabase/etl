@@ -1046,7 +1046,10 @@ where
         schema: &ReplicatedTableSchema,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        self.writer.write_table_rows_inner(schema, None, table_rows).await
+        let (table_name, layout) = self.writer.prepare_table_for_writes(schema).await?;
+        self.writer
+            .write_prepared_table_rows(schema.id(), &table_name, &layout, None, table_rows)
+            .await
     }
 
     /// Dispatches a streaming event batch through the [`Destination`] trait
@@ -1270,6 +1273,9 @@ where
 
         match metadata {
             None => {
+                #[cfg(feature = "test-utils")]
+                crate::clickhouse::test_utils::pause_before_table_creation().await;
+
                 validate_clickhouse_table_shape(schema, self.inserter_config.engine)?;
                 validate_clickhouse_table_name(
                     &clickhouse_table_name,
@@ -1501,14 +1507,15 @@ where
         Ok(())
     }
 
-    async fn write_table_rows_inner(
+    /// Writes a copy batch after table preparation has completed.
+    async fn write_prepared_table_rows(
         &self,
-        schema: &ReplicatedTableSchema,
+        table_id: TableId,
+        table_name: &str,
+        layout: &Arc<RowBinaryLayout>,
         batch_id: Option<TableCopyBatchId>,
         table_rows: Vec<TableRow>,
     ) -> EtlResult<()> {
-        let (clickhouse_table_name, layout) = self.prepare_table_for_writes(schema).await?;
-
         let engine = self.inserter_config.engine;
         let rows: Vec<Vec<ClickHouseValue>> = table_rows
             .into_iter()
@@ -1535,16 +1542,16 @@ where
 
         self.client
             .insert_rows(
-                &clickhouse_table_name,
+                table_name,
                 rows,
-                &layout,
+                layout,
                 self.inserter_config.max_bytes_per_insert,
                 batch_id,
                 COPY_REPLICATION_PATH,
             )
             .await
             .map_err(|failure| {
-                evict_layout_after_rejected_insert(&self.table_cache, schema.id(), &layout, failure)
+                evict_layout_after_rejected_insert(&self.table_cache, table_id, layout, failure)
             })
     }
 
@@ -2739,14 +2746,29 @@ where
     ) -> EtlResult<()> {
         self.tasks.try_reap().await?;
 
+        // Retry skips reset when destination metadata is absent. Keep
+        // preparation under the caller so cancellation cannot leave an
+        // old copy creating a table and writing into the next snapshot
+        // without a reset to drain it.
+        let (table_name, layout) =
+            match self.writer.prepare_table_for_writes(replicated_table_schema).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    async_result.send(Err(error));
+                    return Ok(());
+                }
+            };
+
         // A cancelled copy owner must not drop an in-flight INSERT before a
         // later table reset drains it. Capture only the writer so the task
         // neither retains nor accesses its own registry.
         let writer = self.writer.clone();
-        let schema = replicated_table_schema.clone();
+        let table_id = replicated_table_schema.id();
         self.tasks
             .spawn_with(move || async move {
-                let result = writer.write_table_rows_inner(&schema, batch_id, table_rows).await;
+                let result = writer
+                    .write_prepared_table_rows(table_id, &table_name, &layout, batch_id, table_rows)
+                    .await;
                 async_result.send(result.map(|_| DestinationWriteStatus::Durable));
             })
             .await;

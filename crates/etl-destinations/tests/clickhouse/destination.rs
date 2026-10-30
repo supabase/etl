@@ -29,6 +29,7 @@ use std::{
         Arc,
         atomic::{AtomicI64, Ordering},
     },
+    task::{Context, Waker},
     time::{Duration, Instant},
 };
 
@@ -68,8 +69,9 @@ use etl_destinations::clickhouse::{
     arm_fail_drop_table_for_copy_once_for_tests,
     client::{ClickHouseClient, arm_pause_before_insert_statement_for_tests},
     test_utils::{
-        ClickHouseTestDatabase, get_clickhouse_password, get_clickhouse_url, get_clickhouse_user,
-        redact_clickhouse_error, setup_clickhouse_database,
+        ClickHouseTestDatabase, arm_pause_before_table_creation, get_clickhouse_password,
+        get_clickhouse_url, get_clickhouse_user, redact_clickhouse_error,
+        setup_clickhouse_database,
     },
 };
 use etl_telemetry::tracing::init_test_tracing;
@@ -2916,32 +2918,27 @@ async fn copy_dispatch_delivers_success_and_error() {
     let destination = database.build_destination(MemoryStore::new()).await;
     destination.write_table_rows(&schema, vec![]).await.unwrap();
     let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
-    let probe = Arc::new(DispatchTimingProbe {
+    let probe = DispatchTimingProbe {
         inner: destination,
         write_events_dispatch: Mutex::new(None),
         write_table_rows_dispatch: Mutex::new(None),
-    });
-    let write = tokio::spawn({
-        let probe = Arc::clone(&probe);
-        let schema = schema.clone();
-        async move {
-            write_table_rows_via_trait(
-                probe.as_ref(),
-                &schema,
-                vec![TableRow::new(vec![Cell::I64(1), Cell::String("copied".to_owned())])],
-            )
-            .await
-        }
-    });
+    };
+    let write = write_table_rows_via_trait(
+        &probe,
+        &schema,
+        vec![TableRow::new(vec![Cell::I64(1), Cell::String("copied".to_owned())])],
+    );
+    let mut write = std::pin::pin!(write);
+    assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+
     reached.await.unwrap();
-    yield_until(|| probe.write_table_rows_dispatch.lock().is_some()).await;
+
     assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
-    assert!(!write.is_finished());
     assert!(database.query::<i64>("select id from public_copydispatch").await.is_empty());
 
     release.send(()).unwrap();
 
-    assert_eq!(write.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
+    assert_eq!(write.await.unwrap(), DestinationWriteStatus::Durable);
     assert_eq!(database.query::<i64>("select id from public_copydispatch").await, vec![1]);
 
     database
@@ -2953,7 +2950,7 @@ async fn copy_dispatch_delivers_success_and_error() {
         .unwrap();
     *probe.write_table_rows_dispatch.lock() = None;
     let error = write_table_rows_via_trait(
-        probe.as_ref(),
+        &probe,
         &schema,
         vec![TableRow::new(vec![Cell::I64(2), Cell::String("rejected".to_owned())])],
     )
@@ -2962,8 +2959,77 @@ async fn copy_dispatch_delivers_success_and_error() {
 
     assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
     assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
+
+    // Preparation failures use the completion result too, even though no
+    // background write is admitted.
+    *probe.write_table_rows_dispatch.lock() = None;
+    let error = write_table_rows_via_trait(&probe, &id_only_schema(7101, "_café"), vec![])
+        .await
+        .unwrap_err();
+    assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
+    assert_eq!(error.kind(), ErrorKind::ValidationError);
+
     probe.inner.shutdown().await.unwrap();
     assert_eq!(database.query::<i64>("select id from public_copydispatch").await, vec![1]);
+}
+
+/// Cancelling the first copy before metadata exists stops preparation, since
+/// the next attempt skips destination reset in this state.
+async fn cancelled_first_copy_does_not_write_into_retry(engine: ClickHouseEngine) {
+    init_test_tracing();
+    install_crypto_provider();
+    let database = setup_clickhouse_database().await;
+    let store = MemoryStore::new();
+    let schema = lifecycle_schema("firstcopy");
+    store.store_table_schema(schema.inner().clone()).await.unwrap();
+    let destination = database.build_destination_with_engine(store.clone(), engine).await;
+    let (reached, release) = arm_pause_before_table_creation();
+
+    let owner = tokio::spawn({
+        let destination = destination.clone();
+        let schema = schema.clone();
+        async move {
+            write_table_rows_via_trait(
+                &destination,
+                &schema,
+                vec![TableRow::new(vec![Cell::I64(1), Cell::String("old snapshot".to_owned())])],
+            )
+            .await
+        }
+    });
+    reached.await.unwrap();
+
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    assert!(release.is_closed());
+    assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
+
+    // Match initial-sync retry: no destination metadata means no table reset,
+    // and the new copy starts with the same initial schema snapshot ID.
+    store.prepare_table_state_for_copy(schema.id()).await.unwrap();
+    store.store_table_schema(schema.inner().clone()).await.unwrap();
+    let status = write_table_rows_via_trait(
+        &destination,
+        &schema,
+        vec![TableRow::new(vec![Cell::I64(2), Cell::String("new snapshot".to_owned())])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, DestinationWriteStatus::Durable);
+    destination.shutdown().await.unwrap();
+    assert_eq!(database.query::<i64>("select id from public_firstcopy").await, vec![2]);
+}
+
+/// A cancelled first copy cannot write into a MergeTree retry that skips reset.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_first_copy_does_not_write_into_retry_merge_tree() {
+    cancelled_first_copy_does_not_write_into_retry(ClickHouseEngine::MergeTree).await;
+}
+
+/// First-copy cancellation also stops current-state table and view preparation.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_first_copy_does_not_write_into_retry_replacing_merge_tree() {
+    cancelled_first_copy_does_not_write_into_retry(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
 /// Cancelling the copy caller leaves its admitted operation owned by the
@@ -3000,8 +3066,8 @@ async fn reset_waits_for_cancelled_copy_owner(engine: ClickHouseEngine) {
 
     let reset = drop_table_for_copy_via_trait(&destination, &schema);
     let mut reset = std::pin::pin!(reset);
-    // Keep polling the same reset below the INSERT deadline. Timing out
-    // this borrowed future leaves the drain alive for the release below.
+    // Keep polling the same reset while the copy is paused. Timing out this
+    // borrowed future leaves the drain alive for the release below.
     assert!(tokio::time::timeout(Duration::from_millis(100), &mut reset).await.is_err());
     assert!(database.query::<i64>("select id from public_copyreset").await.is_empty());
 
