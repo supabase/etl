@@ -193,6 +193,22 @@ comparison, or reliable reconstruction of unchanged TOAST columns. See
 [Events](/explanation/events/#old-row-mapping) for the exact pgoutput mapping
 and partial-update behavior.
 
+### Known limitation: keyless partitioned roots published via the root
+
+Postgres enforces the **leaf** partition's replica identity, never the root's.
+A publication created with `publish_via_partition_root = true` exposes only the
+root, so ETL reads the root's identity even though the leaves are what Postgres
+checks.
+
+If the root has no usable identity, ETL has no columns to map an incoming
+old-row image onto. Postgres accepts an `UPDATE` because the leaf can identify
+the row, and emits it against the root — but decoding fails, and because that
+happens in the apply worker the whole pipeline stops. Inserts are unaffected, so
+an insert-only publication replicates such a root correctly.
+
+Give the root a primary key, or publish the partitions directly with
+`publish_via_partition_root = false`.
+
 ## LSN (Log Sequence Number)
 
 Every position in the WAL has a unique **LSN** - a monotonically increasing pointer.
