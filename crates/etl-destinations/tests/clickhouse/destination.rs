@@ -29,7 +29,6 @@ use std::{
         Arc,
         atomic::{AtomicI64, Ordering},
     },
-    task::{Context, Waker},
     time::{Duration, Instant},
 };
 
@@ -2779,12 +2778,11 @@ fn lifecycle_insert(schema: &ReplicatedTableSchema, id: i64, value: &str) -> Eve
     })
 }
 
-/// Records event-dispatch timing and the copy-dispatch result independently
-/// of asynchronous write completion.
+/// Records how long the `write_events` trait dispatch itself takes,
+/// independent of when its asynchronous result completes.
 struct DispatchTimingProbe<D> {
     inner: D,
     write_events_dispatch: Mutex<Option<Duration>>,
-    write_table_rows_dispatch: Mutex<Option<EtlResult<()>>>,
 }
 
 impl<D> Destination for DispatchTimingProbe<D>
@@ -2810,12 +2808,9 @@ where
         table_rows: Vec<TableRow>,
         async_result: WriteTableRowsResult,
     ) -> EtlResult<()> {
-        let result = self
-            .inner
+        self.inner
             .write_table_rows(replicated_table_schema, batch_id, table_rows, async_result)
-            .await;
-        *self.write_table_rows_dispatch.lock() = Some(result.clone());
-        result
+            .await
     }
 
     async fn write_events(
@@ -2878,7 +2873,6 @@ async fn write_events_dispatch_returns_while_insert_is_pending() {
     let probe = Arc::new(DispatchTimingProbe {
         inner: destination,
         write_events_dispatch: Mutex::new(None),
-        write_table_rows_dispatch: Mutex::new(None),
     });
     let write_handle = tokio::spawn({
         let probe = Arc::clone(&probe);
@@ -2905,72 +2899,6 @@ async fn write_events_dispatch_returns_while_insert_is_pending() {
     release.send(()).unwrap();
     assert_eq!(write_handle.await.unwrap().unwrap(), DestinationWriteStatus::Durable);
     assert_eq!(clickhouse_db.query::<i64>("select id from \"public_deferred\"").await, vec![1]);
-}
-
-/// Copy dispatch reports completion through its async result, including
-/// native INSERT errors, after returning to the caller.
-#[tokio::test(flavor = "multi_thread")]
-async fn copy_dispatch_delivers_success_and_error() {
-    init_test_tracing();
-    install_crypto_provider();
-    let database = setup_clickhouse_database().await;
-    let schema = lifecycle_schema("copydispatch");
-    let destination = database.build_destination(MemoryStore::new()).await;
-    destination.write_table_rows(&schema, vec![]).await.unwrap();
-    let (reached, release) = arm_pause_before_insert_statement_for_tests(0);
-    let probe = DispatchTimingProbe {
-        inner: destination,
-        write_events_dispatch: Mutex::new(None),
-        write_table_rows_dispatch: Mutex::new(None),
-    };
-    let write = write_table_rows_via_trait(
-        &probe,
-        &schema,
-        vec![TableRow::new(vec![Cell::I64(1), Cell::String("copied".to_owned())])],
-    );
-    let mut write = std::pin::pin!(write);
-    assert!(write.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
-
-    reached.await.unwrap();
-
-    assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
-    assert!(database.query::<i64>("select id from public_copydispatch").await.is_empty());
-
-    release.send(()).unwrap();
-
-    assert_eq!(write.await.unwrap(), DestinationWriteStatus::Durable);
-    assert_eq!(database.query::<i64>("select id from public_copydispatch").await, vec![1]);
-
-    database
-        .db_client()
-        .query("alter table public_copydispatch add constraint reject_two check id != 2")
-        .execute()
-        .await
-        .map_err(redact_clickhouse_error)
-        .unwrap();
-    *probe.write_table_rows_dispatch.lock() = None;
-    let error = write_table_rows_via_trait(
-        &probe,
-        &schema,
-        vec![TableRow::new(vec![Cell::I64(2), Cell::String("rejected".to_owned())])],
-    )
-    .await
-    .unwrap_err();
-
-    assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
-    assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
-
-    // Preparation failures use the completion result too, even though no
-    // background write is admitted.
-    *probe.write_table_rows_dispatch.lock() = None;
-    let error = write_table_rows_via_trait(&probe, &id_only_schema(7101, "_café"), vec![])
-        .await
-        .unwrap_err();
-    assert!(probe.write_table_rows_dispatch.lock().as_ref().unwrap().is_ok());
-    assert_eq!(error.kind(), ErrorKind::ValidationError);
-
-    probe.inner.shutdown().await.unwrap();
-    assert_eq!(database.query::<i64>("select id from public_copydispatch").await, vec![1]);
 }
 
 /// Cancelling the first copy before metadata exists stops preparation, since
@@ -3420,10 +3348,10 @@ async fn aborted_write_releases_fence_for_later_writes_replacing_merge_tree() {
     aborted_write_releases_fence_for_later_writes_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-/// An insert rejected by the server reaches the caller through the async
-/// result channel, and the destination keeps admitting later work.
+/// Copy and event writes report server rejection, and the destination keeps
+/// admitting later work.
 #[tokio::test(flavor = "multi_thread")]
-async fn write_events_reports_insert_failure_through_async_result() {
+async fn copy_and_event_writes_report_insert_failure() {
     // GIVEN: a destination table with a constraint that rejects one key.
     init_test_tracing();
     install_crypto_provider();
@@ -3441,7 +3369,15 @@ async fn write_events_reports_insert_failure_through_async_result() {
         .map_err(redact_clickhouse_error)
         .unwrap();
 
-    // WHEN: a rejected insert and then an accepted insert are dispatched.
+    // WHEN: copy and event inserts are rejected, followed by an accepted
+    // insert.
+    let copy_error = write_table_rows_via_trait(
+        &destination,
+        &schema,
+        vec![TableRow::new(vec![Cell::I64(2), Cell::String("rejected".to_owned())])],
+    )
+    .await
+    .unwrap_err();
     let error = write_events_via_trait(
         &destination,
         WriteEventsDurability::MayDefer,
@@ -3457,8 +3393,10 @@ async fn write_events_reports_insert_failure_through_async_result() {
     .await
     .unwrap();
 
-    // THEN: the failure carried the permanent insert rejection and later
+    // THEN: both failures carried the permanent insert rejection and later
     // admission still succeeded.
+    assert_eq!(copy_error.kind(), ErrorKind::DestinationQueryFailed);
+    assert_eq!(copy_error.retryability(), Retryability::Permanent);
     assert_eq!(error.kind(), ErrorKind::DestinationQueryFailed);
     assert_eq!(error.retryability(), Retryability::Permanent);
     assert_eq!(status, DestinationWriteStatus::Durable);
