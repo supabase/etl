@@ -6,6 +6,7 @@ members = [
     "crates/etl-config",
     "crates/etl-destinations",
     "crates/etl-examples",
+    "crates/etl-experiments",
     "crates/etl-maintenance",
     "crates/etl-postgres",
     "crates/etl-replicator",

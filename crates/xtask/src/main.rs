@@ -5,9 +5,9 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
     BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
-    FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs, PgFillTableArgs,
-    PostgresArgs, RunArgs, SeedArgs, SetupArgs, TestArgs, TestClickhouseArgs, TestSnowflakeArgs,
-    VendorDuckdbArgs,
+    ExperimentArgs, FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs,
+    PgFillTableArgs, PostgresArgs, RunArgs, SeedArgs, SetupArgs, TestArgs, TestClickhouseArgs,
+    TestSnowflakeArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -33,6 +33,8 @@ enum Command {
     DeployLocal(DeployLocalArgs),
     /// Run a destination example (e.g. `cargo x example snowflake`).
     Example(ExampleArgs),
+    /// Run controlled staging experiments.
+    Experiment(ExperimentArgs),
     /// Auto-fix: clippy --fix, fmt, sort.
     Fix(FixArgs),
     /// Format code with nightly rustfmt.
@@ -84,6 +86,7 @@ async fn main() -> Result<()> {
         Command::Check(cmd) => cmd.run(),
         Command::DeployLocal(cmd) => cmd.run(),
         Command::Example(cmd) => cmd.run(),
+        Command::Experiment(cmd) => cmd.run(),
         Command::Fix(cmd) => cmd.run(),
         Command::Fmt(cmd) => cmd.run(),
         Command::Init(cmd) => cmd.run(),
