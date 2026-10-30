@@ -418,7 +418,7 @@ async fn run_table_copy_timed_retry_scenario(failpoint: &str) {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -473,7 +473,7 @@ async fn table_sync_worker_panic_marks_table_errored() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -527,7 +527,7 @@ async fn table_copy_fails_after_data_sync_threw_an_error_with_no_retry() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -583,7 +583,7 @@ async fn table_copy_fails_after_timed_retry_exceeded_max_attempts() {
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
     // We start the pipeline from scratch.
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -651,7 +651,7 @@ async fn table_sync_handover_preserves_decoder_across_post_handoff_noop_ddl() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -850,7 +850,7 @@ async fn tx_ordinals_follow_wal_order_across_table_sync_and_apply_workers() {
         assert_eq!(orders_insert.tx_ordinal, 2);
     };
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         pipeline_id,
@@ -953,7 +953,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -980,7 +980,7 @@ async fn table_sync_ddl_without_relation_fails_before_persisting_sync_done() {
         .await
         .unwrap();
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
 
     let errored_notify = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     fail::remove(START_TABLE_SYNC_AFTER_FINISHED_COPY_FP);
@@ -1041,7 +1041,7 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     let store = NotifyingStore::new();
     let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1073,7 +1073,7 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // The sender's next idle keepalive must advertise at least this post-commit
     // cluster WAL frontier even though the transaction emitted no event batch.
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
 
     let table_sync_done_notify =
         store.notify_on_table_state_type(table_id, TableStateType::SyncDone).await;
@@ -1133,7 +1133,7 @@ async fn table_sync_quiescent_handover_does_not_persist_received_progress() {
     // persist that received LSN as an apply checkpoint.
     other_database.insert_values(other_database_table, &["value"], &[&2_i32]).await.unwrap();
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
 
     let persisted_checkpoint_lsn =
         store.get_replication_checkpoint(WorkerType::Apply).await.unwrap();
@@ -1295,7 +1295,7 @@ async fn feedback_continues_during_destination_dispatch() {
         first_held_dml_commit_lsn: Arc::clone(&first_held_dml_commit_lsn),
     });
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1324,11 +1324,15 @@ async fn feedback_continues_during_destination_dispatch() {
     let observed_at = activities[0].last_observed_at();
 
     let first_held_dml_commit_lsn = first_held_dml_commit_lsn.lock().unwrap().unwrap();
-    assert_apply_feedback_during_stall(&database, pipeline_id, Some(first_held_dml_commit_lsn))
-        .await;
+    assert_apply_feedback_during_stall(
+        &database,
+        pipeline_id.into(),
+        Some(first_held_dml_commit_lsn),
+    )
+    .await;
 
     assert_eq!(activity::snapshot()[0].last_observed_at(), observed_at);
-    assert!(durability_age(&metrics.render(), pipeline_id) > 1.0);
+    assert!(durability_age(&metrics.render(), pipeline_id.into()) > 1.0);
 
     assert!(!inner.events().await.iter().any(|event| matches!(event, Event::Insert(_))));
 
@@ -1376,7 +1380,7 @@ async fn apply_feedback_continues_during_table_sync_catchup() {
     let store = NotifyingStore::new();
     let destination = MemoryDestination::new(store.clone());
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1393,7 +1397,7 @@ async fn apply_feedback_continues_during_table_sync_catchup() {
 
     // The failpoint is reached only after apply requests catchup and waits for
     // this worker. Keep it suspended across multiple PostgreSQL timeouts.
-    assert_apply_feedback_during_stall(&database, pipeline_id, None).await;
+    assert_apply_feedback_during_stall(&database, pipeline_id.into(), None).await;
 
     release_tx.send(()).unwrap();
 
@@ -1423,7 +1427,7 @@ async fn table_sync_catchup_error_does_not_block_apply_worker() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1510,7 +1514,7 @@ async fn persisted_checkpoint_prevents_replay_when_status_updates_are_skipped() 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let mut pipeline = create_pipeline(
@@ -1630,13 +1634,14 @@ async fn quiescent_feedback_preserves_open_transaction_across_restart() {
     // without emitting a transaction on this stream, allowing idle feedback.
     other_database.insert_values(other_table.clone(), &["value"], &[&1_i32]).await.unwrap();
     let target_lsn = other_database.current_wal_flush_lsn().await.unwrap();
-    let confirmed_lsn = wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    let confirmed_lsn =
+        wait_for_apply_worker_to_reach(&database, pipeline_id.clone(), target_lsn).await;
     assert!(confirmed_lsn > open_transaction_wal);
 
     pipeline.shutdown_and_wait().await.unwrap();
 
     let mut pipeline =
-        create_pipeline(&database.config, pipeline_id, publication, store, destination.clone());
+        create_pipeline(&database.config, &pipeline_id, publication, store, destination.clone());
     pipeline.start().await.unwrap();
 
     // Fresh feedback proves the new stream has started while the source
@@ -1849,7 +1854,7 @@ async fn run_schema_replay_scenario(
         assert_eq!(restart_lsn, table_schemas_snapshots[2].0.commit_lsn());
 
         let apply_slot_name: String =
-            EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+            EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
         let (confirmed_flush_lsn, _) =
             replication_slot_state(database.client.as_ref().unwrap(), &apply_slot_name).await;
         assert!(confirmed_flush_lsn < restart_lsn);
@@ -2157,7 +2162,7 @@ async fn publication_schema_snapshots_replay_before_each_table_first_relation() 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -2355,7 +2360,7 @@ async fn table_and_publication_schema_changes_replay_after_restart() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -2631,7 +2636,7 @@ async fn worker_connections_are_tagged_with_per_worker_application_names() {
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -2759,7 +2764,7 @@ impl IdleDurabilityTest {
         let store = NotifyingStore::new();
         let (destination, writes_rx) = DeferredEventsDestination::new(table_id);
         let received_end_lsn = destination.received_end_lsn();
-        let pipeline_id: PipelineId = random();
+        let pipeline_id = random::<u64>();
         let slot_name = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
         let mut builder = PipelineBuilder::new(
             database.config.clone(),
@@ -2973,7 +2978,7 @@ async fn catchup_retry_recopies_after_dispatched_write() {
     let store = NotifyingStore::new();
     let (destination, mut writes_rx) = DeferredEventsDestination::new(table_id);
     let destination = TestDestinationWrapper::wrap(destination);
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -2997,7 +3002,7 @@ async fn catchup_retry_recopies_after_dispatched_write() {
     other_database.create_table(other_table.clone(), true, &[("value", "int4")]).await.unwrap();
     other_database.insert_values(other_table, &["value"], &[&1_i32]).await.unwrap();
     let target_lsn = database.current_wal_flush_lsn().await.unwrap();
-    wait_for_apply_worker_to_reach(&database, pipeline_id, target_lsn).await;
+    wait_for_apply_worker_to_reach(&database, pipeline_id.into(), target_lsn).await;
     let errored = store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
     let copied_again =
         store.notify_on_table_state_type(table_id, TableStateType::FinishedCopy).await;
@@ -3248,7 +3253,7 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
         panic!("FaultAction::hold must produce a hold gate");
     };
     *destination.copy_gate.lock().unwrap() = Some((copying_id, copy_gate));
-    let pipeline_id = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         pipeline_id,
@@ -3276,7 +3281,7 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
     };
 
     tokio::time::timeout(Duration::from_secs(10), async {
-        while durability_age(&metrics.render(), pipeline_id) < 1.0 {
+        while durability_age(&metrics.render(), pipeline_id.into()) < 1.0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -3287,7 +3292,7 @@ async fn durability_age_observes_cdc_while_another_table_is_copying() {
     result.send(Ok(DestinationWriteStatus::Durable));
     copy_hold.release_ok();
     pipeline.shutdown_and_wait().await.unwrap();
-    assert_eq!(durability_age(&metrics.render(), pipeline_id), -1.0);
+    assert_eq!(durability_age(&metrics.render(), pipeline_id.into()), -1.0);
 }
 
 /// A single accepted batch settles without another source write.
@@ -3325,13 +3330,13 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
 
     // Hold the first result until sampling observes its age before acceptance.
     tokio::time::timeout(Duration::from_secs(10), async {
-        while durability_age(&metrics.render(), pipeline_id) < 1.0 {
+        while durability_age(&metrics.render(), pipeline_id.clone()) < 1.0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .unwrap();
-    let pending_age = durability_age(&metrics.render(), pipeline_id);
+    let pending_age = durability_age(&metrics.render(), pipeline_id.clone());
     assert!(
         test.store.get_replication_checkpoint(WorkerType::Apply).await.unwrap() < Some(first_lsn)
     );
@@ -3344,7 +3349,7 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
         let (lsn, result) = test.next_batch().await;
         assert!(lsn > previous_lsn);
         assert!(accepted_at.elapsed() < Duration::from_millis(SETTLE_AFTER_MS));
-        assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age);
+        assert!(durability_age(&metrics.render(), pipeline_id.clone()) >= pending_age);
         result.send(Ok(DestinationWriteStatus::Accepted));
         previous_lsn = lsn;
     }
@@ -3352,11 +3357,11 @@ async fn idle_durability_allows_multiple_writes_during_settle_interval() {
 
     let barrier = test.next_barrier().await;
     assert!(accepted_at.elapsed() >= Duration::from_millis(SETTLE_AFTER_MS));
-    assert!(durability_age(&metrics.render(), pipeline_id) >= pending_age + 2.0);
+    assert!(durability_age(&metrics.render(), pipeline_id.clone()) >= pending_age + 2.0);
     assert!(test.confirmed_lsn().await < first_lsn);
     barrier.send(Ok(DestinationWriteStatus::Durable));
     test.wait_for_flush(previous_lsn).await;
-    assert_eq!(durability_age(&metrics.render(), pipeline_id), 0.0);
+    assert_eq!(durability_age(&metrics.render(), pipeline_id.clone()), 0.0);
     test.pipeline.shutdown_and_wait().await.unwrap();
     assert_eq!(durability_age(&metrics.render(), pipeline_id), -1.0);
     assert_checkpoint_reached(&test.store, &test.received_end_lsn, previous_lsn).await;

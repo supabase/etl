@@ -172,7 +172,7 @@ mod tests {
             keepalive: TcpKeepaliveConfig::default(),
         };
         let interval = Duration::from_secs(60);
-        let pool = ReplicationLagMonitor::new(1, &connection, interval);
+        let pool = ReplicationLagMonitor::new(1.into(), &connection, interval);
         let monitor = TableSyncMonitor::spawn(TableId::new(1), "unused".into(), pool, interval);
 
         // Accept the sampler's connection without answering its handshake.

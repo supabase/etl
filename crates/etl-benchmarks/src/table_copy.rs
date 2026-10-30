@@ -66,9 +66,9 @@ pub struct RunArgs {
     /// Destination options.
     #[command(flatten)]
     destination: DestinationArgs,
-    /// Pipeline id to use for this benchmark.
-    #[arg(long, default_value_t = 1)]
-    pipeline_id: u64,
+    /// Legacy numeric pipeline ID used by this benchmark.
+    #[arg(long = "pipeline-id", default_value_t = 1)]
+    legacy_pipeline_id: u64,
     /// Publication name.
     #[arg(long, default_value = "bench_pub")]
     publication_name: String,
@@ -94,7 +94,8 @@ pub struct RunArgs {
 struct TableCopyReport {
     benchmark: &'static str,
     destination: DestinationType,
-    pipeline_id: u64,
+    #[serde(rename = "pipeline_id")]
+    legacy_pipeline_id: u64,
     publication_name: String,
     table_ids: Vec<u32>,
     expected_row_count: Option<u64>,
@@ -174,7 +175,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let store = NotifyingStore::new();
     let destination_started = Instant::now();
     let destination =
-        BenchDestination::new(&args.destination, args.pipeline_id, store.clone()).await?;
+        BenchDestination::new(&args.destination, args.legacy_pipeline_id, store.clone()).await?;
     let destination_init_ms = duration_millis(destination_started.elapsed());
     if args.destination_settle_ms > 0 {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
@@ -183,7 +184,7 @@ async fn run(args: RunArgs) -> Result<()> {
     // destination cleanup happen whether it succeeds or fails.
     let run_result: Result<(u128, Duration, u128)> = async {
         let config = pipeline_config(
-            args.pipeline_id,
+            args.legacy_pipeline_id,
             args.publication_name.clone(),
             &args.pg,
             &args.tuning,
@@ -230,8 +231,9 @@ async fn run(args: RunArgs) -> Result<()> {
     .await;
 
     let cleanup_result =
-        cleanup_replication_slots(&args.pg, args.pipeline_id, &args.table_ids).await;
-    let destination_cleanup_result = cleanup_destination(&args.destination, args.pipeline_id).await;
+        cleanup_replication_slots(&args.pg, args.legacy_pipeline_id, &args.table_ids).await;
+    let destination_cleanup_result =
+        cleanup_destination(&args.destination, args.legacy_pipeline_id).await;
     let (pipeline_start_ms, copy_wait_duration, shutdown_ms) =
         finish_run(run_result, [cleanup_result, destination_cleanup_result])?;
 
@@ -260,7 +262,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let report = TableCopyReport {
         benchmark: "table_copy",
         destination: args.destination.destination,
-        pipeline_id: args.pipeline_id,
+        legacy_pipeline_id: args.legacy_pipeline_id,
         publication_name: args.publication_name,
         table_ids: args.table_ids,
         expected_row_count: args.expected_row_count,

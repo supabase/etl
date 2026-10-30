@@ -1,4 +1,6 @@
 //! SQL helpers for ETL-owned metadata tables stored in Postgres.
+//!
+//! Dual writes receive text identities separately from legacy numeric keys.
 
 pub mod catalog;
 pub mod checkpoint;

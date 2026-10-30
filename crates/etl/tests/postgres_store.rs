@@ -655,9 +655,9 @@ async fn cancelled_table_delete_refreshes_all_caches() {
 /// Healthy reads and genuine missing entries then remain in memory.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_preparation_loads_every_domain() {
-    for explicit_load in [false, true] {
+    for (explicit_load, pipeline_id) in [(false, 1_u64), (true, u64::MAX)] {
         let database = spawn_source_database().await;
-        let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+        let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
         let client = database.client.as_ref().unwrap();
         let schema = create_sample_table_schema();
         let other_table_id = TableId::new(67890);
@@ -677,9 +677,25 @@ async fn cache_preparation_loads_every_domain() {
         store.store_table_schema(schema.clone()).await.unwrap();
         store.store_destination_table_metadata(schema.id, metadata.clone()).await.unwrap();
         store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
+        let identities_match: bool = client
+            .query_one(
+                "select count(*) = 5 and bool_and(
+                 pipeline_id_v2 is not null and pipeline_id_v2 = $1 and pipeline_id = $2
+             ) from (
+                 select pipeline_id, pipeline_id_v2 from etl.replication_state
+                 union all select pipeline_id, pipeline_id_v2 from etl.table_schemas
+                 union all select pipeline_id, pipeline_id_v2 from etl.destination_tables_metadata
+                 union all select pipeline_id, pipeline_id_v2 from etl.replication_progress
+             ) as state",
+                &[&pipeline_id.to_string(), &(pipeline_id as i64)],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(identities_match);
         drop(store);
 
-        let store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+        let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
         if explicit_load {
             store.load_cache().await.unwrap();
         } else {

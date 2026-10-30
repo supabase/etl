@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, TimeDelta, Utc};
-use etl::{error::EtlResult, store::DestinationStore};
+use etl::{error::EtlResult, pipeline::PipelineId, store::DestinationStore};
 use etl_maintenance::ducklake::DataFileRewriteReason;
 pub use etl_maintenance::{
     ExternalMaintenanceOperationHistory, ExternalMaintenanceOperationPolicy,
@@ -85,14 +85,14 @@ where
 
 pub(super) async fn run_postgres_external_maintenance_watcher<S>(
     destination: DuckLakeDestination<S>,
-    pipeline_id: i64,
+    pipeline_id: PipelineId,
     pool: PgPool,
 ) -> EtlResult<()>
 where
     S: DestinationStore,
 {
     let config = ExternalMaintenanceWatcherConfig::from_env();
-    let store = PostgresExternalMaintenanceStore::new(pipeline_id, pool);
+    let store = PostgresExternalMaintenanceStore::new(&pipeline_id, pool);
     store.ensure_schema().await?;
     store
         .ensure_pipeline_state_if_missing(
@@ -101,7 +101,7 @@ where
         )
         .await?;
 
-    info!(pipeline_id, "ducklake postgres external maintenance watcher configured");
+    info!(%pipeline_id, "ducklake postgres external maintenance watcher configured");
 
     run_external_maintenance_watcher(destination, store, config).await
 }

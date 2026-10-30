@@ -977,7 +977,7 @@ mod tests {
     fn retained_snapshot_does_not_advance_the_batch_target_revision() {
         let memory_monitor = MemoryMonitor::new_for_test();
         memory_monitor.set_memory_snapshot_for_test(790, 1_000);
-        let governor = BatchMemoryGovernor::new(1, memory_monitor.clone(), 1.0, 1_000);
+        let governor = BatchMemoryGovernor::new(1.into(), memory_monitor.clone(), 1.0, 1_000);
         let revision = memory_monitor.capacity_revision();
         let snapshot = memory_monitor.current_snapshot();
 

@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use etl::{pipeline::PipelineId, schema::PgLsn};
+use etl::{pipeline::LegacyPipelineId, schema::PgLsn};
 use metrics::{counter, histogram};
 use tokio::time::{Instant, sleep};
 use tracing::warn;
@@ -386,12 +386,12 @@ impl<C: StreamClient> ChannelHandle<C> {
     /// New handle with no offset or continuation tokens.
     pub fn new(
         client: Arc<C>,
-        pipeline: PipelineId,
+        legacy_pipeline_id: LegacyPipelineId,
         database: String,
         schema: String,
         table: String,
     ) -> Self {
-        let channel = format!("supabase_etl_{pipeline}_{schema}_{table}_ch0");
+        let channel = format!("supabase_etl_{legacy_pipeline_id}_{schema}_{table}_ch0");
         Self {
             client,
             database,
@@ -1136,13 +1136,7 @@ mod tests {
 
     /// Creates a channel backed by `client`.
     fn test_channel(client: Arc<ScriptedStreamClient>) -> ChannelHandle<ScriptedStreamClient> {
-        ChannelHandle::new(
-            client,
-            PipelineId::from(1_u64),
-            "db".to_owned(),
-            "schema".to_owned(),
-            "table".to_owned(),
-        )
+        ChannelHandle::new(client, 1_u64, "db".to_owned(), "schema".to_owned(), "table".to_owned())
     }
 
     /// Creates the standard pending durability target.

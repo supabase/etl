@@ -1,6 +1,5 @@
 use etl::{
     event::EventType,
-    pipeline::PipelineId,
     store::TableStateType,
     test_utils::{
         database::{
@@ -130,7 +129,7 @@ async fn pipeline_creates_failover_apply_and_table_sync_slots() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         pipeline_id,
@@ -205,7 +204,7 @@ async fn pipeline_enables_failover_on_an_existing_apply_slot() {
     let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users_schema = database_schema.users_schema();
     let table_id = users_schema.id;
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 
@@ -271,7 +270,7 @@ async fn pipeline_failover_slot_is_synced_to_read_replica() {
     let table_id = users_schema.id;
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let mut pipeline = PipelineBuilder::new(

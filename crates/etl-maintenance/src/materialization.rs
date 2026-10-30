@@ -1,6 +1,7 @@
 use std::{error::Error, fmt, num::ParseIntError};
 
 use async_trait::async_trait;
+use etl::error::EtlError;
 use etl_config::shared::DEFAULT_DUCKLAKE_TARGET_FILE_SIZE;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -178,17 +179,6 @@ pub enum MaintenanceMaterializerKind {
 /// Errors raised while creating or deleting external maintenance runtime state.
 #[derive(Debug, Error)]
 pub enum MaintenanceMaterializationError {
-    /// A string identifier cannot address the existing Postgres bigint key.
-    #[error(
-        "Postgres maintenance requires a signed 64-bit integer pipeline ID in canonical decimal \
-         form"
-    )]
-    InvalidPostgresPipelineId {
-        /// Integer conversion failure without the original identifier value.
-        #[source]
-        source: MaintenancePipelineIdError,
-    },
-
     #[error("maintenance backend `{0:?}` is not configured in this deployment")]
     BackendNotConfigured(MaintenanceMaterializerKind),
 
@@ -218,7 +208,7 @@ impl MaintenanceMaterializationError {
     }
 
     /// Wraps a Postgres materialization error.
-    fn postgres(source: etl::error::EtlError) -> Self {
+    fn postgres(source: EtlError) -> Self {
         Self::backend(MaintenanceMaterializerKind::Postgres, source)
     }
 }
@@ -262,8 +252,8 @@ impl MaintenanceMaterializer for DisabledMaintenanceMaterializer {
 /// Postgres materializer for deployments that coordinate maintenance without a
 /// Kubernetes CRD.
 ///
-/// The existing bigint key accepts integer IDs and canonical decimal strings.
-/// Opaque string IDs require a separate storage migration.
+/// Integer and string IDs address text keys without normalizing string
+/// contents.
 #[derive(Debug, Clone)]
 pub struct PostgresMaintenanceMaterializer {
     pool: PgPool,
@@ -275,15 +265,9 @@ impl PostgresMaintenanceMaterializer {
         Self { pool }
     }
 
-    /// Converts the identifier before accessing the legacy bigint-backed store.
-    fn store(
-        &self,
-        pipeline_id: &MaintenancePipelineId,
-    ) -> Result<PostgresExternalMaintenanceStore, MaintenanceMaterializationError> {
-        let pipeline_id = i64::try_from(pipeline_id).map_err(|source| {
-            MaintenanceMaterializationError::InvalidPostgresPipelineId { source }
-        })?;
-        Ok(PostgresExternalMaintenanceStore::new(pipeline_id, self.pool.clone()))
+    /// Converts the wire identifier to the text-backed store identity.
+    fn store(&self, pipeline_id: &MaintenancePipelineId) -> PostgresExternalMaintenanceStore {
+        PostgresExternalMaintenanceStore::new(pipeline_id.to_string(), self.pool.clone())
     }
 }
 
@@ -293,7 +277,7 @@ impl MaintenanceMaterializer for PostgresMaintenanceMaterializer {
         &self,
         input: DuckLakeMaintenanceMaterialization,
     ) -> Result<(), MaintenanceMaterializationError> {
-        let store = self.store(&input.identity.pipeline_id)?;
+        let store = self.store(&input.identity.pipeline_id);
         store.ensure_schema().await.map_err(MaintenanceMaterializationError::postgres)?;
         store
             .ensure_pipeline_state(
@@ -312,7 +296,7 @@ impl MaintenanceMaterializer for PostgresMaintenanceMaterializer {
         &self,
         identity: MaintenanceIdentity,
     ) -> Result<(), MaintenanceMaterializationError> {
-        let store = self.store(&identity.pipeline_id)?;
+        let store = self.store(&identity.pipeline_id);
         store.ensure_schema().await.map_err(MaintenanceMaterializationError::postgres)?;
         store.delete_pipeline_state().await.map_err(MaintenanceMaterializationError::postgres)?;
 
@@ -329,8 +313,9 @@ mod tests {
 
     use crate::{
         DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy, MaintenanceIdentity,
-        MaintenanceMaterializationError, MaintenanceMaterializer, MaintenancePipelineId,
-        MaintenancePipelineIdError, MaintenanceRuntimeRefs, PostgresMaintenanceMaterializer,
+        MaintenanceMaterializationError, MaintenanceMaterializer, MaintenanceMaterializerKind,
+        MaintenancePipelineId, MaintenancePipelineIdError, MaintenanceRuntimeRefs,
+        PostgresMaintenanceMaterializer,
     };
 
     /// Integer identifiers retain their numeric wire representation and range.
@@ -420,12 +405,12 @@ mod tests {
         }
     }
 
-    /// Unsupported Postgres IDs fail before migrations, writes, or deletes.
+    /// String IDs reach the text-backed store without integer conversion.
     #[tokio::test]
-    async fn postgres_materializer_rejects_invalid_ids_before_database_access() {
+    async fn postgres_materializer_routes_string_ids_to_text_store() {
         let pool =
             PgPoolOptions::new().connect_lazy("postgres://postgres@127.0.0.1/postgres").unwrap();
-        // A closed pool makes any accidental database access fail immediately.
+        // A closed pool exposes the storage boundary without a live database.
         pool.close().await;
         let materializer = PostgresMaintenanceMaterializer::new(pool);
         for value in ["pipeline-example", "042", "0042", "+42", "-042", "00", "+0", "-0"] {
@@ -451,7 +436,10 @@ mod tests {
             for error in [reconcile_error, delete_error] {
                 assert!(matches!(
                     error,
-                    MaintenanceMaterializationError::InvalidPostgresPipelineId { .. }
+                    MaintenanceMaterializationError::Backend {
+                        backend: MaintenanceMaterializerKind::Postgres,
+                        ..
+                    }
                 ));
                 assert!(error.source().is_some());
             }

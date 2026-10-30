@@ -4417,7 +4417,7 @@ async fn external_inline_flush_retries_pool_refresh_before_replication_resumes()
     let lake = create_test_lake("external_inline_flush_retries_pool_refresh").await;
     let catalog_url = lake.catalog_url.clone();
     let data_url = lake.data_url.clone();
-    let pipeline_id = 1047_i64;
+    let pipeline_id = "03dg2o5teb2eucxr9ggh3uie6";
     let run_id = "pipe-1047-inline-flush";
 
     let schema = make_schema(1047, "public", "inline_flush_pool_replacement");

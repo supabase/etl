@@ -550,7 +550,7 @@ pub enum BenchDestination {
     Null(CountingDestination<NullDestination>),
     /// BigQuery destination variant.
     #[cfg(feature = "bigquery")]
-    BigQuery(CountingDestination<BigQueryDestination<NotifyingStore>>),
+    BigQuery(Box<CountingDestination<BigQueryDestination<NotifyingStore>>>),
     /// ClickHouse destination variant.
     #[cfg(feature = "clickhouse")]
     ClickHouse(CountingDestination<ClickHouseDestination<NotifyingStore>>),
@@ -582,7 +582,7 @@ impl BenchDestination {
     )]
     pub async fn new(
         destination_args: &DestinationArgs,
-        pipeline_id: u64,
+        legacy_pipeline_id: u64,
         store: NotifyingStore,
     ) -> Result<Self> {
         match destination_args.destination {
@@ -613,12 +613,12 @@ impl BenchDestination {
                     &sa_key_file,
                     destination_args.bq_max_staleness_mins,
                     destination_args.bq_connection_pool_size,
-                    pipeline_id,
+                    legacy_pipeline_id.into(),
                     store,
                 )
                 .await?;
 
-                Ok(Self::BigQuery(CountingDestination::new(destination)))
+                Ok(Self::BigQuery(Box::new(CountingDestination::new(destination))))
             }
             #[cfg(not(feature = "bigquery"))]
             DestinationType::BigQuery => {
@@ -647,7 +647,7 @@ impl BenchDestination {
                 let password =
                     destination_args.clickhouse_password.clone().filter(|p| !p.is_empty());
 
-                let database = clickhouse_run_database(&database, pipeline_id);
+                let database = clickhouse_run_database(&database, legacy_pipeline_id);
                 clickhouse_root_client(&url, &user, password.as_deref())
                     .query(&format!("create database if not exists {database}"))
                     .execute()
@@ -708,7 +708,7 @@ impl BenchDestination {
             DestinationType::Snowflake => {
                 install_crypto_provider();
 
-                let target = snowflake_run_target(pipeline_id)?;
+                let target = snowflake_run_target(legacy_pipeline_id)?;
                 // Housekeeping only: a failed sweep must not fail the run.
                 if let Err(error) = drop_stale_snowflake_run_schemas(&target).await {
                     warn!(error = %error, "failed to drop stale snowflake run schemas");
@@ -726,7 +726,7 @@ impl BenchDestination {
                         format!("failed to create Snowflake schema {}", target.schema)
                     })?;
 
-                let client = SnowflakeClient::new(target.auth, pipeline_id);
+                let client = SnowflakeClient::new(target.auth, legacy_pipeline_id);
                 let destination = SnowflakeDestination::new(client, store);
 
                 Ok(Self::Snowflake(CountingDestination::new(destination)))
@@ -993,14 +993,14 @@ pub async fn run_etl_migrations(args: &PgConnectionArgs) -> Result<()> {
 
 /// Builds an ETL pipeline config for a benchmark.
 pub fn pipeline_config(
-    pipeline_id: u64,
+    legacy_pipeline_id: u64,
     publication_name: String,
     pg: &PgConnectionArgs,
     tuning: &PipelineTuningArgs,
     table_sync_copy: TableSyncCopyConfig,
 ) -> PipelineConfig {
     PipelineConfig {
-        id: pipeline_id,
+        id: legacy_pipeline_id.into(),
         publication_name,
         replication_slot: Default::default(),
         pg_connection: PgConnectionConfig {
@@ -1045,15 +1045,18 @@ pub fn pipeline_config(
 /// Drops replication slots created by a benchmark pipeline.
 pub async fn cleanup_replication_slots(
     pg: &PgConnectionArgs,
-    pipeline_id: u64,
+    legacy_pipeline_id: u64,
     table_ids: &[u32],
 ) -> Result<()> {
     let pool = pg_pool(pg).await?;
 
-    drop_replication_slot(&pool, &format!("supabase_etl_apply_{pipeline_id}")).await;
+    drop_replication_slot(&pool, &format!("supabase_etl_apply_{legacy_pipeline_id}")).await;
     for table_id in table_ids {
-        drop_replication_slot(&pool, &format!("supabase_etl_table_sync_{pipeline_id}_{table_id}"))
-            .await;
+        drop_replication_slot(
+            &pool,
+            &format!("supabase_etl_table_sync_{legacy_pipeline_id}_{table_id}"),
+        )
+        .await;
     }
 
     pool.close().await;
@@ -1070,7 +1073,7 @@ pub async fn cleanup_replication_slots(
 )]
 pub async fn cleanup_destination(
     destination_args: &DestinationArgs,
-    pipeline_id: u64,
+    legacy_pipeline_id: u64,
 ) -> Result<()> {
     #[cfg(feature = "clickhouse")]
     if matches!(destination_args.destination, DestinationType::ClickHouse) {
@@ -1088,7 +1091,7 @@ pub async fn cleanup_destination(
             .as_deref()
             .context("ClickHouse database is required for ClickHouse benchmarks")?;
         let password = destination_args.clickhouse_password.as_deref().filter(|p| !p.is_empty());
-        let database = clickhouse_run_database(database, pipeline_id);
+        let database = clickhouse_run_database(database, legacy_pipeline_id);
         clickhouse_root_client(&url, user, password)
             .query(&format!("drop database if exists {database}"))
             .execute()
@@ -1098,7 +1101,7 @@ pub async fn cleanup_destination(
 
     #[cfg(feature = "snowflake")]
     if matches!(destination_args.destination, DestinationType::Snowflake) {
-        let target = snowflake_run_target(pipeline_id)?;
+        let target = snowflake_run_target(legacy_pipeline_id)?;
         target
             .sql
             .execute_ddl(&format!(
@@ -1137,8 +1140,8 @@ pub fn finish_run<T>(
 }
 
 #[cfg(feature = "clickhouse")]
-fn clickhouse_run_database(database: &str, pipeline_id: u64) -> String {
-    format!("{database}_{pipeline_id}")
+fn clickhouse_run_database(database: &str, legacy_pipeline_id: u64) -> String {
+    format!("{database}_{legacy_pipeline_id}")
 }
 
 #[cfg(feature = "clickhouse")]
@@ -1169,11 +1172,11 @@ struct SnowflakeRunTarget {
 /// Each run writes to its own schema, `{schema}_{pipeline_id}`, so tables left
 /// by earlier runs never collide with a new pipeline.
 #[cfg(feature = "snowflake")]
-fn snowflake_run_target(pipeline_id: u64) -> Result<SnowflakeRunTarget> {
+fn snowflake_run_target(legacy_pipeline_id: u64) -> Result<SnowflakeRunTarget> {
     let config = SnowflakeConfig::require_bench_env()?;
     let base_config = config.clone_without_credentials();
     let base_schema = config.schema().to_owned();
-    let schema = format!("{base_schema}_{pipeline_id}");
+    let schema = format!("{base_schema}_{legacy_pipeline_id}");
     let auth = Arc::new(AuthManager::new(config.with_schema(&schema))?);
     let sql = SnowflakeSqlClient::new(base_config, Arc::clone(&auth), reqwest::Client::new());
 

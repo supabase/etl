@@ -9,6 +9,7 @@ use crate::{
     error::{ErrorKind, EtlResult},
     etl_error,
     observability::OUT_OF_BAND_POOL,
+    pipeline::PipelineId,
     postgres::{client::SlotState, pool::InstrumentedPgPool},
 };
 
@@ -55,7 +56,7 @@ impl OutOfBandSourcePool {
     /// Samples the source WAL heads and all slots of one pipeline.
     pub(crate) async fn sample_pipeline_lag(
         &self,
-        pipeline_id: u64,
+        pipeline_id: &PipelineId,
     ) -> EtlResult<etl_postgres::lag::PipelineLagMetrics> {
         etl_postgres::lag::get_pipeline_lag_metrics(self.pool.executor(), pipeline_id)
             .await
@@ -125,7 +126,14 @@ mod tests {
                 .unwrap();
             let state = pool.get_slot_state(&name).await.unwrap();
             assert!(matches!(state, SlotState::NotInvalidated));
-            assert!(pool.sample_pipeline_lag(1).await.unwrap().source_wal.decoding_lsn().is_some());
+            assert!(
+                pool.sample_pipeline_lag(&1.into())
+                    .await
+                    .unwrap()
+                    .source_wal
+                    .decoding_lsn()
+                    .is_some()
+            );
             client.query_one("select pg_drop_replication_slot($1)", &[&name]).await.unwrap();
         }
         for name in ["test_missing_slot", r"slot'; select 1; --\"] {
@@ -154,7 +162,7 @@ mod tests {
         let pool = OutOfBandSourcePool::new(&config, TEST_MONITOR_REFRESH_INTERVAL);
         let state = pool.get_slot_state(&name).await.unwrap();
         assert!(matches!(state, SlotState::NotInvalidated));
-        let sample = pool.sample_pipeline_lag(1).await.unwrap();
+        let sample = pool.sample_pipeline_lag(&1.into()).await.unwrap();
         assert!(sample.source_wal.decoding_lsn().is_some());
         assert!(sample.source_wal.write_lsn().is_none());
         sqlx::query("select pg_drop_replication_slot($1)")
