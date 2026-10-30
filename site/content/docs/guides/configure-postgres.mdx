@@ -106,7 +106,7 @@ Wait for the previous run's table-sync sessions to end before restarting.
 
 After a host or network failure, PostgreSQL may keep the previous session's
 temporary slot until it detects the lost connection. ETL retries while that
-apply slot is still held. Set the retry window longer than PostgreSQL's
+slot is still held. Set the retry window longer than PostgreSQL's
 [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
 which defaults to 60 seconds. The example allows eight retries ten seconds
 apart; the default retry settings allow only five. A clean session exit or
