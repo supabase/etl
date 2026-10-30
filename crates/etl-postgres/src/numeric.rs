@@ -537,11 +537,12 @@ fn format_numeric_value(
         write!(f, ".")?;
 
         let mut remaining_scale = i32::from(scale);
-        let mut d = weight + 1;
+        // Widen before adding one: the maximum Postgres weight is `i16::MAX`.
+        let mut d = i32::from(weight) + 1;
 
         while remaining_scale > 0 {
             let base_10000_digit =
-                if d >= 0 && (d as usize) < digits.len() { digits[d as usize] } else { 0 };
+                usize::try_from(d).ok().and_then(|index| digits.get(index)).copied().unwrap_or(0);
 
             // Convert base-10000 digit to 4 decimal digits.
             let decimal_digits = format!("{base_10000_digit:04}");
@@ -639,8 +640,10 @@ mod tests {
         );
     }
 
+    /// Covers the largest Postgres numeric shape, whose `i16::MAX` weight must
+    /// not overflow while rendering the fractional digits.
     #[test]
-    fn parse_postgres_numeric_max_shape_roundtrips_sql() {
+    fn parse_postgres_numeric_max_shape_roundtrips_sql_and_text() {
         let mut value = String::with_capacity(
             POSTGRES_NUMERIC_MAX_SCALE as usize + POSTGRES_NUMERIC_MAX_WEIGHT as usize * 4 + 5,
         );
@@ -664,6 +667,7 @@ mod tests {
         ToSql::to_sql(&numeric, &Type::NUMERIC, &mut buf).unwrap();
         let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
         assert_eq!(numeric, round);
+        assert_eq!(numeric.to_string(), value);
     }
 
     #[test]
