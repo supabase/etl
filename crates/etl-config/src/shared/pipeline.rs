@@ -1245,20 +1245,12 @@ mod tests {
     /// Validation rejects temporary failover slots with or without secrets.
     #[test]
     fn pipeline_configs_reject_temporary_slot_failover() {
-        let json = r#"{
-            "id": 1,
-            "publication_name": "publication",
-            "pg_connection": {
-                "host": "localhost",
-                "port": 5432,
-                "name": "postgres",
-                "username": "postgres",
-                "password": null,
-                "tls": {"trusted_root_certs": "", "enabled": false}
-            },
-            "replication_slot": {"persistence": {"type": "temporary"}, "failover": true}
-        }"#;
-        let config: PipelineConfig = serde_json::from_str(json).unwrap();
+        let mut json = pipeline_config_json();
+        json["replication_slot"] = serde_json::json!({
+            "persistence": { "type": "temporary" },
+            "failover": true,
+        });
+        let config: PipelineConfig = serde_json::from_value(json).unwrap();
         let expected = ValidationError::InvalidFieldValue {
             field: "replication_slot.failover".to_owned(),
             constraint: "requires permanent replication slots".to_owned(),
@@ -1275,24 +1267,8 @@ mod tests {
 
     #[test]
     fn pipeline_config_deserializes_missing_run_source_migrations_as_true() {
-        let json = r#"{
-            "id": 1,
-            "publication_name": "publication",
-            "pg_connection": {
-                "host": "localhost",
-                "hostaddr": null,
-                "port": 5432,
-                "name": "postgres",
-                "username": "postgres",
-                "password": null,
-                "tls": {
-                    "trusted_root_certs": "",
-                    "enabled": false
-                }
-            }
-        }"#;
-
-        let config: PipelineConfig = serde_json::from_str(json).unwrap();
+        let json = pipeline_config_json();
+        let config: PipelineConfig = serde_json::from_value(json).unwrap();
 
         assert!(config.run_source_migrations);
         assert_eq!(config.replication_slot, ReplicationSlotConfig::default());
@@ -1300,28 +1276,10 @@ mod tests {
 
     #[test]
     fn pipeline_config_deserializes_run_source_migrations_false() {
-        let json = r#"{
-            "id": 1,
-            "publication_name": "publication",
-            "pg_connection": {
-                "host": "localhost",
-                "hostaddr": null,
-                "port": 5432,
-                "name": "postgres",
-                "username": "postgres",
-                "password": null,
-                "tls": {
-                    "trusted_root_certs": "",
-                    "enabled": false
-                }
-            },
-            "replication_slot": {
-                "failover": true
-            },
-            "run_source_migrations": false
-        }"#;
-
-        let config: PipelineConfig = serde_json::from_str(json).unwrap();
+        let mut json = pipeline_config_json();
+        json["replication_slot"] = serde_json::json!({ "failover": true });
+        json["run_source_migrations"] = false.into();
+        let config: PipelineConfig = serde_json::from_value(json).unwrap();
 
         assert!(!config.run_source_migrations);
         assert!(config.replication_slot.failover);
@@ -1333,22 +1291,9 @@ mod tests {
 
     #[test]
     fn pipeline_config_deserializes_drain_on_shutdown() {
-        let pg_connection = r#""pg_connection": {
-                "host": "localhost",
-                "hostaddr": null,
-                "port": 5432,
-                "name": "postgres",
-                "username": "postgres",
-                "password": null,
-                "tls": {
-                    "trusted_root_certs": "",
-                    "enabled": false
-                }
-            }"#;
-
         // A configuration written before the field existed keeps draining.
-        let json = format!(r#"{{"id": 1, "publication_name": "publication", {pg_connection}}}"#);
-        let config: PipelineConfig = serde_json::from_str(&json).unwrap();
+        let json = pipeline_config_json();
+        let config: PipelineConfig = serde_json::from_value(json).unwrap();
         assert!(config.drain_on_shutdown);
         assert_eq!(config.shutdown_drain_timeout_ms, 30_000);
         let public = PipelineConfigWithoutSecrets::from(config);
@@ -1356,9 +1301,9 @@ mod tests {
         assert_eq!(public.shutdown_drain_timeout_ms, 30_000);
 
         for timeout in [0, 250, 60_000] {
-            let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
-            value["shutdown_drain_timeout_ms"] = timeout.into();
-            let config: PipelineConfig = serde_json::from_value(value).unwrap();
+            let mut json = pipeline_config_json();
+            json["shutdown_drain_timeout_ms"] = timeout.into();
+            let config: PipelineConfig = serde_json::from_value(json).unwrap();
             assert_eq!(config.shutdown_drain_timeout_ms, timeout);
             let public = PipelineConfigWithoutSecrets::from(config);
             assert_eq!(public.shutdown_drain_timeout_ms, timeout);
@@ -1367,11 +1312,9 @@ mod tests {
             assert_eq!(roundtrip.shutdown_drain_timeout_ms, timeout);
         }
 
-        let json = format!(
-            r#"{{"id": 1, "publication_name": "publication", {pg_connection},
-            "drain_on_shutdown": false}}"#
-        );
-        let config: PipelineConfig = serde_json::from_str(&json).unwrap();
+        let mut json = pipeline_config_json();
+        json["drain_on_shutdown"] = false.into();
+        let config: PipelineConfig = serde_json::from_value(json).unwrap();
         assert!(!config.drain_on_shutdown);
         assert!(!PipelineConfigWithoutSecrets::from(config).drain_on_shutdown);
     }
