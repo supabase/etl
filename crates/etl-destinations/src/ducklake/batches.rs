@@ -25,7 +25,7 @@ use etl::{
     error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     event::EventPosition,
-    schema::ReplicatedTableSchema,
+    schema::{IdentityType, ReplicatedTableSchema},
 };
 use etl_maintenance::ducklake::RedactedDuckDbError;
 use metrics::{counter, histogram};
@@ -213,14 +213,15 @@ pub(super) enum TableMutation {
 enum RowMatch {
     /// Every row matching the predicate.
     ///
-    /// A source primary key makes the identity unique, so the only match is
-    /// the source tuple and predicates can share one statement.
+    /// A unique identity matches only the source tuple, so predicates can
+    /// share one statement.
     All,
     /// The first row matching the predicate, selected by DuckDB `rowid`.
     ///
-    /// Without a primary key, `REPLICA IDENTITY FULL` rows can be duplicates,
-    /// and one source event changes exactly one of them. Each predicate needs
-    /// its own statement so a later predicate sees the earlier change.
+    /// When the identity is not unique, `REPLICA IDENTITY FULL` rows can be
+    /// duplicates, and one source event changes exactly one of them. Each
+    /// predicate needs its own statement so a later predicate sees the
+    /// earlier change.
     First,
 }
 
@@ -231,12 +232,28 @@ impl RowMatch {
     /// A replicated column named `rowid` shadows DuckDB's row id, so such
     /// tables keep [`RowMatch::All`].
     fn for_schema(replicated_table_schema: &ReplicatedTableSchema) -> Self {
-        let has_primary_key = replicated_table_schema.primary_key_column_schemas().len() > 0;
         let shadows_rowid = replicated_table_schema.column_schemas().any(|column_schema| {
             DUCKLAKE_COLUMN_NAME_MAPPING.map_name(&column_schema.name).eq_ignore_ascii_case("rowid")
         });
 
-        if has_primary_key || shadows_rowid { Self::All } else { Self::First }
+        if shadows_rowid || Self::identity_is_unique(replicated_table_schema) {
+            Self::All
+        } else {
+            Self::First
+        }
+    }
+
+    /// Returns whether no two source rows can share an identity predicate.
+    ///
+    /// A `USING INDEX` identity is a unique, immediate index. Otherwise the
+    /// replicated row must contain the whole primary key.
+    fn identity_is_unique(replicated_table_schema: &ReplicatedTableSchema) -> bool {
+        if replicated_table_schema.identity_type() == IdentityType::AlternativeKey {
+            return true;
+        }
+
+        replicated_table_schema.primary_key_column_schemas().len() > 0
+            && replicated_table_schema.all_primary_key_columns_replicated()
     }
 
     /// Returns the maximum number of predicates one statement may combine.
@@ -3507,6 +3524,52 @@ mod tests {
             delete_predicate_from_row(&replicated_table_schema, &row).unwrap(),
             "\"email\" = 'alice@example.com'"
         );
+    }
+
+    #[test]
+    fn row_match_batches_only_unique_identities() {
+        let table_schema = |primary_key: bool| {
+            let mut id = ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false);
+            if primary_key {
+                id = id.with_primary_key(1);
+            }
+            Arc::new(TableSchema::new(
+                TableId::new(1),
+                TableName::new("public".to_owned(), "users".to_owned()),
+                vec![id, ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false)],
+            ))
+        };
+        let cases = [
+            // `USING INDEX` on a unique index, no primary key.
+            ("alternative_key", table_schema(false), vec![1, 1], vec![0, 1], RowMatch::All),
+            ("primary_key", table_schema(true), vec![1, 1], vec![1, 0], RowMatch::All),
+            ("full_with_primary_key", table_schema(true), vec![1, 1], vec![1, 1], RowMatch::All),
+            (
+                "full_without_primary_key",
+                table_schema(false),
+                vec![1, 1],
+                vec![1, 1],
+                RowMatch::First,
+            ),
+            // The replicated rows omit part of the key, so they can repeat.
+            (
+                "full_partial_primary_key",
+                table_schema(true),
+                vec![0, 1],
+                vec![0, 1],
+                RowMatch::First,
+            ),
+        ];
+
+        for (case, table_schema, replication, identity, expected) in cases {
+            let replicated_table_schema = ReplicatedTableSchema::from_masks(
+                table_schema,
+                ReplicationMask::from_bytes(replication),
+                IdentityMask::from_bytes(identity),
+            );
+
+            assert_eq!(RowMatch::for_schema(&replicated_table_schema), expected, "{case}");
+        }
     }
 
     #[test]
