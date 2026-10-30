@@ -459,25 +459,6 @@ mod tests {
     }
 
     #[test]
-    fn try_from_null_literal_vs_null_marker() {
-        let column_schemas = create_single_column_schema("value", Type::TEXT);
-
-        let row_data = b"\\N\n";
-        let result = parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
-        assert_eq!(result.values()[0], Cell::Null);
-
-        let row_data = b"\\\\N\n";
-        let result_test =
-            parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
-        assert_eq!(result_test.values()[0], Cell::String("\\N".to_owned()));
-
-        let row_data = b"\\\\A\n";
-        let result_test =
-            parse_table_row_from_postgres_copy_bytes(row_data, &column_schemas).unwrap();
-        assert_eq!(result_test.values()[0], Cell::String("\\A".to_owned()));
-    }
-
-    #[test]
     fn try_from_whitespace_handling() {
         let column_schemas = create_test_column_schemas();
 
@@ -595,6 +576,7 @@ mod tests {
             (b"\\\"\n", "\""), // quote
             (b"value\\Ntail\n", "valueNtail"),
             // Complex patterns
+            (b"\\\\A\n", "\\A"),
             ("Text\\bwith\\bbackspaces\n".as_bytes(), "Text\u{0008}with\u{0008}backspaces"),
             ("Form\\ffeed\\ftest\n".as_bytes(), "Form\u{000C}feed\u{000C}test"),
             ("Vertical\\vtab\\vtest\n".as_bytes(), "Vertical\u{000B}tab\u{000B}test"),

@@ -349,6 +349,12 @@ object storage.
 - DuckLake adds streaming columns as nullable. Supported literal defaults are
   stored as metadata; ETL does not emit `DEFAULT(NULL)` when no source default
   exists, although a catalog client may display an omitted default as `NULL`.
+- On `REPLICA IDENTITY FULL` tables without a primary key, or with a
+  `DEFERRABLE` one, each source update or delete changes one
+  matching DuckLake row, so duplicate rows stay in sync. ETL runs one statement
+  per changed row, so bulk deletes on these tables are slower. If such a table
+  has a column named `rowid` (in any case), the column hides DuckDB's row id,
+  and an update or delete changes every matching row.
 
 ## Snowflake
 
