@@ -537,7 +537,8 @@ fn format_numeric_value(
         write!(f, ".")?;
 
         let mut remaining_scale = i32::from(scale);
-        let mut d = weight + 1;
+        // Fractional group indices can exceed the i16 wire weight range.
+        let mut d = i32::from(weight) + 1;
 
         while remaining_scale > 0 {
             let base_10000_digit =
@@ -602,6 +603,7 @@ mod tests {
     #[test]
     fn parse_postgres_numeric_weight_boundaries() {
         let max_weight = PgNumeric::from_str("1e131071").unwrap();
+        assert_eq!(max_weight.to_string(), format!("1{}", "0".repeat(131_071)));
         if let PgNumeric::Value { sign, weight, scale, ref digits } = max_weight {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, i16::MAX);
@@ -612,6 +614,7 @@ mod tests {
         }
 
         let min_scale_weight = PgNumeric::from_str("1e-16383").unwrap();
+        assert_eq!(min_scale_weight.to_string(), format!("0.{}1", "0".repeat(16_382)));
         if let PgNumeric::Value { sign, weight, scale, ref digits } = min_scale_weight {
             assert_eq!(sign, Sign::Positive);
             assert_eq!(weight, -4096);
@@ -639,8 +642,9 @@ mod tests {
         );
     }
 
+    /// Preserves every digit at the maximum integer width and display scale.
     #[test]
-    fn parse_postgres_numeric_max_shape_roundtrips_sql() {
+    fn parse_postgres_numeric_max_shape_roundtrips_text_and_sql() {
         let mut value = String::with_capacity(
             POSTGRES_NUMERIC_MAX_SCALE as usize + POSTGRES_NUMERIC_MAX_WEIGHT as usize * 4 + 5,
         );
@@ -664,6 +668,32 @@ mod tests {
         ToSql::to_sql(&numeric, &Type::NUMERIC, &mut buf).unwrap();
         let round = PgNumeric::from_sql(&Type::NUMERIC, &buf).unwrap();
         assert_eq!(numeric, round);
+        assert_eq!(round.to_string(), value);
+    }
+
+    /// Preserves fractional groups whose index exceeds the wire weight range.
+    #[test]
+    fn displays_fractional_digits_after_large_integer() {
+        // One fewer integer group than the maximum puts the first fractional
+        // group at i16::MAX, so the next group needs a wider index.
+        let integer = "9".repeat(131_068);
+        for sign in ["", "-"] {
+            let value = format!("{sign}{integer}.12345");
+            let numeric = PgNumeric::from_str(&value).unwrap();
+            assert_eq!(numeric.to_string(), value);
+        }
+    }
+
+    /// Finishes formatting when the final cursor increment exceeds
+    /// [`i16::MAX`].
+    #[test]
+    fn displays_single_fractional_digit_after_large_integer() {
+        let integer = "9".repeat(131_068);
+        for sign in ["", "-"] {
+            let value = format!("{sign}{integer}.1");
+            let numeric = PgNumeric::from_str(&value).unwrap();
+            assert_eq!(numeric.to_string(), value);
+        }
     }
 
     #[test]
