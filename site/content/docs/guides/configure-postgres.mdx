@@ -65,9 +65,19 @@ needs. This lets ETL catch up after a temporary disconnect.
 **ETL creates its logical slots automatically.** Do not pre-create a slot for
 the pipeline. The apply worker uses `supabase_etl_apply_{pipeline_id}`; table
 sync workers create `supabase_etl_table_sync_{pipeline_id}_{table_id}` slots
-for initial sync and drop them after catch-up completes. By default, both use
-permanent PostgreSQL slots. Table-sync slots can remain after a failed or
-interrupted sync.
+for initial sync. The apply slot is permanent by default. Table-sync slots are
+always temporary: PostgreSQL releases them when their session ends, including
+after failure or interrupted sync. An interrupted copy restarts from a fresh
+snapshot and slot.
+
+ETL keeps a table-sync worker's concurrency capacity reserved until it observes
+that both the creating backend and the slot are gone. Delayed session teardown
+or an unavailable source can therefore delay new copies, without replacing
+the table's original error. Already synchronized tables can continue streaming
+while copy capacity is held. Graceful shutdown waits for release within
+`shutdown_drain_timeout_ms`; at the deadline ETL cancels and joins the workers.
+This accounting covers attempts in the current process; old permanent slots
+left by earlier versions still require separate cleanup.
 
 ### Temporary Slots
 
@@ -83,9 +93,10 @@ pipeline:
   table_error_retry_max_attempts: 8
 ```
 
-This applies to both apply-worker and table-sync slots. PostgreSQL drops them
-on an error or when their creating sessions end. Omitted `persistence` defaults
-to `permanent`, including in existing configurations.
+This configures the apply slot; table-sync slots are temporary regardless of
+this setting. PostgreSQL drops temporary slots on an error or when their
+creating sessions end. Omitted `persistence` defaults to `permanent` for the
+apply slot, including in existing configurations.
 
 Every start resets table state and resynchronizes the destination from a fresh
 snapshot. You can reuse the same store and destination. Losing the apply slot
@@ -95,7 +106,7 @@ Wait for the previous run's table-sync sessions to end before restarting.
 
 After a host or network failure, PostgreSQL may keep the previous session's
 temporary slot until it detects the lost connection. ETL retries while that
-slot is still held. Set the retry window longer than PostgreSQL's
+apply slot is still held. Set the retry window longer than PostgreSQL's
 [`wal_sender_timeout`](https://www.postgresql.org/docs/current/runtime-config-replication.html#GUC-WAL-SENDER-TIMEOUT),
 which defaults to 60 seconds. The example allows eight retries ten seconds
 apart; the default retry settings allow only five. A clean session exit or
@@ -220,9 +231,8 @@ large initial copy, so choose it deliberately and monitor destination capacity.
 Permanent slots persist across disconnections and pipeline stops. Stopping ETL
 releases copy transactions and their locks after teardown, but does not release
 the WAL needed by retained slots. Continue monitoring storage and slot status during
-maintenance. By default, table-sync slots are persistent PostgreSQL slots,
-even though ETL removes them after successful synchronization. With temporary
-persistence, both apply and table-sync slots end with their sessions.
+maintenance. Table-sync slots always end with their sessions. The apply slot
+also ends with its session when temporary persistence is configured.
 
 ### Planning Long Initial Copies
 
@@ -466,10 +476,11 @@ pipeline:
     failover: true
 ```
 
-ETL then creates its apply-worker and short-lived table-sync logical slots with
-the PostgreSQL `FAILOVER` option. If the apply-worker slot already exists from
-an earlier run, startup checks `pg_replication_slots.failover` and enables the
-option only when repair is needed. Disabling the setting affects newly created
+ETL then creates its apply-worker slot with the PostgreSQL `FAILOVER` option.
+Table-sync slots remain temporary and are not synchronized to standbys; an
+interrupted copy starts again after failover. If the apply-worker slot already
+exists from an earlier run, startup checks `pg_replication_slots.failover` and
+enables the option only when repair is needed. Disabling the setting affects newly created
 slots but does not downgrade an existing failover-enabled apply slot.
 
 The ETL setting only makes slots eligible for synchronization. PostgreSQL must

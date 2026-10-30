@@ -2,7 +2,6 @@ use std::{any::Any, ops::Deref, panic::AssertUnwindSafe, sync::Arc, time::Durati
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use etl_config::shared::PipelineConfig;
-use etl_postgres::slots::EtlReplicationSlot;
 use futures::FutureExt;
 use metrics::counter;
 use tokio::{
@@ -31,7 +30,7 @@ use crate::{
         BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerPool,
         concurrency::{ShutdownResult, with_shutdown},
         error_policy::{RetryDirective, build_error_handling_policy},
-        table_sync::TableSyncWorkerId,
+        table_sync::{TableSyncSlot, TableSyncWorkerId},
     },
     schema::TableId,
     store::{PipelineStore, StateStore},
@@ -54,7 +53,7 @@ pub(crate) enum TableSyncWorkerResult {
 }
 
 /// Builds an error from a panic caught inside the table sync worker.
-fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
+pub(super) fn table_sync_worker_panic_error(payload: Box<dyn Any + Send>) -> EtlError {
     let detail = if let Some(message) = payload.downcast_ref::<&'static str>() {
         message.to_string()
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -195,7 +194,7 @@ impl TableSyncWorkerState {
     /// This constructor initializes the state management structure with the
     /// specified table ID and table state. It sets up the notification
     /// mechanism for coordinating state changes between workers.
-    fn new(table_id: TableId, table_state: TableState) -> Self {
+    pub(super) fn new(table_id: TableId, table_state: TableState) -> Self {
         let inner = TableSyncWorkerStateInner {
             table_id,
             table_state,
@@ -379,22 +378,19 @@ where
     S: PipelineStore,
     D: PipelineDestination,
 {
-    /// Handles a table sync worker failure using the configured retry policy.
+    /// Publishes a table sync failure before waiting for slot release or retry.
     ///
-    /// Returns `Some(TableSyncWorkerResult)` when error handling terminates the
-    /// worker, [`None`] when the worker should retry, or [`Err`] when the
-    /// failure cannot be handled and must be propagated.
-    ///
-    /// Any errors encountered while persisting error state or preparing a retry
-    /// are propagated immediately.
-    async fn handle_table_sync_worker_error(
+    /// This unblocks apply-worker coordination even when PostgreSQL cannot yet
+    /// confirm release. Release failures never replace the original table
+    /// error. Persistence errors propagate immediately and close sync
+    /// admission through the outstanding slot's accounting guard.
+    async fn persist_table_sync_worker_error(
         table_id: TableId,
         config: &PipelineConfig,
         state: &TableSyncWorkerState,
         store: &S,
-        shutdown_token: &CancellationToken,
         err: EtlError,
-    ) -> EtlResult<Option<TableSyncWorkerResult>> {
+    ) -> EtlResult<TableRetryPolicy> {
         error!(table_id = table_id.0, error = %err, "table sync worker failed");
 
         // Build a retry policy from the shared classifier. The concrete retry
@@ -449,6 +445,22 @@ where
         // in the state store.
         state_guard.set_and_store(table_error.into(), store).await?;
 
+        Ok(retry_policy)
+    }
+
+    /// Waits for a retry and restores state after the previous slot is
+    /// released.
+    ///
+    /// Returns a terminal result, or [`None`] when a fresh attempt should
+    /// start.
+    async fn retry_table_sync_worker(
+        table_id: TableId,
+        state: &TableSyncWorkerState,
+        store: &S,
+        shutdown_token: &CancellationToken,
+        retry_policy: TableRetryPolicy,
+    ) -> EtlResult<Option<TableSyncWorkerResult>> {
+        let mut state_guard = state.lock().await;
         match retry_policy {
             TableRetryPolicy::TimedRetry { next_retry } => {
                 let now = Utc::now();
@@ -573,39 +585,17 @@ where
         Ok(())
     }
 
-    /// Runs the table sync worker task and converts panics to table errors.
+    /// Runs supervised attempts in the worker span.
+    ///
+    /// Attempt panics are handled inside the slot-accounting lifetime. Failures
+    /// in error persistence or release supervision propagate without replacing
+    /// an already published table error.
     async fn run_table_sync_worker_task(
         self,
         state: TableSyncWorkerState,
         table_sync_worker_span: tracing::Span,
     ) -> EtlResult<TableSyncWorkerResult> {
-        let result = AssertUnwindSafe(
-            self.guarded_run_table_sync_worker(state.clone()).instrument(table_sync_worker_span),
-        )
-        .catch_unwind()
-        .await;
-
-        match result {
-            Ok(result) => result,
-            Err(payload) => {
-                let err = table_sync_worker_panic_error(payload);
-                Self::handle_table_sync_worker_error(
-                    self.table_id,
-                    self.config.as_ref(),
-                    &state,
-                    &self.store,
-                    &self.shutdown_token,
-                    err,
-                )
-                .await?
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::InvalidState,
-                        "Table sync worker panic requested retry after unwinding"
-                    )
-                })
-            }
-        }
+        self.guarded_run_table_sync_worker(state).instrument(table_sync_worker_span).await
     }
 
     /// Runs the table sync worker with retry logic and error handling.
@@ -619,23 +609,58 @@ where
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
         loop {
-            let result = self.run_table_sync_worker(state.clone()).await;
+            let ShutdownResult::Ok(permit) =
+                with_shutdown!(Arc::clone(&self.run_permit).acquire_owned(), self.shutdown_token)
+            else {
+                return Ok(TableSyncWorkerResult::Shutdown);
+            };
+            let Ok(permit) = permit else {
+                // An abandoned lease closes admission during fatal failure or
+                // forced shutdown. Its owner reports the actual failure; a
+                // secondary admission error must not replace that diagnosis.
+                return Ok(TableSyncWorkerResult::Shutdown);
+            };
+            let mut slot = TableSyncSlot::new(self.pipeline_id, self.table_id, permit)?;
 
-            match result {
+            // Catch attempt panics inside the accounting lifetime. Unwinding
+            // drops the replication connection before release is observed.
+            let result = AssertUnwindSafe(self.run_table_sync_worker(state.clone(), &mut slot))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|payload| Err(table_sync_worker_panic_error(payload)));
+            let outcome = match result {
+                Ok(result) => Ok(result),
+                Err(error) => Err(Self::persist_table_sync_worker_error(
+                    self.table_id,
+                    self.config.as_ref(),
+                    &state,
+                    &self.store,
+                    error,
+                )
+                .await?),
+            };
+
+            // The attempt's client and observers are now gone. Only a source
+            // observation can establish that its backend and slot are gone.
+            slot.release(&self.replication_lag_monitor).await;
+            if self.shutdown_token.is_cancelled() {
+                return Ok(TableSyncWorkerResult::Shutdown);
+            }
+
+            match outcome {
                 Ok(result) => {
                     let mut state_guard = state.lock().await;
                     state_guard.reset_retry_attempts();
 
                     return Ok(result);
                 }
-                Err(err) => {
-                    let result = Self::handle_table_sync_worker_error(
+                Err(retry_policy) => {
+                    let result = Self::retry_table_sync_worker(
                         self.table_id,
-                        self.config.as_ref(),
                         &state,
                         &self.store,
                         &self.shutdown_token,
-                        err,
+                        retry_policy,
                     )
                     .await?;
 
@@ -649,45 +674,16 @@ where
 
     /// Executes the core table synchronization process.
     ///
-    /// This method orchestrates the complete table sync workflow: acquiring run
-    /// permits, establishing replication connections, performing initial data
+    /// This method orchestrates the complete table sync workflow: establishing
+    /// replication connections, performing initial data
     /// sync, running catchup replication, and cleaning up resources. It handles
     /// both the bulk data copy state and the incremental table state.
     async fn run_table_sync_worker(
         &self,
         state: TableSyncWorkerState,
+        slot: &mut TableSyncSlot,
     ) -> EtlResult<TableSyncWorkerResult> {
-        debug!(
-            table_id = self.table_id.0,
-            "waiting to acquire a running permit for table sync worker"
-        );
-
-        // We acquire a permit to run the table sync worker. This helps us limit
-        // the number of table sync workers running in parallel which in turn
-        // helps limit the max number of concurrent connections to the source
-        // database.
-        let ShutdownResult::Ok(permit) =
-            with_shutdown!(Arc::clone(&self.run_permit).acquire_owned(), self.shutdown_token)
-        else {
-            info!(
-                table_id = self.table_id.0,
-                "shutting down table sync worker while waiting for a run permit"
-            );
-
-            return Ok(TableSyncWorkerResult::Shutdown);
-        };
-        let _permit = permit.map_err(|err| {
-            etl_error!(
-                ErrorKind::InvalidState,
-                "Table sync worker semaphore closed while acquiring run permit",
-                err
-            )
-        })?;
-
         info!(table_id = self.table_id.0, "acquired running permit for table sync worker");
-
-        // Keep the owned permit alive for the full worker run so concurrency
-        // stays bounded until the worker fully exits.
 
         // We create a new replication connection specifically for this table
         // sync worker.
@@ -708,9 +704,9 @@ where
         let mut replication_client = replication_client?;
 
         let table_sync_result = start_table_sync(
-            self.pipeline_id,
             Arc::clone(&self.config),
             &mut replication_client,
+            slot,
             self.table_id,
             state.clone(),
             self.store.clone(),
@@ -793,20 +789,21 @@ where
                     );
                 }
 
-                info!(
-                    table_id = self.table_id.0,
-                    "table sync apply loop completed successfully, deleting slot"
-                );
+                info!(table_id = self.table_id.0, "table sync apply loop completed successfully");
 
                 // Catchup has completed, so cleanup failures should not turn a
                 // completed table sync into a replication failure.
-                if let Err(err) =
-                    self.cleanup_resources(&replication_client, self.store.clone()).await
+                if let Err(err) = self
+                    .store
+                    .delete_replication_checkpoint(WorkerType::TableSync {
+                        table_id: self.table_id,
+                    })
+                    .await
                 {
                     warn!(
                         table_id = self.table_id.0,
                         error = %err,
-                        "failed to clean up table sync resources after completion"
+                        "failed to delete table sync checkpoint after completion"
                     );
                 }
 
@@ -818,32 +815,6 @@ where
                 Ok(TableSyncWorkerResult::Shutdown)
             }
         }
-    }
-
-    /// Cleans up resources owned by this table sync worker.
-    ///
-    /// Once the table sync apply loop completes, its persisted checkpoint is no
-    /// longer needed for resume and its replication slot should be removed so
-    /// it stops retaining WAL.
-    ///
-    /// The checkpoint is deleted first so a slot deletion failure leaves only a
-    /// stale slot behind. That can retain WAL and may require manual cleanup,
-    /// but it does not leave a stale replay frontier for a completed worker.
-    async fn cleanup_resources(
-        &self,
-        replication_client: &PgReplicationClient,
-        store: S,
-    ) -> EtlResult<()> {
-        store
-            .delete_replication_checkpoint(WorkerType::TableSync { table_id: self.table_id })
-            .await?;
-
-        let slot_name: String =
-            EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
-                .try_into()?;
-        replication_client.delete_slot_if_exists(&slot_name).await?;
-
-        Ok(())
     }
 }
 

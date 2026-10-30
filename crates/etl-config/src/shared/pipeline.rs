@@ -313,19 +313,23 @@ pub enum ReplicationSlotPersistence {
     Temporary,
 }
 
-/// Configuration for a pipeline's PostgreSQL logical replication slots.
+/// Configuration for a pipeline's PostgreSQL apply slot.
+///
+/// Table-sync slots are always temporary and do not support failover. An
+/// interrupted initial sync restarts from a fresh snapshot and slot.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ReplicationSlotConfig {
-    /// Whether apply and table-sync slots persist beyond their sessions.
+    /// Whether the apply slot persists beyond its creating session.
     #[serde(default)]
     pub persistence: ReplicationSlotPersistence,
-    /// Enables PostgreSQL failover support for logical replication slots.
+    /// Enables PostgreSQL failover support for the apply slot.
     ///
-    /// On PostgreSQL 17 or newer, ETL creates new slots with the `FAILOVER`
-    /// option and upgrades an existing apply-worker slot that is not already
-    /// failover-enabled. Standbys must still be configured to synchronize
-    /// failover slots before those slots can be used after promotion.
+    /// On PostgreSQL 17 or newer, ETL creates new apply slots with the
+    /// `FAILOVER` option and upgrades an existing apply-worker slot that is
+    /// not already failover-enabled. Standbys must still be configured to
+    /// synchronize failover slots before those slots can be used after
+    /// promotion.
     #[serde(default)]
     #[cfg_attr(feature = "utoipa", schema(example = false))]
     pub failover: bool,
@@ -375,7 +379,7 @@ pub struct PipelineConfig {
     /// a writable endpoint.
     #[serde(default)]
     pub store_pg_connection: Option<PgConnectionConfig>,
-    /// Configuration for the pipeline's logical replication slots.
+    /// Configuration for the pipeline's apply slot.
     #[serde(default)]
     pub replication_slot: ReplicationSlotConfig,
     /// Batch processing configuration.
@@ -768,7 +772,7 @@ pub struct PipelineConfigWithoutSecrets {
     /// When `None`, state storage uses [`Self::pg_connection`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_pg_connection: Option<PgConnectionConfigWithoutSecrets>,
-    /// Configuration for the pipeline's logical replication slots.
+    /// Configuration for the pipeline's apply slot.
     #[serde(default)]
     pub replication_slot: ReplicationSlotConfig,
     /// Batch processing configuration.

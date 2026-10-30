@@ -1461,6 +1461,8 @@ where
                 "shutdown signal received, stopping new intake and entering shutdown drain",
             );
             self.state.start_draining_for_shutdown();
+            #[cfg(feature = "failpoints")]
+            fail::fail_point!(crate::failpoints::APPLY_LOOP_ENTERED_SHUTDOWN_DRAIN_FP);
         } else {
             info!(%worker_type, "shutdown signal received, no unresolved work left");
         }

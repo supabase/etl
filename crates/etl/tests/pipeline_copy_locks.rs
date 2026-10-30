@@ -255,6 +255,7 @@ async fn copy_retries_queued_partition_ddl() {
 /// and the incomplete copy restarts from scratch.
 #[tokio::test(flavor = "multi_thread")]
 async fn table_copy_shutdown_interrupts_stalled_write_and_restarts() {
+    etl_telemetry::tracing::init_test_tracing();
     // An empty table reaches the final write; a populated table stalls a child.
     for row_count in [0, 1000] {
         let mut database = spawn_source_database().await;
@@ -302,9 +303,10 @@ async fn table_copy_shutdown_interrupts_stalled_write_and_restarts() {
 
         pipeline.start().await.unwrap();
 
-        synced.notified().await;
+        let restarted = timeout(Duration::from_secs(30), synced.notified()).await;
 
         pipeline.shutdown_and_wait().await.unwrap();
+        restarted.unwrap();
 
         assert_eq!(destination.get_table_rows().await[&table_id].len(), row_count);
     }
