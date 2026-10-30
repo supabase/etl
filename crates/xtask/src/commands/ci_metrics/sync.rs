@@ -389,7 +389,6 @@ impl Syncer<'_> {
     async fn sync_day(&mut self, conn: &mut PgConnection, task: DayTask) -> Result<(), SyncError> {
         let (start, end) = day_bounds(task.day)?;
 
-        // Network phase.
         let mut batch = self.list_day(start, end).await?;
         let stored = store::load_stored_runs(conn, start, end).await?;
         let known_artifacts = store::load_known_artifacts(conn, start, end).await?;
@@ -441,7 +440,6 @@ impl Syncer<'_> {
             });
         }
 
-        // Write phase.
         let mut tx = conn.begin().await?;
         for run in batch.attempts.iter().chain(&batch.runs) {
             store::upsert_run(&mut tx, run).await?;

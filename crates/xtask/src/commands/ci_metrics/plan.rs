@@ -99,7 +99,6 @@ pub(super) fn plan_days(
         push(&mut tasks, yesterday);
     }
 
-    // Days from oldest to newest within the desired window.
     let days: Vec<NaiveDate> = history_since.iter_days().take_while(|day| *day <= today).collect();
 
     let expiry_start = ARTIFACT_RETENTION_DAYS - EXPIRY_WARNING_DAYS;
