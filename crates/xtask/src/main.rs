@@ -1,13 +1,15 @@
 mod commands;
+mod github;
+mod test_manifest;
 mod utils;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use commands::{
-    BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, DeployLocalArgs, ExampleArgs,
-    FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs, PgFillTableArgs,
-    PostgresArgs, RunArgs, SeedArgs, SetupArgs, TestArgs, TestClickhouseArgs, TestSnowflakeArgs,
-    VendorDuckdbArgs,
+    BenchmarkArgs, BenchmarkCompareArgs, ChaosArgs, CheckArgs, CiMetricsArgs, DeployLocalArgs,
+    ExampleArgs, FixArgs, FmtArgs, InitArgs, MigrateArgs, MsrvArgs, MultigresArgs, NextestArgs,
+    PgFillTableArgs, PostgresArgs, RunArgs, SeedArgs, SetupArgs, TestArgs, TestClickhouseArgs,
+    TestSnowflakeArgs, VendorDuckdbArgs,
 };
 
 #[derive(Parser)]
@@ -28,6 +30,9 @@ enum Command {
     Chaos(ChaosArgs),
     /// Pre-PR gate: fmt, sort, clippy.
     Check(CheckArgs),
+    /// Collect GitHub Actions data into the CI metrics database.
+    #[command(name = "ci-metrics")]
+    CiMetrics(CiMetricsArgs),
     /// Deploy the replicator to a local OrbStack Kubernetes cluster.
     #[command(name = "deploy-local")]
     DeployLocal(DeployLocalArgs),
@@ -82,6 +87,7 @@ async fn main() -> Result<()> {
         Command::BenchmarkCompare(cmd) => cmd.run().await,
         Command::Chaos(cmd) => cmd.run().await,
         Command::Check(cmd) => cmd.run(),
+        Command::CiMetrics(cmd) => cmd.run().await,
         Command::DeployLocal(cmd) => cmd.run(),
         Command::Example(cmd) => cmd.run(),
         Command::Fix(cmd) => cmd.run(),

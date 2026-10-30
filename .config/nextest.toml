@@ -5,6 +5,14 @@ nextest-version = { required = "0.9.148", recommended = "0.9.148" }
 fail-fast = false
 test-threads = "num-cpus"
 
+# Per-test results for the CI metrics collector. `cargo x nextest
+# --test-manifest` converts these reports to JSON. Test output stays in the job
+# log, so the reports stay small.
+[profile.default.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = false
+
 # All tests that share the source Postgres cluster must run serially. Separate
 # nextest test groups do not serialize against each other, so cluster-wide
 # setting tests, etl replication tests, and PG-backed destination tests all
@@ -32,6 +40,11 @@ priority = 10
 # lets each free thread take the next test, and the test connects to the
 # cluster at its NEXTEST_TEST_GLOBAL_SLOT, so no two running tests share one.
 [profile.pg-sharded]
+
+[profile.pg-sharded.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = false
 
 # The longest tests (about 30 seconds each) start first so none of them begins
 # near the end of the run while the other clusters sit idle.
