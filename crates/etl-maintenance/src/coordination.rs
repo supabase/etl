@@ -390,6 +390,18 @@ mod tests {
             expire_snapshots: true,
             ..ExternalMaintenanceOperations::default()
         }));
+
+        let inline_flush = ExternalMaintenanceOperations {
+            inline_flush: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+
+        assert!(inline_flush.covers(inline_flush));
+        assert!(!inline_flush.covers(ExternalMaintenanceOperations {
+            rewrite_data_files: true,
+            cleanup_old_files: true,
+            ..ExternalMaintenanceOperations::default()
+        }));
     }
 
     #[test]
