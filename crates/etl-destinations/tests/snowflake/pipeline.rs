@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use etl::{
     event::{Event, EventType},
+    failpoints::{APPLY_LOOP_EXPIRE_DURABILITY_FP, etl_fail_point_active_for_parameter},
     pipeline::PipelineId,
     schema::TableName,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{PipelineBuilder, create_pipeline},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -17,10 +18,13 @@ use etl_destinations::snowflake::{
     test_utils::{load_test_config, query_rows},
 };
 use etl_postgres::tokio::test_utils::TableModification;
+use fail::FailScenario;
 use rand::random;
 use tokio::time::Duration;
 
-use super::common::{build_auth, poll_destination_offset, with_table_cleanup};
+use crate::snowflake::common::{
+    build_auth, poll_destination_offset, quote, wait_for_replication_checkpoint, with_table_cleanup,
+};
 
 const DESTINATION_OFFSET_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const DESTINATION_OFFSET_MAX_ATTEMPTS: usize = 90;
@@ -196,4 +200,120 @@ async fn schema_change_batched_operations() {
         assert_eq!(rows, expected);
     })
     .await;
+}
+
+/// Confirms a deadline-driven cumulative barrier with live Snowflake and a
+/// tiny source table. Idle settlement is disabled for the duration of the test.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires local PostgreSQL and Snowflake test credentials"]
+async fn durability_deadline_advances_live_snowflake_checkpoint() {
+    let _scenario = FailScenario::setup();
+    let database = spawn_source_database().await;
+    let table_name = test_table_name(&format!("deadline_{}", uuid::Uuid::new_v4().simple()));
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+    let publication = "deadline_publication";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let config = load_test_config().clone_without_credentials();
+    let auth = build_auth();
+    let sql = SqlClient::new(
+        config.clone_without_credentials(),
+        Arc::clone(&auth),
+        reqwest::Client::new(),
+    );
+    let snowflake_table = snowflake_table_name(&table_name);
+
+    with_table_cleanup(&sql, &[&snowflake_table], || async {
+        let store = NotifyingStore::new();
+        let pipeline_id: PipelineId = random();
+        let raw_destination = Destination::new(Client::new(auth, pipeline_id), store.clone());
+        let destination_for_polling = raw_destination.clone();
+        let destination = TestDestinationWrapper::wrap(raw_destination);
+        let mut pipeline = PipelineBuilder::new(
+            database.config.clone(),
+            pipeline_id,
+            publication.to_owned(),
+            store.clone(),
+            destination.clone(),
+        )
+        .with_settle_durable_interval_ms(Some(600_000))
+        .build();
+        let synced = store.notify_on_table_sync_complete(table_id).await;
+
+        pipeline.start().await.unwrap();
+
+        synced.notified().await;
+        database.run_sql("analyze").await.unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(120), async {
+            // The first insert warms the relation/schema path. The second is
+            // pure DML and leaves the small Snowflake window accepted.
+            for value in [1_i32, 2] {
+                let written = destination
+                    .wait_for_events(vec![EventCondition::TableCount(
+                        EventType::Insert,
+                        table_id,
+                        u64::try_from(value).unwrap(),
+                    )])
+                    .await;
+                fail::cfg(APPLY_LOOP_EXPIRE_DURABILITY_FP, "1*return(apply)").unwrap();
+
+                database.insert_values(table_name.clone(), &["value"], &[&value]).await.unwrap();
+
+                written.notified().await;
+                let events = destination.get_events().await;
+                let commit_end_lsn = events
+                    .iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        Event::Commit(commit) => Some(commit.end_lsn),
+                        _ => None,
+                    })
+                    .unwrap();
+                wait_for_replication_checkpoint(&store, commit_end_lsn).await;
+                if value == 2 {
+                    // The single-use hook must have been consumed by an
+                    // Accepted result; a direct Durable result would leave it
+                    // armed and would not prove the deadline path.
+                    assert!(!etl_fail_point_active_for_parameter(
+                        APPLY_LOOP_EXPIRE_DURABILITY_FP,
+                        "apply"
+                    ));
+                }
+            }
+            let events = destination.get_events().await;
+            events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::Insert(insert) => {
+                        Some(OffsetToken::new(insert.commit_lsn, insert.tx_ordinal))
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        })
+        .await;
+        pipeline.shutdown_and_wait().await.unwrap();
+        let expected_offset = outcome.unwrap();
+        assert_eq!(
+            destination_for_polling.fetch_committed_offset(table_id).await.unwrap(),
+            Some(expected_offset)
+        );
+        let rows = query_rows(
+            &sql,
+            &format!(
+                "select count(*) from {}.{}.{}",
+                quote(config.database()),
+                quote(config.schema()),
+                quote(&snowflake_table)
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows, vec![vec![serde_json::json!("2")]]);
+    })
+    .await;
+    assert!(!sql.table_exists(&snowflake_table).await.unwrap());
 }
