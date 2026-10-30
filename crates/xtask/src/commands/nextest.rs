@@ -204,7 +204,7 @@ impl NextestArgs {
         // earlier run must not stand in for it.
         if self.test_manifest.is_some() {
             for profile in profiles {
-                let path = junit_path(self.mode, profile);
+                let path = junit_path(profile);
                 match fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -350,16 +350,11 @@ fn extract_archive(archive: &Path) -> Result<TempDir> {
 }
 
 /// Returns where nextest writes a profile's JUnit report: the profile's store
-/// directory under the workspace's `target`, which cargo-llvm-cov moves to
-/// `target/llvm-cov-target` with `--target-dir`. Archive runs remap the target
-/// directory for binaries only and keep the store in `target`.
-fn junit_path(mode: Mode, profile: &str) -> PathBuf {
-    let target = PathBuf::from("target");
-    let target = match mode {
-        Mode::Run => target,
-        Mode::LlvmCov => target.join("llvm-cov-target"),
-    };
-    target.join("nextest").join(profile).join(JUNIT_FILE_NAME)
+/// directory under the workspace's `target`. Nextest keeps the store there
+/// even when cargo-llvm-cov passes `--target-dir` or an archive run remaps the
+/// target directory.
+fn junit_path(profile: &str) -> PathBuf {
+    Path::new("target").join("nextest").join(profile).join(JUNIT_FILE_NAME)
 }
 
 /// Writes the results of every lane's JUnit report to `path` as a
@@ -368,7 +363,7 @@ fn write_test_manifest(mode: Mode, profiles: &[&str], path: &Path) -> Result<()>
     let job = TestJob::from_env()?;
     let mut tests = Vec::new();
     for profile in profiles {
-        let junit = junit_path(mode, profile);
+        let junit = junit_path(profile);
         match fs::read_to_string(&junit) {
             Ok(xml) => tests.extend(
                 test_manifest::parse_junit(&xml)
@@ -545,7 +540,7 @@ mod tests {
 
     use crate::commands::nextest::{
         DEFAULT_PROFILE, JUNIT_FILE_NAME, Lane, Mode, NextestArgs, PG_SHARDED_PROFILE, PgClusters,
-        PgEnv, SHARED_PG_FILTER, check_forwarded_args, junit_path, lane_command, nextest_command,
+        PgEnv, SHARED_PG_FILTER, check_forwarded_args, lane_command, nextest_command,
     };
 
     /// Standalone parser for testing task-runner options and passthrough.
@@ -739,10 +734,6 @@ mod tests {
             assert_eq!(junit["path"].as_str(), Some(JUNIT_FILE_NAME), "{profile}");
             assert_eq!(junit["store-failure-output"].as_bool(), Some(false), "{profile}");
         }
-        assert_eq!(
-            junit_path(Mode::LlvmCov, PG_SHARDED_PROFILE),
-            Path::new("target/llvm-cov-target/nextest/pg-sharded/junit.xml")
-        );
     }
 
     /// Remote-only BigQuery tests have their own bounded concurrency group.
