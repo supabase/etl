@@ -246,7 +246,10 @@ impl RowMatch {
     /// Returns whether no two source rows can share an identity predicate.
     ///
     /// A `USING INDEX` identity is a unique, immediate index. Otherwise the
-    /// replicated row must contain the whole primary key.
+    /// replicated row must contain the whole primary key, and the key must not
+    /// be `DEFERRABLE`: one statement can move a row into a deferrable key
+    /// before the key's previous row moves out, so the destination briefly
+    /// holds duplicates.
     fn identity_is_unique(replicated_table_schema: &ReplicatedTableSchema) -> bool {
         if replicated_table_schema.identity_type() == IdentityType::AlternativeKey {
             return true;
@@ -254,6 +257,7 @@ impl RowMatch {
 
         replicated_table_schema.primary_key_column_schemas().len() > 0
             && replicated_table_schema.all_primary_key_columns_replicated()
+            && !replicated_table_schema.inner().primary_key_deferrable
     }
 
     /// Returns the maximum number of predicates one statement may combine.
@@ -4877,6 +4881,59 @@ mod tests {
             .unwrap();
 
             assert!(rows_match_model(&schema, &read_rows(&conn, &schema), &[kept]));
+        }
+
+        #[test]
+        fn deferrable_primary_key_renumbering_keeps_every_row() {
+            // `update t set id = id + 1` on a deferrable key moves (1, 0) onto
+            // key 2 before (2, 0) moves to 3. Postgres cannot use a deferrable
+            // key as the replica identity, so old rows are FULL.
+            let deferrable_table = |key_columns: &[i32]| {
+                let column = |name: &str, ordinal: i32| {
+                    let column =
+                        ColumnSchema::new(name.to_owned(), PgType::INT4, -1, ordinal, false);
+                    if key_columns.contains(&ordinal) {
+                        column.with_primary_key(ordinal)
+                    } else {
+                        column
+                    }
+                };
+                let table_schema = Arc::new(
+                    TableSchema::new(
+                        TableId::new(1),
+                        TableName::new("public".to_owned(), "users".to_owned()),
+                        vec![column("id", 1), column("v", 2)],
+                    )
+                    .with_primary_key_deferrable(true),
+                );
+                ReplicatedTableSchema::from_masks(
+                    Arc::clone(&table_schema),
+                    ReplicationMask::all(&table_schema),
+                    IdentityMask::from_bytes(vec![1, 1]),
+                )
+            };
+            let row = |id: i32| TableRow::new(vec![Cell::I32(id), Cell::I32(0)]);
+            let renumber = |from: i32| TableMutation::Update {
+                delete_row: OldTableRow::Full(row(from)),
+                new_row: UpdatedTableRow::Full(row(from + 1)),
+            };
+
+            // A key on `id` alone, and a key covering every column, which
+            // infers as a primary-key identity.
+            for schema in [deferrable_table(&[1]), deferrable_table(&[1, 2])] {
+                let conn = lake_connection(&schema);
+                apply_mutations(
+                    &conn,
+                    &schema,
+                    1,
+                    vec![TableMutation::Insert(row(1)), TableMutation::Insert(row(2))],
+                )
+                .unwrap();
+
+                apply_mutations(&conn, &schema, 3, vec![renumber(1), renumber(2)]).unwrap();
+
+                assert!(rows_match_model(&schema, &read_rows(&conn, &schema), &[row(2), row(3)]));
+            }
         }
 
         #[test]
