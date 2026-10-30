@@ -17,12 +17,13 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     ops::RangeInclusive,
+    sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
 
 use etl::{
     data::{Cell, OldTableRow, TableRow, UpdatedTableRow},
-    event::Event,
+    event::{Event, UpdateEvent},
     schema::{ReplicatedTableSchema, TableId, TableName},
     test_utils::{
         database::test_table_name,
@@ -622,6 +623,8 @@ pub(crate) struct WorkloadHistory {
     committed: Vec<CommittedTx>,
     /// Transaction IDs of rolled-back transactions.
     rolled_back: Vec<u32>,
+    /// Whether a transaction left open across the fault committed.
+    straddle_committed: bool,
 }
 
 /// A transaction left open on its own session across the fault.
@@ -778,6 +781,7 @@ impl<'a> WorkloadRunner<'a> {
             event_count: straddle.event_count,
             phase: TxPhase::AfterFault,
         });
+        self.history.straddle_committed = true;
 
         wait_for_notification(&committed, "delivery of the straddling transaction").await
     }
@@ -971,6 +975,107 @@ pub(crate) fn assert_phase_delivered_once(
     Ok(())
 }
 
+/// Cases a property must pass before it must have seen a partial update.
+///
+/// 300-second runs passed 33 to 50 cases with 14 to 17 partial updates, so
+/// missing every one across this many cases means the TOAST path stopped
+/// firing, not bad luck. Short default budgets pass fewer cases and skip the
+/// check.
+const MIN_CASES_FOR_PARTIAL_UPDATE_CHECK: usize = 30;
+
+/// Counts how often passing cases reached the workload's hard paths.
+///
+/// A property can pass without exercising a path at all; for example, a
+/// large note small enough to be stored inline stops producing partial
+/// updates. The counts make that visible.
+#[derive(Debug, Default)]
+pub(crate) struct WorkloadCoverage {
+    /// Passing cases.
+    cases: AtomicUsize,
+    /// Committed transactions.
+    committed_transactions: AtomicUsize,
+    /// Rolled-back transactions.
+    rolled_back_transactions: AtomicUsize,
+    /// Transactions left open across the fault that committed afterwards.
+    straddle_commits: AtomicUsize,
+    /// Updates delivered as partial rows because of unchanged TOAST.
+    partial_updates: AtomicUsize,
+    /// Updates that changed the primary key.
+    key_changes: AtomicUsize,
+    /// Truncate events.
+    truncates: AtomicUsize,
+    /// Held writes replayed exactly once after a restart.
+    held_replays: AtomicUsize,
+}
+
+impl WorkloadCoverage {
+    /// Records a held write that replayed exactly once after a restart.
+    pub(crate) fn record_held_replay(&self) {
+        self.held_replays.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Prints the counts and checks that partial updates were reached.
+    ///
+    /// # Panics
+    ///
+    /// Panics when at least [`MIN_CASES_FOR_PARTIAL_UPDATE_CHECK`] cases passed
+    /// without a single partial update.
+    pub(crate) fn report(&self, property: &str) {
+        let cases = self.cases.load(Ordering::Relaxed);
+        let partial_updates = self.partial_updates.load(Ordering::Relaxed);
+        println!("property '{property}' coverage: {self:?}");
+
+        assert!(
+            cases < MIN_CASES_FOR_PARTIAL_UPDATE_CHECK || partial_updates > 0,
+            "property '{property}' passed {cases} cases without a partial update: {self:?}"
+        );
+    }
+
+    /// Adds one passing case's history and first deliveries.
+    fn record(&self, history: &WorkloadHistory, first_deliveries: &[Event]) {
+        let add = |counter: &AtomicUsize, count: usize| {
+            counter.fetch_add(count, Ordering::Relaxed);
+        };
+
+        add(&self.cases, 1);
+        add(&self.committed_transactions, history.committed.len());
+        add(&self.rolled_back_transactions, history.rolled_back.len());
+        add(&self.straddle_commits, usize::from(history.straddle_committed));
+
+        for event in first_deliveries {
+            match event {
+                Event::Update(update) => {
+                    if matches!(update.updated_table_row, UpdatedTableRow::Partial(_)) {
+                        add(&self.partial_updates, 1);
+                    }
+                    if update_changes_key(update) {
+                        add(&self.key_changes, 1);
+                    }
+                }
+                Event::Truncate(_) => add(&self.truncates, 1),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Returns whether an update moved its row to a new primary key.
+///
+/// The primary key is the first column of every workload row and key image,
+/// and it is never unchanged TOAST, so it is always the first present value.
+fn update_changes_key(update: &UpdateEvent) -> bool {
+    let old_id = match &update.old_table_row {
+        Some(OldTableRow::Full(row) | OldTableRow::Key(row)) => row.values().first(),
+        None => return false,
+    };
+    let new_id = match &update.updated_table_row {
+        UpdatedTableRow::Full(row) => row.values().first(),
+        UpdatedTableRow::Partial(row) => row.values().first(),
+    };
+
+    old_id != new_id
+}
+
 /// Checks destination history against the executed workload and source.
 ///
 /// Every committed transaction must be delivered with exactly its planned
@@ -979,7 +1084,7 @@ pub(crate) fn assert_phase_delivered_once(
 /// source position order. Rolled-back and unknown transactions must not
 /// appear. Copied rows plus the first delivery of each event must equal the
 /// committed source rows of every table; replays are checked for identity
-/// instead of being applied again.
+/// instead of being applied again. Passing cases are added to `coverage`.
 pub(crate) fn assert_workload_converged(
     tables: &WorkloadTables,
     copied_rows: &HashMap<TableId, Vec<TableRow>>,
@@ -987,6 +1092,7 @@ pub(crate) fn assert_workload_converged(
     source: &[BTreeMap<i64, WorkloadRecord>; TABLE_COUNT],
     history: &WorkloadHistory,
     deliveries: impl Fn(TxPhase) -> RangeInclusive<usize>,
+    coverage: &WorkloadCoverage,
 ) -> Result<(), TestCaseError> {
     let mut commit_lsns = BTreeMap::<u32, PgLsn>::new();
     for event in events {
@@ -1094,6 +1200,8 @@ pub(crate) fn assert_workload_converged(
             table
         );
     }
+
+    coverage.record(history, &first_deliveries);
 
     Ok(())
 }

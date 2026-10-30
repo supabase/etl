@@ -30,9 +30,10 @@ use rand::random;
 use tokio_postgres::{Client, types::PgLsn};
 
 use crate::support::cdc_workload::{
-    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadDestination,
-    WorkloadHistory, WorkloadRunner, WorkloadTables, assert_workload_converged,
-    create_workload_tables, read_source_rows, wait_for_notification, workloads,
+    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
+    WorkloadDestination, WorkloadHistory, WorkloadRunner, WorkloadTables,
+    assert_workload_converged, create_workload_tables, read_source_rows, wait_for_notification,
+    workloads,
 };
 
 /// Returns the current WAL write position of the source.
@@ -186,7 +187,10 @@ async fn run_roulette_workload(
 }
 
 /// Runs one generated workload and fault schedule to convergence.
-async fn run_walsender_roulette_case(case: &WalsenderRouletteCase) -> Result<(), TestCaseError> {
+async fn run_walsender_roulette_case(
+    case: &WalsenderRouletteCase,
+    coverage: &WorkloadCoverage,
+) -> Result<(), TestCaseError> {
     let database = spawn_source_database().await;
     let tables = create_workload_tables(&database, &case.workload).await;
 
@@ -235,7 +239,15 @@ async fn run_walsender_roulette_case(case: &WalsenderRouletteCase) -> Result<(),
     let copied_rows = destination.get_table_rows().await;
 
     // A walsender disconnect may replay any unconfirmed suffix once.
-    assert_workload_converged(&tables, &copied_rows, &events, &source, &history, |_| 1..=2)
+    assert_workload_converged(
+        &tables,
+        &copied_rows,
+        &events,
+        &source,
+        &history,
+        |_| 1..=2,
+        coverage,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -819,9 +831,12 @@ async fn apply_disconnect_at_randomized_positions_converges_without_loss() {
     init_test_tracing();
 
     let strategy = walsender_roulette_cases();
-    run_expensive_property("walsender roulette", &strategy, |case| {
-        block_on(run_walsender_roulette_case(case))
+    let coverage = WorkloadCoverage::default();
+    let property = "walsender roulette";
+    run_expensive_property(property, &strategy, |case| {
+        block_on(run_walsender_roulette_case(case, &coverage))
     });
+    coverage.report(property);
 }
 
 /// A held acknowledgement cannot consume the entire process termination grace.

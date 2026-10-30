@@ -21,8 +21,8 @@ use rand::random;
 use tokio_postgres::Client;
 
 use crate::support::cdc_workload::{
-    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadRunner,
-    assert_phase_delivered_once, assert_workload_converged, create_workload_tables,
+    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
+    WorkloadRunner, assert_phase_delivered_once, assert_workload_converged, create_workload_tables,
     notify_on_commit, read_source_rows, wait_for_notification, workloads,
 };
 
@@ -101,7 +101,10 @@ async fn wait_for_sync_slot_removal(
 }
 
 /// Runs one generated workload and dirty-restart schedule to convergence.
-async fn run_dirty_restart_case(case: &DirtyRestartCase) -> Result<(), TestCaseError> {
+async fn run_dirty_restart_case(
+    case: &DirtyRestartCase,
+    coverage: &WorkloadCoverage,
+) -> Result<(), TestCaseError> {
     let database = spawn_source_database().await;
     let tables = create_workload_tables(&database, &case.workload).await;
     let table_ids = *tables.ids();
@@ -303,12 +306,14 @@ async fn run_dirty_restart_case(case: &DirtyRestartCase) -> Result<(), TestCaseE
             TxPhase::BeforeFault | TxPhase::Fault => 1..=2,
             TxPhase::AfterFault => 1..=1,
         },
+        coverage,
     )?;
 
     // The held transaction was never acknowledged, so the restart must replay
     // all of it exactly once, however its events were split across writes.
     if matches!(case.crash_timing, CrashTiming::WhileWriteResponseHeld) {
         assert_phase_delivered_once(&events[pre_restart_event_count..], &history, TxPhase::Fault)?;
+        coverage.record_held_replay();
     }
 
     Ok(())
@@ -319,7 +324,10 @@ async fn postgres_store_dirty_restart_at_randomized_positions_converges_without_
     init_test_tracing();
 
     let strategy = dirty_restart_cases();
-    run_expensive_property("Postgres store dirty restart convergence", &strategy, |case| {
-        block_on(run_dirty_restart_case(case))
+    let coverage = WorkloadCoverage::default();
+    let property = "Postgres store dirty restart convergence";
+    run_expensive_property(property, &strategy, |case| {
+        block_on(run_dirty_restart_case(case, &coverage))
     });
+    coverage.report(property);
 }
