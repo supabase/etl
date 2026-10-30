@@ -3,9 +3,12 @@ use std::sync::Arc;
 use etl::{
     data::{Cell, TableRow},
     destination::{Destination, DestinationTableMetadata, WriteEventsDurability},
-    event::{Event, EventType, InsertEvent, TruncateEvent},
+    event::{Event, EventType, InsertEvent, RelationEvent, TruncateEvent},
     pipeline::PipelineId,
-    schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
+    schema::{
+        ColumnSchema, PgLsn, ReplicatedTableSchema, SnapshotId, TableId, TableName, TableSchema,
+        Type,
+    },
     store::{MemoryStore, SchemaStore, StateStore},
     test_utils::{
         database::spawn_source_database,
@@ -32,6 +35,111 @@ use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
 
 use crate::support::iceberg::read_all_rows;
+
+/// A schema refresh flushes earlier rows, advances durable metadata, and stays
+/// idempotent across restart without permitting actual schema evolution.
+#[tokio::test(flavor = "multi_thread")]
+async fn unchanged_relation_refresh_preserves_rows_and_replay_guards() {
+    let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
+    let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
+    let client = IcebergClient::new_with_rest_catalog(
+        get_catalog_url(),
+        warehouse_name,
+        create_minio_props(),
+    )
+    .await
+    .unwrap();
+    let namespace = "refresh_test";
+    let store = MemoryStore::new();
+    let schema = store
+        .store_table_schema(TableSchema::new(
+            TableId::new(1),
+            TableName::new("public".to_owned(), "unchanged_refresh".to_owned()),
+            vec![
+                ColumnSchema::new("id".to_owned(), Type::INT4, -1, 1, false)
+                    .with_primary_key(1)
+                    .with_default_expression("2".to_owned())
+                    .with_missing_value_expression(Some("1".to_owned())),
+            ],
+        ))
+        .await
+        .unwrap();
+    let old = ReplicatedTableSchema::all(Arc::clone(&schema));
+    let mut newer = (*schema).clone();
+    newer.snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(10));
+    // A source heap rewrite can clear the hint without changing its schema.
+    newer.column_schemas[0].missing_value_expression = Some("null".to_owned());
+    let new = ReplicatedTableSchema::all(store.store_table_schema(newer).await.unwrap());
+    let destination = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    invoke_write_table_rows(&destination, &old, Vec::new()).await.unwrap();
+    let relation = |schema: &ReplicatedTableSchema| {
+        Event::Relation(RelationEvent { replicated_table_schema: schema.clone() })
+    };
+    invoke_write_events(
+        &destination,
+        WriteEventsDurability::RequireDurable,
+        vec![
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(20),
+                tx_ordinal: 1,
+                replicated_table_schema: old.clone(),
+                table_row: TableRow::new(vec![Cell::I32(1)]),
+            }),
+            relation(&new),
+            relation(&new),
+            Event::Insert(InsertEvent {
+                commit_lsn: PgLsn::from(20),
+                tx_ordinal: 3,
+                replicated_table_schema: new.clone(),
+                table_row: TableRow::new(vec![Cell::I32(2)]),
+            }),
+        ],
+    )
+    .await
+    .unwrap();
+    let metadata = store.get_destination_table_metadata(old.id()).await.unwrap().unwrap();
+    assert_eq!(metadata.snapshot_id(), new.inner().snapshot_id);
+    assert!(metadata.is_applied());
+    let table = table_name_to_iceberg_table_name(new.name(), true).unwrap();
+    let rows = read_all_rows(&client, namespace.to_owned(), table.clone()).await;
+    assert_eq!(rows.len(), 2);
+    for id in [1, 2] {
+        assert!(rows.iter().any(|row| row.values()[0] == Cell::I32(id)));
+    }
+
+    let restarted = IcebergDestination::new(
+        client.clone(),
+        DestinationNamespace::Single(namespace.to_owned()),
+        store.clone(),
+    );
+    invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, vec![relation(&new)])
+        .await
+        .unwrap();
+    // An older relation is a replay marker and leaves metadata unchanged.
+    invoke_write_events(&restarted, WriteEventsDurability::RequireDurable, vec![relation(&old)])
+        .await
+        .unwrap();
+    let mut changed = new.inner().clone();
+    changed.snapshot_id = SnapshotId::new(PgLsn::from(30), PgLsn::from(25));
+    changed.column_schemas.push(ColumnSchema::new("extra".to_owned(), Type::INT4, -1, 2, true));
+    let error = invoke_write_events(
+        &restarted,
+        WriteEventsDurability::RequireDurable,
+        vec![relation(&ReplicatedTableSchema::all(Arc::new(changed)))],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.kind(), etl::error::ErrorKind::CorruptedTableSchema);
+    assert_eq!(store.get_destination_table_metadata(old.id()).await.unwrap(), Some(metadata));
+
+    client.drop_table_if_exists(namespace, table).await.unwrap();
+    client.drop_namespace(namespace).await.unwrap();
+    lakekeeper_client.drop_warehouse(warehouse_id).await.unwrap();
+}
 
 /// Concurrent colliding writes have only one owner, and after restart all
 /// conflicting write and recovery paths leave that owner's data intact.

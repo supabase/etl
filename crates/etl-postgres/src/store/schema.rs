@@ -10,7 +10,7 @@ use tokio_postgres::types::Type as PgType;
 
 use crate::schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema};
 
-/// Columns per INSERT, capped at 2,048 bind parameters per batch.
+/// Columns per INSERT, capped at 2,304 bind parameters per batch.
 pub const MAX_COLUMNS_PER_INSERT: usize = 256;
 
 macro_rules! define_type_mappings {
@@ -28,7 +28,11 @@ macro_rules! define_type_mappings {
                 $(
                     $string_name => PgType::$pg_type,
                 )*
-                _ => PgType::TEXT, // Fallback for unknown types
+                // Older writers omitted these built-in types from the mapping.
+                // Custom source OIDs are normalized to TEXT before storage.
+                "UNKNOWN(pg_ndistinct)" => PgType::PG_NDISTINCT,
+                "UNKNOWN(pg_dependencies)" => PgType::PG_DEPENDENCIES,
+                _ => PgType::TEXT,
             }
         }
 
@@ -133,6 +137,8 @@ define_type_mappings! {
     PG_BRIN_BLOOM_SUMMARY => "PG_BRIN_BLOOM_SUMMARY",
     PG_BRIN_MINMAX_MULTI_SUMMARY => "PG_BRIN_MINMAX_MULTI_SUMMARY",
     PG_MCV_LIST => "PG_MCV_LIST",
+    PG_NDISTINCT => "PG_NDISTINCT",
+    PG_DEPENDENCIES => "PG_DEPENDENCIES",
     PG_SNAPSHOT => "PG_SNAPSHOT",
     XID8 => "XID8",
 
@@ -310,7 +316,8 @@ where
         r#"
             insert into etl.table_columns
             (table_schema_id, column_name, column_type, type_modifier, nullable,
-             ordinal_position, primary_key_ordinal_position, default_expression)
+             ordinal_position, primary_key_ordinal_position, default_expression,
+             missing_value_expression)
             "#,
     );
     query.push_values(columns, |mut row, column| {
@@ -321,7 +328,8 @@ where
             .push_bind(column.nullable)
             .push_bind(column.ordinal_position)
             .push_bind(column.primary_key_ordinal_position)
-            .push_bind(&column.default_expression);
+            .push_bind(&column.default_expression)
+            .push_bind(&column.missing_value_expression);
     });
     query.build().persistent(false).execute(executor).await?;
 
@@ -354,7 +362,8 @@ where
             tc.nullable,
             tc.ordinal_position,
             tc.primary_key_ordinal_position,
-            tc.default_expression
+            tc.default_expression,
+            tc.missing_value_expression
         from etl.table_schemas ts
         left join etl.table_columns tc on ts.id = tc.table_schema_id
         where ts.pipeline_id = $1
@@ -548,53 +557,43 @@ fn parse_column_schema(row: &PgRow) -> ColumnSchema {
     )
     .with_primary_key_ordinal_position(primary_key_ordinal_position)
     .with_default_expression_option(default_expression)
+    .with_missing_value_expression(row.get("missing_value_expression"))
 }
 
 #[cfg(test)]
 mod tests {
-    use tokio_postgres::types::Type;
+    use tokio_postgres::types::{Kind, Type};
 
-    use super::*;
+    use crate::store::schema::{
+        get_test_type_mappings, postgres_type_to_string, string_to_postgres_type,
+    };
 
+    /// Every persisted built-in type retains its identity on reload.
     #[test]
     fn type_string_conversion() {
-        let test_types = get_test_type_mappings();
-
-        // Test type to string conversion
-        for (pg_type, expected_string) in &test_types {
-            let result = postgres_type_to_string(pg_type);
-            assert_eq!(result, *expected_string, "Failed for type: {pg_type:?}");
+        for (pg_type, type_string) in get_test_type_mappings() {
+            assert_eq!(postgres_type_to_string(&pg_type), type_string);
+            assert_eq!(string_to_postgres_type(type_string), pg_type);
         }
 
-        // Test string to type conversion
-        for (expected_type, type_string) in &test_types {
-            let result = string_to_postgres_type(type_string);
-            assert_eq!(result, *expected_type, "Failed for string: {type_string}");
-        }
-
-        // Test roundtrip conversion
-        for (original_type, _) in &test_types {
-            let type_string = postgres_type_to_string(original_type);
-            let converted_back = string_to_postgres_type(&type_string);
-            assert_eq!(converted_back, *original_type, "Roundtrip failed for: {original_type:?}");
-        }
-
-        // Test unknown type fallback
+        // Previously unmapped built-ins must retain their saved snapshot types.
+        assert_eq!(string_to_postgres_type("UNKNOWN(pg_ndistinct)"), Type::PG_NDISTINCT);
+        assert_eq!(string_to_postgres_type("UNKNOWN(pg_dependencies)"), Type::PG_DEPENDENCIES);
         assert_eq!(string_to_postgres_type("UNKNOWN_TYPE"), Type::TEXT);
+        assert_eq!(string_to_postgres_type("UNKNOWN(custom)"), Type::TEXT);
+    }
 
-        // Test array and range syntax specifically
-        assert_eq!(string_to_postgres_type("INT4_ARRAY"), Type::INT4_ARRAY);
-        assert_eq!(string_to_postgres_type("TEXT_ARRAY"), Type::TEXT_ARRAY);
-        assert_eq!(postgres_type_to_string(&Type::BOOL_ARRAY), "BOOL_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::BYTEA_ARRAY), "BYTEA_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::TIME_ARRAY), "TIME_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::UUID_ARRAY), "UUID_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::MONEY_ARRAY), "MONEY_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::INTERVAL_ARRAY), "INTERVAL_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::INET_ARRAY), "INET_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::INT4_RANGE_ARRAY), "INT4_RANGE_ARRAY");
-        assert_eq!(postgres_type_to_string(&Type::NUMMULTI_RANGE_ARRAY), "NUMMULTI_RANGE_ARRAY");
-        assert_eq!(string_to_postgres_type("INT4_RANGE"), Type::INT4_RANGE);
-        assert_eq!(postgres_type_to_string(&Type::DATE_RANGE), "DATE_RANGE");
+    /// Relation validation compares stored types with decoded built-in OIDs,
+    /// so every built-in column type must survive a store round trip.
+    #[test]
+    fn every_builtin_column_type_round_trips() {
+        // PostgreSQL assigns built-in OIDs below FirstNormalObjectId (16384).
+        // Pseudo-types, including `unknown`, cannot be table column types.
+        for typ in (0..16_384)
+            .filter_map(Type::from_oid)
+            .filter(|typ| !matches!(typ.kind(), Kind::Pseudo) && *typ != Type::UNKNOWN)
+        {
+            assert_eq!(string_to_postgres_type(&postgres_type_to_string(&typ)), typ);
+        }
     }
 }

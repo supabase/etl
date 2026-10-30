@@ -42,7 +42,10 @@ use crate::{
             drop_current_view_sql, supports_column_default, trailing_cdc_columns,
         },
     },
-    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        is_stale_relation_replay,
+    },
     table_name::try_stringify_table_name,
 };
 
@@ -205,14 +208,18 @@ fn clickhouse_add_column_definition(
         return (destination_column_schema, true);
     }
 
+    destination_column_schema.default_expression =
+        after_column_schema.initial_default_expression().map(ToOwned::to_owned);
     let preserve_not_null = !after_column_schema.nullable
-        && after_column_schema.default_expression.as_deref().is_some_and(|default_expression| {
-            supports_column_default(
-                default_expression,
-                &after_column_schema.typ,
-                after_column_schema.modifier,
-            )
-        });
+        && destination_column_schema.default_expression.as_deref().is_some_and(
+            |default_expression| {
+                supports_column_default(
+                    default_expression,
+                    &after_column_schema.typ,
+                    after_column_schema.modifier,
+                )
+            },
+        );
     (destination_column_schema, !preserve_not_null)
 }
 
@@ -1588,9 +1595,13 @@ where
         let current_snapshot_id = metadata.snapshot_id();
         let current_replication_mask = metadata.replication_mask().clone();
 
-        // At-least-once delivery can replay an older relation or an
-        // equal-snapshot mask from a deployment that missed its logical schema
-        // message. Neither carries ordering sufficient to drive ClickHouse DDL.
+        if is_stale_relation_replay("ClickHouse", table_id, current_snapshot_id, new_snapshot_id) {
+            return Ok(());
+        }
+
+        // An equal-snapshot mask from a deployment that missed its logical
+        // schema message carries no ordering sufficient to drive ClickHouse
+        // DDL.
         ensure_relation_schema_transition(
             "ClickHouse",
             table_id,
@@ -1649,6 +1660,28 @@ where
                 new_schema,
             )?;
         }
+        // The existing layout remains valid when only source metadata changes.
+        if plan.diff().is_empty() && current_schema.name() == new_schema.name() {
+            let cached = self.table_cache.write().remove(&table_id);
+            let updated_metadata = DestinationTableMetadata::new_applied(
+                clickhouse_table_name.to_owned(),
+                new_snapshot_id,
+                new_replication_mask,
+            );
+            self.store.store_destination_table_metadata(table_id, updated_metadata.clone()).await?;
+            if let Some(cached) = cached {
+                self.table_cache.write().insert(
+                    table_id,
+                    Arc::new(ClickHouseTableCacheEntry {
+                        table_name: cached.table_name.clone(),
+                        metadata: updated_metadata,
+                        layout: Arc::clone(&cached.layout),
+                    }),
+                );
+            }
+            return Ok(());
+        }
+
         // Applied metadata proves the table is at the current layout, so the
         // current endpoint alone identifies a closed-alpha MergeTree table.
         // Reject it before any cache, metadata, or DDL mutation so the operator
@@ -2813,6 +2846,7 @@ mod tests {
         schema::{
             ColumnSchema, IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema,
         },
+        store::MemoryStore,
     };
 
     use super::*;
@@ -2993,19 +3027,105 @@ mod tests {
             .expect("fence acquisition deadlocked");
     }
 
-    #[test]
-    fn replication_mask_addition_is_nullable_and_omits_source_default() {
-        let source_column = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
-            .with_default_expression("42".to_owned());
-
-        let (destination_column, force_nullable) = clickhouse_add_column_definition(
-            &source_column,
-            ColumnPresenceChangeReason::ReplicationMask,
+    /// A source-only change retains the checked layout while updating its
+    /// endpoint, without requiring a ClickHouse connection.
+    #[tokio::test]
+    async fn unchanged_relation_refresh_updates_cached_endpoint_without_remote_work() {
+        let store = MemoryStore::new();
+        let schema = schema_for_table(1);
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        let table_name = "public_table_1".to_owned();
+        let metadata = DestinationTableMetadata::new_applied(
+            table_name.clone(),
+            schema.inner().snapshot_id,
+            schema.replication_mask().clone(),
+        );
+        store.store_destination_table_metadata(schema.id(), metadata.clone()).await.unwrap();
+        let destination = ClickHouseDestination::new(
+            Url::parse("http://127.0.0.1:1").unwrap(),
+            "default",
+            None,
+            "default",
+            ClickHouseInserterConfig { engine: ClickHouseEngine::MergeTree, ..Default::default() },
+            ClickHouseClientConfig::default(),
+            store.clone(),
+        )
+        .unwrap();
+        let layout = Arc::new(RowBinaryLayout::new(&[
+            clickhouse_column("id", "Int32"),
+            clickhouse_column(CDC_OPERATION_COLUMN_NAME, "String"),
+            clickhouse_column(CDC_LSN_COLUMN_NAME, "UInt64"),
+            clickhouse_column(CDC_TX_ORDINAL_COLUMN_NAME, "UInt64"),
+        ]));
+        destination.writer.table_cache.write().insert(
+            schema.id(),
+            Arc::new(ClickHouseTableCacheEntry {
+                table_name,
+                metadata,
+                layout: Arc::clone(&layout),
+            }),
+        );
+        let mut refreshed = schema.inner().clone();
+        refreshed.snapshot_id = test_snapshot_id(20, 10);
+        refreshed.column_schemas.push(ColumnSchema::new(
+            "unpublished".to_owned(),
+            Type::INT4,
+            -1,
+            2,
+            true,
+        ));
+        let refreshed = ReplicatedTableSchema::from_mask(
+            Arc::new(refreshed),
+            ReplicationMask::from_bytes(vec![1, 0]),
         );
 
-        assert!(force_nullable);
-        assert_eq!(destination_column.default_expression, None);
-        assert_eq!(clickhouse_column_type(&destination_column, force_nullable), "Nullable(Int32)");
+        destination.writer.handle_relation_event(&refreshed).await.unwrap();
+
+        let metadata = store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+        assert!(metadata.is_applied());
+        assert_eq!(metadata.snapshot_id(), refreshed.inner().snapshot_id);
+        assert_eq!(metadata.replication_mask(), refreshed.replication_mask());
+        let (_, refreshed_layout) =
+            destination.writer.prepare_table_for_writes(&refreshed).await.unwrap();
+        assert!(Arc::ptr_eq(&layout, &refreshed_layout));
+        let error = destination.writer.prepare_table_for_writes(&schema).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
+    }
+
+    /// Only a physical addition with a supported historical value can retain
+    /// source NOT NULL; publication reveals do not populate existing rows.
+    #[test]
+    fn column_additions_preserve_missing_value_and_nullability() {
+        for (reason, missing, expected_default, expected_type) in [
+            (ColumnPresenceChangeReason::TableSchema, "1", Some("1"), "Int32"),
+            (ColumnPresenceChangeReason::TableSchema, "null", None, "Nullable(Int32)"),
+            (ColumnPresenceChangeReason::ReplicationMask, "1", None, "Nullable(Int32)"),
+        ] {
+            let source = ColumnSchema::new("score".to_owned(), Type::INT4, -1, 1, false)
+                .with_default_expression("2".to_owned())
+                .with_missing_value_expression(Some(missing.to_owned()));
+            let (column, force_nullable) = clickhouse_add_column_definition(&source, reason);
+
+            assert_eq!(column.default_expression.as_deref(), expected_default);
+            assert_eq!(clickhouse_column_type(&column, force_nullable), expected_type);
+        }
+    }
+
+    /// Historical defaults must pass the source modifier guard before an
+    /// added column can retain NOT NULL, independently of its future default.
+    #[test]
+    fn column_addition_checks_historical_default_with_type_modifier() {
+        for (missing, force_nullable) in [("'abc'::text", false), ("'abcd'::text", true)] {
+            let source = ColumnSchema::new("code".to_owned(), Type::VARCHAR, 7, 1, false)
+                .with_default_expression("'future'::text".to_owned())
+                .with_missing_value_expression(Some(missing.to_owned()));
+
+            let (column, actual_force_nullable) =
+                clickhouse_add_column_definition(&source, ColumnPresenceChangeReason::TableSchema);
+
+            assert_eq!(column.default_expression.as_deref(), Some(missing));
+            assert_eq!(actual_force_nullable, force_nullable);
+        }
     }
 
     /// A publication-added array has no historical values, so it is added

@@ -95,7 +95,7 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        warn_unsupported_column_type_change,
+        is_stale_relation_replay, warn_unsupported_column_type_change,
     },
     retry::{classified_error, classified_error_with_detail},
 };
@@ -1181,6 +1181,37 @@ fn ensure_ducklake_schema_plan_recoverable(
     Ok(())
 }
 
+/// Renders the final default after a physical addition or its replay.
+fn plan_ducklake_column_default(
+    table_name: &DuckLakeTableName,
+    column: &ColumnSchema,
+) -> Option<DuckLakeSchemaDdlStatement> {
+    let (sql, error_description) = match column.default_expression.as_deref() {
+        Some(expression) => {
+            let Some(sql) = build_set_default_sql_ducklake(
+                table_name,
+                &column.name,
+                &column.typ,
+                column.modifier,
+                expression,
+            ) else {
+                warn!(
+                    table_name = %table_name,
+                    column_name = %column.name,
+                    "skipping unsupported source column default for ducklake"
+                );
+                return None;
+            };
+            (sql, "DuckLake alter table set default failed")
+        }
+        None => (
+            build_drop_default_sql_ducklake(table_name, &column.name),
+            "DuckLake alter table drop default failed",
+        ),
+    };
+    Some(DuckLakeSchemaDdlStatement { sql, error_description })
+}
+
 /// Renders a shared plan using live DuckLake name and nullability state.
 fn plan_ducklake_schema_ddl_with_nullability(
     table_name: &DuckLakeTableName,
@@ -1296,6 +1327,18 @@ fn plan_ducklake_schema_ddl_with_nullability(
                     );
                 }
 
+                if *reason == ColumnPresenceChangeReason::ReplicationMask
+                    && after_column_schema.default_expression.is_some()
+                {
+                    warn!(
+                        table_name = %table_name,
+                        column_name = %after_column_schema.name,
+                        "not applying the source default to a publication-added ducklake \
+                         column; the destination schema will differ from the logical source \
+                         schema"
+                    );
+                }
+
                 if find_ducklake_column(&column_names, &after_column_schema.name).is_some() {
                     debug!(
                         table = %table_name,
@@ -1303,37 +1346,12 @@ fn plan_ducklake_schema_ddl_with_nullability(
                         "ducklake add column skipped because destination column already exists"
                     );
 
-                    if *reason == ColumnPresenceChangeReason::ReplicationMask {
-                        if after_column_schema.default_expression.is_some() {
-                            warn!(
-                                table_name = %table_name,
-                                column_name = %after_column_schema.name,
-                                "not applying the source default to a publication-added ducklake \
-                                 column; the destination schema will differ from the logical source \
-                                 schema"
-                            );
-                        }
-                    } else if let Some(default_expression) =
-                        after_column_schema.default_expression.as_deref()
+                    if *reason == ColumnPresenceChangeReason::TableSchema
+                        && (after_column_schema.default_expression.is_some()
+                            || after_column_schema.initial_default_expression().is_some())
                     {
-                        let Some(sql) = build_set_default_sql_ducklake(
-                            table_name,
-                            &after_column_schema.name,
-                            &after_column_schema.typ,
-                            after_column_schema.modifier,
-                            default_expression,
-                        ) else {
-                            warn!(
-                                table_name = %table_name,
-                                column_name = %after_column_schema.name,
-                                "skipping unsupported source column default for ducklake"
-                            );
-                            continue;
-                        };
-                        statements.push(DuckLakeSchemaDdlStatement {
-                            sql,
-                            error_description: "DuckLake alter table set default failed",
-                        });
+                        statements
+                            .extend(plan_ducklake_column_default(table_name, after_column_schema));
                     }
 
                     continue;
@@ -1342,20 +1360,21 @@ fn plan_ducklake_schema_ddl_with_nullability(
                 let mut destination_column_schema = after_column_schema.clone();
                 if *reason == ColumnPresenceChangeReason::ReplicationMask {
                     destination_column_schema.default_expression = None;
-                    if after_column_schema.default_expression.is_some() {
-                        warn!(
-                            table_name = %table_name,
-                            column_name = %after_column_schema.name,
-                            "not applying the source default to a publication-added ducklake \
-                             column; the destination schema will differ from the logical source \
-                             schema"
-                        );
-                    }
+                } else {
+                    destination_column_schema.default_expression =
+                        after_column_schema.initial_default_expression().map(ToOwned::to_owned);
                 }
                 statements.push(DuckLakeSchemaDdlStatement {
                     sql: build_add_column_sql_ducklake(table_name, &destination_column_schema),
                     error_description: "DuckLake alter table add column failed",
                 });
+                if *reason == ColumnPresenceChangeReason::TableSchema
+                    && destination_column_schema.default_expression
+                        != after_column_schema.default_expression
+                {
+                    statements
+                        .extend(plan_ducklake_column_default(table_name, after_column_schema));
+                }
                 column_names.push(after_column_schema.name.clone());
                 nullable_column_names.insert(after_column_schema.name.clone());
             }
@@ -2757,13 +2776,7 @@ where
         let current_snapshot_id = metadata.snapshot_id();
         let current_replication_mask = metadata.replication_mask().clone();
 
-        if new_snapshot_id < current_snapshot_id {
-            info!(
-                table_id = %table_id,
-                applied_snapshot_id = %current_snapshot_id,
-                replayed_snapshot_id = %new_snapshot_id,
-                "ducklake stale schema relation replay skipped"
-            );
+        if is_stale_relation_replay("DuckLake", table_id, current_snapshot_id, new_snapshot_id) {
             return Ok(());
         }
 
@@ -2782,7 +2795,7 @@ where
         )?;
 
         if current_snapshot_id == new_snapshot_id {
-            info!(
+            debug!(
                 table_id = %table_id,
                 snapshot_id = %new_snapshot_id,
                 replication_mask = %new_replication_mask,
@@ -2813,6 +2826,22 @@ where
         );
         let plan = current_schema
             .plan_schema_change(new_replicated_table_schema, DUCKLAKE_COLUMN_NAME_MAPPING)?;
+        // Retain the applied table state when its replicated definition is
+        // unchanged, including source-only DDL and missing-value hint updates.
+        if plan.diff().is_empty() && current_schema.name() == new_replicated_table_schema.name() {
+            self.store
+                .store_destination_table_metadata(
+                    table_id,
+                    DestinationTableMetadata::new_applied(
+                        metadata.table_id().to_owned(),
+                        new_snapshot_id,
+                        new_replication_mask,
+                    ),
+                )
+                .await?;
+            return Ok(());
+        }
+
         self.cleanup_tombstone_columns_after_applied(&table_name, &current_schema).await;
 
         let updated_metadata = DestinationTableMetadata::new_applied(
@@ -4422,10 +4451,10 @@ mod tests {
         data::{Cell, PartialTableRow, TableRow},
         destination::{TableCopyAttemptId, TableCopyBatchId},
         schema::{
-            ColumnMetadataChange, ColumnSchema, IdentityMask, ReplicationMask, SchemaDiff,
+            ColumnMetadataChange, ColumnSchema, IdentityMask, PgLsn, ReplicationMask, SchemaDiff,
             TableSchema, Type as PgType,
         },
-        store::{MemoryStore, SchemaStore},
+        store::{MemoryStore, SchemaStore, StateStore},
     };
     use etl_maintenance::ducklake::flush_table_inlined_data;
     use etl_postgres::{
@@ -5088,6 +5117,46 @@ mod tests {
     }
 
     #[test]
+    fn plan_ducklake_schema_ddl_restores_future_default_after_addition_and_replay() {
+        for (future_default, restoration) in [
+            (
+                Some("2"),
+                r#"alter table "lake"."public"."users" alter column "score" set default 2"#,
+            ),
+            (None, r#"alter table "lake"."public"."users" alter column "score" drop default"#),
+        ] {
+            let column = ColumnSchema::new("score".to_owned(), PgType::INT4, -1, 2, true)
+                .with_default_expression_option(future_default.map(ToOwned::to_owned))
+                .with_missing_value_expression(Some("1".to_owned()));
+            let shared_plan = shared_schema_plan(
+                SchemaDiff::new(vec![column], Vec::new(), Vec::new()),
+                ["id"],
+                ["id", "score"],
+            );
+            for already_added in [false, true] {
+                let names = if already_added { vec!["id", "score"] } else { vec!["id"] };
+                let plan = plan_ducklake_schema_ddl(
+                    &ducklake_table_name(),
+                    names.into_iter().map(ToOwned::to_owned).collect(),
+                    &shared_plan,
+                )
+                .unwrap();
+                let sql: Vec<_> =
+                    plan.statements.iter().map(|statement| statement.sql.as_str()).collect();
+                let expected = if already_added {
+                    vec![restoration]
+                } else {
+                    vec![
+                        r#"alter table "lake"."public"."users" add column "score" integer default 1"#,
+                        restoration,
+                    ]
+                };
+                assert_eq!(sql, expected);
+            }
+        }
+    }
+
+    #[test]
     fn plan_ducklake_schema_ddl_adds_publication_column_nullable_without_default() {
         let table_schema = Arc::new(TableSchema::new(
             TableId::new(1),
@@ -5675,6 +5744,59 @@ mod tests {
 
     mod postgres_backed {
         use super::*;
+
+        /// A source-only change advances metadata even when DuckLake pools are
+        /// unavailable, because the physical destination needs no changes.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn unchanged_relation_refresh_avoids_catalog_work() {
+            let dir = TempDir::new().unwrap();
+            let data = path_to_file_url(&dir.path().join("data"));
+            let (_catalog_database, catalog) = create_catalog_database().await;
+            let store = MemoryStore::new();
+            let schema = ReplicatedTableSchema::all(
+                store.store_table_schema(make_schema(1, "public", "users")).await.unwrap(),
+            );
+            let table_name = table_name_to_ducklake_table_name(schema.name()).unwrap();
+            store
+                .store_destination_table_metadata(
+                    schema.id(),
+                    DestinationTableMetadata::new_applied(
+                        table_name.to_metadata_id().unwrap(),
+                        schema.inner().snapshot_id,
+                        schema.replication_mask().clone(),
+                    ),
+                )
+                .await
+                .unwrap();
+            let destination =
+                DuckLakeDestination::new(catalog, data, 1, None, None, None, None, store.clone())
+                    .await
+                    .unwrap();
+            drop(destination.pools.invalidate());
+            destination.applied_tables.lock().insert(table_name.clone());
+            let mut refreshed = schema.inner().clone();
+            refreshed.snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(10));
+            refreshed.column_schemas.push(ColumnSchema::new(
+                "unpublished".to_owned(),
+                PgType::INT4,
+                -1,
+                3,
+                true,
+            ));
+            let refreshed = ReplicatedTableSchema::from_mask(
+                Arc::new(refreshed),
+                ReplicationMask::from_bytes(vec![1, 1, 0]),
+            );
+
+            destination.handle_relation_event(&refreshed).await.unwrap();
+
+            let metadata =
+                store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+            assert!(metadata.is_applied());
+            assert_eq!(metadata.snapshot_id(), refreshed.inner().snapshot_id);
+            assert_eq!(metadata.replication_mask(), refreshed.replication_mask());
+            assert!(destination.applied_tables.lock().contains(&table_name));
+        }
 
         /// DuckDB's Postgres extension writes the catalog connection string
         /// into a catalog outage error; the converted error must not expose

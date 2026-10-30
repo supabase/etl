@@ -42,7 +42,7 @@ use crate::{
     },
     recovery::{
         ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
-        warn_unsupported_column_type_change,
+        is_stale_relation_replay, warn_unsupported_column_type_change,
     },
     table_name::try_stringify_table_name,
 };
@@ -918,10 +918,14 @@ where
         let current_replication_mask = metadata.replication_mask().clone();
         let new_replication_mask = new_replicated_table_schema.replication_mask().clone();
 
+        if is_stale_relation_replay("BigQuery", table_id, current_snapshot_id, new_snapshot_id) {
+            return Ok(());
+        }
+
         // BigQuery CDC sequence numbers order row mutations, but they do not
         // make destructive or ambiguously ordered DDL safe. A relation has no
-        // DML sequence number of its own, so reject older snapshots and
-        // equal-snapshot mask conflicts before computing a diff.
+        // DML sequence number of its own, so reject equal-snapshot mask
+        // conflicts before computing a diff.
         ensure_relation_schema_transition(
             "BigQuery",
             table_id,
@@ -985,6 +989,22 @@ where
             table_name_to_bigquery_table_id(new_replicated_table_schema.name())?;
         let versioned_table_id =
             metadata_versioned_table_id_for_base(&metadata, &bigquery_table_id)?;
+
+        // A source-only change needs no remote DDL or pending recovery state.
+        // Table renames still reconcile the logical view below.
+        if plan.diff().is_empty() && current_schema.name() == new_replicated_table_schema.name() {
+            self.state_store
+                .store_destination_table_metadata(
+                    table_id,
+                    DestinationTableMetadata::new_applied(
+                        metadata.table_id().to_owned(),
+                        new_snapshot_id,
+                        new_replication_mask,
+                    ),
+                )
+                .await?;
+            return Ok(());
+        }
 
         // Mark as applying before making changes (with the NEW snapshot_id and
         // mask).
@@ -2168,7 +2188,7 @@ mod tests {
     use etl::{
         data::Cell,
         schema::{ColumnSchema, IdentityMask, PgLsn, SnapshotId, TableId, TableSchema, Type},
-        store::{MemoryStore, StateStore},
+        store::{MemoryStore, SchemaStore, StateStore},
         test_utils::destination::write_table_rows,
     };
     use futures::FutureExt;
@@ -2530,6 +2550,57 @@ mod tests {
         assert!(!Arc::ptr_eq(&projected_descriptor, &next));
         assert_eq!(next.field_descriptors[0].name, "renamed_id");
         assert!(Arc::ptr_eq(&next, &table.prepare_descriptor(&next_schema, true)));
+    }
+
+    /// Source-only changes advance metadata without remote DDL and keep the
+    /// cached view usable with a freshly prepared descriptor.
+    #[tokio::test]
+    async fn unchanged_relation_refresh_preserves_view_without_remote_work() {
+        let destination = unavailable_destination(false).await;
+        let schema = replicated_schema(IdentityType::PrimaryKey);
+        destination.state_store.store_table_schema(schema.inner().clone()).await.unwrap();
+        seed_table(&destination, &schema).await;
+        let (target, descriptor) =
+            destination.prepare_table_for_writes(&schema, false).await.unwrap();
+        let mut refreshed = schema.inner().clone();
+        refreshed.snapshot_id = SnapshotId::new(PgLsn::from(20), PgLsn::from(10));
+        refreshed.column_schemas.push(ColumnSchema::new(
+            "unpublished".to_owned(),
+            Type::INT4,
+            -1,
+            3,
+            true,
+        ));
+        let refreshed = ReplicatedTableSchema::from_mask(
+            Arc::new(refreshed),
+            ReplicationMask::from_bytes(vec![1, 1, 0]),
+        );
+
+        destination.handle_relation_event(&refreshed).await.unwrap();
+
+        let metadata = destination
+            .state_store
+            .get_destination_table_metadata(schema.id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(metadata.is_applied());
+        assert_eq!(metadata.snapshot_id(), refreshed.inner().snapshot_id);
+        assert_eq!(metadata.replication_mask(), refreshed.replication_mask());
+        let (refreshed_target, refreshed_descriptor) =
+            destination.prepare_table_for_writes(&refreshed, false).await.unwrap();
+        assert!(Arc::ptr_eq(&target, &refreshed_target));
+        assert!(!Arc::ptr_eq(&descriptor, &refreshed_descriptor));
+        assert_eq!(
+            descriptor.field_descriptors.len(),
+            refreshed_descriptor.field_descriptors.len()
+        );
+        for (before, after) in
+            descriptor.field_descriptors.iter().zip(&refreshed_descriptor.field_descriptors)
+        {
+            assert_eq!(before.name, after.name);
+        }
+        destination.shutdown().await.unwrap();
     }
 
     /// A warm view cache cannot bypass authoritative schema state or identity.

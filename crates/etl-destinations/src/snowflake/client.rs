@@ -1,13 +1,10 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use etl::{
     pipeline::PipelineId,
     schema::{
-        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
-        SchemaOperation, SchemaPlan, TableId,
+        ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, IdentityMask,
+        ReplicatedTableSchema, SchemaOperation, SchemaPlan, TableId,
     },
 };
 use metrics::{counter, gauge, histogram};
@@ -268,8 +265,8 @@ pub struct Client<T, C = RestStreamClient<T>> {
     schema: String,
     pipeline_id: PipelineId,
     channels: ChannelMap<C>,
-    /// Tables whose companion view has been reconciled in this process.
-    prepared_views: Arc<RwLock<HashSet<TableId>>>,
+    /// Replica identity used to reconcile each table's companion view.
+    prepared_views: Arc<RwLock<HashMap<TableId, IdentityMask>>>,
     /// Stable lifecycle gates retained across channel removal and recreation.
     table_gates: Arc<Mutex<HashMap<TableId, Arc<Mutex<()>>>>>,
     pending_durability: Arc<Mutex<PendingDurabilityState>>,
@@ -402,7 +399,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
             schema,
             pipeline_id,
             channels: Arc::new(RwLock::new(HashMap::new())),
-            prepared_views: Arc::new(RwLock::new(HashSet::new())),
+            prepared_views: Arc::new(RwLock::new(HashMap::new())),
             table_gates: Arc::new(Mutex::new(HashMap::new())),
             pending_durability: Arc::new(Mutex::new(PendingDurabilityState::default())),
         }
@@ -413,9 +410,11 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         self.channels.read().await.contains_key(&table_id)
     }
 
-    /// Returns whether channel and view setup both completed in this process.
-    pub(super) async fn is_table_ready(&self, table_id: TableId) -> bool {
-        self.has_channel(table_id).await && self.prepared_views.read().await.contains(&table_id)
+    /// Returns whether channel and view setup match the current replica
+    /// identity.
+    pub(super) async fn is_table_ready(&self, schema: &ReplicatedTableSchema) -> bool {
+        self.has_channel(schema.id()).await
+            && self.prepared_views.read().await.get(&schema.id()) == Some(schema.identity_mask())
     }
 
     /// Reconciles the companion view while the caller owns the table lifecycle.
@@ -425,13 +424,16 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
         name: &str,
         schema: &ReplicatedTableSchema,
     ) -> Result<()> {
-        if self.prepared_views.read().await.contains(&table.table_id) {
+        if self.prepared_views.read().await.get(&table.table_id) == Some(schema.identity_mask()) {
             return Ok(());
         }
+        // Real relation messages can change identity without a new stored
+        // snapshot. A failed refresh must not retain the old readiness entry.
+        self.prepared_views.write().await.remove(&table.table_id);
         CompanionView::new(self.pipeline_id, table.table_id, name)
             .prepare(&self.sql_client, name, schema)
             .await?;
-        self.prepared_views.write().await.insert(table.table_id);
+        self.prepared_views.write().await.insert(table.table_id, schema.identity_mask().clone());
         Ok(())
     }
 
@@ -514,7 +516,7 @@ impl<T: TokenProvider, C: StreamClient> Client<T, C> {
     }
 
     /// Validates or upgrades an owned raw table without opening a streaming
-    /// channel, including during idle-table view recovery.
+    /// channel, including during startup.
     pub(super) async fn prepare_existing_schema(
         &self,
         table_name: &str,
@@ -1210,7 +1212,7 @@ mod tests {
             channel.open().await.unwrap();
             client.channels.write().await.insert(schema.id(), Arc::new(Mutex::new(channel)));
             // This transport-only fixture starts after remote setup completed.
-            client.prepared_views.write().await.insert(schema.id());
+            client.prepared_views.write().await.insert(schema.id(), schema.identity_mask().clone());
             schemas.push(schema);
         }
         (Destination::new(client, store), stream, schemas)
@@ -1411,6 +1413,55 @@ mod tests {
                 assert_eq!(requests[1].rows.len(), 1);
                 assert_eq!(requests[1].start, OffsetToken::new(10.into(), 2));
             }
+        }
+    }
+
+    /// An unchanged snapshot can carry a different actual replica identity,
+    /// which must be reconciled before subsequent rows reach Snowflake.
+    #[tokio::test]
+    async fn relation_identity_refresh_invalidates_view_readiness_before_retry() {
+        for identity_mask in [vec![0, 1], vec![0, 0]] {
+            let (destination, stream, schemas) = recording_destination(1, false).await;
+            let schema = &schemas[0];
+            let unchanged =
+                Event::Relation(RelationEvent { replicated_table_schema: schema.clone() });
+            write_events(
+                &destination,
+                WriteEventsDurability::RequireDurable,
+                vec![unchanged.clone(), unchanged],
+            )
+            .await
+            .unwrap();
+
+            let changed = ReplicatedTableSchema::from_masks(
+                Arc::new(schema.inner().clone()),
+                schema.replication_mask().clone(),
+                IdentityMask::from_bytes(identity_mask),
+            );
+            let error = write_events(
+                &destination,
+                WriteEventsDurability::RequireDurable,
+                vec![
+                    Event::Relation(RelationEvent { replicated_table_schema: changed.clone() }),
+                    insert_event(&changed, 0),
+                ],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
+
+            // A failed reconciliation may have changed the remote view. Even
+            // the previously cached identity must retry before sending rows.
+            let error = write_events(
+                &destination,
+                WriteEventsDurability::RequireDurable,
+                vec![insert_event(schema, 1)],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
+            destination.shutdown().await.unwrap();
+            assert_eq!(stream.append_attempts.load(Ordering::SeqCst), 0);
         }
     }
 
@@ -1669,7 +1720,7 @@ mod tests {
             table_name.to_owned(),
         )));
         client.channels.write().await.insert(table_id, channel);
-        client.prepared_views.write().await.insert(table_id);
+        client.prepared_views.write().await.insert(table_id, IdentityMask::from_bytes(vec![]));
         client
             .pending_durability
             .lock()
@@ -1683,7 +1734,7 @@ mod tests {
         assert!(detached.channel.is_some());
         assert_eq!(detached.table_name, table_name);
         assert!(!client.channels.read().await.contains_key(&table_id));
-        assert!(!client.prepared_views.read().await.contains(&table_id));
+        assert!(!client.prepared_views.read().await.contains_key(&table_id));
         let pending = client.pending_durability.lock().await;
         assert!(pending.is_empty());
         assert_eq!(pending.row_batches, 0);

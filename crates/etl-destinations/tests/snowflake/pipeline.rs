@@ -119,10 +119,7 @@ async fn schema_change_batched_operations() {
         assert_eq!(committed, Some(copy_offset));
 
         let events_notify = destination
-            .wait_for_events(vec![
-                EventCondition::TableCount(EventType::Relation, table_id, 1),
-                EventCondition::TableCount(EventType::Insert, table_id, 1),
-            ])
+            .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
             .await;
 
         database

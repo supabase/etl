@@ -1,11 +1,13 @@
 #![cfg(feature = "test-utils")]
 
 use etl::{
+    config::IntoConnectOptions,
     data::{ArrayCell, Cell, Date},
     event::{Event, EventType},
     pipeline::PipelineId,
-    schema::{ColumnSchema, SnapshotId, TableId, TableSchema},
-    store::TableStateType,
+    postgres::migrations::run_source_migrations,
+    schema::{ColumnSchema, SnapshotId, TableId, TableName, TableSchema},
+    store::{SchemaStore, StateStore, TableState, TableStateType},
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -20,10 +22,15 @@ use etl::{
         test_schema::create_partitioned_table,
     },
 };
-use etl_postgres::tokio::test_utils::TableModification;
+use etl_postgres::{
+    below_version,
+    tokio::test_utils::TableModification,
+    version::{POSTGRES_15, POSTGRES_18},
+};
 use etl_telemetry::{metrics::init_metrics_handle, tracing::init_test_tracing};
 use pg_escape::quote_identifier;
 use rand::random;
+use sqlx::Connection;
 use tokio_postgres::types::Type;
 
 fn get_last_relation_event(events: &[Event], table_id: TableId) -> &Event {
@@ -168,10 +175,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
 
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     let expected_columns = match change {
@@ -271,26 +275,51 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    let relations = grouped.get(&(EventType::Relation, table_id)).unwrap();
+    assert_eq!(relations.len(), 2);
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
+    let Event::Relation(synthetic) = &relations[0] else {
+        panic!("grouped relation events contain only relations");
+    };
     let Event::Relation(r) = get_last_relation_event(&events, table_id) else {
         panic!("expected relation event");
     };
+    assert_eq!(synthetic.replicated_table_schema.inner(), r.replicated_table_schema.inner());
+    assert_eq!(
+        synthetic.replicated_table_schema.replication_mask(),
+        r.replicated_table_schema.replication_mask()
+    );
+    assert_eq!(
+        synthetic.replicated_table_schema.identity_mask(),
+        r.replicated_table_schema.identity_mask()
+    );
     assert_replicated_schema_column_names_types(&r.replicated_table_schema, &expected_columns);
     let Event::Insert(i) = get_last_insert_event(&events, table_id) else {
         panic!("expected insert event");
     };
-    assert_eq!(i.table_row.values().len(), expected_columns.len());
-    match change {
+    let expected_row = match change {
+        RelationSchemaChange::AddColumn => vec![
+            Cell::I64(1),
+            Cell::String("Alice".to_owned()),
+            Cell::I32(25),
+            Cell::String("alice@example.com".to_owned()),
+        ],
+        RelationSchemaChange::DropColumn => vec![Cell::I64(1), Cell::String("Bob".to_owned())],
+        RelationSchemaChange::RenameColumn => {
+            vec![Cell::I64(1), Cell::String("Carol".to_owned()), Cell::I32(41)]
+        }
+        RelationSchemaChange::ChangeColumnType => {
+            vec![Cell::I64(1), Cell::String("Dave".to_owned()), Cell::I64(45)]
+        }
         RelationSchemaChange::ChangeColumnDefault => {
-            assert_eq!(i.table_row.values()[2], Cell::I32(42));
+            vec![Cell::I64(1), Cell::String("Eve".to_owned()), Cell::I32(42)]
         }
         RelationSchemaChange::ChangeColumnNullability => {
-            assert_eq!(i.table_row.values()[2], Cell::Null);
+            vec![Cell::I64(1), Cell::String("Frank".to_owned()), Cell::Null]
         }
-        _ => {}
-    }
+    };
+    assert_eq!(i.table_row.values(), expected_row);
     assert_eq!(
         i.replicated_table_schema.inner().snapshot_id,
         r.replicated_table_schema.inner().snapshot_id
@@ -312,18 +341,7 @@ async fn run_relation_schema_change(change: RelationSchemaChange) {
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
     let stored_schema = assert_only_schema_snapshot(snapshots, &expected_columns);
-    let stored_age = stored_schema.column_schemas.iter().find(|column| column.name == "age");
-    match change {
-        RelationSchemaChange::DropColumn => assert!(stored_age.is_none()),
-        RelationSchemaChange::ChangeColumnDefault => {
-            assert_eq!(stored_age.unwrap().default_expression.as_deref(), Some("42"));
-        }
-        RelationSchemaChange::ChangeColumnNullability => {
-            assert!(stored_age.unwrap().nullable);
-        }
-        _ => {}
-    }
-    assert_eq!(snapshots[0].0, r.replicated_table_schema.inner().snapshot_id);
+    assert_eq!(stored_schema, r.replicated_table_schema.inner());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -341,6 +359,1157 @@ async fn relation_message_updates_when_column_is_renamed() {
     run_relation_schema_change(RelationSchemaChange::RenameColumn).await;
 }
 
+/// Intermediate defaults reach the destination even without a later row.
+#[tokio::test(flavor = "multi_thread")]
+async fn ddl_snapshots_preserve_intermediate_defaults_without_dml() {
+    let (mut database, table_name, table_id, _, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "ordered_defaults",
+            &[("value", "integer")],
+        )
+        .await;
+    let initial_relations = destination
+        .get_events()
+        .await
+        .iter()
+        .filter(|event| matches!(event, Event::Relation(_)))
+        .count();
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(
+            EventType::Relation,
+            table_id,
+            u64::try_from(initial_relations).unwrap() + 2,
+        )])
+        .await;
+
+    let transaction = database.begin_transaction().await;
+    transaction
+        .run_sql(&format!(
+            "alter table {} add column score integer default 1",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction
+        .run_sql(&format!(
+            "alter table {} alter column score set default 2",
+            table_name.as_quoted_identifier()
+        ))
+        .await
+        .unwrap();
+    transaction.commit_transaction().await;
+
+    applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let schemas = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let changes = &schemas[initial_relations..];
+    assert_eq!(changes.len(), 2);
+    for (schema, default) in changes.iter().zip(["1", "2"]) {
+        assert_column_default_contains(schema.column_schemas(), "score", &[default]);
+    }
+    assert!(changes[0].inner().snapshot_id < changes[1].inner().snapshot_id);
+}
+
+/// An empty intermediate schema still produces a relation barrier before
+/// later DDL restores columns, without requiring a row in that empty schema.
+#[tokio::test(flavor = "multi_thread")]
+async fn ddl_preserves_empty_intermediate_schema() {
+    let (database, table_name, table_id, _, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "empty_intermediate_schema",
+            &[("value", "integer")],
+        )
+        .await;
+    let initial_relations = destination
+        .get_events()
+        .await
+        .iter()
+        .filter(|event| matches!(event, Event::Relation(_)))
+        .count();
+    let inserted = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    let table = table_name.as_quoted_identifier();
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "begin; alter table {table} drop column id, drop column value; alter table {table} \
+             add column restored integer default 7; insert into {table} default values; commit"
+        ))
+        .await
+        .unwrap();
+
+    inserted.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let relations = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .skip(initial_relations)
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 3);
+    assert!(relations[0].inner().column_schemas.is_empty());
+    assert!(relations[0].replication_mask().as_slice().is_empty());
+    assert!(relations[0].identity_mask().as_slice().is_empty());
+    assert_eq!(relations[1].column_schemas().next().unwrap().name, "restored");
+    assert!(relations[0].inner().snapshot_id < relations[1].inner().snapshot_id);
+    assert_eq!(relations[1].inner(), relations[2].inner());
+}
+
+/// Each DDL barrier uses its captured publication columns, including physical
+/// columns added while a publication column list hides them.
+#[tokio::test(flavor = "multi_thread")]
+async fn ddl_snapshots_capture_each_publication_mask() {
+    let (mut database, table_name, table_id, _, destination, pipeline, _, publication) =
+        create_database_and_sync_done_pipeline_with_table(
+            "ordered_publication_masks",
+            &[("a", "integer"), ("b", "integer")],
+        )
+        .await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        pipeline.shutdown_and_wait().await.unwrap();
+        return;
+    }
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    let transaction = database.begin_transaction().await;
+    let table = table_name.as_quoted_identifier();
+    let publication = quote_identifier(&publication);
+    for sql in [
+        format!("alter publication {publication} set table {table} (id, a)"),
+        format!("alter table {table} add column c integer default 7"),
+        format!("alter publication {publication} set table {table} (id, a, b, c)"),
+        format!("insert into {table} (a, b) values (1, 2)"),
+    ] {
+        transaction.run_sql(&sql).await.unwrap();
+    }
+    transaction.commit_transaction().await;
+
+    applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let masks = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => {
+                Some(relation.replicated_table_schema.replication_mask().as_slice())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // Three synthetic relations retain each DDL boundary. PostgreSQL's real
+    // relation repeats the final snapshot and mask before the insert.
+    assert_eq!(masks, [&[1, 1, 0][..], &[1, 1, 0, 0][..], &[1, 1, 1, 1][..], &[1, 1, 1, 1][..]]);
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
+        unreachable!();
+    };
+    assert_eq!(
+        insert.table_row.values(),
+        &[Cell::I64(1), Cell::I32(1), Cell::I32(2), Cell::I32(7)]
+    );
+}
+
+/// Verifies that equal current masks retain distinct all-column and explicit
+/// filter behavior when a column is added, optionally after a Ready restart.
+async fn run_add_column_with_equal_initial_masks(restart: bool) {
+    for explicit in [false, true] {
+        let database = spawn_source_database().await;
+        if explicit && below_version!(database.server_version(), POSTGRES_15) {
+            continue;
+        }
+        let name = test_table_name("equal_initial_masks");
+        let table_id =
+            database.create_table(name.clone(), true, &[("value", "integer")]).await.unwrap();
+        let table = name.as_quoted_identifier();
+        let columns = if explicit { " (id, value)" } else { "" };
+        database
+            .run_sql(&format!("create publication equal_masks_pub for table {table}{columns}"))
+            .await
+            .unwrap();
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+        let pipeline_id = random();
+        let mut pipeline = create_pipeline(
+            &database.config,
+            pipeline_id,
+            "equal_masks_pub".to_owned(),
+            store.clone(),
+            destination.clone(),
+        );
+        let synced = store.notify_on_table_sync_complete(table_id).await;
+
+        pipeline.start().await.unwrap();
+
+        synced.notified().await;
+
+        let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+        let first_insert = destination
+            .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+            .await;
+
+        database.run_sql(&format!("insert into {table} (value) values (1)")).await.unwrap();
+
+        first_insert.notified().await;
+        ready.notified().await;
+
+        if restart {
+            // Ready has discarded the persisted handover decoder. The next
+            // connection has no previous real relation for this table.
+            pipeline.shutdown_and_wait().await.unwrap();
+            pipeline = create_pipeline(
+                &database.config,
+                pipeline_id,
+                "equal_masks_pub".to_owned(),
+                store,
+                destination.clone(),
+            );
+        }
+        let synthetic = destination
+            .wait_for_events(vec![EventCondition::TableCount(EventType::Relation, table_id, 2)])
+            .await;
+
+        database
+            .run_sql(&format!("alter table {table} add column extra integer default 7"))
+            .await
+            .unwrap();
+        if restart {
+            pipeline.start().await.unwrap();
+        }
+
+        // The DDL barrier must arrive before any row can cause PostgreSQL to
+        // emit a real relation on this connection.
+        synthetic.notified().await;
+
+        let second_insert = destination
+            .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+            .await;
+
+        database.run_sql(&format!("insert into {table} (value) values (2)")).await.unwrap();
+
+        second_insert.notified().await;
+
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        let events = destination.get_events().await;
+        let relations = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Relation(relation) => Some(&relation.replicated_table_schema),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(relations.len(), 3);
+        assert_eq!(relations[0].replication_mask().as_slice(), &[1, 1]);
+        let expected = [1, 1, u8::from(!explicit)];
+        for relation in &relations[1..] {
+            assert_eq!(relation.replication_mask().as_slice(), &expected);
+            assert_eq!(relation.identity_mask().as_slice(), &[1, 0, 0]);
+        }
+        assert_eq!(relations[1].inner().snapshot_id, relations[2].inner().snapshot_id);
+    }
+}
+
+/// A real relation cannot distinguish an all-column publication from an
+/// explicit list covering every current column; DDL must preserve that policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn synthetic_relations_preserve_filter_policy_on_add_column() {
+    run_add_column_with_equal_initial_masks(false).await;
+}
+
+/// DDL replay reconstructs the filter without a retained decoder or a new real
+/// relation, including explicit lists that previously selected every column.
+#[tokio::test(flavor = "multi_thread")]
+async fn synthetic_relations_restore_filter_policy_after_ready_restart() {
+    run_add_column_with_equal_initial_masks(true).await;
+}
+
+/// A current catalog read or the first real relation after reconnect cannot
+/// replace publication metadata captured at each older DDL boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn replayed_table_ddl_precedes_later_publication_filter_change() {
+    let (mut database, name, table_id, store, destination, mut pipeline, pipeline_id, publication) =
+        create_database_and_sync_done_pipeline_with_table(
+            "replayed_publication_filter",
+            &[("value", "integer")],
+        )
+        .await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        pipeline.shutdown_and_wait().await.unwrap();
+        return;
+    }
+    let table = name.as_quoted_identifier();
+    let quoted_publication = quote_identifier(&publication);
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let inserted = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    database
+        .run_sql(&format!("alter publication {quoted_publication} set table {table} (id, value)"))
+        .await
+        .unwrap();
+    database.run_sql(&format!("insert into {table} (value) values (1)")).await.unwrap();
+
+    inserted.notified().await;
+    ready.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+    destination.clear_events().await;
+
+    let transaction = database.begin_transaction().await;
+    for statement in [
+        format!("alter table {table} add column extra integer default 1"),
+        format!("insert into {table} (value) values (2)"),
+        format!("alter table {table} alter column extra set default 2"),
+        format!("alter publication {quoted_publication} set table {table} (id, value, extra)"),
+        format!("insert into {table} (value) values (3)"),
+    ] {
+        transaction.run_sql(&statement).await.unwrap();
+    }
+    transaction.commit_transaction().await;
+
+    pipeline =
+        create_pipeline(&database.config, pipeline_id, publication, store, destination.clone());
+    let replayed = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    pipeline.start().await.unwrap();
+
+    replayed.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let relations = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 5);
+    for (relation, (expected_mask, default)) in relations.iter().zip([
+        ([1, 1, 0], "1"),
+        ([1, 1, 0], "1"),
+        ([1, 1, 0], "2"),
+        ([1, 1, 1], "2"),
+        ([1, 1, 1], "2"),
+    ]) {
+        assert_eq!(relation.replication_mask().as_slice(), &expected_mask);
+        assert_eq!(relation.identity_mask().as_slice(), &[1, 0, 0]);
+        assert_column_default_contains(&relation.inner().column_schemas, "extra", &[default]);
+    }
+    let rows = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) => Some(insert.table_row.values()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [&[Cell::I64(2), Cell::I32(2)][..], &[Cell::I64(3), Cell::I32(3), Cell::I32(2)]]
+    );
+}
+
+/// Copy and synthetic relations retain physical tuple order across gaps,
+/// renames, and different publication-list and primary-key declaration orders.
+#[tokio::test(flavor = "multi_thread")]
+async fn publication_attnums_preserve_dropped_column_gaps_and_renames() {
+    let mut database = spawn_source_database().await;
+    if below_version!(database.server_version(), POSTGRES_15) {
+        return;
+    }
+    let name = test_table_name("publication_attnum_gaps");
+    let table_id = database
+        .create_table(name.clone(), true, &[("discarded", "integer"), ("selected", "integer")])
+        .await
+        .unwrap();
+    let table = name.as_quoted_identifier();
+    let primary_key_name = format!("{}_pkey", name.name);
+    let primary_key = quote_identifier(&primary_key_name);
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "alter table {table} drop column discarded;
+             alter table {table} alter column selected set not null;
+             alter table {table} drop constraint {primary_key}, add primary key (selected, id);
+             create publication attnum_gaps_pub for table {table} (selected, id);
+             insert into {table} (selected) values (5)"
+        ))
+        .await
+        .unwrap();
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        "attnum_gaps_pub".to_owned(),
+        store.clone(),
+        destination.clone(),
+    );
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    synced.notified().await;
+
+    let inserted = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    let transaction = database.begin_transaction().await;
+    for statement in [
+        format!("alter table {table} rename column selected to renamed"),
+        format!("alter table {table} add column discarded integer default 7"),
+        format!("insert into {table} (renamed) values (11)"),
+    ] {
+        transaction.run_sql(&statement).await.unwrap();
+    }
+    transaction.commit_transaction().await;
+
+    inserted.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let copied = destination.get_table_rows().await;
+    assert_eq!(copied[&table_id][0].values(), &[Cell::I64(1), Cell::I32(5)]);
+    let events = destination.get_events().await;
+    let relations = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 3);
+    for (relation, expected_ordinals) in
+        relations.iter().zip([vec![1, 3], vec![1, 3, 4], vec![1, 3, 4]])
+    {
+        let ordinals = relation
+            .inner()
+            .column_schemas
+            .iter()
+            .map(|column| column.ordinal_position)
+            .collect::<Vec<_>>();
+        assert_eq!(ordinals, expected_ordinals);
+        assert_eq!(relation.inner().column_schemas[1].name, "renamed");
+        assert_eq!(relation.column_schemas().count(), 2);
+        assert_eq!(relation.identity_mask().as_slice()[..2], [1, 1]);
+        assert_eq!(relation.inner().column_schemas[0].primary_key_ordinal_position, Some(2));
+        assert_eq!(relation.inner().column_schemas[1].primary_key_ordinal_position, Some(1));
+    }
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
+        unreachable!();
+    };
+    assert_eq!(insert.table_row.values(), &[Cell::I64(2), Cell::I32(11)]);
+}
+
+/// Synthetic relations capture each replica-identity mode exactly as the real
+/// PostgreSQL relation before the following row.
+#[tokio::test(flavor = "multi_thread")]
+async fn synthetic_and_real_relations_preserve_identity_masks() {
+    let (database, table_name, table_id, _, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "synthetic_identity_masks",
+            &[("value", "integer not null"), ("extra", "integer")],
+        )
+        .await;
+    let table = table_name.as_quoted_identifier();
+    database
+        .run_sql(&format!("create unique index synthetic_identity_idx on {table} (value)"))
+        .await
+        .unwrap();
+    let modes = [
+        ("full", vec![1, 1, 1]),
+        ("using index synthetic_identity_idx", vec![0, 1, 0]),
+        ("nothing", vec![0, 0, 0]),
+        ("default", vec![1, 0, 0]),
+    ];
+    for (index, (mode, _)) in modes.iter().enumerate() {
+        let inserted = destination
+            .wait_for_events(vec![EventCondition::TableCount(
+                EventType::Insert,
+                table_id,
+                u64::try_from(index).unwrap() + 1,
+            )])
+            .await;
+
+        database.run_sql(&format!("alter table {table} replica identity {mode}")).await.unwrap();
+        database
+            .run_sql(&format!("insert into {table} (value, extra) values ({index}, 7)"))
+            .await
+            .unwrap();
+
+        inserted.notified().await;
+    }
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let relations = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 2 * modes.len());
+    for (pair, (_, expected_mask)) in relations.chunks_exact(2).zip(modes) {
+        assert_eq!(pair[0].inner(), pair[1].inner());
+        assert_eq!(pair[0].replication_mask(), pair[1].replication_mask());
+        assert_eq!(pair[0].identity_mask().as_slice(), expected_mask);
+        assert_eq!(pair[0].identity_mask(), pair[1].identity_mask());
+    }
+}
+
+/// Copy, synthetic relations, and real PostgreSQL relations agree on their
+/// publication and identity masks at the same catalog state.
+#[tokio::test(flavor = "multi_thread")]
+async fn copy_synthetic_and_real_relations_share_decoding_masks() {
+    for mode in [
+        "default",
+        "full",
+        "index",
+        "index_include",
+        "deferrable_index",
+        "composite",
+        "nothing",
+        "filtered",
+        "full_filtered",
+        "deferrable",
+        "inherited",
+        "quoted_publication",
+    ] {
+        let database = spawn_source_database().await;
+        if matches!(mode, "filtered" | "full_filtered")
+            && below_version!(database.server_version(), POSTGRES_15)
+        {
+            continue;
+        }
+        let name = test_table_name("decoder_consistency");
+        let table_id = database
+            .create_table(
+                name.clone(),
+                true,
+                &[("value", "integer not null"), ("extra", "integer")],
+            )
+            .await
+            .unwrap();
+        let table = name.as_quoted_identifier();
+        let primary_key_name = format!("{}_pkey", name.name);
+        let primary_key = quote_identifier(&primary_key_name);
+        match mode {
+            "full" | "full_filtered" => database
+                .run_sql(&format!("alter table {table} replica identity full"))
+                .await
+                .unwrap(),
+            "nothing" => database
+                .run_sql(&format!("alter table {table} replica identity nothing"))
+                .await
+                .unwrap(),
+            "index" | "index_include" | "composite" | "deferrable_index" => {
+                let index_columns = match mode {
+                    "index_include" => "(value) include (extra)",
+                    "composite" => {
+                        database
+                            .run_sql(&format!("alter table {table} alter extra set not null"))
+                            .await
+                            .unwrap();
+                        "(extra, value)"
+                    }
+                    _ => "(value)",
+                };
+                database
+                    .run_sql(&format!(
+                        "create unique index decoder_identity_idx on {table} {index_columns}"
+                    ))
+                    .await
+                    .unwrap();
+                database
+                    .run_sql(&format!(
+                        "alter table {table} replica identity using index decoder_identity_idx"
+                    ))
+                    .await
+                    .unwrap();
+                if mode == "deferrable_index" {
+                    // Attaching a DEFERRABLE constraint can make an already
+                    // selected identity index ineligible without clearing its
+                    // indisreplident flag.
+                    database
+                        .run_sql(&format!(
+                            "alter table {table} add constraint decoder_deferred unique using \
+                             index decoder_identity_idx deferrable"
+                        ))
+                        .await
+                        .unwrap();
+                }
+                0
+            }
+            "deferrable" => database
+                .run_sql(&format!(
+                    "alter table {table} drop constraint {primary_key}, add primary key (id) \
+                     deferrable"
+                ))
+                .await
+                .unwrap(),
+            "inherited" => {
+                database
+                    .run_sql("create table test.decoder_parent (id bigint primary key)")
+                    .await
+                    .unwrap();
+                database
+                    .run_sql(&format!("alter table {table} drop constraint {primary_key}"))
+                    .await
+                    .unwrap();
+                database
+                    .run_sql(&format!("alter table {table} inherit test.decoder_parent"))
+                    .await
+                    .unwrap()
+            }
+            _ => 0,
+        };
+        let columns = if matches!(mode, "filtered" | "full_filtered") { " (value)" } else { "" };
+        let publication =
+            if mode == "quoted_publication" { "Decoder's \"pub,旧" } else { "decoder_pub" };
+        database
+            .run_sql(&format!(
+                "create publication {} for table {table}{columns} with (publish = 'insert')",
+                quote_identifier(publication),
+            ))
+            .await
+            .unwrap();
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+        let mut pipeline = create_pipeline(
+            &database.config,
+            random(),
+            publication.to_owned(),
+            store.clone(),
+            destination.clone(),
+        );
+        let synced = store.notify_on_table_sync_complete(table_id).await;
+
+        pipeline.start().await.unwrap();
+
+        synced.notified().await;
+
+        let expected_replication = if matches!(mode, "filtered" | "full_filtered") {
+            vec![0, 1, 0]
+        } else {
+            vec![1, 1, 1]
+        };
+        let expected_identity = match mode {
+            "full" => vec![1, 1, 1],
+            "index" | "index_include" | "full_filtered" => vec![0, 1, 0],
+            "composite" => vec![0, 1, 1],
+            "nothing" | "filtered" | "deferrable" | "deferrable_index" | "inherited" => {
+                vec![0, 0, 0]
+            }
+            _ => vec![1, 0, 0],
+        };
+        let current_state = store.get_table_state(table_id).await.unwrap();
+        let mut states = store.get_table_state_history(table_id).await;
+        states.extend(current_state);
+        let decoder = states
+            .iter()
+            .find_map(|state| match state {
+                TableState::SyncDone { table_decoding_state: Some(decoder), .. } => Some(decoder),
+                _ => None,
+            })
+            .unwrap();
+        let decoder = serde_json::to_value(decoder).unwrap();
+
+        let inserted = destination
+            .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+            .await;
+
+        database.run_sql(&format!("alter table {table} owner to current_user")).await.unwrap();
+        database
+            .run_sql(&format!("insert into {table} (value, extra) values (5, 7)"))
+            .await
+            .unwrap();
+
+        inserted.notified().await;
+
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        let events = destination.get_events().await;
+        let relations = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Relation(relation) => Some(&relation.replicated_table_schema),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(relations.len(), 2, "{mode}");
+        assert_eq!(relations[0].inner(), relations[1].inner(), "{mode}");
+        assert_eq!(decoder["replication_mask"], serde_json::json!(expected_replication), "{mode}");
+        assert_eq!(decoder["identity_mask"], serde_json::json!(expected_identity), "{mode}");
+        for relation in relations {
+            assert_eq!(relation.replication_mask().as_slice(), expected_replication, "{mode}");
+            assert_eq!(relation.identity_mask().as_slice(), expected_identity, "{mode}");
+        }
+    }
+}
+
+/// A real relation refreshes identity after synthetic DDL without selecting a
+/// future schema already retained in the store.
+#[tokio::test(flavor = "multi_thread")]
+async fn real_relation_updates_identity_after_replica_index_drop() {
+    let (database, table_name, table_id, store, destination, pipeline, _, _) =
+        create_database_and_sync_done_pipeline_with_table(
+            "replica_index_drop",
+            &[("value", "integer not null")],
+        )
+        .await;
+    let table = table_name.as_quoted_identifier();
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "create unique index drop_identity_idx on {table} (value); alter table {table} \
+             replica identity using index drop_identity_idx; insert into {table} (value) values \
+             (1)"
+        ))
+        .await
+        .unwrap();
+
+    applied.notified().await;
+    ready.notified().await;
+
+    // A failed attempt or another worker may have stored schemas this decoder
+    // has not observed. Only the local DDL boundary determines its lineage.
+    let events = destination.get_events().await;
+    let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
+        unreachable!();
+    };
+    let observed_snapshot_id = relation.replicated_table_schema.inner().snapshot_id;
+    let mut future_schema = relation.replicated_table_schema.inner().clone();
+    future_schema.snapshot_id = SnapshotId::max();
+    future_schema.column_schemas[1].name = "future_value".into();
+    store.store_table_schema(future_schema).await.unwrap();
+
+    let applied = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "drop index test.drop_identity_idx; insert into {table} (value) values (2)"
+        ))
+        .await
+        .unwrap();
+
+    applied.notified().await;
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let events = destination.get_events().await;
+    let relations = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let identities =
+        relations.iter().map(|schema| schema.identity_mask().as_slice()).collect::<Vec<_>>();
+    assert_eq!(identities, vec![&[0, 1][..], &[0, 1][..], &[0, 0][..]]);
+    for schema in relations {
+        assert_eq!(schema.inner().snapshot_id, observed_snapshot_id);
+        assert_eq!(schema.inner().column_schemas[1].name, "value");
+        assert_eq!(schema.replication_mask().as_slice(), &[1, 1]);
+    }
+    let Event::Insert(insert) = get_last_insert_event(&events, table_id) else {
+        unreachable!();
+    };
+    assert_eq!(insert.replicated_table_schema.inner().snapshot_id, observed_snapshot_id);
+    assert_eq!(insert.table_row.values(), &[Cell::I64(2), Cell::I32(2)]);
+}
+
+/// Publication root mode selects the root's filter; leaf mode uses each
+/// leaf's own filter. PostgreSQL forbids a root list in leaf mode.
+#[tokio::test(flavor = "multi_thread")]
+async fn partition_filters_match_copy_synthetic_and_real_relations() {
+    for via_root in [false, true] {
+        let database = spawn_source_database().await;
+        if below_version!(database.server_version(), POSTGRES_15) {
+            return;
+        }
+        let name = test_table_name("partition_filtered_decoder");
+        let (root, leaves) = create_partitioned_table(
+            &database,
+            name.clone(),
+            &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+        )
+        .await
+        .unwrap();
+        let table = name.as_quoted_identifier();
+        let first_leaf = TableName::new(name.schema.clone(), format!("{}_first", name.name));
+        let root_columns = if via_root { " (id, partition_key)" } else { "" };
+        database
+            .run_sql(&format!(
+                "create publication partition_filter_pub for table {table}{root_columns}, {} \
+                 (data)
+             with (publish = 'insert', publish_via_partition_root = {via_root})",
+                first_leaf.as_quoted_identifier(),
+            ))
+            .await
+            .unwrap();
+        let expected = if via_root {
+            vec![(root, vec![1, 0, 1, 0], vec![1, 0, 1, 0])]
+        } else {
+            vec![
+                (leaves[0], vec![0, 1, 0, 0], vec![0, 0, 0, 0]),
+                (leaves[1], vec![1, 1, 1, 1], vec![1, 0, 1, 0]),
+            ]
+        };
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+        let mut pipeline = create_pipeline(
+            &database.config,
+            random(),
+            "partition_filter_pub".to_owned(),
+            store.clone(),
+            destination.clone(),
+        );
+        let mut synced = Vec::new();
+        for (target, _, _) in &expected {
+            synced.push(store.notify_on_table_sync_complete(*target).await);
+        }
+
+        pipeline.start().await.unwrap();
+
+        for notification in synced {
+            notification.notified().await;
+        }
+        for (target, mask, identity) in &expected {
+            // Read current first: if SyncDone becomes Ready between reads,
+            // its decoder is either in this clone or the later history.
+            let current_state = store.get_table_state(*target).await.unwrap();
+            let mut states = store.get_table_state_history(*target).await;
+            states.extend(current_state);
+            let decoder = states
+                .iter()
+                .find_map(|state| match state {
+                    TableState::SyncDone { table_decoding_state: Some(decoder), .. } => {
+                        Some(decoder)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let decoder = serde_json::to_value(decoder).unwrap();
+            assert_eq!(decoder["replication_mask"], serde_json::json!(&mask[..3]));
+            assert_eq!(decoder["identity_mask"], serde_json::json!(&identity[..3]));
+        }
+        let described = destination
+            .wait_for_events(
+                expected
+                    .iter()
+                    .map(|(target, _, _)| {
+                        EventCondition::TableCount(EventType::Relation, *target, 1)
+                    })
+                    .collect(),
+            )
+            .await;
+
+        database
+            .run_sql(&format!("alter table {table} add column score integer default 7"))
+            .await
+            .unwrap();
+
+        described.notified().await;
+
+        let inserted = destination
+            .wait_for_events(
+                expected
+                    .iter()
+                    .map(|(target, _, _)| {
+                        EventCondition::TableCount(
+                            EventType::Insert,
+                            *target,
+                            if via_root { 2 } else { 1 },
+                        )
+                    })
+                    .collect(),
+            )
+            .await;
+
+        database
+            .run_sql(&format!(
+                "insert into {table} (data, partition_key) values ('first', 1), ('second', 101)"
+            ))
+            .await
+            .unwrap();
+
+        inserted.notified().await;
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        let events = destination.get_events().await;
+        for (target, mask, identity) in expected {
+            let relations: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Relation(relation)
+                        if relation.replicated_table_schema.id() == target =>
+                    {
+                        Some(&relation.replicated_table_schema)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(relations.len() >= 2);
+            for relation in relations {
+                assert_eq!(relation.replication_mask().as_slice(), mask);
+                assert_eq!(relation.identity_mask().as_slice(), identity);
+            }
+        }
+    }
+}
+
+/// PostgreSQL 18 accepts an invalid partitioned primary index as default
+/// identity, while earlier supported versions require a valid index.
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_partitioned_primary_index_matches_real_identity() {
+    let database = spawn_source_database().await;
+    let name = test_table_name("invalid_partition_identity");
+    let (table_id, _) =
+        create_partitioned_table(&database, name.clone(), &[("leaf", "from (0) to (100)")])
+            .await
+            .unwrap();
+    let table = name.as_quoted_identifier();
+    let primary_key_name = format!("{}_pkey", name.name);
+    let primary_key = quote_identifier(&primary_key_name);
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "alter table {table} drop constraint {primary_key};
+             alter table only {table} add primary key (id, partition_key);
+             create publication invalid_partition_pub for table {table}
+                 with (publish = 'insert', publish_via_partition_root = true)"
+        ))
+        .await
+        .unwrap();
+    let index_valid: bool = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select indisvalid from pg_catalog.pg_index where indrelid = $1 and indisprimary",
+            &[&table_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!index_valid);
+    let store = NotifyingStore::new();
+    let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+    let mut pipeline = create_pipeline(
+        &database.config,
+        random(),
+        "invalid_partition_pub".into(),
+        store.clone(),
+        destination.clone(),
+    );
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+
+    pipeline.start().await.unwrap();
+
+    synced.notified().await;
+
+    let inserted = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    database.run_sql(&format!("alter table {table} owner to current_user")).await.unwrap();
+    database
+        .run_sql(&format!("insert into {table} (data, partition_key) values ('row', 1)"))
+        .await
+        .unwrap();
+
+    inserted.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    let expected = if below_version!(database.server_version(), POSTGRES_18) {
+        vec![0, 0, 0]
+    } else {
+        vec![1, 0, 1]
+    };
+    let events = destination.get_events().await;
+    let relations = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Relation(relation) => Some(&relation.replicated_table_schema),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(relations.len(), 2);
+    // The last event comes from pgoutput, providing the native reference.
+    assert_eq!(relations[1].identity_mask().as_slice(), expected);
+    assert_eq!(relations[0].identity_mask().as_slice(), expected);
+    assert_eq!(relations[0].inner(), relations[1].inner());
+    let current = store.get_table_state(table_id).await.unwrap();
+    let mut states = store.get_table_state_history(table_id).await;
+    states.extend(current);
+    let decoder = states
+        .iter()
+        .find_map(|state| match state {
+            TableState::SyncDone { table_decoding_state: Some(decoder), .. } => Some(decoder),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(decoder).unwrap()["identity_mask"],
+        serde_json::json!(expected)
+    );
+}
+
+/// Root and leaf DDL refresh complete decoders for every published identity.
+#[tokio::test(flavor = "multi_thread")]
+async fn tree_ddl_emits_synthetic_relations_for_effective_partition_targets() {
+    for via_root in [false, true] {
+        let database = spawn_source_database().await;
+        let name = test_table_name("partition_ddl_decoder");
+        let (root, leaves) = create_partitioned_table(
+            &database,
+            name.clone(),
+            &[("first", "from (0) to (100)"), ("second", "from (100) to (200)")],
+        )
+        .await
+        .unwrap();
+        let table = name.as_quoted_identifier();
+        database
+            .run_sql(&format!(
+                "create publication partition_ddl_pub for table {table} with \
+                 (publish_via_partition_root = {via_root})"
+            ))
+            .await
+            .unwrap();
+        let leaf_name = format!("{}_first", name.name);
+        let leaf =
+            etl::schema::TableName::new(name.schema.clone(), leaf_name).as_quoted_identifier();
+        let targets = if via_root { vec![root] } else { leaves };
+        let store = NotifyingStore::new();
+        let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
+        let mut pipeline = create_pipeline(
+            &database.config,
+            random(),
+            "partition_ddl_pub".to_owned(),
+            store.clone(),
+            destination.clone(),
+        );
+        let mut synced = Vec::new();
+        for target in &targets {
+            synced.push(store.notify_on_table_sync_complete(*target).await);
+        }
+
+        pipeline.start().await.unwrap();
+
+        for ready in synced {
+            ready.notified().await;
+        }
+        let ddl_applied = destination
+            .wait_for_events(
+                targets
+                    .iter()
+                    .map(|target| EventCondition::TableCount(EventType::Relation, *target, 2))
+                    .collect(),
+            )
+            .await;
+
+        database
+            .client
+            .as_ref()
+            .unwrap()
+            .batch_execute(&format!(
+                "alter table {table} add column score int default 1; alter table {leaf} alter \
+                 score set default 2"
+            ))
+            .await
+            .unwrap();
+
+        ddl_applied.notified().await;
+
+        let inserted = destination
+            .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, targets[0], 1)])
+            .await;
+
+        database
+            .run_sql(&format!("insert into {table} (data, partition_key) values ('example', 1)"))
+            .await
+            .unwrap();
+
+        inserted.notified().await;
+
+        pipeline.shutdown_and_wait().await.unwrap();
+
+        let events = destination.get_events().await;
+        for target in &targets {
+            let relations = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Relation(relation)
+                        if relation.replicated_table_schema.id() == *target =>
+                    {
+                        Some(&relation.replicated_table_schema)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let count = if *target == targets[0] { 3 } else { 2 };
+            assert_eq!(relations.len(), count);
+            for relation in &relations {
+                assert_eq!(relation.replication_mask().as_slice(), &[1, 1, 1, 1]);
+                assert_eq!(relation.identity_mask().as_slice(), &[1, 0, 1, 0]);
+            }
+            // Partitioned roots store no add-time values, so every target
+            // backfills the value its partitions read.
+            let added = relations[0].inner().column_schemas.last().unwrap();
+            assert_eq!(added.initial_default_expression(), Some("1"));
+            let score = relations[1].inner().column_schemas.last().unwrap();
+            let expected_default = if !via_root && *target == targets[0] { "2" } else { "1" };
+            assert_eq!(score.default_expression.as_deref(), Some(expected_default));
+            if relations.len() == 3 {
+                assert_eq!(relations[1].inner(), relations[2].inner());
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn relation_message_updates_when_column_type_changes() {
     run_relation_schema_change(RelationSchemaChange::ChangeColumnType).await;
@@ -356,8 +1525,170 @@ async fn relation_message_updates_when_column_nullability_changes() {
     run_relation_schema_change(RelationSchemaChange::ChangeColumnNullability).await;
 }
 
-/// Checks stable snapshots through maintenance and truncate, then new snapshots
-/// from no-op DDL before both rows and truncate.
+/// Replays queued pre-synthetic WAL and new DDL under one replica-identity
+/// mode without recopying the table.
+async fn run_queued_legacy_and_synthetic_relations(explicit_index: bool) {
+    init_test_tracing();
+    let (
+        mut database,
+        table_name,
+        table_id,
+        store,
+        destination,
+        pipeline,
+        pipeline_id,
+        publication,
+    ) = create_database_and_sync_done_pipeline_with_table(
+        "queued_ddl_upgrade",
+        &[("value", "integer not null default 10")],
+    )
+    .await;
+    let table = table_name.as_quoted_identifier();
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let warm_insert = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    database.run_sql(&format!("insert into {table} default values")).await.unwrap();
+
+    warm_insert.notified().await;
+    ready.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    let copy_writes = destination.write_table_rows_called().await;
+    destination.clear_events().await;
+
+    // Roll the source back to its last pre-synthetic migration while the
+    // pipeline is stopped. Its existing slot retains the legacy WAL payload.
+    let options: sqlx::postgres::PgConnectOptions = database.config.with_db(None);
+    let mut connection = sqlx::PgConnection::connect_with(&options).await.unwrap();
+    sqlx::query("set search_path = 'etl'").execute(&mut connection).await.unwrap();
+    let mut migrator = sqlx::migrate!("./migrations/source");
+    migrator.set_ignore_missing(true);
+    migrator.undo(&mut connection, 20261002120000).await.unwrap();
+    drop(connection);
+    assert!(
+        database
+            .client
+            .as_ref()
+            .unwrap()
+            .query_one(
+                "select pg_catalog.to_regprocedure('etl.describe_table_columns(oid)') is null",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    let transaction = database.begin_transaction().await;
+    if explicit_index {
+        transaction
+            .run_sql(&format!("create unique index upgrade_identity on {table} (value)"))
+            .await
+            .unwrap();
+        transaction
+            .run_sql(&format!("alter table {table} replica identity using index upgrade_identity"))
+            .await
+            .unwrap();
+    }
+    transaction
+        .run_sql(&format!("alter table {table} add column legacy integer default 1"))
+        .await
+        .unwrap();
+    transaction.run_sql(&format!("insert into {table} (value) values (20)")).await.unwrap();
+    transaction.commit_transaction().await;
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    let transaction = database.begin_transaction().await;
+    transaction
+        .run_sql(&format!(
+            "alter table {table} add column captured integer default 2, alter column captured set \
+             default 3"
+        ))
+        .await
+        .unwrap();
+    transaction.run_sql(&format!("insert into {table} (value) values (30)")).await.unwrap();
+    transaction.commit_transaction().await;
+
+    let replayed = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
+        .await;
+    let mut pipeline = create_pipeline(
+        &database.config,
+        pipeline_id,
+        publication,
+        store.clone(),
+        destination.clone(),
+    );
+
+    pipeline.start().await.unwrap();
+
+    replayed.notified().await;
+    pipeline.shutdown_and_wait().await.unwrap();
+    assert_eq!(destination.write_table_rows_called().await, copy_writes);
+
+    let events = destination.get_events().await;
+    let inserts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
+                Some(insert)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(inserts.len(), 2);
+    assert_eq!(inserts[0].table_row.values(), &[Cell::I64(2), Cell::I32(20), Cell::I32(1)]);
+    assert_eq!(
+        inserts[1].table_row.values(),
+        &[Cell::I64(3), Cell::I32(30), Cell::I32(1), Cell::I32(3)]
+    );
+    let legacy = &inserts[0].replicated_table_schema;
+    let captured = &inserts[1].replicated_table_schema;
+    assert_replicated_schema_column_names_types(
+        legacy,
+        &[("id", Type::INT8), ("value", Type::INT4), ("legacy", Type::INT4)],
+    );
+    assert_replicated_schema_column_names_types(
+        captured,
+        &[
+            ("id", Type::INT8),
+            ("value", Type::INT4),
+            ("legacy", Type::INT4),
+            ("captured", Type::INT4),
+        ],
+    );
+    assert_eq!(
+        legacy
+            .inner()
+            .column_schemas
+            .iter()
+            .map(|column| (column.name.as_str(), column.missing_value_expression.is_some()))
+            .collect::<Vec<_>>(),
+        [("id", false), ("value", false), ("legacy", false)]
+    );
+    let column =
+        captured.inner().column_schemas.iter().find(|column| column.name == "captured").unwrap();
+    assert_eq!(column.missing_value_expression.as_deref(), Some("2"));
+    assert_eq!(column.default_expression.as_deref(), Some("3"));
+    assert_eq!(legacy.replication_mask().as_slice(), &[1, 1, 1]);
+    assert_eq!(captured.replication_mask().as_slice(), &[1, 1, 1, 1]);
+    let identity = if explicit_index { [0, 1, 0, 0] } else { [1, 0, 0, 0] };
+    assert_eq!(legacy.identity_mask().as_slice(), &identity[..3]);
+    assert_eq!(captured.identity_mask().as_slice(), &identity);
+}
+
+/// Upgrade replay preserves both default and explicit-index identity while
+/// consuming old and new payloads from the same retained replication slot.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_upgrade_replays_queued_legacy_and_synthetic_relations() {
+    for explicit_index in [false, true] {
+        run_queued_legacy_and_synthetic_relations(explicit_index).await;
+    }
+}
+
+/// Legacy DDL payloads retain their relation-less row fallback through
+/// maintenance, no-op DDL, and truncate.
 #[tokio::test(flavor = "multi_thread")]
 async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
     init_test_tracing();
@@ -368,6 +1699,17 @@ async fn relationless_noop_schema_changes_reuse_previous_relation_masks() {
             &[("name", "text not null"), ("age", "integer")],
         )
         .await;
+
+    // Simulate WAL produced before publication columns were captured.
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(include_str!(
+            "../migrations/source/20260724120000_publication_schema_change_messages.up.sql"
+        ))
+        .await
+        .unwrap();
 
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let warm_insert_notify = destination
@@ -576,14 +1918,12 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     let table_schemas = store.get_table_schemas().await;
     let snapshots = table_schemas.get(&table_id).unwrap();
-    assert_eq!(snapshots.len(), 2);
-    assert_schema_snapshots_ordering(snapshots, true);
+    // Applying the synthetic relation can prune the initial snapshot before
+    // shutdown. The newest durable snapshot must retain the DDL either way.
+    let (snapshot_id, newest_schema) = snapshots.last().unwrap();
+    assert!(*snapshot_id > SnapshotId::initial());
     assert_table_schema_column_names_types(
-        &snapshots[0].1,
-        &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4)],
-    );
-    assert_table_schema_column_names_types(
-        &snapshots[1].1,
+        newest_schema,
         &[("id", Type::INT8), ("name", Type::TEXT), ("age", Type::INT4), ("email", Type::TEXT)],
     );
 
@@ -605,14 +1945,7 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
     pipeline.start().await.unwrap();
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(
-                EventType::Relation,
-                table_id,
-                (relation_count_before_restart + 1) as u64,
-            ),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -630,9 +1963,9 @@ async fn alter_table_without_dml_stores_schema_snapshot() {
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    assert_eq!(
-        grouped.get(&(EventType::Relation, table_id)).unwrap().len(),
-        relation_count_before_restart + 1
+    assert!(
+        grouped.get(&(EventType::Relation, table_id)).unwrap().len()
+            > relation_count_before_restart
     );
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
@@ -684,10 +2017,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
 
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
@@ -758,7 +2088,7 @@ async fn default_expressions_round_trip_through_schema_changes_and_defaulted_ins
 
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
-    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 1);
+    assert_eq!(grouped.get(&(EventType::Relation, table_id)).unwrap().len(), 2);
     assert_eq!(grouped.get(&(EventType::Insert, table_id)).unwrap().len(), 1);
 
     let Event::Relation(relation) = get_last_relation_event(&events, table_id) else {
@@ -906,10 +2236,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // Add column + insert, then restart.
     let ready_notify = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -944,10 +2271,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     pipeline.start().await.unwrap();
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
     database
         .alter_table(
@@ -989,10 +2313,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     pipeline.start().await.unwrap();
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 3),
-            EventCondition::TableCount(EventType::Insert, table_id, 3),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 3)])
         .await;
     database
         .alter_table(table_name.clone(), &[TableModification::DropColumn { name: "status" }])
@@ -1023,10 +2344,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     pipeline.start().await.unwrap();
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 4),
-            EventCondition::TableCount(EventType::Insert, table_id, 4),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 4)])
         .await;
     database
         .alter_table(
@@ -1148,10 +2466,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
 
     // Wait for the Relation event (schema change) and Insert event.
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, parent_table_id, 1),
-            EventCondition::TableCount(EventType::Insert, parent_table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, parent_table_id, 1)])
         .await;
 
     // Add a new column to the partitioned table.
@@ -1182,8 +2497,8 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let events = destination.get_events().await;
     let grouped = group_events_by_type_and_table_id(&events);
 
-    // Verify we received exactly 1 Relation event for the parent table.
-    assert_eq!(grouped.get(&(EventType::Relation, parent_table_id)).unwrap().len(), 1);
+    // Both the synthetic and real relation describe the updated parent.
+    assert_eq!(grouped.get(&(EventType::Relation, parent_table_id)).unwrap().len(), 2);
     assert_eq!(grouped.get(&(EventType::Insert, parent_table_id)).unwrap().len(), 1);
 
     // Verify the Relation event has the updated schema with the new column.

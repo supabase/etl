@@ -55,7 +55,22 @@ By default, `Pipeline::start()` also installs ETL source helpers and a
 `ddl_command_end` event trigger. Creating that event trigger requires
 superuser. Either run the pipeline as a superuser, or apply the source
 migrations in `crates/etl/migrations/source/` as an admin and set
-`run_source_migrations: false`.
+`run_source_migrations: false`. After installation, grant the replication role
+access to the source helpers:
+
+```sql
+GRANT USAGE ON SCHEMA etl TO etl_user;
+GRANT EXECUTE ON FUNCTION etl.describe_table_schema(oid),
+  etl.describe_table_columns(oid), etl.describe_table_identity(oid),
+  etl.describe_table_publication_columns(oid, text) TO etl_user;
+```
+
+The legacy `describe_table_schema` grant supports older binaries. The source
+upgrade copies its existing role grants to the new column and publication
+helpers, including grant options. PUBLIC access remains revoked; deployments
+that granted the legacy helper only to PUBLIC must grant their replication role
+explicitly. Keep the `etl` schema and helper owner trusted; the replication
+role needs USAGE, not CREATE, on that schema.
 
 ## Replication Slots
 

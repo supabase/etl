@@ -547,10 +547,7 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
     let old_pid = active_pid.expect("apply walsender should be active");
 
     let replayed_events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 2),
-            EventCondition::TableCount(EventType::Insert, table_id, 2),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
         .await;
 
     // Both schema versions occur in one transaction. On retry, the first
@@ -597,7 +594,7 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
         })
         .collect::<Vec<_>>();
 
-    assert_eq!(relation_schemas.len(), 2);
+    assert_eq!(relation_schemas.len(), 3);
     assert_eq!(
         relation_schemas[0].column_schemas().map(|column| column.name.as_str()).collect::<Vec<_>>(),
         vec!["id", "name", "age"]
@@ -606,6 +603,10 @@ async fn apply_retry_reselects_relation_snapshots_after_ambiguous_write() {
         relation_schemas[1].column_schemas().map(|column| column.name.as_str()).collect::<Vec<_>>(),
         vec!["id", "name"]
     );
+    // The synthetic and native barriers must select the same decoder on retry.
+    assert_eq!(relation_schemas[1].inner(), relation_schemas[2].inner());
+    assert_eq!(relation_schemas[1].replication_mask(), relation_schemas[2].replication_mask());
+    assert_eq!(relation_schemas[1].identity_mask(), relation_schemas[2].identity_mask());
     assert!(relation_schemas[0].inner().snapshot_id < relation_schemas[1].inner().snapshot_id);
 
     let inserts = events

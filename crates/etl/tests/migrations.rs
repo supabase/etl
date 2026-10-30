@@ -6,15 +6,21 @@ use etl::{
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
     pipeline::Pipeline,
-    postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
+    postgres::{
+        client::PgReplicationClient,
+        migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
+    },
     store::{MemoryStore, PostgresStore},
-    test_utils::memory_destination::MemoryDestination,
+    test_utils::{memory_destination::MemoryDestination, pipeline::test_slot_name},
 };
 use etl_postgres::{
     test_utils::{local_tls_config_from_env, test_database_port_from_env},
     tokio::test_utils::PgDatabase,
 };
 use etl_telemetry::tracing::init_test_tracing;
+use futures::StreamExt;
+use pg_escape::quote_identifier;
+use postgres_replication::protocol::{LogicalReplicationMessage, ReplicationMessage};
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
 use tokio_postgres::Client;
 use uuid::Uuid;
@@ -27,6 +33,7 @@ const POSTGRES_STORE_PRE_COMPOSITE_SNAPSHOT_VERSION: i64 = 20260610120000;
 const POSTGRES_STORE_PRE_CREATING_STATUS_VERSION: i64 = 20260810120000;
 const SOURCE_PRE_PUBLICATION_SCHEMA_CHANGE_VERSION: i64 = 20260415100000;
 const SOURCE_PRE_PRIMARY_KEY_DEFERRABILITY_VERSION: i64 = 20260724120000;
+const SOURCE_PRE_SYNTHETIC_RELATION_VERSION: i64 = 20261002120000;
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
 
 static TEST_MIGRATION_OPTIONS: LazyLock<PgConnectionOptions> =
@@ -1081,6 +1088,328 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     assert_eq!(restored_mapping, "destination_snapshot_items");
 }
 
+/// Fresh installations of the previous source migration set can retain WAL
+/// through an upgrade, including payloads readable by the previous decoder.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_upgrade_from_main_preserves_queued_identity_messages() {
+    /// The required identity fields read by the pre-synthetic decoder.
+    #[derive(serde::Deserialize)]
+    struct LegacyIdentity {
+        /// Destination primary-key metadata.
+        primary_key_attnums: Vec<i32>,
+        /// Whether the source primary key is deferrable.
+        #[serde(default)]
+        primary_key_condeferrable: bool,
+        /// The source replica-identity mode.
+        relreplident: String,
+        /// The explicit-index field required by the previous decoder.
+        replica_identity_index_attnums: Vec<i32>,
+    }
+
+    let database = spawn_unmigrated_database().await;
+    let mut connection = migration_connection(&database.config).await;
+    source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut connection).await.unwrap();
+    drop(connection);
+    assert_eq!(
+        applied_migration_versions(&database).await,
+        source_migration_versions()
+            .into_iter()
+            .filter(|version| *version <= SOURCE_PRE_SYNTHETIC_RELATION_VERSION)
+            .collect::<Vec<_>>()
+    );
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(
+            "create table public.upgrade_identity (id integer primary key, value integer not \
+             null);
+             create unique index upgrade_identity_value on public.upgrade_identity (value);
+             create publication upgrade_pub for table public.upgrade_identity",
+        )
+        .await
+        .unwrap();
+    let mut replication_client =
+        PgReplicationClient::connect(database.config.clone()).await.unwrap();
+    let slot_name = test_slot_name("identity_upgrade");
+    let slot = replication_client.create_slot(&slot_name, &Default::default()).await.unwrap();
+
+    client
+        .batch_execute(
+            "alter table public.upgrade_identity replica identity using index \
+             upgrade_identity_value",
+        )
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    client
+        .batch_execute(
+            "alter table public.upgrade_identity owner to current_user;
+             alter table public.upgrade_identity replica identity default",
+        )
+        .await
+        .unwrap();
+
+    // Start decoding only after both formats are already queued in the slot.
+    let (stream, _) = replication_client
+        .start_logical_replication("upgrade_pub", &slot_name, slot.consistent_point, None)
+        .await
+        .unwrap();
+    tokio::pin!(stream);
+    let mut messages = Vec::<serde_json::Value>::new();
+    while messages.len() < 3 {
+        let event = tokio::time::timeout(Duration::from_secs(10), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let ReplicationMessage::XLogData(event) = event
+            && let LogicalReplicationMessage::Message(message) = event.data()
+            && message.prefix().unwrap() == "supabase_etl_ddl"
+        {
+            messages.push(serde_json::from_slice(message.content()).unwrap());
+        }
+    }
+    assert!(messages[0].get("publication_column_attnums").is_none());
+    assert!(messages[0]["identity"].get("replica_identity_attnums").is_none());
+    assert_eq!(messages[1]["identity"]["replica_identity_attnums"], serde_json::json!([2]));
+    assert_eq!(messages[2]["identity"]["replica_identity_attnums"], serde_json::json!([1]));
+    for (message, mode, legacy_keys) in
+        [(&messages[0], "i", vec![2]), (&messages[1], "i", vec![2]), (&messages[2], "d", vec![])]
+    {
+        let legacy: LegacyIdentity = serde_json::from_value(message["identity"].clone()).unwrap();
+        assert_eq!(legacy.primary_key_attnums, vec![1]);
+        assert!(!legacy.primary_key_condeferrable);
+        assert_eq!(legacy.relreplident, mode);
+        assert_eq!(legacy.replica_identity_index_attnums, legacy_keys);
+    }
+}
+
+/// Column output formats follow the configured SQLx migration connection rather
+/// than duplicated defaults in the migration SQL.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_migration_captures_connection_output_formats() {
+    let database = spawn_unmigrated_database().await;
+    let mut session_options = (*TEST_MIGRATION_OPTIONS).clone();
+    session_options.extra_float_digits = 1;
+    let options: PgConnectOptions = database.config.with_db(Some(&session_options));
+    let mut conn = PgConnection::connect_with(&options).await.unwrap();
+    let application_name: String =
+        sqlx::query_scalar("show application_name").fetch_one(&mut conn).await.unwrap();
+    assert_eq!(application_name, session_options.application_name);
+    conn.execute("create schema etl; set search_path = etl").await.unwrap();
+
+    source_migrator().run(&mut conn).await.unwrap();
+
+    let (count, matches_connection): (i64, bool) = sqlx::query_as(
+        "select count(*), bool_and(
+             split_part(config, '=', 2) = current_setting(split_part(config, '=', 1))
+         )
+         from pg_catalog.pg_proc p
+         cross join lateral unnest(p.proconfig) config
+         where p.oid = 'etl.describe_table_columns(pg_catalog.oid)'::regprocedure
+           and lower(split_part(config, '=', 1)) = any(array[
+               'datestyle', 'intervalstyle', 'extra_float_digits', 'timezone', 'bytea_output'
+           ])",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(count, 5);
+    assert!(matches_connection);
+    let float_setting: String =
+        sqlx::query_scalar("show extra_float_digits").fetch_one(&mut conn).await.unwrap();
+    assert_eq!(float_setting, "1");
+}
+
+/// The production migration runner applies shared ETL options at connection
+/// startup, overriding conflicting database defaults.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_migrations_use_shared_connection_defaults() {
+    let database = spawn_unmigrated_database().await;
+    database
+        .client
+        .as_ref()
+        .unwrap()
+        .batch_execute(&format!(
+            "alter database {} set extra_float_digits = -15",
+            quote_identifier(&database.config.name)
+        ))
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    let mut conn = migration_connection(&database.config).await;
+    let captured: String = sqlx::query_scalar(
+        "select split_part(config, '=', 2)
+         from pg_catalog.pg_proc p
+         cross join lateral unnest(p.proconfig) config
+         where p.oid = 'etl.describe_table_columns(pg_catalog.oid)'::regprocedure
+           and split_part(config, '=', 1) = 'extra_float_digits'",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(captured, TEST_MIGRATION_OPTIONS.extra_float_digits.to_string());
+}
+
+/// Replacing a SECURITY DEFINER function retains its owner, even when another
+/// admin installs new private helpers needed by that function.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_upgrade_preserves_trigger_owner_helper_access() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut conn).await.unwrap();
+    drop(conn);
+
+    let owner = format!("ddl_owner_{}", Uuid::new_v4().simple());
+    let quoted_owner = quote_identifier(&owner);
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(&format!(
+            "create role {quoted_owner};
+             grant usage on schema etl to {quoted_owner};
+             grant execute on function etl.describe_table_schema(oid), \
+             etl.describe_table_identity(oid) to {quoted_owner};
+             create table public.owner_table (id integer primary key);
+             create publication owner_pub for table public.owner_table;
+             alter function etl.emit_schema_change_messages() owner to {quoted_owner};
+             alter table public.owner_table add column before_upgrade integer"
+        ))
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    let retained_owner: String = client
+        .query_one(
+            "select pg_catalog.pg_get_userbyid(proowner) from pg_catalog.pg_proc where oid = \
+             'etl.emit_schema_change_messages()'::pg_catalog.regprocedure",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(retained_owner, owner);
+    client
+        .batch_execute(
+            "alter table public.owner_table add column after_upgrade integer;
+             alter publication owner_pub set (publish = 'insert')",
+        )
+        .await
+        .unwrap();
+
+    client
+        .batch_execute(&format!(
+            "alter function etl.emit_schema_change_messages() owner to current_user;
+             drop owned by {quoted_owner}; drop role {quoted_owner}"
+        ))
+        .await
+        .unwrap();
+}
+
+/// Admin-installed source upgrades retain role access without exposing helpers
+/// to PUBLIC or granting readers access to trigger-only functions.
+#[tokio::test(flavor = "multi_thread")]
+async fn source_upgrade_preserves_reader_helper_grants() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    // Start with exactly the source migrations shipped before synthetic DDL.
+    source_migrator().run_to(SOURCE_PRE_SYNTHETIC_RELATION_VERSION, &mut conn).await.unwrap();
+    drop(conn);
+    assert!(
+        query_bool(&database, "select to_regprocedure('etl.describe_table_columns(oid)') is null",)
+            .await
+    );
+
+    let reader = format!("ddl reader's \"{}\"", Uuid::new_v4().simple());
+    let member = format!("ddl_member_{}", Uuid::new_v4().simple());
+    let quoted_reader = quote_identifier(&reader);
+    let quoted_member = quote_identifier(&member);
+    let client = database.client.as_ref().unwrap();
+    client
+        .batch_execute(&format!(
+            "create role {quoted_reader};
+             create role {quoted_member};
+             grant {quoted_reader} to {quoted_member};
+             grant usage on schema etl to {quoted_reader};
+             grant execute on function etl.describe_table_schema(oid) to {quoted_reader} with \
+             grant option;
+             grant execute on function etl.describe_table_identity(oid) to {quoted_reader};
+             create table public.reader_table (id integer primary key, value integer);
+             create publication reader_pub for table public.reader_table"
+        ))
+        .await
+        .unwrap();
+
+    run_source_migrations(&database.config).await.unwrap();
+
+    for signature in
+        ["etl.describe_table_columns(oid)", "etl.describe_table_publication_columns(oid,text)"]
+    {
+        let privileges = client
+            .query_one(
+                "select pg_catalog.has_function_privilege($1, $3, 'execute with grant option'),
+                        pg_catalog.has_function_privilege($2, $3, 'execute')",
+                &[&reader, &member, &signature],
+            )
+            .await
+            .unwrap();
+        assert!(privileges.get::<_, bool>(0));
+        assert!(privileges.get::<_, bool>(1));
+    }
+    let public_access = query_bool(
+        &database,
+        "select exists (
+            select 1 from pg_catalog.pg_proc p
+            cross join lateral pg_catalog.aclexplode(p.proacl) acl
+            where p.oid in (
+                'etl.describe_table_columns(oid)'::pg_catalog.regprocedure,
+                'etl.describe_table_publication_columns(oid,text)'::pg_catalog.regprocedure
+            ) and acl.grantee = 0
+        )",
+    )
+    .await;
+    assert!(!public_access);
+    let private_helpers = client
+        .query_one(
+            "select pg_catalog.has_function_privilege($1, \
+             'etl.publication_table_candidates(oid)', 'execute') or \
+             pg_catalog.has_function_privilege($1, 'etl.emit_schema_change_messages()', 'execute')",
+            &[&member],
+        )
+        .await
+        .unwrap();
+    assert!(!private_helpers.get::<_, bool>(0));
+
+    client.batch_execute(&format!("set role {quoted_member}")).await.unwrap();
+    let result = client
+        .query_one(
+            "select (select count(*) from \
+             etl.describe_table_columns('public.reader_table'::regclass)),
+                    etl.describe_table_identity('public.reader_table'::regclass) ? \
+             'replica_identity_attnums',
+                    (select column_attnums is null from etl.describe_table_publication_columns(
+                        'public.reader_table'::regclass, 'reader_pub'))",
+            &[],
+        )
+        .await;
+    client.batch_execute("reset role").await.unwrap();
+    let row = result.unwrap();
+    assert_eq!(row.get::<_, i64>(0), 2);
+    assert!(row.get::<_, bool>(1));
+    assert!(row.get::<_, bool>(2));
+
+    client
+        .batch_execute(&format!(
+            "drop owned by {quoted_reader}, {quoted_member};
+             drop role {quoted_member}, {quoted_reader}"
+        ))
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn split_migrations_can_be_reverted_independently() {
     init_test_tracing();
@@ -1099,6 +1428,46 @@ async fn split_migrations_can_be_reverted_independently() {
             'etl.replication_state'::pg_catalog.regclass
         ) ? 'primary_key_condeferrable'";
     assert!(query_bool(&database, identity_reports_deferrability).await);
+
+    let protocol_identity = "select etl.describe_table_identity(
+        'etl.replication_state'::pg_catalog.regclass
+    ) ? 'replica_identity_attnums'";
+    let publication_helper = "select to_regprocedure(
+        'etl.describe_table_publication_columns(oid,text)'
+    ) is not null";
+    let publication_candidates = "select to_regprocedure(
+        'etl.publication_table_candidates(oid)'
+    ) is not null";
+    let decoder_columns = "select to_regprocedure(
+        'etl.describe_table_columns(oid)'
+    ) is not null";
+    assert!(query_bool(&database, protocol_identity).await);
+    assert!(query_bool(&database, publication_helper).await);
+    assert!(query_bool(&database, publication_candidates).await);
+    assert!(query_bool(&database, decoder_columns).await);
+
+    let stored_missing_value = "select exists (
+        select 1 from pg_catalog.pg_attribute
+        where attrelid = 'etl.table_columns'::pg_catalog.regclass
+          and attname = 'missing_value_expression'
+          and not attnotnull and not attisdropped
+    )";
+    assert!(query_bool(&database, stored_missing_value).await);
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator().undo(&mut conn, 20261002120100).await.unwrap();
+    drop(conn);
+    assert!(!query_bool(&database, stored_missing_value).await);
+    assert!(query_bool(&database, decoder_columns).await);
+    let _upgraded_store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    assert!(query_bool(&database, stored_missing_value).await);
+
+    let mut conn = migration_connection(&database.config).await;
+    source_migrator().undo(&mut conn, SOURCE_PRE_SYNTHETIC_RELATION_VERSION).await.unwrap();
+    drop(conn);
+    assert!(!query_bool(&database, protocol_identity).await);
+    assert!(!query_bool(&database, publication_helper).await);
+    assert!(!query_bool(&database, publication_candidates).await);
+    assert!(!query_bool(&database, decoder_columns).await);
 
     let mut conn = migration_connection(&database.config).await;
     source_migrator().undo(&mut conn, SOURCE_PRE_PRIMARY_KEY_DEFERRABILITY_VERSION).await.unwrap();

@@ -2408,10 +2408,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 
     // --- WHEN: add column and insert with new schema ---
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -2546,21 +2543,20 @@ async fn schema_change_add_column_defaults_merge_tree() {
     table_sync_complete_notify.notified().await;
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
 
     database
         .alter_table(
             table_name.clone(),
             &[
-                TableModification::AddColumn {
+                TableModification::AddColumn { name: "status", data_type: "text" },
+                TableModification::AlterColumn {
                     name: "status",
-                    data_type: "text default 'new'::text",
+                    alteration: "set default 'new'::text",
                 },
                 TableModification::AddColumn { name: "score", data_type: "integer default 15" },
+                TableModification::AlterColumn { name: "score", alteration: "set default 25" },
                 TableModification::AddColumn { name: "active", data_type: "boolean default true" },
             ],
         )
@@ -2594,7 +2590,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
             DefaultedSchemaRow {
                 id: 1,
                 name: "Alice".to_owned(),
-                status: Some("new".to_owned()),
+                status: None,
                 score: Some(15),
                 active: Some(true),
             },
@@ -2602,7 +2598,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
                 id: 2,
                 name: "Bob".to_owned(),
                 status: Some("new".to_owned()),
-                score: Some(15),
+                score: Some(25),
                 active: Some(true),
             },
         ]
@@ -2686,10 +2682,7 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
     let initial_snapshot_id = initial_metadata.snapshot_id();
 
     let events_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -2796,7 +2789,7 @@ struct StaleReplayRow {
     email: Option<String>,
 }
 
-/// Tests that a stale relation event replayed after a restart is rejected
+/// Tests that a stale relation event replayed after a restart is skipped
 /// instead of rewinding the destination schema.
 ///
 /// # GIVEN
@@ -2813,9 +2806,9 @@ struct StaleReplayRow {
 ///
 /// # THEN
 ///
-/// The write fails with `ErrorKind::DestinationSchemaRewind`, no reverse DDL
-/// runs (the `email` column and its data survive), and destination metadata
-/// still points at the newer snapshot.
+/// The write succeeds as a replay marker, no reverse DDL runs (the `email`
+/// column and its data survive), and destination metadata still points at the
+/// newer snapshot.
 ///
 /// # Regression
 ///
@@ -2823,16 +2816,16 @@ struct StaleReplayRow {
 /// the stale one and executed `DROP COLUMN email`, physically deleting the
 /// newer column data before the newer relation event re-added it as empty.
 #[tokio::test(flavor = "multi_thread")]
-async fn stale_relation_replay_rejected_merge_tree() {
-    stale_relation_replay_rejected_inner(ClickHouseEngine::MergeTree).await;
+async fn stale_relation_replay_skipped_merge_tree() {
+    stale_relation_replay_skipped_inner(ClickHouseEngine::MergeTree).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn stale_relation_replay_rejected_replacing_merge_tree() {
-    stale_relation_replay_rejected_inner(ClickHouseEngine::ReplacingMergeTree).await;
+async fn stale_relation_replay_skipped_replacing_merge_tree() {
+    stale_relation_replay_skipped_inner(ClickHouseEngine::ReplacingMergeTree).await;
 }
 
-async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
+async fn stale_relation_replay_skipped_inner(engine: ClickHouseEngine) {
     init_test_tracing();
     install_crypto_provider();
 
@@ -2888,10 +2881,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
 
     // Add a column and stream one row that carries data in it.
     let event_notify = destination
-        .wait_for_events(vec![
-            EventCondition::TableCount(EventType::Relation, table_id, 1),
-            EventCondition::TableCount(EventType::Insert, table_id, 1),
-        ])
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
         .await;
     database
         .alter_table(
@@ -2924,15 +2914,14 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
     // ---
     let restarted_destination =
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
-    let result = restarted_destination
+    restarted_destination
         .write_events(vec![Event::Relation(RelationEvent {
             replicated_table_schema: stale_schema,
         })])
-        .await;
+        .await
+        .unwrap();
 
-    // --- THEN: the stale snapshot is rejected and no reverse DDL ran ---
-    let err = result.unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::DestinationSchemaRewind);
+    // --- THEN: the stale snapshot is skipped and no reverse DDL ran ---
 
     let columns = clickhouse_db.column_names(&clickhouse_table_name).await;
     assert_eq!(columns, vec!["id", "name", "email"], "email column must survive the stale replay");

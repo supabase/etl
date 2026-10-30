@@ -23,7 +23,10 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::{
-    recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    recovery::{
+        ensure_destination_schema_matches_metadata, ensure_relation_schema_transition,
+        is_stale_relation_replay,
+    },
     snowflake::{
         Client, SNOWFLAKE_COLUMN_NAME_MAPPING,
         auth::{AuthManager, HttpExchanger, TokenProvider},
@@ -35,8 +38,8 @@ use crate::{
     table_name::try_stringify_table_name,
 };
 
-/// Bounds concurrent remote table/view checks before replication starts.
-const VIEW_STARTUP_CONCURRENCY: usize = 8;
+/// Bounds concurrent remote raw-table checks before replication starts.
+const TABLE_STARTUP_CONCURRENCY: usize = 8;
 
 /// Ensures Snowflake metadata is ready for streaming operations.
 fn ensure_snowflake_metadata_applied(
@@ -147,7 +150,7 @@ where
         && metadata.is_applied()
     {
         ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
-        if client.is_table_ready(table_id).await {
+        if client.is_table_ready(table_schema).await {
             return Ok(());
         }
     }
@@ -356,7 +359,7 @@ where
             })?;
         ensure_snowflake_metadata_applied(table_id, &metadata)?;
         ensure_destination_schema_matches_metadata("Snowflake", table_id, &metadata, table_schema)?;
-        if self.client.is_table_ready(table_id).await {
+        if self.client.is_table_ready(table_schema).await {
             return Ok(());
         }
 
@@ -590,9 +593,13 @@ where
         let current_replication_mask = metadata.replication_mask().clone();
         let new_replication_mask = new_schema.replication_mask().clone();
 
-        // A relation carries no channel offset proving replay coverage or
-        // ordering between masks. Reject older snapshots and equal-snapshot
-        // mask conflicts before relying on provider offsets or diffing DDL.
+        if is_stale_relation_replay("Snowflake", table_id, current_snapshot_id, new_snapshot_id) {
+            return Ok(false);
+        }
+
+        // A relation carries no channel offset proving ordering between
+        // masks. Reject equal-snapshot mask conflicts before relying on
+        // provider offsets or diffing DDL.
         ensure_relation_schema_transition(
             "Snowflake",
             table_id,
@@ -637,6 +644,33 @@ where
             current_table_schema,
             current_replication_mask.clone(),
         );
+        let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
+        if plan.diff().is_empty() && current_schema.name() == new_schema.name() {
+            // Earlier rows must be durable before their schema endpoint
+            // advances, even when no remote DDL is needed.
+            self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
+            let table = self.client.lock_table(table_id).await;
+            self.client.invalidate_view(&table).await;
+            self.store
+                .store_destination_table_metadata(
+                    table_id,
+                    DestinationTableMetadata::new_applied(
+                        metadata.table_id().to_owned(),
+                        new_snapshot_id,
+                        new_replication_mask,
+                    ),
+                )
+                .await?;
+            // Replica identity can change view eligibility without changing
+            // columns. Reconcile after recording the unchanged raw schema so
+            // a view failure never leaves an interrupted raw DDL transition.
+            self.client
+                .prepare_view(&table, metadata.table_id(), new_schema)
+                .await
+                .map_err(EtlError::from)?;
+            return Ok(true);
+        }
+
         let current_columns: Vec<_> =
             current_schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
         let table_name = metadata.table_id().to_owned();
@@ -645,7 +679,6 @@ where
             .await
             .map_err(EtlError::from)?;
 
-        let plan = current_schema.plan_schema_change(new_schema, SNOWFLAKE_COLUMN_NAME_MAPPING)?;
         self.client.wait_for_pending_durability().await.map_err(EtlError::from)?;
 
         let table = self.client.lock_table(table_id).await;
@@ -717,13 +750,13 @@ where
             })
             .collect::<Vec<_>>();
         stream::iter(table_ids.into_iter().map(Ok))
-            .try_for_each_concurrent(VIEW_STARTUP_CONCURRENCY, |table_id| async move {
+            .try_for_each_concurrent(TABLE_STARTUP_CONCURRENCY, |table_id| async move {
                 let Some(metadata) =
                     self.writer.store.get_destination_table_metadata(table_id).await?
                 else {
                     return Ok(());
                 };
-                // Never publish a view over interrupted raw DDL.
+                // Interrupted raw DDL requires schema recovery before setup.
                 if !metadata.is_applied() {
                     return Ok(());
                 }
@@ -735,7 +768,7 @@ where
                     .ok_or_else(|| {
                         etl_error!(
                             ErrorKind::InvalidState,
-                            "Stored schema missing for Snowflake view reconciliation"
+                            "Stored schema missing for Snowflake startup validation"
                         )
                     })?;
                 let schema =
@@ -743,15 +776,13 @@ where
                 schema.validate_destination_column_names(SNOWFLAKE_COLUMN_NAME_MAPPING)?;
                 let columns: Vec<_> =
                     schema.destination_column_schemas(SNOWFLAKE_COLUMN_NAME_MAPPING).collect();
-                let table = self.writer.client.lock_table(table_id).await;
+                let _table = self.writer.client.lock_table(table_id).await;
+                // Stored snapshots do not retain actual replica identity.
+                // Preserve existing views until a relation or copy schema can
+                // safely decide whether to restore, create, or park them.
                 self.writer
                     .client
                     .prepare_existing_schema(metadata.table_id(), &columns)
-                    .await
-                    .map_err(EtlError::from)?;
-                self.writer
-                    .client
-                    .prepare_view(&table, metadata.table_id(), &schema)
                     .await
                     .map_err(EtlError::from)
             })
@@ -1220,9 +1251,60 @@ mod tests {
         assert!(store.get_destination_table_metadata(schema.id()).await.unwrap().is_none());
     }
 
-    /// A stale relation event must fail before driving reverse Snowflake DDL.
+    /// A source-only change needs no raw DDL, so a failed companion-view
+    /// reconciliation must leave the new endpoint applied and retryable.
     #[tokio::test]
-    async fn stale_relation_event_is_rejected() {
+    async fn unchanged_relation_refresh_remains_applied_on_view_failure() {
+        let (destination, store) = test_destination();
+        let schema = replicated_schema();
+        store.store_table_schema(schema.inner().clone()).await.unwrap();
+        store
+            .store_destination_table_metadata(
+                schema.id(),
+                DestinationTableMetadata::new_applied(
+                    "PUBLIC_USERS".to_owned(),
+                    schema.inner().snapshot_id,
+                    schema.replication_mask().clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let mut refreshed = schema.inner().clone();
+        refreshed.snapshot_id = test_snapshot_id(20, 10);
+        refreshed.column_schemas.push(ColumnSchema::new(
+            "unpublished".to_owned(),
+            Type::INT4,
+            -1,
+            3,
+            true,
+        ));
+        let refreshed = ReplicatedTableSchema::from_mask(
+            Arc::new(refreshed),
+            ReplicationMask::from_bytes(vec![1, 1, 0]),
+        );
+
+        for _ in 0..2 {
+            let error = destination
+                .writer
+                .process_admitted_events(vec![Event::Relation(RelationEvent {
+                    replicated_table_schema: refreshed.clone(),
+                })])
+                .await
+                .unwrap_err();
+
+            assert_eq!(error.kind(), ErrorKind::DestinationAuthenticationError);
+            let metadata =
+                store.get_destination_table_metadata(schema.id()).await.unwrap().unwrap();
+            assert!(metadata.is_applied());
+            assert_eq!(metadata.snapshot_id(), refreshed.inner().snapshot_id);
+            assert_eq!(metadata.replication_mask(), refreshed.replication_mask());
+        }
+    }
+
+    /// A stale relation event is a replay marker and never drives reverse
+    /// Snowflake DDL.
+    #[tokio::test]
+    async fn stale_relation_event_is_skipped() {
         let (destination, store) = test_destination();
         let table_id = TableId::new(3);
         let table_name = TableName::new("public".to_owned(), "users".to_owned());
@@ -1254,15 +1336,14 @@ mod tests {
         );
         store.store_destination_table_metadata(table_id, metadata.clone()).await.unwrap();
 
-        let error = destination
+        destination
             .writer
             .process_admitted_events(vec![Event::Relation(RelationEvent {
                 replicated_table_schema: stale_schema,
             })])
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error.kind(), ErrorKind::DestinationSchemaRewind);
         assert_eq!(store.get_destination_table_metadata(table_id).await.unwrap(), Some(metadata));
     }
 

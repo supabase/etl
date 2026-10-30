@@ -505,7 +505,7 @@ grant create view on schema ETL_DB.PUBLIC to role ETL_ROLE;
 
 Grant this before starting or upgrading the replicator. ETL does not change role
 grants automatically. Missing permissions or conflicting objects fail setup or
-startup reconciliation. Consumers need `SELECT` on the view and the usual
+view reconciliation. Consumers need `SELECT` on the view and the usual
 usage privileges for its database, schema, and query warehouse.
 
 ETL owns the `_CURRENT` and `_CURRENT_PENDING` companion names and their comments.
@@ -515,9 +515,12 @@ For physical names longer than 239 characters, the view name is
 The second name is an internal recovery object, not a supported query interface.
 Before a drop or rename, the public view becomes temporarily unavailable; it is
 restored after the raw schema and new definition are ready. Add-only changes
-replace the definition without taking the public name offline. Startup
-reconciles views for tables that completed initial synchronization, including
-idle tables. Tables awaiting a fresh copy and errored tables are skipped.
+replace the definition without taking the public name offline. Startup validates
+applied raw tables and preserves existing public views. Creating or restoring a
+view requires authoritative relation or copy metadata, because stored destination
+schemas do not retain replica identity. A parked view on an idle table stays
+unavailable until that metadata arrives; replayed schema messages can restore it
+without a row change. Tables awaiting a fresh copy and errored tables are skipped.
 Interrupted raw DDL follows the existing schema recovery/resync requirements.
 
 Explicit view grants survive definition replacement and same-name resync.
@@ -610,9 +613,12 @@ recommended for new deployments.
 
 ### Limitations
 
-- Schema-change DDL is not supported. A newer relation schema is rejected even
-  when only a default, nullability, mapped-equivalent type, or publication mask
-  changed. Existing tables must match the exact generated Iceberg schema.
+- Schema-change DDL is not supported. A newer snapshot is accepted only when
+  the table name, source column identities and metadata (excluding add-time
+  missing-value hints), and publication mask are
+  unchanged. Changes to defaults, nullability, mapped-equivalent types, or
+  publication masks are rejected. Existing tables must match the exact generated
+  Iceberg schema.
 - In `OnePerSchema` mode, source schema names are normalized into Iceberg
   namespace names. The destination rejects different source schemas that map to
   the same namespace within a pipeline, including during restart and recovery.
