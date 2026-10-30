@@ -1,7 +1,7 @@
-use std::error::Error;
+use std::{error::Error, fmt, num::ParseIntError};
 
 use async_trait::async_trait;
-use etl::{error::EtlError, pipeline::PipelineId};
+use etl::error::EtlError;
 use etl_config::shared::DEFAULT_DUCKLAKE_TARGET_FILE_SIZE;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -62,12 +62,95 @@ impl Default for DuckLakeMaintenancePolicy {
     }
 }
 
+/// Errors converting a maintenance pipeline identifier to an integer key.
+#[derive(Debug, Error)]
+pub enum MaintenancePipelineIdError {
+    /// The string is not a signed 64-bit integer.
+    #[error("Pipeline ID is not a signed 64-bit integer")]
+    InvalidInteger {
+        /// Integer parsing failure without the original identifier value.
+        #[source]
+        source: ParseIntError,
+    },
+    /// The string would alias a different identifier after integer conversion.
+    #[error("Pipeline ID is not in canonical decimal form")]
+    NonCanonicalInteger,
+}
+
+/// Pipeline identifier accepted during the migration from integers to strings.
+///
+/// Serialization preserves the original representation so legacy integer
+/// identifiers remain compatible with integer-only maintenance CRD schemas.
+/// Callers must keep writing integers until those schemas accept strings.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum MaintenancePipelineId {
+    /// Legacy signed 64-bit pipeline identifier.
+    Integer(i64),
+    /// String pipeline identifier, preserved without normalization.
+    String(String),
+}
+
+impl From<i64> for MaintenancePipelineId {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<String> for MaintenancePipelineId {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for MaintenancePipelineId {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_owned())
+    }
+}
+
+impl fmt::Display for MaintenancePipelineId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Integer(value) => value.fmt(f),
+            Self::String(value) => f.write_str(value),
+        }
+    }
+}
+
+/// Converts identifiers for backends that still require an integer key.
+///
+/// String identifiers must use canonical decimal form to avoid aliasing another
+/// pipeline's state through leading zeros, a leading plus, or negative zero.
+impl TryFrom<&MaintenancePipelineId> for i64 {
+    type Error = MaintenancePipelineIdError;
+
+    fn try_from(value: &MaintenancePipelineId) -> Result<Self, Self::Error> {
+        match value {
+            MaintenancePipelineId::Integer(value) => Ok(*value),
+            MaintenancePipelineId::String(value) => {
+                let parsed = value
+                    .parse::<i64>()
+                    .map_err(|source| MaintenancePipelineIdError::InvalidInteger { source })?;
+                if parsed.to_string() != *value {
+                    return Err(MaintenancePipelineIdError::NonCanonicalInteger);
+                }
+                Ok(parsed)
+            }
+        }
+    }
+}
+
 /// Stable identity for one pipeline's external maintenance runtime state.
 #[derive(Debug, Clone)]
 pub struct MaintenanceIdentity {
+    /// Tenant/project identifier.
     pub tenant_id: String,
-    pub pipeline_id: PipelineId,
+    /// Pipeline identifier in its legacy integer or new string representation.
+    pub pipeline_id: MaintenancePipelineId,
+    /// Replicator identifier used in runtime resource names.
     pub replicator_id: i64,
+    /// Deployment-specific prefix for runtime resources.
     pub resource_prefix: String,
 }
 
@@ -168,18 +251,23 @@ impl MaintenanceMaterializer for DisabledMaintenanceMaterializer {
 
 /// Postgres materializer for deployments that coordinate maintenance without a
 /// Kubernetes CRD.
+///
+/// Integer and string IDs address text keys without normalizing string
+/// contents.
 #[derive(Debug, Clone)]
 pub struct PostgresMaintenanceMaterializer {
     pool: PgPool,
 }
 
 impl PostgresMaintenanceMaterializer {
+    /// Creates a materializer using the existing Postgres maintenance schema.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 
-    fn store(&self, pipeline_id: &PipelineId) -> PostgresExternalMaintenanceStore {
-        PostgresExternalMaintenanceStore::new(pipeline_id, self.pool.clone())
+    /// Converts the wire identifier to the text-backed store identity.
+    fn store(&self, pipeline_id: &MaintenancePipelineId) -> PostgresExternalMaintenanceStore {
+        PostgresExternalMaintenanceStore::new(pipeline_id.to_string(), self.pool.clone())
     }
 }
 
@@ -213,5 +301,148 @@ impl MaintenanceMaterializer for PostgresMaintenanceMaterializer {
         store.delete_pipeline_state().await.map_err(MaintenanceMaterializationError::postgres)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use serde_json::json;
+    use sqlx::postgres::PgPoolOptions;
+
+    use crate::{
+        DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy, MaintenanceIdentity,
+        MaintenanceMaterializationError, MaintenanceMaterializer, MaintenanceMaterializerKind,
+        MaintenancePipelineId, MaintenancePipelineIdError, MaintenanceRuntimeRefs,
+        PostgresMaintenanceMaterializer,
+    };
+
+    /// Integer identifiers retain their numeric wire representation and range.
+    #[test]
+    fn pipeline_id_round_trips_integers() {
+        for value in [i64::MIN, -1, 0, 42, i64::MAX] {
+            let pipeline_id: MaintenancePipelineId = serde_json::from_value(json!(value)).unwrap();
+
+            assert_eq!(pipeline_id, MaintenancePipelineId::from(value));
+            assert_eq!(serde_json::to_value(&pipeline_id).unwrap(), json!(value));
+            assert_eq!(pipeline_id.to_string(), value.to_string());
+            assert_eq!(i64::try_from(&pipeline_id).unwrap(), value);
+        }
+    }
+
+    /// Strings retain their exact contents, including numeric-looking IDs.
+    #[test]
+    fn pipeline_id_round_trips_strings() {
+        for value in ["42", "0042", "+42", "-0", "pipeline-example", "9223372036854775808", ""] {
+            let pipeline_id: MaintenancePipelineId = serde_json::from_value(json!(value)).unwrap();
+
+            assert_eq!(pipeline_id, MaintenancePipelineId::from(value.to_owned()));
+            assert_eq!(pipeline_id, MaintenancePipelineId::from(value));
+            assert_eq!(serde_json::to_value(&pipeline_id).unwrap(), json!(value));
+            assert_eq!(pipeline_id.to_string(), value);
+        }
+    }
+
+    /// Other JSON shapes and numbers outside the signed range are rejected.
+    #[test]
+    fn pipeline_id_rejects_invalid_wire_types() {
+        for json in [
+            "null",
+            "true",
+            "42.0",
+            "42.5",
+            "[]",
+            "{}",
+            "9223372036854775808",
+            "-9223372036854775809",
+        ] {
+            assert!(serde_json::from_str::<MaintenancePipelineId>(json).is_err());
+        }
+    }
+
+    /// Canonical numeric strings can address the existing Postgres bigint keys.
+    #[test]
+    fn pipeline_id_converts_numeric_strings_for_legacy_backends() {
+        for value in [i64::MIN, -1, 0, 42, i64::MAX] {
+            let pipeline_id = MaintenancePipelineId::from(value.to_string());
+
+            assert_eq!(i64::try_from(&pipeline_id).unwrap(), value);
+        }
+    }
+
+    /// Incompatible strings return conversion errors without panicking.
+    #[test]
+    fn pipeline_id_rejects_invalid_legacy_integer_conversion() {
+        for value in [
+            "",
+            "pipeline-example",
+            "４２",
+            " 42",
+            "42.0",
+            "9223372036854775808",
+            "-9223372036854775809",
+        ] {
+            let pipeline_id = MaintenancePipelineId::from(value);
+
+            assert!(matches!(
+                i64::try_from(&pipeline_id),
+                Err(MaintenancePipelineIdError::InvalidInteger { .. })
+            ));
+        }
+    }
+
+    /// Non-canonical strings must not alias another pipeline's integer key.
+    #[test]
+    fn pipeline_id_rejects_non_canonical_legacy_integer_conversion() {
+        for value in ["042", "0042", "+42", "-042", "00", "+0", "-0"] {
+            let pipeline_id = MaintenancePipelineId::from(value);
+
+            assert!(matches!(
+                i64::try_from(&pipeline_id),
+                Err(MaintenancePipelineIdError::NonCanonicalInteger)
+            ));
+        }
+    }
+
+    /// String IDs reach the text-backed store without integer conversion.
+    #[tokio::test]
+    async fn postgres_materializer_routes_string_ids_to_text_store() {
+        let pool =
+            PgPoolOptions::new().connect_lazy("postgres://postgres@127.0.0.1/postgres").unwrap();
+        // A closed pool exposes the storage boundary without a live database.
+        pool.close().await;
+        let materializer = PostgresMaintenanceMaterializer::new(pool);
+        for value in ["pipeline-example", "042", "0042", "+42", "-042", "00", "+0", "-0"] {
+            let identity = MaintenanceIdentity {
+                tenant_id: "tenant-example".to_owned(),
+                pipeline_id: value.into(),
+                replicator_id: 1,
+                resource_prefix: "replicator".to_owned(),
+            };
+            let input = DuckLakeMaintenanceMaterialization {
+                identity: identity.clone(),
+                policy: DuckLakeMaintenancePolicy::default(),
+                runtime_refs: MaintenanceRuntimeRefs {
+                    replicator_image: "etl-replicator:test".to_owned(),
+                },
+            };
+
+            let reconcile_error =
+                materializer.reconcile_ducklake_maintenance(input).await.unwrap_err();
+            let delete_error =
+                materializer.delete_ducklake_maintenance(identity).await.unwrap_err();
+
+            for error in [reconcile_error, delete_error] {
+                assert!(matches!(
+                    error,
+                    MaintenanceMaterializationError::Backend {
+                        backend: MaintenanceMaterializerKind::Postgres,
+                        ..
+                    }
+                ));
+                assert!(error.source().is_some());
+            }
+        }
     }
 }

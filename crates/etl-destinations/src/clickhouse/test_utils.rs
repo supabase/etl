@@ -2,7 +2,8 @@
 
 use clickhouse::Client;
 use etl::store::{SchemaStore, StateStore};
-use tokio::runtime::Handle;
+use parking_lot::Mutex;
+use tokio::{runtime::Handle, sync::oneshot};
 use url::Url;
 use uuid::Uuid;
 
@@ -18,6 +19,39 @@ pub const CLICKHOUSE_USER_ENV: &str = "TESTS_CLICKHOUSE_USER";
 /// ClickHouse password (optional -- omit or leave empty for passwordless
 /// access).
 pub const CLICKHOUSE_PASSWORD_ENV: &str = "TESTS_CLICKHOUSE_PASSWORD";
+
+/// One-shot pause before the first destination metadata and table are created.
+struct TableCreationPause {
+    /// Signals that preparation reached the metadata-free boundary.
+    reached: oneshot::Sender<()>,
+    /// Resumes preparation when signalled or dropped.
+    release: oneshot::Receiver<()>,
+}
+
+/// Next table-creation pause, consumed by the first preparation without
+/// metadata.
+static TABLE_CREATION_PAUSE: Mutex<Option<TableCreationPause>> = Mutex::new(None);
+
+/// Pauses the next table preparation before it creates destination metadata.
+///
+/// Returns a notification that preparation reached the pause and a sender that
+/// resumes it. Closing that sender also resumes preparation; a closed receiver
+/// means preparation was cancelled.
+pub fn arm_pause_before_table_creation() -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (reached, reached_rx) = oneshot::channel();
+    let (release_tx, release) = oneshot::channel();
+    *TABLE_CREATION_PAUSE.lock() = Some(TableCreationPause { reached, release });
+    (reached_rx, release_tx)
+}
+
+/// Stops at the armed metadata-free boundary, if a test requested a pause.
+pub(super) async fn pause_before_table_creation() {
+    let pause = TABLE_CREATION_PAUSE.lock().take();
+    if let Some(pause) = pause {
+        let _ = pause.reached.send(());
+        let _ = pause.release.await;
+    }
+}
 
 /// Removes provider response text before ClickHouse test errors are reported.
 pub fn redact_clickhouse_error(error: clickhouse::error::Error) -> clickhouse::error::Error {
