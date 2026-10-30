@@ -14,12 +14,16 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Days, NaiveDate, TimeDelta, Utc};
 use reqwest::StatusCode;
+use serde_json::json;
 use sqlx::{Connection, PgConnection};
 use tokio::{io::AsyncReadExt, process::Command};
 
 use crate::{
     commands::ci_metrics::{
-        manifest::{self, MANIFEST_FILE_NAME, MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, Rejection},
+        manifest::{
+            self, ArchiveEntry, ArtifactKind, MANIFEST_FILE_NAME, MAX_ARCHIVE_BYTES,
+            MAX_ENTRY_BYTES, Rejection,
+        },
         model::{
             ArtifactPage, CodeScanningAlert, CodeScanningAnalysis, Job, JobPage, Run, RunPage,
             WorkflowPage,
@@ -28,6 +32,7 @@ use crate::{
         store::{self, ManifestRow, RejectionRow},
     },
     github::{GitHubClient, GitHubResponse},
+    test_manifest::{self, TestStatus},
 };
 
 /// GitHub page size for every listing.
@@ -44,8 +49,10 @@ const CODE_SCANNING_RESERVE: u64 = 20;
 const MAX_TRIES: u32 = 3;
 /// Longest `retry-after` the sync waits for instead of stopping.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
-/// Workflows whose runs upload manifests.
-const MANIFEST_WORKFLOWS: &[&str] = &[".github/workflows/benchmark.yml"];
+/// Workflow whose runs upload benchmark manifests.
+const BENCHMARK_WORKFLOW: &str = ".github/workflows/benchmark.yml";
+/// Workflow whose runs upload test manifests, from its reusable test jobs.
+const TEST_WORKFLOW: &str = ".github/workflows/ci.yml";
 /// Code-scanning alert states listed separately, which does not rely on the
 /// unfiltered listing's default. The `fixed` filter also returns dismissed
 /// alerts; upserting by alert number makes the overlap harmless.
@@ -90,6 +97,7 @@ struct Totals {
     detailed_runs: u64,
     jobs: u64,
     manifests: u64,
+    test_results: u64,
     skipped_manifests: u64,
     rejections: u64,
     deleted_runs: u64,
@@ -230,8 +238,8 @@ async fn run_locked(
     let totals = &syncer.totals;
     eprintln!(
         "ci-metrics: synced {} days ({} failed), {} runs ({} detailed), {} jobs, {} manifests ({} \
-         skipped), {} rejections, {} deleted, {} stale, {} alerts, {} new analyses using {} \
-         requests{}",
+         skipped, {} test results), {} rejections, {} deleted, {} stale, {} alerts, {} new \
+         analyses using {} requests{}",
         totals.days,
         totals.failed_days,
         totals.runs,
@@ -239,6 +247,7 @@ async fn run_locked(
         totals.jobs,
         totals.manifests,
         totals.skipped_manifests,
+        totals.test_results,
         totals.rejections,
         totals.deleted_runs,
         totals.stale_runs,
@@ -415,8 +424,9 @@ impl Syncer<'_> {
             let jobs = self.fetch_jobs(run.id).await?;
             let known = known_artifacts.get(&run.id).cloned().unwrap_or_default();
             let known_stored = known.values().any(|stored| *stored);
-            let (manifests, rejections, artifact_status) = if accepts_manifests(run) {
-                self.fetch_manifests(run, &jobs, &known).await?
+            let trust = ManifestTrust::for_run(run);
+            let (manifests, rejections, artifact_status) = if trust.any() {
+                self.fetch_manifests(run, &jobs, &known, trust).await?
             } else {
                 (Vec::new(), Vec::new(), None)
             };
@@ -462,7 +472,7 @@ impl Syncer<'_> {
                     self.totals.skipped_manifests += 1;
                     continue;
                 }
-                store::insert_manifest(&mut tx, manifest).await?;
+                self.totals.test_results += store::insert_manifest(&mut tx, manifest).await?;
                 inserted += 1;
             }
             for rejection in &details.rejections {
@@ -608,13 +618,15 @@ impl Syncer<'_> {
         }
     }
 
-    /// Fetches and validates manifest artifacts of a run. Artifacts already
-    /// stored or rejected are skipped, because artifacts are immutable.
+    /// Fetches and validates the manifest artifacts of a run that `trust`
+    /// admits. Artifacts already stored or rejected are skipped, because
+    /// artifacts are immutable.
     async fn fetch_manifests(
         &mut self,
         run: &Run,
         jobs: &[Job],
         known: &HashMap<i64, bool>,
+        trust: ManifestTrust,
     ) -> Result<(Vec<ManifestRow>, Vec<RejectionRow>, Option<&'static str>), SyncError> {
         let mut manifests = Vec::new();
         let mut rejections = Vec::new();
@@ -628,9 +640,11 @@ impl Syncer<'_> {
                 || listing.artifacts.is_empty()
                 || u64::try_from(page * PER_PAGE).unwrap_or(u64::MAX) >= listing.total_count;
             for artifact in listing.artifacts {
-                if !manifest::is_benchmark_artifact(&artifact.name)
-                    || known.contains_key(&artifact.id)
-                {
+                let Some(ingest) = trust.ingest(manifest::artifact_kind(&artifact.name), jobs)
+                else {
+                    continue;
+                };
+                if known.contains_key(&artifact.id) {
                     continue;
                 }
                 if artifact.expired {
@@ -662,7 +676,7 @@ impl Syncer<'_> {
                     continue;
                 }
                 let archive = response.into_body();
-                match read_benchmark_archive(&archive, run, jobs).await {
+                match read_archive(&archive, run, jobs, ingest).await {
                     Ok(Ok(row)) => manifests.push(row.with_artifact(artifact.id)),
                     Ok(Err((reason, run_attempt))) => reject(reason, run_attempt),
                     Err(source) => return Err(SyncError::Day { kind: "artifact_io", source }),
@@ -776,6 +790,98 @@ enum Target<'a> {
     Url(&'a str),
 }
 
+/// Which results of a test manifest are stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestScope {
+    /// Every result. Runs on `main` feed the per-test duration views.
+    All,
+    /// Failed tests only: enough to find flaky tests at a small fraction of
+    /// the rows.
+    Failures,
+}
+
+impl TestScope {
+    /// Returns the name recorded in the manifest payload.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Failures => "failures",
+        }
+    }
+}
+
+/// Which manifests of a run are ingested, by kind.
+///
+/// A branch can edit any workflow and upload any manifest it likes, so trust
+/// depends on what a forged manifest could distort. Benchmark manifests
+/// set comparison baselines and come only from the benchmark workflow as
+/// committed to `main` (scheduled, or dispatched or pushed on `main`). Test
+/// manifests come from CI runs on `main` and from same-repository pull
+/// requests and merge queue runs, where re-run flakes happen; a forged one
+/// can only distort flaky-test statistics, and only its failures are stored.
+/// Forks are never trusted, and runs are read once completed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ManifestTrust {
+    benchmarks: bool,
+    tests: Option<TestScope>,
+}
+
+impl ManifestTrust {
+    /// Returns the trust for `run`.
+    fn for_run(run: &Run) -> Self {
+        if run.status != "completed" || run.is_fork() {
+            return Self { benchmarks: false, tests: None };
+        }
+        let from_main = match run.event.as_str() {
+            "schedule" => true,
+            "workflow_dispatch" | "push" => run.head_branch.as_deref() == Some("main"),
+            _ => false,
+        };
+        let tests = if run.workflow_path() != TEST_WORKFLOW {
+            None
+        } else if from_main {
+            Some(TestScope::All)
+        } else if matches!(run.event.as_str(), "pull_request" | "merge_group") {
+            Some(TestScope::Failures)
+        } else {
+            None
+        };
+        Self { benchmarks: from_main && run.workflow_path() == BENCHMARK_WORKFLOW, tests }
+    }
+
+    /// Returns whether any manifest of the run is ingested.
+    fn any(self) -> bool {
+        self.benchmarks || self.tests.is_some()
+    }
+
+    /// Returns how to ingest an artifact of `kind`, or `None` to skip it. A
+    /// test job that passed has no failures, so it is skipped when only
+    /// failures are stored.
+    fn ingest(self, kind: Option<ArtifactKind>, jobs: &[Job]) -> Option<Ingest> {
+        match kind? {
+            ArtifactKind::Benchmark => self.benchmarks.then_some(Ingest::Benchmark),
+            ArtifactKind::Test { job_id } => {
+                let scope = self.tests?;
+                let passed = jobs
+                    .iter()
+                    .any(|job| job.id == job_id && job.conclusion.as_deref() == Some("success"));
+                (scope == TestScope::All || !passed).then_some(Ingest::Test { job_id, scope })
+            }
+        }
+    }
+}
+
+/// How one artifact is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ingest {
+    Benchmark,
+    /// The test manifest of job `job_id`.
+    Test {
+        job_id: i64,
+        scope: TestScope,
+    },
+}
+
 impl ManifestRow {
     /// Sets the artifact id once the archive has been validated.
     fn with_artifact(mut self, artifact_id: i64) -> Self {
@@ -784,15 +890,16 @@ impl ManifestRow {
     }
 }
 
-/// Reads and validates a benchmark results archive.
+/// Reads and validates a manifest archive.
 ///
 /// The outer `Result` carries local I/O failures, which retry later. The
 /// inner one carries validation outcomes, which are recorded; only
 /// `unmatched_job` is retried on a later fetch.
-async fn read_benchmark_archive(
+async fn read_archive(
     archive: &[u8],
     run: &Run,
     jobs: &[Job],
+    ingest: Ingest,
 ) -> Result<Result<ManifestRow, (Rejection, Option<i32>)>> {
     let mut file = tempfile::NamedTempFile::new().context("Failed to create artifact file")?;
     std::io::Write::write_all(&mut file, archive).context("Failed to write artifact file")?;
@@ -810,14 +917,26 @@ async fn read_benchmark_archive(
     let Some(manifest_bytes) = read_entry(path, MANIFEST_FILE_NAME).await? else {
         return Ok(Err((Rejection::TooLarge, None)));
     };
-    let parsed = match manifest::parse_benchmark_manifest(
-        &manifest_bytes,
-        &run.repository.full_name,
-        run.id,
-    ) {
-        Ok(parsed) => parsed,
-        Err(reason) => return Ok(Err((reason, None))),
-    };
+    match ingest {
+        Ingest::Benchmark => benchmark_row(path, &entries, &manifest_bytes, run, jobs).await,
+        Ingest::Test { job_id, scope } => Ok(test_row(&manifest_bytes, run, jobs, job_id, scope)),
+    }
+}
+
+/// Validates a benchmark manifest and reads the reports it lists.
+async fn benchmark_row(
+    path: &Path,
+    entries: &[ArchiveEntry],
+    manifest_bytes: &[u8],
+    run: &Run,
+    jobs: &[Job],
+) -> Result<Result<ManifestRow, (Rejection, Option<i32>)>> {
+    let parsed =
+        match manifest::parse_benchmark_manifest(manifest_bytes, &run.repository.full_name, run.id)
+        {
+            Ok(parsed) => parsed,
+            Err(reason) => return Ok(Err((reason, None))),
+        };
     let run_attempt = parsed.run_attempt();
 
     let mut reports = BTreeMap::new();
@@ -848,7 +967,51 @@ async fn read_benchmark_archive(
         schema_version: parsed.schema_version(),
         commit_sha: parsed.commit_sha().to_owned(),
         payload,
+        tests: Vec::new(),
     }))
+}
+
+/// Validates the test manifest of job `job_id` and keeps the results `scope`
+/// stores. The payload records totals, so a failures-only row still shows how
+/// many tests ran.
+fn test_row(
+    manifest_bytes: &[u8],
+    run: &Run,
+    jobs: &[Job],
+    job_id: i64,
+    scope: TestScope,
+) -> Result<ManifestRow, (Rejection, Option<i32>)> {
+    let parsed =
+        manifest::parse_test_manifest(manifest_bytes, &run.repository.full_name, run.id, job_id)
+            .map_err(|reason| (reason, None))?;
+    let run_attempt = parsed.github().run_attempt();
+    if resolve_job(jobs, run_attempt, Some(job_id), "").is_none() {
+        return Err((Rejection::UnmatchedJob, Some(run_attempt)));
+    }
+
+    let coverage = parsed.coverage();
+    let mut tests = parsed.into_tests();
+    let total = tests.len();
+    let failed = tests.iter().filter(|test| test.status() == TestStatus::Failed).count();
+    if scope == TestScope::Failures {
+        tests.retain(|test| test.status() == TestStatus::Failed);
+    }
+    Ok(ManifestRow {
+        artifact_id: 0,
+        run_id: run.id,
+        run_attempt,
+        job_id,
+        kind: test_manifest::KIND,
+        schema_version: i32::try_from(test_manifest::SCHEMA_VERSION).unwrap_or(i32::MAX),
+        commit_sha: run.head_sha.clone(),
+        payload: json!({
+            "coverage": coverage,
+            "tests": total,
+            "failed": failed,
+            "stored": scope.as_str(),
+        }),
+        tests,
+    })
 }
 
 /// Resolves the job that produced a manifest: by id when recorded, else by
@@ -902,22 +1065,6 @@ async fn run_unzip(
     Ok(status.success().then_some(output))
 }
 
-/// Returns whether a run's manifests may be ingested: only runs of the
-/// workflow as committed to `main` (scheduled, or dispatched or pushed on
-/// `main`), never pull requests or forks. A branch can edit the workflow and
-/// write any manifest it likes, so its runs are not trusted.
-fn accepts_manifests(run: &Run) -> bool {
-    let trusted_event = match run.event.as_str() {
-        "schedule" => true,
-        "workflow_dispatch" | "push" => run.head_branch.as_deref() == Some("main"),
-        _ => false,
-    };
-    run.status == "completed"
-        && !run.is_fork()
-        && trusted_event
-        && MANIFEST_WORKFLOWS.contains(&run.workflow_path())
-}
-
 /// Classifies how much step detail GitHub still returns for a job.
 fn detail_status(now: DateTime<Utc>, job: &Job) -> &'static str {
     if !job.steps.is_empty() {
@@ -952,6 +1099,7 @@ fn backoff(attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::ci_metrics::model::Repository;
 
     fn job(id: i64, run_attempt: i32, name: &str) -> Job {
         Job {
@@ -966,6 +1114,27 @@ mod tests {
             completed_at: None,
             labels: Vec::new(),
             steps: Vec::new(),
+        }
+    }
+
+    fn run(path: &str, event: &str, branch: &str, head_repo: Option<&str>) -> Run {
+        let repository = |name: &str| Repository { full_name: name.to_owned() };
+        Run {
+            id: 1,
+            run_attempt: 1,
+            workflow_id: 1,
+            display_title: "title".to_owned(),
+            event: event.to_owned(),
+            head_branch: Some(branch.to_owned()),
+            head_sha: "ec5e169ae80ccd664826b298791de64a88e9aa61".to_owned(),
+            path: path.to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some("success".to_owned()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            run_started_at: None,
+            repository: repository("supabase/etl"),
+            head_repository: head_repo.map(repository),
         }
     }
 
@@ -985,5 +1154,77 @@ mod tests {
         assert_eq!(resolve_job(&jobs, 2, None, "Benchmark (snowflake)"), Some(20));
         assert_eq!(resolve_job(&jobs, 3, None, "Benchmark (snowflake)"), None);
         assert_eq!(resolve_job(&jobs, 2, None, "Benchmark (bigquery)"), None);
+    }
+
+    /// Benchmarks are trusted only from `main`; test failures also from
+    /// same-repository pull requests; nothing from forks or unfinished runs.
+    #[test]
+    fn manifest_trust_depends_on_kind() {
+        let same = Some("supabase/etl");
+        let trust = |run: &Run| {
+            let trust = ManifestTrust::for_run(run);
+            (trust.benchmarks, trust.tests)
+        };
+        let ci = TEST_WORKFLOW;
+        let bench = BENCHMARK_WORKFLOW;
+
+        assert_eq!(trust(&run(ci, "push", "main", same)), (false, Some(TestScope::All)));
+        assert_eq!(
+            trust(&run(ci, "workflow_dispatch", "main", same)),
+            (false, Some(TestScope::All))
+        );
+        assert_eq!(
+            trust(&run(ci, "pull_request", "feature", same)),
+            (false, Some(TestScope::Failures))
+        );
+        assert_eq!(
+            trust(&run(ci, "merge_group", "gh-readonly-queue/main/pr-1", same)),
+            (false, Some(TestScope::Failures))
+        );
+        assert_eq!(trust(&run(ci, "workflow_dispatch", "feature", same)), (false, None));
+        assert_eq!(trust(&run(ci, "pull_request", "feature", Some("someone/etl"))), (false, None));
+        assert_eq!(trust(&run(ci, "pull_request", "feature", None)), (false, None));
+        assert_eq!(
+            trust(&run(&format!("{ci}@refs/heads/main"), "push", "main", same)).1,
+            Some(TestScope::All)
+        );
+
+        assert_eq!(trust(&run(bench, "schedule", "main", same)), (true, None));
+        assert_eq!(trust(&run(bench, "push", "main", same)), (true, None));
+        assert_eq!(trust(&run(bench, "pull_request", "feature", same)), (false, None));
+        assert_eq!(trust(&run(bench, "workflow_dispatch", "feature", same)), (false, None));
+
+        let mut running = run(ci, "push", "main", same);
+        running.status = "in_progress".to_owned();
+        assert!(!ManifestTrust::for_run(&running).any());
+    }
+
+    /// Failures-only runs skip the artifacts of passing jobs; other kinds
+    /// follow their own trust.
+    #[test]
+    fn ingest_skips_passing_jobs_when_storing_failures() {
+        let mut failed = job(2, 1, "Run tests");
+        failed.conclusion = Some("failure".to_owned());
+        let jobs = [job(1, 1, "Run tests"), failed];
+        let test = |job_id| Some(ArtifactKind::Test { job_id });
+        let pr = ManifestTrust { benchmarks: false, tests: Some(TestScope::Failures) };
+        let main = ManifestTrust { benchmarks: false, tests: Some(TestScope::All) };
+
+        assert_eq!(pr.ingest(test(1), &jobs), None);
+        assert_eq!(
+            pr.ingest(test(2), &jobs),
+            Some(Ingest::Test { job_id: 2, scope: TestScope::Failures })
+        );
+        // An unknown job is read, then rejected as unmatched and retried.
+        assert_eq!(
+            pr.ingest(test(3), &jobs),
+            Some(Ingest::Test { job_id: 3, scope: TestScope::Failures })
+        );
+        assert_eq!(
+            main.ingest(test(1), &jobs),
+            Some(Ingest::Test { job_id: 1, scope: TestScope::All })
+        );
+        assert_eq!(main.ingest(Some(ArtifactKind::Benchmark), &jobs), None);
+        assert_eq!(main.ingest(None, &jobs), None);
     }
 }

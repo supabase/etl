@@ -7603,6 +7603,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "pg_escape",
+ "quick-xml 0.38.4",
  "reqwest",
  "schemars 1.2.1",
  "secrecy",

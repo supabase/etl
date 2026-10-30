@@ -137,12 +137,25 @@ jobs:
       - name: Run tests
         env:
           COVERAGE: ${{ inputs.coverage }}
+          # Equals the jobs API `id`, so the test manifest joins to this job.
+          # `GITHUB_JOB` is only the YAML key and is shared by every leg.
+          JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         run: |
           if [[ "$COVERAGE" == true ]]; then
-            cargo --locked xtask nextest llvm-cov
+            cargo --locked xtask nextest llvm-cov --test-manifest target/test-results/manifest.json
           else
-            target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst
+            target/ci/xtask nextest run --archive-file target/ci/tests.tar.zst \
+              --test-manifest target/test-results/manifest.json
           fi
+      - name: Upload test results
+        # Per-test results for the CI metrics collector, kept when tests fail.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ job.check_run_id }}
+          path: target/test-results/manifest.json
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Export coverage
         if: inputs.coverage
         run: cargo llvm-cov report --locked --lcov --output-path lcov.info

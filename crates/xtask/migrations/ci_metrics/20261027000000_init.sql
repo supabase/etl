@@ -115,6 +115,27 @@ create table ci.manifest_rejection (
     rejected_at timestamptz not null
 );
 
+-- Tests by nextest binary id and name, stored once and referenced by results.
+create table ci.test (
+    test_id bigint generated always as identity primary key,
+    binary_id text not null,
+    name text not null,
+    unique (binary_id, name)
+);
+
+-- Per-test results from `test` manifests, one row per job and test. Runs on
+-- `main` keep every result; pull requests and merge queue runs keep failures
+-- only, which is enough to find flaky tests at a fraction of the rows. The
+-- manifest payload records the totals and whether the job ran instrumented
+-- for coverage.
+create table ci.test_result (
+    job_id bigint not null references ci.job,
+    test_id bigint not null references ci.test,
+    status text not null check (status in ('passed', 'failed')),
+    duration_ms integer not null check (duration_ms >= 0),
+    primary key (job_id, test_id)
+);
+
 -- List prices per runner label. Cost is an estimate; the invoice is the
 -- authority. Labels without a price yield a null cost, never zero.
 create table ci.runner_price (
@@ -436,6 +457,70 @@ join ci.run r using (run_id, run_attempt)
 cross join lateral jsonb_each(m.payload -> 'reports') report
 cross join lateral jsonb_each(report.value -> 'metrics') metric
 where m.kind = 'benchmark' and r.deleted_at is null;
+
+-- One row per stored test result. Coverage jobs run instrumented binaries, so
+-- their durations are not comparable with other jobs'.
+create view ci_report.test_result as
+select
+    tr.job_id,
+    j.run_id,
+    j.run_attempt,
+    r.event,
+    r.head_branch,
+    r.head_sha,
+    j.name as job_name,
+    j.completed_at,
+    t.binary_id,
+    t.name as test_name,
+    tr.status,
+    tr.duration_ms,
+    coalesce((m.payload ->> 'coverage')::boolean, false) as coverage,
+    'https://github.com/supabase/etl/actions/runs/' || j.run_id || '/job/' || j.job_id as job_url
+from ci.test_result tr
+join ci.test t using (test_id)
+join ci.job j using (job_id)
+join ci.run r on r.run_id = j.run_id and r.run_attempt = j.run_attempt
+join ci.manifest m on m.job_id = tr.job_id and m.kind = 'test'
+where r.deleted_at is null;
+
+-- Tests that failed in a job whose same-named job passed in a later attempt
+-- of the same run: the rule of `flaky_job`, per test. One row per failure.
+create view ci_report.flaky_test as
+select
+    f.run_id,
+    f.run_attempt,
+    f.event,
+    f.head_branch,
+    case when f.head_branch = 'main' then 'main' else 'pull request' end as scope,
+    f.job_name,
+    f.binary_id,
+    f.test_name,
+    f.completed_at,
+    f.job_url
+from ci_report.test_result f
+where f.status = 'failed'
+    and exists (
+        select
+        from ci.job retried
+        where retried.run_id = f.run_id
+            and retried.name = f.job_name
+            and retried.run_attempt > f.run_attempt
+            and retried.conclusion = 'success'
+    );
+
+-- Daily duration percentiles per test from passing runs on `main`, excluding
+-- coverage jobs. Pull requests store failures only and never appear here.
+create view ci_report.test_duration_daily as
+select
+    (completed_at at time zone 'utc')::date as day,
+    binary_id,
+    test_name,
+    count(*) as results,
+    percentile_cont(0.5) within group (order by duration_ms) / 1000.0 as p50_seconds,
+    percentile_cont(0.9) within group (order by duration_ms) / 1000.0 as p90_seconds
+from ci_report.test_result
+where status = 'passed' and not coverage and head_branch = 'main'
+group by 1, 2, 3;
 
 -- Open code-scanning alerts per day, reconstructed from alert timestamps.
 create view ci_report.security_daily as
