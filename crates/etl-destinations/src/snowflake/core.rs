@@ -935,7 +935,6 @@ mod tests {
     use etl::{
         destination::Destination as _,
         event::{RelationEvent, TruncateEvent},
-        pipeline::PipelineId,
         schema::{IdentityMask, PgLsn, ReplicationMask, SnapshotId, TableName, TableSchema, Type},
         store::{SchemaStore, StateStore, TableRetryPolicy, TableState},
         test_utils::notifying_store::NotifyingStore,
@@ -977,7 +976,7 @@ mod tests {
             stream_client,
             config.database().to_owned(),
             config.schema().to_owned(),
-            PipelineId::from(1_u64),
+            1_u64,
         );
         let store = NotifyingStore::new();
         let destination = Destination::new(client, store.clone());

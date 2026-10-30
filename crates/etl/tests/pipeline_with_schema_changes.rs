@@ -3,7 +3,6 @@
 use etl::{
     data::{ArrayCell, Cell, Date},
     event::{Event, EventType},
-    pipeline::PipelineId,
     schema::{ColumnSchema, SnapshotId, TableId, TableSchema},
     store::TableStateType,
     test_utils::{
@@ -935,7 +934,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // Rename column + change type + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        &pipeline_id,
         publication.clone(),
         store.clone(),
         destination.clone(),
@@ -980,7 +979,7 @@ async fn pipeline_recovers_after_multiple_schema_changes_and_restart() {
     // Drop column + insert, then restart.
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        &pipeline_id,
         publication.clone(),
         store.clone(),
         destination.clone(),
@@ -1128,7 +1127,7 @@ async fn partitioned_table_schema_change_updates_relation_message() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

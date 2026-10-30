@@ -177,8 +177,8 @@ impl PostgresMaintenanceMaterializer {
         Self { pool }
     }
 
-    fn store(&self, pipeline_id: i64) -> PostgresExternalMaintenanceStore {
-        PostgresExternalMaintenanceStore::new(pipeline_id, self.pool.clone())
+    fn store(&self, legacy_pipeline_id: i64) -> PostgresExternalMaintenanceStore {
+        PostgresExternalMaintenanceStore::new(legacy_pipeline_id, self.pool.clone())
     }
 }
 

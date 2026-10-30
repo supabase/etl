@@ -60,7 +60,7 @@ async fn copy_converges_with_concurrent_writers() {
     }
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        random(),
+        random::<u64>(),
         "copy_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -187,7 +187,7 @@ async fn copy_retries_queued_partition_ddl() {
     let retry_drop = destination.hold_next(FaultyOp::DropTableForCopy).await;
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        random(),
+        random::<u64>(),
         "copy_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -264,7 +264,7 @@ async fn table_copy_shutdown_interrupts_stalled_write_and_restarts() {
         let store = NotifyingStore::new();
         let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
         let write_hold = destination.hold_next(FaultyOp::WriteTableRows).await;
-        let pipeline_id = random();
+        let pipeline_id = random::<u64>();
         let mut pipeline = create_pipeline(
             &database.config,
             pipeline_id,

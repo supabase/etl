@@ -1,6 +1,6 @@
 //! Naming and cleanup helpers for ETL logical replication slots.
 
-use std::time::Duration;
+use std::{fmt::Display, time::Duration};
 
 use sqlx::PgPool;
 use thiserror::Error;
@@ -30,17 +30,17 @@ pub enum EtlReplicationSlotError {
 }
 
 /// Parsed representation of a replication slot name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EtlReplicationSlot {
     /// Apply worker slot for a pipeline.
     Apply {
         /// Pipeline that owns the slot.
-        pipeline_id: u64,
+        pipeline_id: String,
     },
     /// Table sync worker slot for a pipeline and table.
     TableSync {
         /// Pipeline that owns the slot.
-        pipeline_id: u64,
+        pipeline_id: String,
         /// Source table copied by the table-sync worker.
         table_id: TableId,
     },
@@ -48,17 +48,17 @@ pub enum EtlReplicationSlot {
 
 impl EtlReplicationSlot {
     /// Creates a new [`EtlReplicationSlot`] for the apply worker.
-    pub fn for_apply_worker(pipeline_id: u64) -> Self {
-        Self::Apply { pipeline_id }
+    pub fn for_apply_worker(pipeline_id: impl Display) -> Self {
+        Self::Apply { pipeline_id: pipeline_id.to_string() }
     }
 
     /// Creates a new [`EtlReplicationSlot`] for the table sync worker.
-    pub fn for_table_sync_worker(pipeline_id: u64, table_id: TableId) -> Self {
-        Self::TableSync { pipeline_id, table_id }
+    pub fn for_table_sync_worker(pipeline_id: impl Display, table_id: TableId) -> Self {
+        Self::TableSync { pipeline_id: pipeline_id.to_string(), table_id }
     }
 
     /// Returns the prefix of apply sync slot for a pipeline.
-    pub fn apply_prefix(pipeline_id: u64) -> Result<String, EtlReplicationSlotError> {
+    pub fn apply_prefix(pipeline_id: impl Display) -> Result<String, EtlReplicationSlotError> {
         let prefix = format!("{APPLY_WORKER_PREFIX}_{pipeline_id}");
 
         if prefix.len() >= MAX_SLOT_NAME_LENGTH {
@@ -69,7 +69,7 @@ impl EtlReplicationSlot {
     }
 
     /// Returns the prefix of table sync slots for a pipeline.
-    pub fn table_sync_prefix(pipeline_id: u64) -> Result<String, EtlReplicationSlotError> {
+    pub fn table_sync_prefix(pipeline_id: impl Display) -> Result<String, EtlReplicationSlotError> {
         let prefix = format!("{TABLE_SYNC_WORKER_PREFIX}_{pipeline_id}_");
 
         if prefix.len() >= MAX_SLOT_NAME_LENGTH {
@@ -88,12 +88,11 @@ impl TryFrom<&str> for EtlReplicationSlot {
             let rest = rest
                 .strip_prefix('_')
                 .ok_or_else(|| EtlReplicationSlotError::InvalidSlotName(slot_name.into()))?;
-            let pipeline_id: u64 = rest
-                .parse()
-                .ok()
-                .ok_or_else(|| EtlReplicationSlotError::InvalidSlotName(slot_name.into()))?;
+            if rest.is_empty() {
+                return Err(EtlReplicationSlotError::InvalidSlotName(slot_name.to_owned()));
+            }
 
-            return Ok(EtlReplicationSlot::for_apply_worker(pipeline_id));
+            return Ok(EtlReplicationSlot::for_apply_worker(rest));
         }
 
         if let Some(rest) = slot_name.strip_prefix(TABLE_SYNC_WORKER_PREFIX) {
@@ -108,17 +107,16 @@ impl TryFrom<&str> for EtlReplicationSlot {
                 .next()
                 .ok_or_else(|| EtlReplicationSlotError::InvalidSlotName(slot_name.into()))?;
 
-            let pipeline_id: u64 = pipeline_id_str
-                .parse()
-                .ok()
-                .ok_or_else(|| EtlReplicationSlotError::InvalidSlotName(slot_name.into()))?;
+            if pipeline_id_str.is_empty() {
+                return Err(EtlReplicationSlotError::InvalidSlotName(slot_name.to_owned()));
+            }
             let table_oid: Oid = table_id_str
                 .parse()
                 .ok()
                 .ok_or_else(|| EtlReplicationSlotError::InvalidSlotName(slot_name.into()))?;
 
             return Ok(EtlReplicationSlot::for_table_sync_worker(
-                pipeline_id,
+                pipeline_id_str,
                 TableId::new(table_oid),
             ));
         }
@@ -148,21 +146,6 @@ impl TryFrom<EtlReplicationSlot> for String {
     }
 }
 
-/// Builds a SQL `LIKE` pattern that matches all table-sync replication slots
-/// belonging to the given pipeline.
-///
-/// Table-sync slots include a table id suffix, so callers use this pattern when
-/// they need all table-sync slots for a pipeline and do not already know the
-/// table ids.
-///
-/// The pattern escapes the literal `_` characters in the slot prefix so that
-/// LIKE does not treat them as single-character wildcards. Must be used with
-/// `LIKE ... ESCAPE '\'`.
-pub(super) fn table_sync_like_pattern(pipeline_id: u64) -> Result<String, EtlReplicationSlotError> {
-    let prefix = EtlReplicationSlot::table_sync_prefix(pipeline_id)?;
-    Ok(format!("{}%", prefix.replace('_', r"\_")))
-}
-
 /// Deletes all replication slots for a given pipeline.
 ///
 /// This function deletes both the apply worker slot and all table sync worker
@@ -170,9 +153,9 @@ pub(super) fn table_sync_like_pattern(pipeline_id: u64) -> Result<String, EtlRep
 ///
 /// The cleanup derives slot names directly from `pipeline_id`: the apply worker
 /// slot is matched exactly and table sync worker slots are matched by the known
-/// slot prefix for that pipeline. This gives us the best chance of cleaning up
-/// all ETL-managed slots even after source-side ETL metadata has already been
-/// deleted, without having to thread table ids through every caller.
+/// slot prefix followed by a numeric table OID in the current database. This
+/// also allows cleanup after source-side ETL metadata has been deleted,
+/// without threading table IDs through every caller.
 ///
 /// The tradeoff is that this function identifies slots by our naming convention
 /// rather than by state stored in ETL tables. If a user-created replication
@@ -186,14 +169,15 @@ pub(super) fn table_sync_like_pattern(pipeline_id: u64) -> Result<String, EtlRep
 /// deletion.
 pub async fn delete_pipeline_replication_slots(
     pool: &PgPool,
-    pipeline_id: u64,
+    pipeline_id: impl Display,
 ) -> sqlx::Result<()> {
-    let Ok(apply_slot_name) = String::try_from(EtlReplicationSlot::for_apply_worker(pipeline_id))
+    let pipeline_id = pipeline_id.to_string();
+    let Ok(apply_slot_name) = String::try_from(EtlReplicationSlot::for_apply_worker(&pipeline_id))
     else {
         warn!(%pipeline_id, "could not derive apply-worker replication slot name during cleanup");
         return Ok(());
     };
-    let Ok(table_sync_pattern) = table_sync_like_pattern(pipeline_id) else {
+    let Ok(table_sync_prefix) = EtlReplicationSlot::table_sync_prefix(&pipeline_id) else {
         warn!(%pipeline_id, "could not derive table-sync replication slot prefix during cleanup");
         return Ok(());
     };
@@ -209,13 +193,17 @@ pub async fn delete_pipeline_replication_slots(
         let terminate_query = r#"
             select pg_terminate_backend(r.active_pid)
             from pg_replication_slots r
-            where (r.slot_name = $1 or r.slot_name like $2 escape '\')
+            where r.database = current_database()
+              and (r.slot_name = $1 or (
+                  starts_with(r.slot_name::text, $2)
+                  and substr(r.slot_name::text, length($2) + 1) ~ '^[0-9]+$'
+              ))
               and r.active = true
               and r.active_pid is not null;
             "#;
         let result = sqlx::query(terminate_query)
             .bind(&apply_slot_name)
-            .bind(&table_sync_pattern)
+            .bind(&table_sync_prefix)
             .execute(pool)
             .await;
         if let Err(err) = result {
@@ -233,11 +221,15 @@ pub async fn delete_pipeline_replication_slots(
         let drop_query = r#"
             select pg_drop_replication_slot(r.slot_name)
             from pg_replication_slots r
-            where r.slot_name = $1 or r.slot_name like $2 escape '\';
+            where r.database = current_database()
+              and (r.slot_name = $1 or (
+                  starts_with(r.slot_name::text, $2)
+                  and substr(r.slot_name::text, length($2) + 1) ~ '^[0-9]+$'
+              ));
             "#;
         let result = sqlx::query(drop_query)
             .bind(&apply_slot_name)
-            .bind(&table_sync_pattern)
+            .bind(&table_sync_prefix)
             .execute(pool)
             .await;
 
@@ -324,7 +316,7 @@ mod tests {
     #[test]
     fn parse_apply_slot() {
         let parsed = EtlReplicationSlot::try_from("supabase_etl_apply_13").unwrap();
-        assert_eq!(parsed, EtlReplicationSlot::Apply { pipeline_id: 13 });
+        assert_eq!(parsed, EtlReplicationSlot::Apply { pipeline_id: "13".to_owned() });
     }
 
     #[test]
@@ -332,14 +324,11 @@ mod tests {
         let parsed = EtlReplicationSlot::try_from("supabase_etl_table_sync_7_12345").unwrap();
         assert_eq!(
             parsed,
-            EtlReplicationSlot::TableSync { pipeline_id: 7, table_id: TableId::new(12345_u32) }
+            EtlReplicationSlot::TableSync {
+                pipeline_id: "7".to_owned(),
+                table_id: TableId::new(12345_u32)
+            }
         );
-    }
-
-    #[test]
-    fn table_sync_like_pattern_escapes_underscores() {
-        let pattern = table_sync_like_pattern(42).unwrap();
-        assert_eq!(pattern, r"supabase\_etl\_table\_sync\_42\_%");
     }
 
     #[test]

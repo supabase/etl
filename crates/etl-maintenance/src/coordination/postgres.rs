@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use etl::{
     error::{ErrorKind, EtlError, EtlResult},
     etl_error,
+    pipeline::{LegacyPipelineId, PipelineId},
 };
 use sqlx::{Executor, PgPool, Row, migrate::Migrator, types::Json};
 
@@ -74,14 +75,19 @@ impl StoredPostgresExternalMaintenancePolicy {
 /// Postgres-backed external maintenance coordination store.
 #[derive(Clone)]
 pub struct PostgresExternalMaintenanceStore {
-    pipeline_id: i64,
+    /// Canonical text paired once with the existing numeric backend key.
+    pipeline_id: PipelineId,
+    /// Numeric database key shared with existing maintenance workers.
+    legacy_pipeline_id: i64,
     pool: PgPool,
 }
 
 impl PostgresExternalMaintenanceStore {
     /// Creates a Postgres-backed maintenance store.
-    pub fn new(pipeline_id: i64, pool: PgPool) -> Self {
-        Self { pipeline_id, pool }
+    pub fn new(legacy_pipeline_id: i64, pool: PgPool) -> Self {
+        // Reverse the existing unsigned-to-signed storage mapping once.
+        let pipeline_id = PipelineId::from(legacy_pipeline_id as LegacyPipelineId);
+        Self { pipeline_id, legacy_pipeline_id, pool }
     }
 
     /// Runs the Postgres maintenance migrations.
@@ -112,14 +118,18 @@ impl PostgresExternalMaintenanceStore {
         let policy = Json(PostgresExternalMaintenancePolicy::new(pause_policy, operation_policy));
         sqlx::query(
             r#"
-            insert into etl.external_maintenance_state (pipeline_id, operation_policy)
-            values ($1, $2)
+            insert into etl.external_maintenance_state (pipeline_id, operation_policy, pipeline_id_v2)
+            values ($1, $2, $3)
             on conflict (pipeline_id)
-            do update set operation_policy = excluded.operation_policy, updated_at = now()
+            do update set
+                pipeline_id_v2 = excluded.pipeline_id_v2,
+                operation_policy = excluded.operation_policy,
+                updated_at = now()
             "#,
         )
-        .bind(self.pipeline_id)
+        .bind(self.legacy_pipeline_id)
         .bind(policy)
+        .bind(self.pipeline_id.as_str())
         .execute(&self.pool)
         .await
         .map_err(|error| sqlx_error(error, "Failed to upsert external maintenance state"))?;
@@ -137,13 +147,14 @@ impl PostgresExternalMaintenanceStore {
         let policy = Json(PostgresExternalMaintenancePolicy::new(pause_policy, operation_policy));
         sqlx::query(
             r#"
-            insert into etl.external_maintenance_state (pipeline_id, operation_policy)
-            values ($1, $2)
+            insert into etl.external_maintenance_state (pipeline_id, operation_policy, pipeline_id_v2)
+            values ($1, $2, $3)
             on conflict (pipeline_id) do nothing
             "#,
         )
-        .bind(self.pipeline_id)
+        .bind(self.legacy_pipeline_id)
         .bind(policy)
+        .bind(self.pipeline_id.as_str())
         .execute(&self.pool)
         .await
         .map_err(|error| sqlx_error(error, "Failed to insert external maintenance state"))?;
@@ -154,7 +165,7 @@ impl PostgresExternalMaintenanceStore {
     /// Deletes state for one pipeline.
     pub async fn delete_pipeline_state(&self) -> EtlResult<()> {
         sqlx::query("delete from etl.external_maintenance_state where pipeline_id = $1")
-            .bind(self.pipeline_id)
+            .bind(self.legacy_pipeline_id)
             .execute(&self.pool)
             .await
             .map_err(|error| sqlx_error(error, "Failed to delete external maintenance state"))?;
@@ -180,7 +191,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             where pipeline_id = $1
             "#,
         )
-        .bind(self.pipeline_id)
+        .bind(self.legacy_pipeline_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| sqlx_error(error, "Failed to load external maintenance state"))?
@@ -250,7 +261,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             for update
             "#,
         )
-        .bind(self.pipeline_id)
+        .bind(self.legacy_pipeline_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|error| sqlx_error(error, "Failed to lock external maintenance state"))?
@@ -306,7 +317,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             where pipeline_id = $1
             "#,
         )
-        .bind(self.pipeline_id)
+        .bind(self.legacy_pipeline_id)
         .bind(Json(merged_request))
         .execute(&mut *tx)
         .await
@@ -330,7 +341,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             where pipeline_id = $1
             "#,
         )
-        .bind(self.pipeline_id)
+        .bind(self.legacy_pipeline_id)
         .bind(Json(status))
         .execute(&self.pool)
         .await
@@ -347,7 +358,7 @@ impl ExternalMaintenanceStore for PostgresExternalMaintenanceStore {
             where pipeline_id = $1
             "#,
         )
-        .bind(self.pipeline_id)
+        .bind(self.legacy_pipeline_id)
         .execute(&self.pool)
         .await
         .map_err(|error| sqlx_error(error, "Failed to clear external maintenance status"))?;

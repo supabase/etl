@@ -17,6 +17,7 @@ use etl::{
     error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     event::{Event, EventPosition},
+    pipeline::LegacyPipelineId,
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
         SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
@@ -808,20 +809,20 @@ pub enum DuckLakeMaintenanceMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DuckLakeExternalMaintenanceConfig {
     pub mode: DuckLakeMaintenanceMode,
-    pub pipeline_id: u64,
+    pub legacy_pipeline_id: LegacyPipelineId,
 }
 
 impl DuckLakeExternalMaintenanceConfig {
     pub const fn disabled() -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: 0 }
+        Self { mode: DuckLakeMaintenanceMode::Disabled, legacy_pipeline_id: 0 }
     }
 
-    pub const fn kubernetes(pipeline_id: u64) -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Kubernetes, pipeline_id }
+    pub const fn kubernetes(legacy_pipeline_id: LegacyPipelineId) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Kubernetes, legacy_pipeline_id }
     }
 
-    pub const fn postgres(pipeline_id: u64) -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Postgres, pipeline_id }
+    pub const fn postgres(legacy_pipeline_id: LegacyPipelineId) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Postgres, legacy_pipeline_id }
     }
 }
 
@@ -2112,13 +2113,13 @@ where
 
                 let watcher_destination = destination.clone();
                 let maintenance_pool = metadata_pg_pool.clone();
-                let pipeline_id = external_maintenance.pipeline_id as i64;
+                let legacy_pipeline_id = external_maintenance.legacy_pipeline_id as i64;
                 destination
                     .tasks
                     .spawn_with(move || async move {
                         if let Err(error) = run_postgres_external_maintenance_watcher(
                             watcher_destination,
-                            pipeline_id,
+                            legacy_pipeline_id,
                             maintenance_pool,
                         )
                         .await

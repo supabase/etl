@@ -478,13 +478,18 @@ mod tests {
     fn test_batch_memory_governor(memory_monitor: &MemoryMonitor) -> BatchMemoryGovernor {
         memory_monitor.set_total_memory_bytes_for_test(10_000_000_000);
 
-        BatchMemoryGovernor::new(1, memory_monitor.clone(), 0.2, 8 * 1024 * 1024)
+        BatchMemoryGovernor::new(1.into(), memory_monitor.clone(), 0.2, 8 * 1024 * 1024)
     }
 
     /// Returns a governor derived from a small synthetic memory capacity.
     fn test_small_batch_memory_governor(memory_monitor: &MemoryMonitor) -> BatchMemoryGovernor {
         memory_monitor.set_total_memory_bytes_for_test(10_000);
-        BatchMemoryGovernor::new(1, memory_monitor.clone(), 0.2, BatchConfig::DEFAULT_MAX_BYTES)
+        BatchMemoryGovernor::new(
+            1.into(),
+            memory_monitor.clone(),
+            0.2,
+            BatchConfig::DEFAULT_MAX_BYTES,
+        )
     }
 
     /// Returns a test batch config with the supplied fill timeout.
@@ -601,7 +606,7 @@ mod tests {
     async fn pressure_flushes_the_batch_and_resumes() {
         let memory = MemoryMonitor::new_for_test();
         memory.set_memory_snapshot_for_test(7_500, 10_000);
-        let governor = BatchMemoryGovernor::new(1, memory.clone(), 1.0, 10_000);
+        let governor = BatchMemoryGovernor::new(1.into(), memory.clone(), 1.0, 10_000);
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         let mut stream = Box::pin(MemoryBatchStream::wrap(
             ReceiverStream::new(rx),
@@ -773,7 +778,7 @@ mod tests {
     async fn refreshes_shared_target_between_ready_items() {
         let memory = MemoryMonitor::new_for_test();
         memory.set_total_memory_bytes_for_test(5_000);
-        let governor = BatchMemoryGovernor::new(1, memory.clone(), 0.2, 10_000);
+        let governor = BatchMemoryGovernor::new(1.into(), memory.clone(), 0.2, 10_000);
         let batch_config = test_batch_config(10_000);
         let mut stream = Box::pin(MemoryBatchStream::wrap(
             ShrinksMemoryBetweenReadyItems::new(memory),

@@ -3,12 +3,12 @@
 use std::time::{Duration, Instant};
 
 use etl::{
-    config::{ReplicationSlotConfig, ReplicationSlotPersistence},
+    config::{IntoConnectOptions, ReplicationSlotConfig, ReplicationSlotPersistence},
     data::{Cell, TableRow},
     error::ErrorKind,
     event::EventType,
-    pipeline::PipelineId,
     postgres::client::PgReplicationClient,
+    schema::TableId,
     store::{StateStore, TableState, TableStateType, WorkerType},
     test_utils::{
         database::{WalsenderTermination, spawn_source_database, terminate_active_walsender},
@@ -24,9 +24,14 @@ use etl::{
         },
     },
 };
-use etl_postgres::{slots::EtlReplicationSlot, tokio::test_utils::PgDatabase};
+use etl_postgres::{
+    lag::get_pipeline_lag_metrics,
+    slots::{EtlReplicationSlot, delete_pipeline_replication_slots},
+    tokio::test_utils::PgDatabase,
+};
 use etl_telemetry::tracing::init_test_tracing;
 use rand::random;
+use sqlx::postgres::PgPoolOptions;
 use tokio_postgres::{Client, types::PgLsn};
 
 use crate::support::read_replica::wait_until;
@@ -43,6 +48,105 @@ async fn slot_is_temporary(database: &PgDatabase<Client>, slot_name: &str) -> Op
         .map(|row| row.get(0))
 }
 
+/// Cleanup isolates opaque IDs with shared prefixes and respects database
+/// ownership.
+#[tokio::test(flavor = "multi_thread")]
+async fn slot_cleanup_isolates_pipeline_ids_and_databases() {
+    let database = spawn_source_database().await;
+    let other_database = spawn_source_database().await;
+    let client = database.client.as_ref().unwrap();
+    let other_client = other_database.client.as_ref().unwrap();
+    let pipeline_id = format!("cleanup_{}", random::<u32>());
+    let neighbor_id = format!("{pipeline_id}_other");
+    let apply: String = EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
+    let table: String = EtlReplicationSlot::for_table_sync_worker(&pipeline_id, TableId::new(1))
+        .try_into()
+        .unwrap();
+    let neighbor_apply: String =
+        EtlReplicationSlot::for_apply_worker(&neighbor_id).try_into().unwrap();
+    let neighbor_table: String =
+        EtlReplicationSlot::for_table_sync_worker(&neighbor_id, TableId::new(2))
+            .try_into()
+            .unwrap();
+    let foreign_table: String =
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, TableId::new(3))
+            .try_into()
+            .unwrap();
+    for name in [&apply, &table, &neighbor_apply, &neighbor_table] {
+        client
+            .query_one("select pg_create_logical_replication_slot($1, 'pgoutput')", &[name])
+            .await
+            .unwrap();
+    }
+    other_client
+        .query_one("select pg_create_logical_replication_slot($1, 'pgoutput')", &[&foreign_table])
+        .await
+        .unwrap();
+    client.batch_execute("create publication slot_cleanup_test").await.unwrap();
+    other_client.batch_execute("create publication slot_cleanup_test").await.unwrap();
+    let mut streams = Vec::new();
+    let mut active_pids = Vec::new();
+    for (source, name) in [
+        (&database, &apply),
+        (&database, &table),
+        (&database, &neighbor_apply),
+        (&database, &neighbor_table),
+        (&other_database, &foreign_table),
+    ] {
+        let replication_client = PgReplicationClient::connect(source.config.clone()).await.unwrap();
+        let (stream, _) = replication_client
+            .start_logical_replication("slot_cleanup_test", name, PgLsn::from(0), None)
+            .await
+            .unwrap();
+        streams.push((replication_client, stream));
+        let row = client
+            .query_one("select active_pid from pg_replication_slots where slot_name = $1", &[name])
+            .await
+            .unwrap();
+        active_pids.push((name, row.get::<_, i32>(0)));
+    }
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(database.config.with_db(None))
+        .await
+        .unwrap();
+    let lag = get_pipeline_lag_metrics(&pool, &pipeline_id).await.unwrap();
+    assert!(lag.apply.is_some());
+    assert_eq!(lag.table_sync.keys().copied().collect::<Vec<_>>(), vec![TableId::new(1)]);
+    let neighbor_lag = get_pipeline_lag_metrics(&pool, &neighbor_id).await.unwrap();
+    assert!(neighbor_lag.apply.is_some());
+    assert_eq!(neighbor_lag.table_sync.keys().copied().collect::<Vec<_>>(), vec![TableId::new(2)]);
+
+    delete_pipeline_replication_slots(&pool, format!("{pipeline_id}%")).await.unwrap();
+    for (name, pid) in &active_pids {
+        let row = client
+            .query_one("select active_pid from pg_replication_slots where slot_name = $1", &[name])
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i32>(0), *pid);
+    }
+    delete_pipeline_replication_slots(&pool, &pipeline_id).await.unwrap();
+    assert_eq!(slot_is_temporary(&database, &apply).await, None);
+    assert_eq!(slot_is_temporary(&database, &table).await, None);
+    assert_eq!(slot_is_temporary(&database, &neighbor_apply).await, Some(false));
+    assert_eq!(slot_is_temporary(&database, &neighbor_table).await, Some(false));
+    assert_eq!(slot_is_temporary(&other_database, &foreign_table).await, Some(false));
+    for (name, pid) in &active_pids[2..] {
+        let row = client
+            .query_one("select active_pid from pg_replication_slots where slot_name = $1", &[name])
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i32>(0), *pid);
+    }
+    drop(streams);
+    for name in [&neighbor_apply, &neighbor_table, &foreign_table] {
+        database.wait_for_slot_inactive(name).await;
+    }
+    delete_pipeline_replication_slots(&pool, &neighbor_id).await.unwrap();
+    other_client.query_one("select pg_drop_replication_slot($1)", &[&foreign_table]).await.unwrap();
+    pool.close().await;
+}
+
 /// Copy and streaming use temporary slots, and a fresh pipeline can reuse the
 /// same id after shutdown while copying the current source data again.
 #[tokio::test(flavor = "multi_thread")]
@@ -52,7 +156,7 @@ async fn temporary_pipeline_copies_streams_and_restarts_with_fresh_state() {
     let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users = schema.users_schema();
     insert_users_data(&mut database, &users.name, 1..=1).await;
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let apply_slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let copy_slot: String =
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, users.id).try_into().unwrap();
@@ -143,7 +247,7 @@ async fn temporary_pipeline_rejects_an_existing_apply_slot() {
     init_test_tracing();
     let database = spawn_source_database().await;
     let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let mut client = PgReplicationClient::connect(database.config.clone()).await.unwrap();
     client.create_slot(&slot_name, &Default::default()).await.unwrap();
@@ -173,7 +277,7 @@ async fn temporary_pipeline_rejects_stale_state_after_connection_loss() {
     let database = spawn_source_database().await;
     let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users = schema.users_schema();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let store = NotifyingStore::new();
     let destination = MemoryDestination::new(store.clone());
@@ -213,7 +317,7 @@ async fn assert_temporary_restart_resyncs(lose_slot_during_copy: bool) {
     let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users = schema.users_schema();
     insert_users_data(&mut database, &users.name, 1..=3).await;
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let apply_slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let copy_slot: String =
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, users.id).try_into().unwrap();
@@ -336,7 +440,7 @@ async fn temporary_pipeline_waits_for_an_existing_temporary_slot() {
     let schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
     let users = schema.users_schema();
     insert_users_data(&mut database, &users.name, 1..=1).await;
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let slot_name: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     let store = NotifyingStore::new();
     let old_state = TableState::SyncDone { lsn: PgLsn::from(1), table_decoding_state: None };

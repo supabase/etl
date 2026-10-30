@@ -122,7 +122,10 @@ fn disabled_destination_error(kind: DestinationKind) -> crate::error::Replicator
 /// BigQuery destination startup.
 #[cfg(feature = "bigquery")]
 mod bigquery {
-    use etl::{destination::PipelineDestination, pipeline::Pipeline};
+    use etl::{
+        destination::PipelineDestination,
+        pipeline::{Pipeline, PipelineId},
+    };
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::bigquery::BigQueryDestination;
     use secrecy::ExposeSecret;
@@ -134,7 +137,7 @@ mod bigquery {
         replicator_config: ReplicatorConfig,
         store: ReplicatorStore,
     ) -> ReplicatorResult<Pipeline<ReplicatorStore, impl PipelineDestination>> {
-        let pipeline_id = replicator_config.pipeline.id;
+        let pipeline_id = PipelineId::from(&replicator_config.pipeline.id);
 
         let DestinationConfig::BigQuery {
             project_id,
@@ -312,7 +315,10 @@ mod clickhouse {
 /// DuckLake destination startup.
 #[cfg(feature = "ducklake")]
 mod ducklake {
-    use etl::{destination::PipelineDestination, pipeline::Pipeline};
+    use etl::{
+        destination::PipelineDestination,
+        pipeline::{LegacyPipelineId, Pipeline, PipelineId},
+    };
     use etl_config::{
         default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, parse_ducklake_s3_data_path,
         parse_ducklake_url,
@@ -337,8 +343,6 @@ mod ducklake {
         replicator_config: ReplicatorConfig,
         store: ReplicatorStore,
     ) -> ReplicatorResult<Pipeline<ReplicatorStore, impl PipelineDestination>> {
-        let pipeline_id = replicator_config.pipeline.id;
-
         let DestinationConfig::Ducklake {
             catalog_url,
             data_path,
@@ -386,8 +390,13 @@ mod ducklake {
             ConfigDuckLakeMaintenanceMode::Kubernetes => DuckLakeMaintenanceMode::Kubernetes,
             ConfigDuckLakeMaintenanceMode::Postgres => DuckLakeMaintenanceMode::Postgres,
         };
-        let external_maintenance =
-            DuckLakeExternalMaintenanceConfig { mode: maintenance_mode, pipeline_id };
+        let external_maintenance = DuckLakeExternalMaintenanceConfig {
+            mode: maintenance_mode,
+            legacy_pipeline_id: LegacyPipelineId::try_from(&PipelineId::from(
+                &replicator_config.pipeline.id,
+            ))
+            .map_err(ReplicatorError::config)?,
+        };
 
         let destination = DuckLakeDestination::builder(
             parse_ducklake_url(catalog_url.expose_secret()).map_err(ReplicatorError::config)?,
@@ -521,7 +530,10 @@ mod iceberg {
 /// Snowflake destination startup.
 #[cfg(feature = "snowflake")]
 mod snowflake {
-    use etl::{destination::PipelineDestination, pipeline::Pipeline};
+    use etl::{
+        destination::PipelineDestination,
+        pipeline::{LegacyPipelineId, Pipeline, PipelineId},
+    };
     use etl_config::shared::{DestinationConfig, ReplicatorConfig};
     use etl_destinations::snowflake as snowflake_destination;
 
@@ -535,7 +547,9 @@ mod snowflake {
         replicator_config: ReplicatorConfig,
         store: ReplicatorStore,
     ) -> ReplicatorResult<Pipeline<ReplicatorStore, impl PipelineDestination>> {
-        let pipeline_id = replicator_config.pipeline.id;
+        let legacy_pipeline_id =
+            LegacyPipelineId::try_from(&PipelineId::from(&replicator_config.pipeline.id))
+                .map_err(ReplicatorError::config)?;
 
         let DestinationConfig::Snowflake {
             account_id,
@@ -559,7 +573,7 @@ mod snowflake {
         let auth = std::sync::Arc::new(
             snowflake_destination::AuthManager::new(config).map_err(ReplicatorError::config)?,
         );
-        let client = snowflake_destination::Client::new(auth, pipeline_id);
+        let client = snowflake_destination::Client::new(auth, legacy_pipeline_id);
         let destination = snowflake_destination::Destination::new(client, store.clone());
 
         Ok(Pipeline::new(replicator_config.pipeline, store, destination))

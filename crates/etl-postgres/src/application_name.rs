@@ -5,6 +5,8 @@
 //! `pg_stat_activity` and targeted individually (e.g. by `pg_terminate_backend`
 //! in tests). Connections not owned by a worker keep the plain base name.
 
+use std::fmt::Display;
+
 use tracing::debug;
 
 use crate::schema::TableId;
@@ -26,14 +28,14 @@ pub const APPLY_WORKER_TAG: &str = "apply";
 pub const TABLE_SYNC_WORKER_TAG: &str = "table_sync";
 
 /// Returns the `application_name` for an apply worker connection.
-pub fn apply_worker_application_name(base: &str, pipeline_id: u64) -> String {
+pub fn apply_worker_application_name(base: &str, pipeline_id: impl Display) -> String {
     with_worker_suffix(base, &format!("{SEPARATOR}{APPLY_WORKER_TAG}{SEPARATOR}{pipeline_id}"))
 }
 
 /// Returns the `application_name` for a table sync worker connection.
 pub fn table_sync_worker_application_name(
     base: &str,
-    pipeline_id: u64,
+    pipeline_id: impl Display,
     table_id: TableId,
 ) -> String {
     with_worker_suffix(

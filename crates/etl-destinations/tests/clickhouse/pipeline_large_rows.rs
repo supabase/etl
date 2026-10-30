@@ -10,7 +10,6 @@
 
 use etl::{
     event::EventType,
-    pipeline::PipelineId,
     schema::TableName,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -135,7 +134,7 @@ async fn large_row_inner(engine: ClickHouseEngine, field_chars: usize) {
     // --- WHEN: pipeline copies row 1 and row 2 streams as an INSERT event ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );

@@ -160,7 +160,7 @@
 //!
 //!     // Configure the pipeline
 //!     let config = PipelineConfig {
-//!         id: 1,
+//!         id: 1.into(),
 //!         publication_name: "my_publication".to_string(),
 //!         pg_connection: pg_config,
 //!         store_pg_connection: None,

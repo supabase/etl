@@ -5,7 +5,6 @@
 
 use etl::{
     event::EventType,
-    pipeline::PipelineId,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -73,7 +72,7 @@ async fn sequential_transactions_preserve_commit_order_merge_tree() {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
@@ -187,7 +186,7 @@ async fn same_transaction_primary_key_change_preserves_order_merge_tree() {
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<PipelineId>(),
+        random::<u64>(),
         publication_name.to_owned(),
         store,
         destination.clone(),

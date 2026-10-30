@@ -5,7 +5,6 @@ use etl::{
     error::ErrorKind,
     event::{Event, EventType, RelationEvent},
     failpoints::APPLY_LOOP_AFTER_EVENT_BATCH_DISPATCH_FP,
-    pipeline::PipelineId,
     schema::ReplicatedTableSchema,
     store::{
         CachedStore, PostgresStore, SchemaStore, StateStore, TableRetryPolicy, TableState,
@@ -231,7 +230,7 @@ async fn all_types_table_copy_inner(engine: ClickHouseEngine) {
     // --- WHEN: pipeline copies data to ClickHouse ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
@@ -351,7 +350,7 @@ async fn updates_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
     // WHEN: the pipeline copies data and updates are streamed.
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -459,7 +458,7 @@ async fn composite_key_changes_inner(engine: ClickHouseEngine, full_identity: bo
     let copied = store.notify_on_table_sync_complete(table_id).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<PipelineId>(),
+        random::<u64>(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -571,7 +570,7 @@ async fn deferrable_primary_key_is_rejected_inner(engine: ClickHouseEngine) {
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<PipelineId>(),
+        random::<u64>(),
         publication_name.to_owned(),
         store.clone(),
         destination,
@@ -642,7 +641,7 @@ async fn primary_key_made_deferrable_is_rejected_inner(engine: ClickHouseEngine)
     let copied = store.notify_on_table_sync_complete(table_id).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<PipelineId>(),
+        random::<u64>(),
         publication_name.to_owned(),
         store,
         destination,
@@ -761,7 +760,7 @@ async fn nan_key_changes_inner(engine: ClickHouseEngine, array_keys: bool) {
     let copied = store.notify_on_table_sync_complete(table_id).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<PipelineId>(),
+        random::<u64>(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -889,7 +888,7 @@ async fn in_flight_write_keeps_streaming_and_shuts_down_cleanly_merge_tree() {
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
     let mut pipeline = create_pipeline(
         &database.config,
-        random::<PipelineId>(),
+        random::<u64>(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -983,7 +982,7 @@ async fn replay_after_apply_worker_retry_waits_for_in_flight_insert_merge_tree()
     // delay only adds wall time.
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        random::<PipelineId>(),
+        random::<u64>(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -1166,7 +1165,7 @@ async fn boundary_values_table_copy_inner(engine: ClickHouseEngine) {
     // --- WHEN: pipeline copies data to ClickHouse ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
@@ -1316,7 +1315,7 @@ async fn pre_1970_and_far_future_dates_round_trip_inner(engine: ClickHouseEngine
     // --- WHEN: pipeline copies data to ClickHouse ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
@@ -1424,7 +1423,7 @@ async fn deletes_are_streamed_to_clickhouse_inner(engine: ClickHouseEngine) {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -1504,7 +1503,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
@@ -1640,7 +1639,7 @@ async fn table_copy_reset_drops_destination_table_before_recopy_inner(engine: Cl
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let reset_query =
         || current_state_query(engine, RESET_COPY_TABLE, ID_VALUE_PROJECTION, &["id"], "id");
 
@@ -1748,7 +1747,7 @@ async fn truncate_clears_table_and_accepts_new_inserts_inner(engine: ClickHouseE
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -1849,7 +1848,7 @@ async fn intermediate_flush_preserves_all_rows_inner(engine: ClickHouseEngine) {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = clickhouse_db
         .build_destination_with_config(
             store.clone(),
@@ -1958,7 +1957,7 @@ async fn multiple_tables_receive_independent_writes_inner(engine: ClickHouseEngi
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -2136,7 +2135,7 @@ async fn delete_with_default_replica_identity_inner(engine: ClickHouseEngine) {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -2265,7 +2264,7 @@ async fn exclusive_large_batch_table_copy_inner(engine: ClickHouseEngine) {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), engine).await;
 
     let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
@@ -2380,7 +2379,7 @@ async fn schema_change_add_column_inner(engine: ClickHouseEngine) {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -2524,7 +2523,7 @@ async fn schema_change_add_column_defaults_merge_tree() {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::MergeTree)
@@ -2660,7 +2659,7 @@ async fn schema_change_ordered_name_reuse_inner(engine: ClickHouseEngine) {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );
@@ -2858,7 +2857,7 @@ async fn stale_relation_replay_rejected_inner(engine: ClickHouseEngine) {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,
     );

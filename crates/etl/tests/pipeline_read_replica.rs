@@ -1,6 +1,5 @@
 use etl::{
     event::EventType,
-    pipeline::PipelineId,
     test_utils::{
         database::{
             local_pg_read_replica_connection_config, spawn_source_database, test_table_name,
@@ -154,7 +153,7 @@ async fn pipeline_replicates_table_copy_and_cdc_from_read_replica() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &replica_config,
         pipeline_id,
@@ -220,7 +219,7 @@ async fn pipeline_advances_read_replica_slot_on_idle_keepalive() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &replica_config,
         pipeline_id,

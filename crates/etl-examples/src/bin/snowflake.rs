@@ -158,12 +158,12 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     // Create a persistent store for tracking table states and schemas. This
     // runs the Postgres store migrations; Pipeline::start() runs the source
     // migrations required by replication.
-    let pipeline_id = 1;
-    let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
+    let legacy_pipeline_id = 1;
+    let store = PostgresStore::new(legacy_pipeline_id, pg_connection_config.clone()).await?;
 
     // Create pipeline configuration with batching and retry settings
     let pipeline_config = PipelineConfig {
-        id: pipeline_id, // Using a simple ID for the example
+        id: legacy_pipeline_id.into(), // Using a simple ID for the example
         publication_name: args.publication,
         replication_slot: Default::default(),
         pg_connection: pg_connection_config,
@@ -197,7 +197,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
 
     // Initialize Snowflake destination -- tables will be automatically created
     // to match the Postgres schema
-    let client = Client::new(Arc::clone(&auth), pipeline_id);
+    let client = Client::new(Arc::clone(&auth), legacy_pipeline_id);
     let destination = Destination::new(client, store.clone());
 
     // Create the pipeline instance with all components

@@ -19,8 +19,8 @@ use crate::{
     utils::DestinationPreset,
 };
 
-/// Pipeline id written into generated local replicator configuration.
-const LOCAL_PIPELINE_ID: u64 = 1;
+/// Legacy numeric pipeline ID written into local replicator configuration.
+const LOCAL_LEGACY_PIPELINE_ID: u64 = 1;
 /// Placeholder accepted by interactive prompts when a secret will be supplied
 /// later through the environment.
 const REPLACE_ME: &str = "REPLACE_ME";
@@ -214,7 +214,7 @@ pipeline:
       trusted_root_certs: \"\"
 ",
             destination = self.destination.to_yaml().trim_end(),
-            pipeline_id = LOCAL_PIPELINE_ID,
+            pipeline_id = LOCAL_LEGACY_PIPELINE_ID,
             publication = yaml_string(&self.publication),
             host = yaml_string(&self.postgres.host),
             port = self.postgres.port,

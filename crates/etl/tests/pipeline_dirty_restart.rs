@@ -346,18 +346,18 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     let destination_store = NotifyingStore::new();
     let memory_destination = MemoryDestination::new(destination_store);
     let first_destination = TestDestinationWrapper::wrap(memory_destination.clone());
-    let pipeline_id: PipelineId = u64::from(random::<u32>());
+    let pipeline_id: PipelineId = u64::from(random::<u32>()).into();
     let first_store =
-        PostgresStore::new(pipeline_id, database.config.clone()).await.map_err(|error| {
+        PostgresStore::new(&pipeline_id, database.config.clone()).await.map_err(|error| {
             TestCaseError::fail(format!("failed to create the first Postgres store: {error}"))
         })?;
     let apply_slot_name: String =
-        EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+        EtlReplicationSlot::for_apply_worker(&pipeline_id).try_into().unwrap();
     let sync_slot_name: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into().unwrap();
+        EtlReplicationSlot::for_table_sync_worker(&pipeline_id, table_id).try_into().unwrap();
     let mut first_pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        &pipeline_id,
         database_schema.publication_name(),
         first_store.clone(),
         first_destination.clone(),
@@ -426,7 +426,7 @@ async fn run_dirty_restart_case(case: DirtyRestartCase) -> Result<(), TestCaseEr
     drop(first_store);
 
     let restarted_store =
-        PostgresStore::new(pipeline_id, database.config.clone()).await.map_err(|error| {
+        PostgresStore::new(&pipeline_id, database.config.clone()).await.map_err(|error| {
             TestCaseError::fail(format!("failed to reopen the Postgres store: {error}"))
         })?;
     let restarted_destination = TestDestinationWrapper::wrap(memory_destination.clone());

@@ -139,7 +139,7 @@ async fn run(config: ReplicatorConfig) -> MaintenanceResult<()> {
     };
 
     info!(
-        pipeline_id = config.pipeline.id,
+        pipeline_id = %config.pipeline.id,
         inline_flush_enabled = maintenance_config.inline_flush.enabled,
         inline_flush_min_inlined_bytes = maintenance_config.inline_flush.min_inlined_bytes,
         merge_adjacent_files_enabled = maintenance_config.merge_adjacent_files.enabled,

@@ -38,7 +38,7 @@ static INIT_TEST_TRACING: Once = Once::new();
 /// Global project reference storage
 static PROJECT_REF: OnceLock<String> = OnceLock::new();
 /// Global pipeline id storage.
-static PIPELINE_ID: OnceLock<u64> = OnceLock::new();
+static PIPELINE_ID: OnceLock<String> = OnceLock::new();
 
 /// Errors that can occur during tracing initialization.
 #[derive(Debug, Error)]
@@ -100,15 +100,15 @@ pub fn get_global_project_ref() -> Option<&'static str> {
 ///
 /// The pipeline id will be injected into all structured log entries as a
 /// top-level field named "pipeline_id" for identification and filtering.
-pub fn set_global_pipeline_id(pipeline_id: u64) {
-    let _ = PIPELINE_ID.set(pipeline_id);
+pub fn set_global_pipeline_id(pipeline_id: &str) {
+    let _ = PIPELINE_ID.set(pipeline_id.to_owned());
 }
 
 /// Returns the current global pipeline id.
 ///
 /// Returns `None` if no pipeline id has been set.
-pub fn get_global_pipeline_id() -> Option<u64> {
-    PIPELINE_ID.get().copied()
+pub fn get_global_pipeline_id() -> Option<&'static str> {
+    PIPELINE_ID.get().map(String::as_str)
 }
 
 /// Event formatter that emits global context directly into JSON log entries.
@@ -299,7 +299,7 @@ pub fn init_tracing_for_environment(
 pub fn init_tracing_with_top_level_fields(
     app_name: &str,
     project_ref: Option<&str>,
-    pipeline_id: Option<u64>,
+    pipeline_id: Option<&str>,
 ) -> Result<LogFlusher, TracingError> {
     // Set a global project reference if provided.
     if let Some(project) = project_ref {

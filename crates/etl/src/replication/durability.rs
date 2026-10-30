@@ -175,7 +175,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn pending_confirmation_exports_increasing_age() {
         let metrics = etl_telemetry::metrics::init_metrics_handle().unwrap();
-        let monitor = DurabilityMonitor::new(42);
+        let monitor = DurabilityMonitor::new(42.into());
         let task = monitor.spawn_durability_metrics_task();
         monitor.begin_attempt();
         tokio::task::yield_now().await;
@@ -202,7 +202,7 @@ mod tests {
     /// work.
     #[tokio::test(start_paused = true)]
     async fn retry_preserves_age_until_durable_replay_covers_prior_dispatch() {
-        let monitor = DurabilityMonitor::new(43);
+        let monitor = DurabilityMonitor::new(43.into());
         monitor.begin_attempt();
         monitor.dispatched(100.into());
         tokio::time::advance(Duration::from_secs(60)).await;

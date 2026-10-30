@@ -22,7 +22,7 @@ use crate::{
     observability::{
         ETL_SCHEMA_CLEANUP_SKIPPED_TABLES_TOTAL, ETL_TABLES_TOTAL, POSTGRES_STORE_POOL, STATE_LABEL,
     },
-    pipeline::PipelineId,
+    pipeline::{LegacyPipelineId, PipelineId},
     postgres::{
         migrations,
         pool::{InstrumentedPgPool, InstrumentedPgTransaction},
@@ -187,7 +187,10 @@ impl Inner {
 /// an uncertain schema commit may have invalidated a remembered boundary.
 #[derive(Debug, Clone)]
 pub struct PostgresStore {
+    /// Exact text identity written alongside the temporary numeric key.
     pipeline_id: PipelineId,
+    /// Numeric key retained until store reads use text identities.
+    legacy_pipeline_id: LegacyPipelineId,
     pool: InstrumentedPgPool,
     /// One serialization point for cache access and database mutations.
     inner: Arc<Mutex<Inner>>,
@@ -196,23 +199,38 @@ pub struct PostgresStore {
 impl PostgresStore {
     /// Creates a new Postgres-backed store for the given pipeline.
     ///
-    /// Runs the Postgres store migrations, then creates a lazily-connected pool
-    /// with automatic idle timeout. Connections are established on first use
-    /// and automatically closed after `IDLE_TIMEOUT` of inactivity.
+    /// Reads and conflict detection still use numeric pipeline keys. Inserts
+    /// and upserts also populate `pipeline_id_v2` with the same identity as
+    /// text. The schema migration leaves existing rows unchanged.
+    ///
+    /// Validates the temporary numeric representation before accessing
+    /// Postgres. Runs the Postgres store migrations, then creates a
+    /// lazily-connected pool with automatic idle timeout. Connections are
+    /// established on first use and automatically closed after
+    /// `IDLE_TIMEOUT` of inactivity.
     ///
     /// Install the metrics recorder before constructing the store so its
     /// cached query metric handle uses that recorder.
     /// The cache starts unusable and is loaded by [`CachedStore::load_cache`]
     /// or the first accessor.
     pub async fn new(
-        pipeline_id: PipelineId,
+        pipeline_id: impl Into<PipelineId>,
         connection_config: PgConnectionConfig,
     ) -> EtlResult<Self> {
+        let pipeline_id = pipeline_id.into();
+        let legacy_pipeline_id = LegacyPipelineId::try_from(&pipeline_id).map_err(|error| {
+            etl_error!(ErrorKind::ConfigError, "Invalid Postgres store pipeline identity", source: error)
+        })?;
         migrations::run_postgres_store_migrations(&connection_config).await?;
 
         let pool = create_database_pool(&connection_config);
 
-        Ok(Self { pipeline_id, pool, inner: Arc::new(Mutex::new(Inner::default())) })
+        Ok(Self {
+            pipeline_id,
+            legacy_pipeline_id,
+            pool,
+            inner: Arc::new(Mutex::new(Inner::default())),
+        })
     }
 
     /// Returns a usable cache, rebuilding every domain after interruption.
@@ -235,7 +253,7 @@ impl PostgresStore {
         let mut tx = self.pool.begin().await?;
 
         sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!("{STORE_LOCK_NAMESPACE}{}", self.pipeline_id))
+            .bind(format!("{STORE_LOCK_NAMESPACE}{}", self.legacy_pipeline_id))
             .execute(tx.executor())
             .await?;
 
@@ -253,7 +271,8 @@ impl PostgresStore {
         let mut refreshed = Inner::default();
 
         let replication_state_rows =
-            pg_table_state::get_table_state_rows(tx.executor(), self.pipeline_id as i64).await?;
+            pg_table_state::get_table_state_rows(tx.executor(), self.legacy_pipeline_id as i64)
+                .await?;
 
         let mut table_states: BTreeMap<TableId, TableState> = BTreeMap::new();
         for row in replication_state_rows {
@@ -264,7 +283,7 @@ impl PostgresStore {
 
         let rows = pg_destination_table_metadata::load_destination_tables_metadata(
             tx.executor(),
-            self.pipeline_id as i64,
+            self.legacy_pipeline_id as i64,
         )
         .await
         .map_err(|err| {
@@ -328,18 +347,19 @@ impl PostgresStore {
             metadata.insert(table_id, destination_metadata);
         }
 
-        let table_schemas = schema::load_table_schemas(tx.executor(), self.pipeline_id as i64)
-            .await
-            .map_err(|error| {
-                etl_error!(
-                    ErrorKind::SourceQueryFailed,
-                    "Table schemas loading failed",
-                    source: error
-                )
-            })?;
+        let table_schemas =
+            schema::load_table_schemas(tx.executor(), self.legacy_pipeline_id as i64)
+                .await
+                .map_err(|error| {
+                    etl_error!(
+                        ErrorKind::SourceQueryFailed,
+                        "Table schemas loading failed",
+                        source: error
+                    )
+                })?;
 
         let checkpoints =
-            checkpoint::load_replication_checkpoints(tx.executor(), self.pipeline_id as i64)
+            checkpoint::load_replication_checkpoints(tx.executor(), self.legacy_pipeline_id as i64)
                 .await
                 .map_err(|err| {
                     etl_error!(
@@ -428,7 +448,8 @@ impl StateStore for PostgresStore {
         for (table_id, state_type, metadata) in db_updates {
             pg_table_state::update_table_state_raw(
                 tx.executor(),
-                self.pipeline_id as i64,
+                self.pipeline_id.as_str(),
+                self.legacy_pipeline_id as i64,
                 table_id,
                 state_type,
                 metadata,
@@ -457,16 +478,19 @@ impl StateStore for PostgresStore {
         inner.usable = false;
         let mut tx = self.begin_transaction().await?;
 
-        let restored_row =
-            pg_table_state::rollback_table_state(tx.executor(), self.pipeline_id as i64, table_id)
-                .await?
-                .ok_or_else(|| {
-                    etl_error!(
-                        ErrorKind::StateRollbackError,
-                        "Previous table state not found",
-                        "No previous state available to roll back to for this table"
-                    )
-                })?;
+        let restored_row = pg_table_state::rollback_table_state(
+            tx.executor(),
+            self.legacy_pipeline_id as i64,
+            table_id,
+        )
+        .await?
+        .ok_or_else(|| {
+            etl_error!(
+                ErrorKind::StateRollbackError,
+                "Previous table state not found",
+                "No previous state available to roll back to for this table"
+            )
+        })?;
 
         let restored_state = TableState::from_state_row(restored_row)?;
 
@@ -500,7 +524,8 @@ impl StateStore for PostgresStore {
 
         let persisted_checkpoint = checkpoint::upsert_replication_checkpoint(
             tx.executor(),
-            self.pipeline_id as i64,
+            self.pipeline_id.as_str(),
+            self.legacy_pipeline_id as i64,
             worker_type.as_str(),
             worker_type.checkpoint_table_id(),
             checkpoint_lsn,
@@ -530,7 +555,7 @@ impl StateStore for PostgresStore {
 
         checkpoint::delete_replication_checkpoint(
             tx.executor(),
-            self.pipeline_id as i64,
+            self.legacy_pipeline_id as i64,
             worker_type.as_str(),
             worker_type.checkpoint_table_id(),
         )
@@ -602,7 +627,8 @@ impl StateStore for PostgresStore {
 
         pg_destination_table_metadata::store_destination_table_metadata(
             tx.executor(),
-            self.pipeline_id as i64,
+            self.pipeline_id.as_str(),
+            self.legacy_pipeline_id as i64,
             table_id,
             metadata.table_id(),
             metadata.snapshot_id(),
@@ -666,9 +692,13 @@ impl SchemaStore for PostgresStore {
         inner.usable = false;
         let mut tx = self.begin_transaction().await?;
 
-        let schema_id =
-            schema::upsert_table_schema(tx.executor(), self.pipeline_id as i64, &table_schema)
-                .await?;
+        let schema_id = schema::upsert_table_schema(
+            tx.executor(),
+            self.pipeline_id.as_str(),
+            self.legacy_pipeline_id as i64,
+            &table_schema,
+        )
+        .await?;
         schema::delete_table_columns(tx.executor(), schema_id).await?;
         for columns in table_schema.column_schemas.chunks(schema::MAX_COLUMNS_PER_INSERT) {
             schema::insert_table_columns(tx.executor(), schema_id, columns).await?;
@@ -713,7 +743,7 @@ impl SchemaStore for PostgresStore {
 
         let deleted_count = schema::delete_obsolete_table_schema_versions(
             tx.executor(),
-            self.pipeline_id as i64,
+            self.legacy_pipeline_id as i64,
             &retention_snapshot_ids,
         )
         .await
@@ -759,7 +789,7 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 pg_destination_table_metadata::delete_destination_table_metadata(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     table_id,
                 )
                 .await
@@ -773,7 +803,7 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 schema::delete_table_schema_for_table(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     table_id,
                 )
                 .await
@@ -787,7 +817,7 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 checkpoint::delete_replication_checkpoint_for_table(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     table_id,
                 )
                 .await
@@ -821,7 +851,8 @@ impl TableStateLifecycleStore for PostgresStore {
                 for table_id in &table_ids {
                     pg_table_state::update_table_state_raw(
                         tx.executor(),
-                        self.pipeline_id as i64,
+                        self.pipeline_id.as_str(),
+                        self.legacy_pipeline_id as i64,
                         *table_id,
                         state_type,
                         metadata.clone(),
@@ -831,7 +862,7 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 checkpoint::delete_replication_checkpoint(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     WorkerType::Apply.as_str(),
                     WorkerType::Apply.checkpoint_table_id(),
                 )
@@ -864,7 +895,7 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 pg_destination_table_metadata::delete_destination_table_metadata(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     table_id,
                 )
                 .await
@@ -878,7 +909,7 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 schema::delete_table_schema_for_table(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     table_id,
                 )
                 .await
@@ -892,14 +923,14 @@ impl TableStateLifecycleStore for PostgresStore {
 
                 pg_table_state::delete_table_state(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     table_id,
                 )
                 .await?;
 
                 checkpoint::delete_replication_checkpoint_for_table(
                     tx.executor(),
-                    self.pipeline_id as i64,
+                    self.legacy_pipeline_id as i64,
                     table_id,
                 )
                 .await
