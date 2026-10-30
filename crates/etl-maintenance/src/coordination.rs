@@ -369,91 +369,9 @@ fn env_u64(name: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use chrono::TimeDelta;
-    use tokio::sync::Mutex;
 
     use super::*;
-
-    #[derive(Clone)]
-    struct InMemoryExternalMaintenanceStore {
-        state: Arc<Mutex<ExternalMaintenanceState>>,
-    }
-
-    impl InMemoryExternalMaintenanceStore {
-        fn new(state: ExternalMaintenanceState) -> Self {
-            Self { state: Arc::new(Mutex::new(state)) }
-        }
-    }
-
-    #[async_trait]
-    impl ExternalMaintenanceStore for InMemoryExternalMaintenanceStore {
-        async fn load_state(&self) -> EtlResult<ExternalMaintenanceState> {
-            Ok(self.state.lock().await.clone())
-        }
-
-        async fn request_operations(
-            &self,
-            request: ExternalMaintenanceOperationRequest,
-        ) -> EtlResult<ExternalMaintenanceRequestOutcome> {
-            let mut state = self.state.lock().await;
-            if !state.exists {
-                return Ok(ExternalMaintenanceRequestOutcome::MissingState);
-            }
-            if state.active_run.is_some() {
-                return Ok(ExternalMaintenanceRequestOutcome::RejectedActiveRun);
-            }
-            if state
-                .operation_request
-                .as_ref()
-                .is_some_and(|existing| existing.operations.covers(request.operations))
-            {
-                return Ok(ExternalMaintenanceRequestOutcome::AlreadyCovered);
-            }
-
-            let merged_request = if let Some(mut existing) = state.operation_request.take() {
-                existing.operations = existing.operations.merge(request.operations);
-                existing.inline_flush_min_inlined_bytes = request
-                    .inline_flush_min_inlined_bytes
-                    .or(existing.inline_flush_min_inlined_bytes);
-                existing.rewrite_data_files_min_active_data_files = request
-                    .rewrite_data_files_min_active_data_files
-                    .or(existing.rewrite_data_files_min_active_data_files);
-                existing.requested_at = request.requested_at;
-                existing
-            } else {
-                request
-            };
-            state.operation_request = Some(merged_request);
-
-            Ok(ExternalMaintenanceRequestOutcome::Created)
-        }
-
-        async fn report_replicator_status(
-            &self,
-            status: ExternalMaintenanceReplicatorStatus,
-        ) -> EtlResult<()> {
-            self.state.lock().await.replicator = Some(status);
-            Ok(())
-        }
-
-        async fn clear_replicator_status(&self) -> EtlResult<()> {
-            self.state.lock().await.replicator = None;
-            Ok(())
-        }
-    }
-
-    fn operation_request(
-        operations: ExternalMaintenanceOperations,
-    ) -> ExternalMaintenanceOperationRequest {
-        ExternalMaintenanceOperationRequest {
-            operations,
-            inline_flush_min_inlined_bytes: Some(10_000_000),
-            rewrite_data_files_min_active_data_files: Some(40),
-            requested_at: Utc::now(),
-        }
-    }
 
     #[test]
     fn operation_coverage_requires_every_requested_operation() {
@@ -470,6 +388,18 @@ mod tests {
         assert!(!existing.covers(ExternalMaintenanceOperations {
             inline_flush: true,
             expire_snapshots: true,
+            ..ExternalMaintenanceOperations::default()
+        }));
+
+        let inline_flush = ExternalMaintenanceOperations {
+            inline_flush: true,
+            ..ExternalMaintenanceOperations::default()
+        };
+
+        assert!(inline_flush.covers(inline_flush));
+        assert!(!inline_flush.covers(ExternalMaintenanceOperations {
+            rewrite_data_files: true,
+            cleanup_old_files: true,
             ..ExternalMaintenanceOperations::default()
         }));
     }
@@ -544,90 +474,5 @@ mod tests {
             .signed_duration_since(completed_at)
             .to_std()
             .is_ok_and(|elapsed| elapsed < cooldown)
-    }
-
-    #[tokio::test]
-    async fn mock_store_creates_and_merges_operation_requests() {
-        let store = InMemoryExternalMaintenanceStore::new(ExternalMaintenanceState::present());
-
-        let inline_flush = ExternalMaintenanceOperations {
-            inline_flush: true,
-            ..ExternalMaintenanceOperations::default()
-        };
-        let outcome = store.request_operations(operation_request(inline_flush)).await.unwrap();
-        assert_eq!(outcome, ExternalMaintenanceRequestOutcome::Created);
-
-        let outcome = store.request_operations(operation_request(inline_flush)).await.unwrap();
-        assert_eq!(outcome, ExternalMaintenanceRequestOutcome::AlreadyCovered);
-
-        let rewrite = ExternalMaintenanceOperations {
-            rewrite_data_files: true,
-            cleanup_old_files: true,
-            ..ExternalMaintenanceOperations::default()
-        };
-        let outcome = store.request_operations(operation_request(rewrite)).await.unwrap();
-        assert_eq!(outcome, ExternalMaintenanceRequestOutcome::Created);
-
-        let state = store.load_state().await.unwrap();
-        let operations = state.operation_request.unwrap().operations;
-        assert!(operations.inline_flush);
-        assert!(operations.rewrite_data_files);
-        assert!(operations.cleanup_old_files);
-        assert!(!operations.expire_snapshots);
-    }
-
-    #[tokio::test]
-    async fn mock_store_rejects_requests_when_missing_or_running() {
-        let missing_store =
-            InMemoryExternalMaintenanceStore::new(ExternalMaintenanceState::default());
-        let outcome = missing_store
-            .request_operations(operation_request(ExternalMaintenanceOperations {
-                inline_flush: true,
-                ..ExternalMaintenanceOperations::default()
-            }))
-            .await
-            .unwrap();
-        assert_eq!(outcome, ExternalMaintenanceRequestOutcome::MissingState);
-
-        let active_store = InMemoryExternalMaintenanceStore::new(ExternalMaintenanceState {
-            exists: true,
-            active_run: Some(ExternalMaintenanceRun {
-                run_id: "run-1".to_owned(),
-                started_at: Some(Utc::now()),
-                operations: ExternalMaintenanceOperations::default(),
-            }),
-            ..ExternalMaintenanceState::default()
-        });
-        let outcome = active_store
-            .request_operations(operation_request(ExternalMaintenanceOperations {
-                rewrite_data_files: true,
-                ..ExternalMaintenanceOperations::default()
-            }))
-            .await
-            .unwrap();
-        assert_eq!(outcome, ExternalMaintenanceRequestOutcome::RejectedActiveRun);
-    }
-
-    #[tokio::test]
-    async fn mock_store_round_trips_replicator_status() {
-        let store = InMemoryExternalMaintenanceStore::new(ExternalMaintenanceState::present());
-        let quiesced_at = Utc::now();
-
-        store
-            .report_replicator_status(ExternalMaintenanceReplicatorStatus {
-                state: ExternalMaintenanceReplicatorState::Quiesced,
-                observed_run_id: Some("run-1".to_owned()),
-                quiesced_at: Some(quiesced_at),
-            })
-            .await
-            .unwrap();
-
-        let status = store.load_state().await.unwrap().replicator.unwrap();
-        assert_eq!(status.state, ExternalMaintenanceReplicatorState::Quiesced);
-        assert_eq!(status.observed_run_id.as_deref(), Some("run-1"));
-        assert_eq!(status.quiesced_at, Some(quiesced_at));
-
-        store.clear_replicator_status().await.unwrap();
-        assert!(store.load_state().await.unwrap().replicator.is_none());
     }
 }
