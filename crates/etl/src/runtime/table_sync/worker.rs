@@ -578,34 +578,21 @@ where
             table_id = self.table_id.0,
         );
 
-        let fut = self.run_table_sync_worker_task(state.clone(), table_sync_worker_span);
+        let fut =
+            self.guarded_run_table_sync_worker(state.clone()).instrument(table_sync_worker_span);
 
         pool.spawn(table_id, state, fut).await;
 
         Ok(())
     }
 
-    /// Runs supervised attempts in the worker span.
+    /// Runs the table sync worker with retry logic and error handling.
     ///
     /// Attempt panics are handled inside the slot-accounting lifetime. Failures
     /// in error persistence or release supervision propagate without replacing
     /// an already published table error.
-    async fn run_table_sync_worker_task(
-        self,
-        state: TableSyncWorkerState,
-        table_sync_worker_span: tracing::Span,
-    ) -> EtlResult<TableSyncWorkerResult> {
-        self.guarded_run_table_sync_worker(state).instrument(table_sync_worker_span).await
-    }
-
-    /// Runs the table sync worker with retry logic and error handling.
-    ///
-    /// This method implements the retry loop for table synchronization,
-    /// handling different error scenarios according to their retry policies. It
-    /// manages worker lifecycle, state transitions, and cleanup operations
-    /// while providing robust error recovery capabilities.
     async fn guarded_run_table_sync_worker(
-        &self,
+        self,
         state: TableSyncWorkerState,
     ) -> EtlResult<TableSyncWorkerResult> {
         loop {
