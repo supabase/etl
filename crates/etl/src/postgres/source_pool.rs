@@ -89,6 +89,30 @@ impl OutOfBandSourcePool {
             Some(_) => Ok(SlotState::NotInvalidated),
         }
     }
+
+    /// Confirms both the creating backend and its slot have disappeared.
+    ///
+    /// Slot absence alone is insufficient: a creation request whose response
+    /// was lost may still be running before allocating the slot. PID reuse is
+    /// conservative here; an unrelated live backend delays release, never
+    /// causes a slot or backend to be deleted.
+    pub(crate) async fn table_sync_slot_is_released(
+        &self,
+        slot_name: &str,
+        backend_pid: i32,
+    ) -> EtlResult<bool> {
+        sqlx::query_scalar(
+            "select not exists (select 1 from pg_stat_activity where pid = $1) \
+             and not exists (select 1 from pg_replication_slots where slot_name = $2)",
+        )
+        .bind(backend_pid)
+        .bind(slot_name)
+        .fetch_one(self.pool.executor())
+        .await
+        .map_err(|error| {
+            etl_error!(ErrorKind::SourceConnectionFailed, "Table sync slot release query failed", source: error)
+        })
+    }
 }
 
 #[cfg(all(test, feature = "test-utils"))]
@@ -99,13 +123,63 @@ mod tests {
     use uuid::Uuid;
 
     use crate::{
+        config::{ReplicationSlotConfig, ReplicationSlotPersistence},
         error::ErrorKind,
-        postgres::{client::SlotState, source_pool::OutOfBandSourcePool},
+        postgres::{
+            client::{PgReplicationClient, SlotState},
+            source_pool::OutOfBandSourcePool,
+        },
         test_utils::database::{local_pg_read_replica_connection_config, spawn_source_database},
     };
 
     /// Monitor cadence used by source-pool tests.
     const TEST_MONITOR_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+
+    /// A live creator blocks release before allocation, and another slot with
+    /// the same name blocks release after that creator exits. Observation must
+    /// never drop the other session's resource.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn exclusive_slot_release_requires_backend_and_slot_absence() {
+        let database = spawn_source_database().await;
+        let source = database.client.as_ref().unwrap();
+        let pool = OutOfBandSourcePool::new(&database.config, TEST_MONITOR_REFRESH_INTERVAL);
+        let name = format!("test_release_{}", Uuid::new_v4().simple());
+        let mut creator = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+        let backend_pid = creator.backend_pid();
+
+        assert!(!pool.table_sync_slot_is_released(&name, backend_pid).await.unwrap());
+        creator
+            .create_slot(
+                &name,
+                &ReplicationSlotConfig {
+                    persistence: ReplicationSlotPersistence::Temporary,
+                    failover: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!pool.table_sync_slot_is_released(&name, backend_pid).await.unwrap());
+        drop(creator);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !pool.table_sync_slot_is_released(&name, backend_pid).await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        source
+            .query_one(
+                "select * from pg_create_physical_replication_slot($1, false, true)",
+                &[&name],
+            )
+            .await
+            .unwrap();
+        assert!(!pool.table_sync_slot_is_released(&name, backend_pid).await.unwrap());
+        source.query_one("select pg_drop_replication_slot($1)", &[&name]).await.unwrap();
+        assert!(pool.table_sync_slot_is_released(&name, backend_pid).await.unwrap());
+    }
 
     /// Slot validity distinguishes missing slots, including bound hostile
     /// names.

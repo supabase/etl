@@ -65,9 +65,27 @@ needs. This lets ETL catch up after a temporary disconnect.
 **ETL creates its logical slots automatically.** Do not pre-create a slot for
 the pipeline. The apply worker uses `supabase_etl_apply_{pipeline_id}`; table
 sync workers create `supabase_etl_table_sync_{pipeline_id}_{table_id}` slots
-for initial sync and drop them after catch-up completes. By default, both use
-permanent PostgreSQL slots. Table-sync slots can remain after a failed or
-interrupted sync.
+for initial sync. The apply slot is permanent by default. Table-sync slots are
+always temporary: PostgreSQL releases them when their session ends, including
+after failure or interrupted sync. An interrupted copy restarts from a fresh
+snapshot and slot.
+
+If a table-sync slot disappears during copy, ETL retries from scratch up to
+`table_error_retry_max_attempts`, then requires manual intervention. PostgreSQL
+can remove temporary slots after either connection loss or WAL-pressure
+termination, so persistent WAL pressure can cause repeated full copies before
+that limit is reached. Slot disappearance does not identify which cause occurred.
+If ETL instead observes an existing slot with `wal_status = 'lost'`, it reports
+a manually retryable table error.
+
+ETL keeps a table-sync worker's concurrency capacity reserved until it observes
+that both the creating backend and the slot are gone. Delayed session teardown
+or an unavailable source can therefore delay new copies, without replacing
+the table's original error. Already synchronized tables can continue streaming
+while copy capacity is held. Graceful shutdown waits for release within
+`shutdown_drain_timeout_ms`; at the deadline ETL cancels and joins the workers.
+This accounting covers attempts in the current process; old permanent slots
+left by earlier versions still require separate cleanup.
 
 ### Temporary Slots
 
@@ -83,9 +101,10 @@ pipeline:
   table_error_retry_max_attempts: 8
 ```
 
-This applies to both apply-worker and table-sync slots. PostgreSQL drops them
-on an error or when their creating sessions end. Omitted `persistence` defaults
-to `permanent`, including in existing configurations.
+This configures the apply slot; table-sync slots are temporary regardless of
+this setting. PostgreSQL drops temporary slots on an error or when their
+creating sessions end. Omitted `persistence` defaults to `permanent` for the
+apply slot, including in existing configurations.
 
 Every start resets table state and resynchronizes the destination from a fresh
 snapshot. You can reuse the same store and destination. Losing the apply slot
@@ -172,8 +191,9 @@ cause **significant disk usage**. See PostgreSQL's [slot fields](https://www.pos
 
 ### Common Causes of WAL Buildup
 
-- **Errored tables:** ETL retains their slots to preserve consistency. Fix the
-  error or remove tables you no longer replicate.
+- **Retained permanent slots:** A stopped or failing apply worker, or table-sync
+  slots left by older versions, can keep retaining WAL. Failed table-sync
+  attempts release their temporary slots when their sessions end.
 - **Slow destinations:** High latency, large transactions, or outages can make
   ingestion fall behind source writes.
 - **Long initial copies:** Each active table copy retains WAL needed by its
@@ -205,11 +225,13 @@ max_slot_wal_keep_size = 10GB
 ```
 
 Increasing the setting cannot restore WAL that has already been removed.
-A lost table-sync slot requires resetting the affected table's state and
-restarting its initial sync. Invalidation detected during copying produces a
-manually retryable table error; restarting the pipeline alone does not reset
-that error. A new copy replaces the partial destination table and uses a fresh
-snapshot and slot, so it needs enough retention to complete again.
+A table-sync slot that can no longer supply the required WAL needs a fresh
+copy, following the [retry policy above](#replication-slots). If automatic
+retries are exhausted or ETL reports a manually retryable error, resolve the
+cause and reset the affected table for initial sync; restarting the pipeline
+alone does not reset that error. Each new copy replaces the partial destination
+table and uses a fresh snapshot and slot, so it needs enough retention to
+complete again.
 
 If the main replication slot is invalidated, ETL fails pipeline startup by
 default and requires operator intervention. Set `invalidated_slot_behavior` to
@@ -220,9 +242,8 @@ large initial copy, so choose it deliberately and monitor destination capacity.
 Permanent slots persist across disconnections and pipeline stops. Stopping ETL
 releases copy transactions and their locks after teardown, but does not release
 the WAL needed by retained slots. Continue monitoring storage and slot status during
-maintenance. By default, table-sync slots are persistent PostgreSQL slots,
-even though ETL removes them after successful synchronization. With temporary
-persistence, both apply and table-sync slots end with their sessions.
+maintenance. Table-sync slots always end with their sessions. The apply slot
+also ends with its session when temporary persistence is configured.
 
 ### Planning Long Initial Copies
 
@@ -466,10 +487,11 @@ pipeline:
     failover: true
 ```
 
-ETL then creates its apply-worker and short-lived table-sync logical slots with
-the PostgreSQL `FAILOVER` option. If the apply-worker slot already exists from
-an earlier run, startup checks `pg_replication_slots.failover` and enables the
-option only when repair is needed. Disabling the setting affects newly created
+ETL then creates its apply-worker slot with the PostgreSQL `FAILOVER` option.
+Table-sync slots remain temporary and are not synchronized to standbys; an
+interrupted copy starts again after failover. If the apply-worker slot already
+exists from an earlier run, startup checks `pg_replication_slots.failover` and
+enables the option only when repair is needed. Disabling the setting affects newly created
 slots but does not downgrade an existing failover-enabled apply slot.
 
 The ETL setting only makes slots eligible for synchronization. PostgreSQL must

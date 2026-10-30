@@ -12,7 +12,7 @@ use tracing::warn;
 
 use crate::{
     bail,
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlResult, Retryability},
     observability::ETL_SLOT_INVALIDATIONS_TOTAL,
     postgres::client::SlotState,
     replication::ReplicationLagMonitor,
@@ -28,8 +28,8 @@ use crate::{
 pub(crate) struct TableSyncMonitor {
     /// Owned monitor task whose failures must reach the copy owner.
     handle: AbortOnDropHandle<()>,
-    /// Invalidation notification; closure also signals task termination.
-    slot_invalidated_rx: oneshot::Receiver<()>,
+    /// Invalidation or copy error; closure also signals task termination.
+    slot_invalidated_rx: oneshot::Receiver<EtlResult<()>>,
 }
 
 impl TableSyncMonitor {
@@ -65,7 +65,7 @@ impl TableSyncMonitor {
 
                         // Ignore send errors: if the receiver was already
                         // dropped, the copy has already finished on its own.
-                        let _ = slot_invalidated_tx.send(());
+                        let _ = slot_invalidated_tx.send(Ok(()));
 
                         break;
                     }
@@ -76,9 +76,12 @@ impl TableSyncMonitor {
                             slot_name, "replication slot disappeared during table copy"
                         );
 
-                        // A missing slot is just as unusable as an invalidated
-                        // slot.
-                        let _ = slot_invalidated_tx.send(());
+                        // Session loss removes temporary slots, including when
+                        // WAL pressure terminates their owner. The cause cannot
+                        // be recovered from an absent slot, but a fresh copy is
+                        // safe within the worker's existing retry limit.
+                        let _ = slot_invalidated_tx
+                            .send(Err(error.with_retryability(Retryability::Retryable)));
 
                         break;
                     }
@@ -96,22 +99,24 @@ impl TableSyncMonitor {
         Self { handle, slot_invalidated_rx }
     }
 
-    /// Resolves once the monitored replication slot is observed invalidated.
+    /// Resolves when the slot is invalidated, or errors if it disappears.
     ///
-    /// Reports unexpected monitor termination with its original task error.
-    /// An error consumes the task result and must terminate the copy attempt;
-    /// the caller must not subsequently call [`Self::stop`]. Controlled
-    /// shutdown calls [`Self::stop`] instead of waiting for invalidation.
-    /// Pending waits may be cancelled, but completion consumes the notification
-    /// and the caller must not wait again.
+    /// Missing slots return a retryable error so the owner starts a fresh copy.
+    /// Unexpected monitor termination returns its original task error. Any
+    /// error must terminate the copy attempt; the caller must not subsequently
+    /// call [`Self::stop`] because task failure consumes the handle's result.
+    /// Controlled shutdown calls [`Self::stop`] instead of waiting for
+    /// invalidation. Pending waits may be cancelled, but completion
+    /// consumes the notification and the caller must not wait again.
     pub(crate) async fn wait_for_slot_invalidated(&mut self) -> EtlResult<()> {
-        if (&mut self.slot_invalidated_rx).await.is_err() {
-            (&mut self.handle).await?;
+        match (&mut self.slot_invalidated_rx).await {
+            Ok(result) => result,
+            Err(_) => {
+                (&mut self.handle).await?;
 
-            bail!(ErrorKind::InvalidState, "Table copy slot monitor stopped unexpectedly");
+                bail!(ErrorKind::InvalidState, "Table copy slot monitor stopped unexpectedly");
+            }
         }
-
-        Ok(())
     }
 
     /// Stops the monitor task, waiting for it to finish.
@@ -124,15 +129,55 @@ impl TableSyncMonitor {
 mod tests {
     use std::time::Duration;
 
-    use etl_config::shared::{PgConnectionConfig, TcpKeepaliveConfig, TlsConfig};
+    use etl_config::shared::{
+        PgConnectionConfig, ReplicationSlotConfig, ReplicationSlotPersistence, TcpKeepaliveConfig,
+        TlsConfig,
+    };
     use tokio::sync::oneshot;
     use tokio_util::task::AbortOnDropHandle;
 
     use crate::{
-        error::ErrorKind,
+        error::{ErrorKind, Retryability},
+        postgres::client::PgReplicationClient,
         replication::{ReplicationLagMonitor, table_sync::monitor::TableSyncMonitor},
         schema::TableId,
+        test_utils::{database::spawn_source_database, pipeline::test_slot_name},
     };
+
+    /// WAL pressure removes a temporary slot instead of leaving a lost slot.
+    /// Test the monitor without an apply slot, since the WAL limit affects
+    /// every slot on the cluster. Pipeline recovery is covered separately.
+    // Serialized via nextest test-group "shared-pg" (mutates cluster-wide WAL settings).
+    #[tokio::test]
+    async fn exclusive_wal_pressure_on_temporary_slot_is_retryable() {
+        let database = spawn_source_database().await;
+        let mut owner = PgReplicationClient::connect(database.config.clone()).await.unwrap();
+        let slot_name = test_slot_name("copy_wal_pressure");
+        owner
+            .create_slot(
+                &slot_name,
+                &ReplicationSlotConfig {
+                    persistence: ReplicationSlotPersistence::Temporary,
+                    failover: false,
+                },
+            )
+            .await
+            .unwrap();
+        let interval = Duration::from_millis(100);
+        let pool = ReplicationLagMonitor::new(1, &database.config, interval);
+        let mut monitor =
+            TableSyncMonitor::spawn(TableId::new(1), slot_name.clone(), pool, interval);
+
+        database.invalidate_slot(&slot_name).await.unwrap();
+
+        let error =
+            tokio::time::timeout(Duration::from_secs(10), monitor.wait_for_slot_invalidated())
+                .await
+                .unwrap()
+                .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ReplicationSlotNotFound);
+        assert_eq!(error.retryability(), Retryability::Retryable);
+    }
 
     /// A failed monitor wakes its copy owner instead of leaving it waiting on
     /// an invalidation notification that can no longer arrive.

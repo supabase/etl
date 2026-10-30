@@ -219,7 +219,7 @@ where
 
         // We create the table sync workers pool to manage all table sync
         // workers in a central place.
-        let pool = Arc::new(TableSyncWorkerPool::new());
+        let pool = Arc::new(TableSyncWorkerPool::new(self.shutdown_token.clone()));
 
         // We create the permits semaphore which is used to control how many
         // table sync workers can be running at the same time.
@@ -285,7 +285,9 @@ where
     /// Joins apply and table sync workers and shuts down the destination while
     /// samplers remain alive, then stops and joins the samplers. Optional
     /// sampler failures are logged without stopping replication. Worker and
-    /// destination failures propagate without further cleanup. On
+    /// destination failures propagate without further cleanup. Fatal table
+    /// sync failures are observed even while apply is still running and
+    /// pre-empt an in-progress graceful drain. On
     /// failure or cancellation of this future, remaining owned handles
     /// request abort on drop without awaiting further cleanup.
     /// Destination-owned resources, including ownership cycles, may still
@@ -335,6 +337,8 @@ where
         // destination cleanup while native writes are still running.
         let forced = tokio::select! {
             biased;
+
+            error = pool.wait_for_failure() => return Err(error),
 
             result = &mut workers => {
                 result?;

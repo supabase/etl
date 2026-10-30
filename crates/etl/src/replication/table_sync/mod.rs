@@ -6,8 +6,7 @@ mod copy;
 mod monitor;
 
 pub(crate) use copy::{TableCopyResult, table_copy};
-use etl_config::shared::PipelineConfig;
-use etl_postgres::slots::EtlReplicationSlot;
+use etl_config::shared::{PipelineConfig, ReplicationSlotConfig, ReplicationSlotPersistence};
 #[cfg(feature = "failpoints")]
 use fail::fail_point;
 use tokio_postgres::types::PgLsn;
@@ -27,14 +26,13 @@ use crate::{
     },
     error::{ErrorKind, EtlResult},
     etl_error,
-    pipeline::PipelineId,
     postgres::client::PgReplicationClient,
     replication::{
         ReplicationLagMonitor,
         state::{TableState, TableStateType},
     },
     runtime::{
-        BatchMemoryGovernor, MemoryMonitor, TableSyncWorkerState,
+        BatchMemoryGovernor, MemoryMonitor, TableSyncSlot, TableSyncWorkerState,
         concurrency::{ShutdownResult, with_shutdown},
     },
     schema::{ReplicatedTableSchema, ReplicationMask, SchemaError, TableId},
@@ -102,9 +100,9 @@ where
 /// worker.
 #[expect(clippy::too_many_arguments)]
 pub(crate) async fn start_table_sync<S, D>(
-    pipeline_id: PipelineId,
     config: Arc<PipelineConfig>,
     replication_client: &mut PgReplicationClient,
+    slot: &mut TableSyncSlot,
     table_id: TableId,
     table_sync_worker_state: TableSyncWorkerState,
     store: S,
@@ -169,8 +167,7 @@ where
         state_type
     };
 
-    let slot_name: String =
-        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into()?;
+    let slot_name = slot.name().to_owned();
 
     // There are three states from which table sync can start:
     // - `Init` -> the table sync was never done or the table was reset, so we
@@ -259,12 +256,16 @@ where
             // without the slot being deleted, and we want to surface this.
             // Slot creation can wait for an unrelated source transaction. The
             // persisted DataSync state makes cancellation restart the copy.
+            // Every attempt starts a fresh copy. Its slot belongs only to this
+            // source session and must not survive failure or be synchronized
+            // to a standby. Apply-slot configuration is intentionally separate.
+            let slot_config = ReplicationSlotConfig {
+                persistence: ReplicationSlotPersistence::Temporary,
+                failover: false,
+            };
+            slot.creation_started(replication_client.backend_pid());
             let ShutdownResult::Ok(created) = with_shutdown!(
-                replication_client.create_table_copy_slot(
-                    &slot_name,
-                    table_id,
-                    &config.replication_slot
-                ),
+                replication_client.create_table_copy_slot(&slot_name, table_id, &slot_config),
                 shutdown_token,
             ) else {
                 return Ok(TableSyncResult::Stopped);

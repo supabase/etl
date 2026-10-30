@@ -115,7 +115,7 @@ async fn wait_for_synchronized_failover_slot(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_creates_failover_apply_and_table_sync_slots() {
+async fn pipeline_creates_failover_apply_and_temporary_table_sync_slots() {
     init_test_tracing();
 
     let mut database = spawn_source_database().await;
@@ -157,7 +157,19 @@ async fn pipeline_creates_failover_apply_and_table_sync_slots() {
     let table_sync_slot_name: String =
         EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into().unwrap();
     assert_eq!(replication_slot_failover(&database, &apply_slot_name).await, Some(true));
-    assert_eq!(replication_slot_failover(&database, &table_sync_slot_name).await, Some(true));
+    assert_eq!(replication_slot_failover(&database, &table_sync_slot_name).await, Some(false));
+    let temporary: bool = database
+        .client
+        .as_ref()
+        .unwrap()
+        .query_one(
+            "select temporary from pg_replication_slots where slot_name = $1",
+            &[&table_sync_slot_name],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(temporary);
 
     let catchup_notify = destination
         .wait_for_all_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 2)])
