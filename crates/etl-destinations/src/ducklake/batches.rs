@@ -3532,35 +3532,41 @@ mod tests {
 
     #[test]
     fn row_match_batches_only_unique_identities() {
-        let table_schema = |primary_key: bool| {
-            let mut id = ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false);
-            if primary_key {
-                id = id.with_primary_key(1);
-            }
+        let table_schema = |key: &[i32]| {
+            let column = |name: &str, ordinal: i32| {
+                let column = ColumnSchema::new(name.to_owned(), PgType::INT4, -1, ordinal, false);
+                if key.contains(&ordinal) { column.with_primary_key(ordinal) } else { column }
+            };
             Arc::new(TableSchema::new(
                 TableId::new(1),
                 TableName::new("public".to_owned(), "users".to_owned()),
-                vec![id, ColumnSchema::new("email".to_owned(), PgType::TEXT, -1, 2, false)],
+                vec![column("a", 1), column("b", 2), column("v", 3)],
             ))
         };
         let cases = [
             // `USING INDEX` on a unique index, no primary key.
-            ("alternative_key", table_schema(false), vec![1, 1], vec![0, 1], RowMatch::All),
-            ("primary_key", table_schema(true), vec![1, 1], vec![1, 0], RowMatch::All),
-            ("full_with_primary_key", table_schema(true), vec![1, 1], vec![1, 1], RowMatch::All),
+            ("alternative_key", table_schema(&[]), vec![1, 1, 1], vec![0, 1, 0], RowMatch::All),
+            ("primary_key", table_schema(&[1]), vec![1, 1, 1], vec![1, 0, 0], RowMatch::All),
+            (
+                "full_with_primary_key",
+                table_schema(&[1]),
+                vec![1, 1, 1],
+                vec![1, 1, 1],
+                RowMatch::All,
+            ),
             (
                 "full_without_primary_key",
-                table_schema(false),
-                vec![1, 1],
-                vec![1, 1],
+                table_schema(&[]),
+                vec![1, 1, 1],
+                vec![1, 1, 1],
                 RowMatch::First,
             ),
-            // The replicated rows omit part of the key, so they can repeat.
+            // The replicated rows omit `b`, part of the key, so they can repeat.
             (
                 "full_partial_primary_key",
-                table_schema(true),
-                vec![0, 1],
-                vec![0, 1],
+                table_schema(&[1, 2]),
+                vec![1, 0, 1],
+                vec![1, 0, 1],
                 RowMatch::First,
             ),
         ];
