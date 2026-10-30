@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, fmt};
 
 use crate::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
-    event::Event,
+    event::{Event, UpdateEvent},
     schema::TableId,
 };
 
@@ -44,10 +44,17 @@ pub enum MaterializeError {
     },
     /// A delete carried no old-side row.
     DeleteWithoutOldRow,
-    /// A partial update had no unique materialized row to complete it.
-    PartialUpdateWithoutBase {
-        /// Debug rendering of the present values.
-        values: String,
+    /// An insert, or an update to a new key, targeted a key already present.
+    DuplicateKey {
+        /// Debug rendering of the key.
+        id: String,
+    },
+    /// An update or delete targeted a key that is not present.
+    MissingKey {
+        /// Operation that needed the key.
+        operation: &'static str,
+        /// Debug rendering of the key.
+        id: String,
     },
 }
 
@@ -57,8 +64,9 @@ impl fmt::Display for MaterializeError {
             Self::UnconvertibleRow { values } => write!(f, "Row {values} did not convert"),
             Self::UnconvertibleKeyRow { values } => write!(f, "Key row {values} did not convert"),
             Self::DeleteWithoutOldRow => write!(f, "Delete carried no old row"),
-            Self::PartialUpdateWithoutBase { values } => {
-                write!(f, "Partial update {values} had no unique base row")
+            Self::DuplicateKey { id } => write!(f, "Key {id} is already present"),
+            Self::MissingKey { operation, id } => {
+                write!(f, "{operation} targeted missing key {id}")
             }
         }
     }
@@ -84,12 +92,16 @@ fn old_row_id<T: FromTableRow>(old_row: &OldTableRow) -> Result<T::Id, Materiali
 }
 
 /// Fills a partial row's missing columns from `base`.
-fn merge_partial_row(base: &TableRow, partial: &PartialTableRow) -> TableRow {
+///
+/// Present values fill every index not listed as missing, in order. Without
+/// a base, missing columns become [`Cell::Null`]; that is enough to read the
+/// row identity because identity columns are never unchanged TOAST.
+fn merge_partial_row(base: Option<&TableRow>, partial: &PartialTableRow) -> TableRow {
     let mut present = partial.values().iter();
     let values = (0..partial.total_columns())
         .map(|index| {
             if partial.missing_column_indexes().contains(&index) {
-                base.values().get(index).cloned().unwrap_or(Cell::Null)
+                base.and_then(|base| base.values().get(index)).cloned().unwrap_or(Cell::Null)
             } else {
                 present.next().cloned().unwrap_or(Cell::Null)
             }
@@ -99,44 +111,33 @@ fn merge_partial_row(base: &TableRow, partial: &PartialTableRow) -> TableRow {
     TableRow::new(values)
 }
 
-/// Completes a partial update from the materialized row it modifies.
-///
-/// The old-side identity names the base row when present. Otherwise the base
-/// is the unique row whose identity survives the merge, which holds whenever
-/// the identity columns themselves are present in the partial row.
-fn complete_partial_row<T: FromTableRow>(
-    rows: &BTreeMap<T::Id, TableRow>,
-    old_id: Option<&T::Id>,
-    partial: &PartialTableRow,
-) -> Result<TableRow, MaterializeError> {
-    let missing_base =
-        || MaterializeError::PartialUpdateWithoutBase { values: format!("{:?}", partial.values()) };
-
-    if let Some(old_id) = old_id {
-        let base = rows.get(old_id).ok_or_else(missing_base)?;
-        return Ok(merge_partial_row(base, partial));
+/// Returns the key an update modifies: the old-side identity when present,
+/// otherwise the new row's own identity.
+fn update_old_id<T: FromTableRow>(update: &UpdateEvent) -> Result<T::Id, MaterializeError> {
+    if let Some(old_row) = &update.old_table_row {
+        return old_row_id::<T>(old_row);
     }
 
-    let mut candidates = rows.iter().filter_map(|(id, base)| {
-        let merged = merge_partial_row(base, partial);
-        let merged_id = T::from_table_row(&merged)?.id();
-        (&merged_id == id).then_some(merged)
-    });
-    let merged = candidates.next().ok_or_else(missing_base)?;
-    if candidates.next().is_some() {
-        return Err(missing_base());
+    match &update.updated_table_row {
+        UpdatedTableRow::Full(row) => full_row_id::<T>(row),
+        UpdatedTableRow::Partial(partial) => full_row_id::<T>(&merge_partial_row(None, partial)),
     }
+}
 
-    Ok(merged)
+/// Returns a [`MaterializeError::MissingKey`] for `id`.
+fn missing_key<I: fmt::Debug>(operation: &'static str, id: &I) -> MaterializeError {
+    MaterializeError::MissingKey { operation, id: format!("{id:?}") }
 }
 
 /// Materializes copied rows plus CDC events for one table.
 ///
-/// `copied_rows` is the table-copy snapshot. Events then apply in order:
-/// inserts upsert by identity, updates remove the old identity and upsert the
-/// new row (completing partial rows from the stored row), deletes remove by
-/// old-side identity, and truncates that include the table clear it. Events
-/// for other tables are skipped.
+/// `copied_rows` is the table-copy snapshot. Events then apply in order with
+/// strict keyed semantics: an insert needs an absent key; an update needs its
+/// old key present and, when the key changes, the new key absent; a partial
+/// update keeps unchanged columns from the stored row; a delete needs its key
+/// present; a truncate that includes the table clears it. Events for other
+/// tables are skipped. Pass each event once, since a replayed event would
+/// break these rules.
 pub fn materialize_events<T>(
     copied_rows: &[TableRow],
     events: &[Event],
@@ -148,31 +149,39 @@ where
     let mut rows = BTreeMap::<T::Id, TableRow>::new();
 
     for row in copied_rows {
-        rows.insert(full_row_id::<T>(row)?, row.clone());
+        let id = full_row_id::<T>(row)?;
+        if rows.insert(id.clone(), row.clone()).is_some() {
+            return Err(MaterializeError::DuplicateKey { id: format!("{id:?}") });
+        }
     }
 
     for event in events {
         match event {
             Event::Insert(insert) if insert.replicated_table_schema.id() == table_id => {
-                rows.insert(full_row_id::<T>(&insert.table_row)?, insert.table_row.clone());
+                let id = full_row_id::<T>(&insert.table_row)?;
+                if rows.contains_key(&id) {
+                    return Err(MaterializeError::DuplicateKey { id: format!("{id:?}") });
+                }
+                rows.insert(id, insert.table_row.clone());
             }
             Event::Update(update) if update.replicated_table_schema.id() == table_id => {
-                let old_id = update.old_table_row.as_ref().map(old_row_id::<T>).transpose()?;
+                let old_id = update_old_id::<T>(update)?;
+                let base = rows.remove(&old_id).ok_or_else(|| missing_key("Update", &old_id))?;
                 let new_row = match &update.updated_table_row {
                     UpdatedTableRow::Full(row) => row.clone(),
-                    UpdatedTableRow::Partial(partial) => {
-                        complete_partial_row::<T>(&rows, old_id.as_ref(), partial)?
-                    }
+                    UpdatedTableRow::Partial(partial) => merge_partial_row(Some(&base), partial),
                 };
-                if let Some(old_id) = old_id {
-                    rows.remove(&old_id);
+                let new_id = full_row_id::<T>(&new_row)?;
+                if rows.contains_key(&new_id) {
+                    return Err(MaterializeError::DuplicateKey { id: format!("{new_id:?}") });
                 }
-                rows.insert(full_row_id::<T>(&new_row)?, new_row);
+                rows.insert(new_id, new_row);
             }
             Event::Delete(delete) if delete.replicated_table_schema.id() == table_id => {
                 let old_row =
                     delete.old_table_row.as_ref().ok_or(MaterializeError::DeleteWithoutOldRow)?;
-                rows.remove(&old_row_id::<T>(old_row)?);
+                let id = old_row_id::<T>(old_row)?;
+                rows.remove(&id).ok_or_else(|| missing_key("Delete", &id))?;
             }
             Event::Truncate(truncate)
                 if truncate.truncated_tables.iter().any(|schema| schema.id() == table_id) =>
@@ -353,6 +362,23 @@ mod tests {
     }
 
     #[test]
+    fn partial_key_change_moves_unchanged_columns_to_new_key() {
+        let partial =
+            PartialTableRow::new(3, TableRow::new(vec![Cell::I64(5), Cell::I32(0)]), vec![1]);
+        let events = [
+            insert(row(1, "toasted", 0)),
+            update(
+                UpdatedTableRow::Partial(partial),
+                Some(OldTableRow::Key(TableRow::new(vec![Cell::I64(1)]))),
+            ),
+        ];
+
+        let materialized = materialize_events::<Record>(&[], &events, TABLE_ID).unwrap();
+
+        assert_eq!(materialized, BTreeMap::from([record(5, "toasted", 0)]));
+    }
+
+    #[test]
     fn partial_update_without_stored_row_is_an_error() {
         let partial =
             PartialTableRow::new(3, TableRow::new(vec![Cell::I64(1), Cell::I32(7)]), vec![1]);
@@ -360,6 +386,41 @@ mod tests {
 
         let error = materialize_events::<Record>(&[], &events, TABLE_ID).unwrap_err();
 
-        assert!(matches!(error, MaterializeError::PartialUpdateWithoutBase { .. }));
+        assert!(matches!(error, MaterializeError::MissingKey { operation: "Update", .. }));
+    }
+
+    /// A re-inserted key would otherwise hide a lost delete.
+    #[test]
+    fn insert_of_present_key_is_an_error() {
+        let events = [insert(row(1, "a", 0)), insert(row(1, "a", 0))];
+
+        let error = materialize_events::<Record>(&[], &events, TABLE_ID).unwrap_err();
+
+        assert!(matches!(error, MaterializeError::DuplicateKey { .. }));
+    }
+
+    #[test]
+    fn delete_of_missing_key_is_an_error() {
+        let events = [insert(row(1, "a", 0)), delete_key(2)];
+
+        let error = materialize_events::<Record>(&[], &events, TABLE_ID).unwrap_err();
+
+        assert!(matches!(error, MaterializeError::MissingKey { operation: "Delete", .. }));
+    }
+
+    #[test]
+    fn key_change_onto_present_key_is_an_error() {
+        let events = [
+            insert(row(1, "a", 0)),
+            insert(row(2, "b", 0)),
+            update(
+                UpdatedTableRow::Full(row(2, "a", 0)),
+                Some(OldTableRow::Key(TableRow::new(vec![Cell::I64(1)]))),
+            ),
+        ];
+
+        let error = materialize_events::<Record>(&[], &events, TABLE_ID).unwrap_err();
+
+        assert!(matches!(error, MaterializeError::DuplicateKey { .. }));
     }
 }
