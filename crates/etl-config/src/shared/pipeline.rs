@@ -439,6 +439,11 @@ pub struct PipelineConfig {
     /// Defaults to `None`, allowing forced durability at any keepalive. `Some`
     /// guarantees at least this window before a later keepalive can force
     /// durability. This is a minimum age, not a periodic flush timer.
+    /// Independently, active apply loops request cumulative durability after
+    /// at most 60 seconds of deferral, even during traffic or backpressure.
+    /// That maximum takes precedence over a longer idle window; destination
+    /// completion can take longer, including an in-flight write's remaining
+    /// time before the required-durability write can be dispatched.
     ///
     /// Terminal table-sync completion forces durability without this wait.
     /// Shutdown drains buffered and pending writes but does not start a new
