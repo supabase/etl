@@ -231,6 +231,13 @@ pub trait Destination {
     /// buffer subsequent events while that barrier is pending, but cannot
     /// dispatch them until the barrier completes.
     ///
+    /// Independently, after 60 seconds from the first `Accepted` result, an
+    /// active apply loop requires cumulative durability on its next dispatch.
+    /// It sends buffered events or an empty barrier once the in-flight write
+    /// completes, even with continuous traffic or backpressured intake. Later
+    /// accepted results do not restart this deadline. This maximum overrides
+    /// a longer idle minimum and does not bound destination completion time.
+    ///
     /// If no later streaming write is dispatched before shutdown, ETL normally
     /// exits without checkpointing accepted-but-not-durable work. Restart then
     /// replays from the last persisted checkpoint. A terminal table-sync
