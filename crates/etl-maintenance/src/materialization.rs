@@ -61,6 +61,21 @@ impl Default for DuckLakeMaintenancePolicy {
     }
 }
 
+/// Errors converting a maintenance pipeline identifier to an integer key.
+#[derive(Debug, Error)]
+pub enum MaintenancePipelineIdError {
+    /// The string is not a signed 64-bit integer.
+    #[error("Pipeline ID is not a signed 64-bit integer")]
+    InvalidInteger {
+        /// Integer parsing failure without the original identifier value.
+        #[source]
+        source: ParseIntError,
+    },
+    /// The string would alias a different identifier after integer conversion.
+    #[error("Pipeline ID is not in canonical decimal form")]
+    NonCanonicalInteger,
+}
+
 /// Pipeline identifier accepted during the migration from integers to strings.
 ///
 /// Serialization preserves the original representation so legacy integer
@@ -103,13 +118,24 @@ impl fmt::Display for MaintenancePipelineId {
 }
 
 /// Converts identifiers for backends that still require an integer key.
+///
+/// String identifiers must use canonical decimal form to avoid aliasing another
+/// pipeline's state through leading zeros, a leading plus, or negative zero.
 impl TryFrom<&MaintenancePipelineId> for i64 {
-    type Error = ParseIntError;
+    type Error = MaintenancePipelineIdError;
 
     fn try_from(value: &MaintenancePipelineId) -> Result<Self, Self::Error> {
         match value {
             MaintenancePipelineId::Integer(value) => Ok(*value),
-            MaintenancePipelineId::String(value) => value.parse(),
+            MaintenancePipelineId::String(value) => {
+                let parsed = value
+                    .parse::<i64>()
+                    .map_err(|source| MaintenancePipelineIdError::InvalidInteger { source })?;
+                if parsed.to_string() != *value {
+                    return Err(MaintenancePipelineIdError::NonCanonicalInteger);
+                }
+                Ok(parsed)
+            }
         }
     }
 }
@@ -153,11 +179,14 @@ pub enum MaintenanceMaterializerKind {
 #[derive(Debug, Error)]
 pub enum MaintenanceMaterializationError {
     /// A string identifier cannot address the existing Postgres bigint key.
-    #[error("Postgres maintenance requires a signed 64-bit integer pipeline ID")]
+    #[error(
+        "Postgres maintenance requires a signed 64-bit integer pipeline ID in canonical decimal \
+         form"
+    )]
     InvalidPostgresPipelineId {
         /// Integer conversion failure without the original identifier value.
         #[source]
-        source: ParseIntError,
+        source: MaintenancePipelineIdError,
     },
 
     #[error("maintenance backend `{0:?}` is not configured in this deployment")]
@@ -233,8 +262,8 @@ impl MaintenanceMaterializer for DisabledMaintenanceMaterializer {
 /// Postgres materializer for deployments that coordinate maintenance without a
 /// Kubernetes CRD.
 ///
-/// The existing bigint key accepts integer IDs and numeric strings. Opaque
-/// string IDs require a separate storage migration.
+/// The existing bigint key accepts integer IDs and canonical decimal strings.
+/// Opaque string IDs require a separate storage migration.
 #[derive(Debug, Clone)]
 pub struct PostgresMaintenanceMaterializer {
     pool: PgPool,
@@ -301,7 +330,7 @@ mod tests {
     use crate::{
         DuckLakeMaintenanceMaterialization, DuckLakeMaintenancePolicy, MaintenanceIdentity,
         MaintenanceMaterializationError, MaintenanceMaterializer, MaintenancePipelineId,
-        MaintenanceRuntimeRefs, PostgresMaintenanceMaterializer,
+        MaintenancePipelineIdError, MaintenanceRuntimeRefs, PostgresMaintenanceMaterializer,
     };
 
     /// Integer identifiers retain their numeric wire representation and range.
@@ -320,7 +349,7 @@ mod tests {
     /// Strings retain their exact contents, including numeric-looking IDs.
     #[test]
     fn pipeline_id_round_trips_strings() {
-        for value in ["42", "0042", "pipeline-example", "9223372036854775808", ""] {
+        for value in ["42", "0042", "+42", "-0", "pipeline-example", "9223372036854775808", ""] {
             let pipeline_id: MaintenancePipelineId = serde_json::from_value(json!(value)).unwrap();
 
             assert_eq!(pipeline_id, MaintenancePipelineId::from(value.to_owned()));
@@ -347,7 +376,7 @@ mod tests {
         }
     }
 
-    /// Numeric strings can still address the existing Postgres bigint keys.
+    /// Canonical numeric strings can address the existing Postgres bigint keys.
     #[test]
     fn pipeline_id_converts_numeric_strings_for_legacy_backends() {
         for value in [i64::MIN, -1, 0, 42, i64::MAX] {
@@ -371,41 +400,61 @@ mod tests {
         ] {
             let pipeline_id = MaintenancePipelineId::from(value);
 
-            assert!(i64::try_from(&pipeline_id).is_err());
+            assert!(matches!(
+                i64::try_from(&pipeline_id),
+                Err(MaintenancePipelineIdError::InvalidInteger { .. })
+            ));
+        }
+    }
+
+    /// Non-canonical strings must not alias another pipeline's integer key.
+    #[test]
+    fn pipeline_id_rejects_non_canonical_legacy_integer_conversion() {
+        for value in ["042", "0042", "+42", "-042", "00", "+0", "-0"] {
+            let pipeline_id = MaintenancePipelineId::from(value);
+
+            assert!(matches!(
+                i64::try_from(&pipeline_id),
+                Err(MaintenancePipelineIdError::NonCanonicalInteger)
+            ));
         }
     }
 
     /// Unsupported Postgres IDs fail before migrations, writes, or deletes.
     #[tokio::test]
-    async fn postgres_materializer_rejects_opaque_ids_before_database_access() {
+    async fn postgres_materializer_rejects_invalid_ids_before_database_access() {
         let pool =
             PgPoolOptions::new().connect_lazy("postgres://postgres@127.0.0.1/postgres").unwrap();
         // A closed pool makes any accidental database access fail immediately.
         pool.close().await;
         let materializer = PostgresMaintenanceMaterializer::new(pool);
-        let identity = MaintenanceIdentity {
-            tenant_id: "tenant-example".to_owned(),
-            pipeline_id: "pipeline-example".into(),
-            replicator_id: 1,
-            resource_prefix: "replicator".to_owned(),
-        };
-        let input = DuckLakeMaintenanceMaterialization {
-            identity: identity.clone(),
-            policy: DuckLakeMaintenancePolicy::default(),
-            runtime_refs: MaintenanceRuntimeRefs {
-                replicator_image: "etl-replicator:test".to_owned(),
-            },
-        };
+        for value in ["pipeline-example", "042", "0042", "+42", "-042", "00", "+0", "-0"] {
+            let identity = MaintenanceIdentity {
+                tenant_id: "tenant-example".to_owned(),
+                pipeline_id: value.into(),
+                replicator_id: 1,
+                resource_prefix: "replicator".to_owned(),
+            };
+            let input = DuckLakeMaintenanceMaterialization {
+                identity: identity.clone(),
+                policy: DuckLakeMaintenancePolicy::default(),
+                runtime_refs: MaintenanceRuntimeRefs {
+                    replicator_image: "etl-replicator:test".to_owned(),
+                },
+            };
 
-        let reconcile_error = materializer.reconcile_ducklake_maintenance(input).await.unwrap_err();
-        let delete_error = materializer.delete_ducklake_maintenance(identity).await.unwrap_err();
+            let reconcile_error =
+                materializer.reconcile_ducklake_maintenance(input).await.unwrap_err();
+            let delete_error =
+                materializer.delete_ducklake_maintenance(identity).await.unwrap_err();
 
-        for error in [reconcile_error, delete_error] {
-            assert!(matches!(
-                error,
-                MaintenanceMaterializationError::InvalidPostgresPipelineId { .. }
-            ));
-            assert!(error.source().is_some());
+            for error in [reconcile_error, delete_error] {
+                assert!(matches!(
+                    error,
+                    MaintenanceMaterializationError::InvalidPostgresPipelineId { .. }
+                ));
+                assert!(error.source().is_some());
+            }
         }
     }
 }
