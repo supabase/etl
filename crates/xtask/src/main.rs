@@ -1,5 +1,6 @@
 mod commands;
 mod github;
+mod test_manifest;
 mod utils;
 
 use anyhow::Result;

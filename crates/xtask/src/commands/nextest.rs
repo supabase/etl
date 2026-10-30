@@ -1,5 +1,6 @@
 use std::{
-    io::{BufRead, BufReader},
+    fs,
+    io::{BufRead, BufReader, ErrorKind},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -9,7 +10,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, ValueEnum};
 use tempfile::TempDir;
 
-use crate::utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET};
+use crate::{
+    test_manifest::{self, TestJob, TestManifest},
+    utils::{DEFAULT_BASE_PORT, DEFAULT_PG_SHARD_COUNT, READ_REPLICA_PORT_OFFSET},
+};
 
 /// Nextest filter expression that selects tests requiring a Postgres cluster.
 ///
@@ -28,6 +32,13 @@ const SHARED_PG_FILTER: &str =
 /// It must exist in `.config/nextest.toml` and move those tests out of the
 /// serial `shared-pg` group.
 const PG_SHARDED_PROFILE: &str = "pg-sharded";
+
+/// Nextest profile of the lane without Postgres.
+const DEFAULT_PROFILE: &str = "default";
+
+/// JUnit report file name in each profile's store directory, as configured in
+/// `.config/nextest.toml`.
+const JUNIT_FILE_NAME: &str = "junit.xml";
 
 /// Test execution mode.
 #[derive(Clone, Copy, ValueEnum)]
@@ -101,6 +112,12 @@ pub(crate) struct NextestArgs {
     #[arg(long)]
     archive_file: Option<PathBuf>,
 
+    /// Write every lane's per-test results to this JSON file for the CI
+    /// metrics collector, even when tests fail. Reads the job's identity from
+    /// the GitHub Actions environment.
+    #[arg(long)]
+    test_manifest: Option<PathBuf>,
+
     /// Extra arguments forwarded to every nextest invocation.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     extra: Vec<String>,
@@ -168,6 +185,7 @@ impl NextestArgs {
             // Every compatibility job runs the full suite, including destinations.
             Lane {
                 name: "non-pg".to_owned(),
+                profile: DEFAULT_PROFILE,
                 filter: format!("not ({SHARED_PG_FILTER})"),
                 pg_clusters: None,
             },
@@ -175,10 +193,28 @@ impl NextestArgs {
             // test, so long tests cannot pile up on one cluster.
             Lane {
                 name: "pg".to_owned(),
+                profile: PG_SHARDED_PROFILE,
                 filter: SHARED_PG_FILTER.to_owned(),
                 pg_clusters: Some(PgClusters { first_port: self.base_port, count: self.shards }),
             },
         ];
+        let profiles = lanes.each_ref().map(|lane| lane.profile);
+
+        // A lane that fails to start writes no report; a stale one from an
+        // earlier run must not stand in for it.
+        if self.test_manifest.is_some() {
+            for profile in profiles {
+                let path = junit_path(self.mode, profile);
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("Failed to remove {}", path.display()));
+                    }
+                }
+            }
+        }
 
         let handles: Vec<_> = lanes
             .into_iter()
@@ -208,6 +244,14 @@ impl NextestArgs {
             }
         }
 
+        // Results matter most when tests fail, so the manifest is written
+        // first. Failing to write it only warns: it must not fail CI.
+        if let Some(path) = &self.test_manifest
+            && let Err(error) = write_test_manifest(self.mode, &profiles, path)
+        {
+            eprintln!("warning: test manifest not written: {error:#}");
+        }
+
         if failed {
             bail!("one or more test lanes failed");
         }
@@ -229,6 +273,9 @@ impl NextestArgs {
 struct Lane {
     /// Display name used as a prefix in output (e.g. `[pg]`).
     name: String,
+    /// Nextest profile the lane runs with, which names its JUnit report
+    /// directory.
+    profile: &'static str,
     /// Nextest filter expression (`-E`) selecting which tests this lane runs.
     filter: String,
     /// Postgres clusters this lane's tests run against. `None` for
@@ -300,6 +347,56 @@ fn extract_archive(archive: &Path) -> Result<TempDir> {
         bail!("Failed to extract nextest archive");
     }
     Ok(destination)
+}
+
+/// Returns where nextest writes a profile's JUnit report: the profile's store
+/// directory under the workspace's `target`, which cargo-llvm-cov moves to
+/// `target/llvm-cov-target` with `--target-dir`. Archive runs remap the target
+/// directory for binaries only and keep the store in `target`.
+fn junit_path(mode: Mode, profile: &str) -> PathBuf {
+    let target = PathBuf::from("target");
+    let target = match mode {
+        Mode::Run => target,
+        Mode::LlvmCov => target.join("llvm-cov-target"),
+    };
+    target.join("nextest").join(profile).join(JUNIT_FILE_NAME)
+}
+
+/// Writes the results of every lane's JUnit report to `path` as a
+/// [`TestManifest`].
+fn write_test_manifest(mode: Mode, profiles: &[&str], path: &Path) -> Result<()> {
+    let job = TestJob::from_env()?;
+    let mut tests = Vec::new();
+    for profile in profiles {
+        let junit = junit_path(mode, profile);
+        match fs::read_to_string(&junit) {
+            Ok(xml) => tests.extend(
+                test_manifest::parse_junit(&xml)
+                    .with_context(|| format!("Failed to read {}", junit.display()))?,
+            ),
+            // A lane that never ran tests writes no report; keep the others.
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                eprintln!("warning: no JUnit report at {}", junit.display());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("Failed to read {}", junit.display()));
+            }
+        }
+    }
+    if tests.is_empty() {
+        bail!("No JUnit report has test results");
+    }
+
+    let count = tests.len();
+    let manifest = TestManifest::new(matches!(mode, Mode::LlvmCov), job, tests);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    fs::write(path, serde_json::to_vec(&manifest)?)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    eprintln!("wrote {count} test results to {}.", path.display());
+    Ok(())
 }
 
 /// Builds a nextest command, preserving an archive's original build selection.
@@ -447,8 +544,8 @@ mod tests {
     use clap::Parser;
 
     use crate::commands::nextest::{
-        Lane, Mode, NextestArgs, PG_SHARDED_PROFILE, PgClusters, PgEnv, SHARED_PG_FILTER,
-        check_forwarded_args, lane_command, nextest_command,
+        DEFAULT_PROFILE, JUNIT_FILE_NAME, Lane, Mode, NextestArgs, PG_SHARDED_PROFILE, PgClusters,
+        PgEnv, SHARED_PG_FILTER, check_forwarded_args, junit_path, lane_command, nextest_command,
     };
 
     /// Standalone parser for testing task-runner options and passthrough.
@@ -567,11 +664,13 @@ mod tests {
         };
         let pg_lane = Lane {
             name: "pg".to_owned(),
+            profile: PG_SHARDED_PROFILE,
             filter: SHARED_PG_FILTER.to_owned(),
             pg_clusters: Some(PgClusters { first_port: 5430, count: 4 }),
         };
         let non_pg_lane = Lane {
             name: "non-pg".to_owned(),
+            profile: DEFAULT_PROFILE,
             filter: format!("not ({SHARED_PG_FILTER})"),
             pg_clusters: None,
         };
@@ -627,6 +726,22 @@ mod tests {
         assert_eq!(
             SHARED_PG_FILTER.split_whitespace().collect::<String>(),
             group["filter"].as_str().unwrap().split_whitespace().collect::<String>()
+        );
+    }
+
+    /// Both lanes' profiles must write the JUnit reports the test manifest
+    /// is built from, without failure output that would bloat them.
+    #[test]
+    fn lane_profiles_write_junit_reports() {
+        let config: toml::Table = include_str!("../../../../.config/nextest.toml").parse().unwrap();
+        for profile in [DEFAULT_PROFILE, PG_SHARDED_PROFILE] {
+            let junit = &config["profile"][profile]["junit"];
+            assert_eq!(junit["path"].as_str(), Some(JUNIT_FILE_NAME), "{profile}");
+            assert_eq!(junit["store-failure-output"].as_bool(), Some(false), "{profile}");
+        }
+        assert_eq!(
+            junit_path(Mode::LlvmCov, PG_SHARDED_PROFILE),
+            Path::new("target/llvm-cov-target/nextest/pg-sharded/junit.xml")
         );
     }
 

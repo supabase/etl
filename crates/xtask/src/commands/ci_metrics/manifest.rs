@@ -5,13 +5,16 @@
 //! every failure as a [`Rejection`] that the caller records instead of
 //! failing the sync.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::commands::benchmark_compare::CONFIG_KEYS;
+use crate::{
+    commands::benchmark_compare::CONFIG_KEYS,
+    test_manifest::{self, TestManifest},
+};
 
 /// Artifact name prefixes of benchmark result uploads: nightly and manual
 /// runs, and backfills of older commits. Backfills are never comparison
@@ -20,8 +23,13 @@ use crate::commands::benchmark_compare::CONFIG_KEYS;
 const BENCHMARK_ARTIFACT_PREFIXES: &[&str] = &["benchmark-results-", "benchmark-backfill-"];
 /// Largest artifact archive downloaded.
 pub(super) const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024;
-/// Largest single file read from an archive.
-pub(super) const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+/// Largest single file read from an archive. A test manifest of about 1,900
+/// tests is about 300 KiB.
+pub(super) const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
+/// Most tests accepted in one test manifest.
+const MAX_TESTS: usize = 20_000;
+/// Longest test binary id or test name accepted.
+const MAX_TEST_NAME_LEN: usize = 256;
 /// Most files accepted in one archive.
 const MAX_ENTRIES: usize = 16;
 /// Manifest file name inside a results archive.
@@ -62,9 +70,26 @@ impl Rejection {
     }
 }
 
-/// Returns whether an artifact name carries benchmark results.
-pub(super) fn is_benchmark_artifact(name: &str) -> bool {
-    BENCHMARK_ARTIFACT_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+/// Kind of manifest an artifact carries, from its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ArtifactKind {
+    /// Benchmark reports.
+    Benchmark,
+    /// Per-test results of the job with this id.
+    Test { job_id: i64 },
+}
+
+/// Returns the kind of manifest an artifact carries, or `None` for other
+/// artifacts.
+pub(super) fn artifact_kind(name: &str) -> Option<ArtifactKind> {
+    if BENCHMARK_ARTIFACT_PREFIXES.iter().any(|prefix| name.starts_with(prefix)) {
+        return Some(ArtifactKind::Benchmark);
+    }
+    let job_id = name.strip_prefix(test_manifest::ARTIFACT_PREFIX)?;
+    if !job_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    job_id.parse().ok().filter(|id| *id > 0).map(|job_id| ArtifactKind::Test { job_id })
 }
 
 /// One file named in an archive listing.
@@ -295,6 +320,48 @@ pub(super) fn benchmark_payload(
     }))
 }
 
+/// Parses and validates a test manifest from `repo` run `run_id`, uploaded as
+/// the artifact of job `job_id`.
+pub(super) fn parse_test_manifest(
+    bytes: &[u8],
+    repo: &str,
+    run_id: i64,
+    job_id: i64,
+) -> Result<TestManifest, Rejection> {
+    let manifest: TestManifest = serde_json::from_slice(bytes).map_err(|_| Rejection::Invalid)?;
+    if !manifest.is_supported() {
+        return Err(Rejection::Unsupported);
+    }
+    let github = manifest.github();
+    if github.repository() != repo || github.run_id() != run_id || github.job_id() != job_id {
+        return Err(Rejection::WrongRun);
+    }
+    let tests = manifest.tests();
+    let mut seen = HashSet::new();
+    let valid = github.run_attempt() >= 1
+        && tests.len() <= MAX_TESTS
+        && tests.iter().all(|test| {
+            is_test_name(test.binary())
+                && is_test_name(test.name())
+                // Stored as `integer`; a larger value would fail the insert.
+                && i32::try_from(test.duration_ms()).is_ok()
+                && seen.insert((test.binary(), test.name()))
+        });
+    if !valid {
+        return Err(Rejection::Invalid);
+    }
+    Ok(manifest)
+}
+
+/// Returns whether `value` is a plausible nextest binary id or Rust test name.
+fn is_test_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TEST_NAME_LEN
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'/' | b'.' | b'-')
+        })
+}
+
 /// Returns whether `value` is a short lowercase identifier.
 fn is_identifier(value: &str) -> bool {
     !value.is_empty()
@@ -316,6 +383,7 @@ mod tests {
 
     const REPO: &str = "supabase/etl";
     const RUN_ID: i64 = 40_430_353_543;
+    const JOB_ID: i64 = 56_250_883_441;
 
     fn manifest_json(job_id: Value) -> Value {
         json!({
@@ -379,7 +447,7 @@ mod tests {
             ("       10  10-27-2026 05:38   rep*rt.json", Rejection::InvalidArchive),
             ("       10  10-27-2026 05:38   two words.json", Rejection::InvalidArchive),
             ("       10  10-27-2026 05:38   rapport_é.json", Rejection::InvalidArchive),
-            ("  2000000  10-27-2026 05:38   big.json", Rejection::TooLarge),
+            ("  5000000  10-27-2026 05:38   big.json", Rejection::TooLarge),
             ("notanumber  10-27-2026 05:38   report.json", Rejection::InvalidArchive),
             ("      914  10-27-2026 05:38   manifest.json", Rejection::InvalidArchive),
         ] {
@@ -398,11 +466,107 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_artifacts_include_backfills() {
-        assert!(is_benchmark_artifact("benchmark-results-snowflake"));
-        assert!(is_benchmark_artifact("benchmark-backfill-null"));
-        assert!(!is_benchmark_artifact("benchmark-failed-snowflake"));
-        assert!(!is_benchmark_artifact("fuzz-artifacts-parse_text_cell"));
+    fn artifact_kind_follows_name() {
+        assert_eq!(artifact_kind("benchmark-results-snowflake"), Some(ArtifactKind::Benchmark));
+        assert_eq!(artifact_kind("benchmark-backfill-null"), Some(ArtifactKind::Benchmark));
+        assert_eq!(
+            artifact_kind("test-results-56250883441"),
+            Some(ArtifactKind::Test { job_id: 56_250_883_441 })
+        );
+        for name in [
+            "benchmark-failed-snowflake",
+            "fuzz-artifacts-parse_text_cell",
+            "test-results-",
+            "test-results-0",
+            "test-results-+5",
+            "test-results-12x",
+            "test-results-99999999999999999999",
+            "coverage",
+        ] {
+            assert_eq!(artifact_kind(name), None, "{name}");
+        }
+    }
+
+    /// A test manifest as `cargo x nextest --test-manifest` writes it.
+    fn test_manifest_json() -> Value {
+        json!({
+            "schema_version": 1,
+            "kind": "test",
+            "coverage": false,
+            "github": { "repository": REPO, "run_id": RUN_ID, "run_attempt": 1, "job_id": JOB_ID },
+            "tests": [
+                { "binary": "etl::main", "name": "replication::copy", "status": "passed", "duration_ms": 1200 },
+                { "binary": "xtask::bin/xtask", "name": "tests::plan", "status": "failed", "duration_ms": 3 },
+            ],
+        })
+    }
+
+    fn parse_tests(value: &Value) -> Result<TestManifest, Rejection> {
+        parse_test_manifest(&serde_json::to_vec(value).unwrap(), REPO, RUN_ID, JOB_ID)
+    }
+
+    #[test]
+    fn tests_manifest_parses_producer_output() {
+        let manifest = parse_tests(&test_manifest_json()).unwrap();
+        assert!(!manifest.coverage());
+        assert_eq!(manifest.github().run_attempt(), 1);
+        let tests: Vec<_> = manifest
+            .tests()
+            .iter()
+            .map(|test| (test.binary(), test.name(), test.status().as_str(), test.duration_ms()))
+            .collect();
+        assert_eq!(
+            tests,
+            [
+                ("etl::main", "replication::copy", "passed", 1200),
+                ("xtask::bin/xtask", "tests::plan", "failed", 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn tests_manifest_rejects_other_jobs_and_versions() {
+        for (pointer, value) in [
+            ("/github/job_id", json!(1)),
+            ("/github/run_id", json!(1)),
+            ("/github/repository", json!("someone/fork")),
+        ] {
+            let mut manifest = test_manifest_json();
+            *manifest.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(parse_tests(&manifest).unwrap_err(), Rejection::WrongRun, "{pointer}");
+        }
+        for (pointer, value) in [("/schema_version", json!(2)), ("/kind", json!("benchmark"))] {
+            let mut manifest = test_manifest_json();
+            *manifest.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(parse_tests(&manifest).unwrap_err(), Rejection::Unsupported, "{pointer}");
+        }
+    }
+
+    #[test]
+    fn tests_manifest_rejects_malformed_results() {
+        for (pointer, value) in [
+            ("/github/run_attempt", json!(0)),
+            ("/tests/0/status", json!("skipped")),
+            ("/tests/0/duration_ms", json!(-1)),
+            ("/tests/0/duration_ms", json!(1.5)),
+            ("/tests/0/duration_ms", json!(3_000_000_000_u64)),
+            ("/tests/0/name", json!("")),
+            ("/tests/0/name", json!("drop table; --")),
+            ("/tests/0/name", json!("x".repeat(257))),
+            ("/tests/0/binary", json!("etl main")),
+            (
+                "/tests/1",
+                json!({ "binary": "etl::main", "name": "replication::copy", "status": "failed", "duration_ms": 1 }),
+            ),
+        ] {
+            let mut manifest = test_manifest_json();
+            *manifest.pointer_mut(pointer).unwrap() = value;
+            assert_eq!(parse_tests(&manifest).unwrap_err(), Rejection::Invalid, "{pointer}");
+        }
+        assert_eq!(
+            parse_test_manifest(b"{\"kind\": \"te", REPO, RUN_ID, JOB_ID).unwrap_err(),
+            Rejection::Invalid
+        );
     }
 
     #[test]

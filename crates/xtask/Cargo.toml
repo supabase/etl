@@ -12,6 +12,7 @@ etl-config = { workspace = true }
 k8s-openapi = { workspace = true, features = ["latest"] }
 kube = { workspace = true, features = ["client", "derive", "rustls-tls", "ring"] }
 pg_escape = { workspace = true }
+quick-xml = "0.38.4"
 reqwest = { workspace = true, features = ["rustls-tls", "json"] }
 schemars = "1.2.1"
 secrecy = { workspace = true }

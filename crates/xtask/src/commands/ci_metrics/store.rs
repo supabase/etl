@@ -10,10 +10,13 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::{PgConnection, Row, migrate::Migrator, types::Json};
 
-use crate::commands::ci_metrics::{
-    manifest::Rejection,
-    model::{CodeScanningAlert, CodeScanningAnalysis, Job, Run, Workflow},
-    plan::{DayState, StoredRun},
+use crate::{
+    commands::ci_metrics::{
+        manifest::Rejection,
+        model::{CodeScanningAlert, CodeScanningAnalysis, Job, Run, Workflow},
+        plan::{DayState, StoredRun},
+    },
+    test_manifest::TestCase,
 };
 
 /// Advisory lock key that serializes syncs against one database.
@@ -373,11 +376,17 @@ pub(super) struct ManifestRow {
     pub(super) schema_version: i32,
     pub(super) commit_sha: String,
     pub(super) payload: Value,
+    /// Per-test results to store with a test manifest.
+    pub(super) tests: Vec<TestCase>,
 }
 
-/// Inserts a manifest. Artifacts are immutable, so an existing row is kept.
-pub(super) async fn insert_manifest(conn: &mut PgConnection, manifest: &ManifestRow) -> Result<()> {
-    sqlx::query(
+/// Inserts a manifest and its test results, returning how many test results
+/// were stored. Artifacts are immutable, so an existing row is kept.
+pub(super) async fn insert_manifest(
+    conn: &mut PgConnection,
+    manifest: &ManifestRow,
+) -> Result<u64> {
+    let inserted = sqlx::query(
         "insert into ci.manifest (
              artifact_id, run_id, run_attempt, job_id, kind, schema_version, commit_sha, payload
          ) values ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -392,13 +401,48 @@ pub(super) async fn insert_manifest(conn: &mut PgConnection, manifest: &Manifest
     .bind(&manifest.commit_sha)
     .bind(Json(&manifest.payload))
     .execute(&mut *conn)
-    .await?;
+    .await?
+    .rows_affected()
+        == 1;
     // Clears a retryable rejection recorded by an earlier attempt.
     sqlx::query("delete from ci.manifest_rejection where artifact_id = $1")
         .bind(manifest.artifact_id)
         .execute(&mut *conn)
         .await?;
-    Ok(())
+    if !inserted || manifest.tests.is_empty() {
+        return Ok(0);
+    }
+
+    let binaries: Vec<&str> = manifest.tests.iter().map(TestCase::binary).collect();
+    let names: Vec<&str> = manifest.tests.iter().map(TestCase::name).collect();
+    sqlx::query(
+        "insert into ci.test (binary_id, name)
+         select * from unnest($1::text[], $2::text[])
+         on conflict (binary_id, name) do nothing",
+    )
+    .bind(&binaries)
+    .bind(&names)
+    .execute(&mut *conn)
+    .await?;
+    let statuses: Vec<&str> = manifest.tests.iter().map(|test| test.status().as_str()).collect();
+    let durations: Vec<i64> =
+        manifest.tests.iter().map(|test| i64::from(test.duration_ms())).collect();
+    let stored = sqlx::query(
+        "insert into ci.test_result (job_id, test_id, status, duration_ms)
+         select $1, t.test_id, input.status, input.duration_ms
+         from unnest($2::text[], $3::text[], $4::text[], $5::bigint[])
+             as input(binary_id, name, status, duration_ms)
+         join ci.test t using (binary_id, name)",
+    )
+    .bind(manifest.job_id)
+    .bind(&binaries)
+    .bind(&names)
+    .bind(&statuses)
+    .bind(&durations)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(stored)
 }
 
 /// An artifact that failed validation.
