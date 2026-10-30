@@ -21,11 +21,11 @@ use tracing_log::{LogTracer, NormalizeEvent, log_tracer::SetLoggerError};
 use tracing_subscriber::{
     EnvFilter,
     fmt::{
-        self as tracing_fmt, FmtContext, FormattedFields, MakeWriter, fmt,
+        self as tracing_fmt, FmtContext, MakeWriter, fmt,
         format::{self, FormatEvent, FormatFields, Writer},
         time::FormatTime,
     },
-    registry::{LookupSpan, SpanRef},
+    registry::LookupSpan,
 };
 
 /// JSON field name for project identification in logs.
@@ -131,7 +131,7 @@ where
 {
     fn format_event(
         &self,
-        ctx: &FmtContext<'_, S, N>,
+        _ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> stdfmt::Result {
@@ -140,10 +140,6 @@ where
 
         let normalized_meta = event.normalized_metadata();
         let meta = normalized_meta.as_ref().unwrap_or_else(|| event.metadata());
-
-        let spans = ctx.event_scope().map(|scope| {
-            scope.from_root().map(|span| span_to_json_value::<S, N>(&span)).collect::<Vec<_>>()
-        });
 
         let mut output = Vec::new();
         let mut serializer = serde_json::Serializer::new(&mut output);
@@ -161,14 +157,6 @@ where
         }
 
         map.serialize_entry("fields", &SerializableEvent(event)).map_err(|_| stdfmt::Error)?;
-
-        if let Some(span) = spans.as_ref().and_then(|spans| spans.last()) {
-            map.serialize_entry("span", span).map_err(|_| stdfmt::Error)?;
-        }
-
-        if let Some(spans) = spans.as_ref() {
-            map.serialize_entry("spans", spans).map_err(|_| stdfmt::Error)?;
-        }
 
         map.end().map_err(|_| stdfmt::Error)?;
 
@@ -189,27 +177,6 @@ impl serde::Serialize for SerializableEvent<'_> {
         self.0.record(&mut visitor);
         visitor.values.serialize(serializer)
     }
-}
-
-/// Converts a span reference into the JSON shape used by the JSON formatter.
-fn span_to_json_value<S, N>(span: &SpanRef<'_, S>) -> serde_json::Value
-where
-    S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
-    N: for<'writer> FormatFields<'writer> + 'static,
-{
-    let mut map = serde_json::Map::new();
-
-    let ext = span.extensions();
-    if let Some(data) = ext.get::<FormattedFields<N>>()
-        && let Ok(serde_json::Value::Object(fields)) =
-            serde_json::from_str::<serde_json::Value>(data)
-    {
-        map.extend(fields);
-    }
-
-    map.insert("name".to_owned(), serde_json::Value::String(span.metadata().name().to_owned()));
-
-    serde_json::Value::Object(map)
 }
 
 /// JSON visitor for event fields.
@@ -343,7 +310,6 @@ fn configure_prod_tracing(filter: EnvFilter, app_name: &str) -> Result<LogFlushe
 
     let subscriber = fmt()
         .with_env_filter(filter)
-        .fmt_fields(format::JsonFields::new())
         .event_format(JsonContextFormatter::new(tracing_fmt::time::SystemTime))
         .with_writer(move || file_appender.make_writer())
         .finish();

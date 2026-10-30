@@ -30,6 +30,9 @@ pub enum EtlReplicationSlotError {
 }
 
 /// Parsed representation of a replication slot name.
+///
+/// Pipeline identities are embedded verbatim. PostgreSQL validates allowed
+/// slot-name characters when the slot is created.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EtlReplicationSlot {
     /// Apply worker slot for a pipeline.

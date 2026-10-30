@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use async_trait::async_trait;
+use etl::{error::EtlError, pipeline::PipelineId};
 use etl_config::shared::DEFAULT_DUCKLAKE_TARGET_FILE_SIZE;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -65,7 +66,7 @@ impl Default for DuckLakeMaintenancePolicy {
 #[derive(Debug, Clone)]
 pub struct MaintenanceIdentity {
     pub tenant_id: String,
-    pub pipeline_id: i64,
+    pub pipeline_id: PipelineId,
     pub replicator_id: i64,
     pub resource_prefix: String,
 }
@@ -124,7 +125,7 @@ impl MaintenanceMaterializationError {
     }
 
     /// Wraps a Postgres materialization error.
-    fn postgres(source: etl::error::EtlError) -> Self {
+    fn postgres(source: EtlError) -> Self {
         Self::backend(MaintenanceMaterializerKind::Postgres, source)
     }
 }
@@ -177,8 +178,8 @@ impl PostgresMaintenanceMaterializer {
         Self { pool }
     }
 
-    fn store(&self, legacy_pipeline_id: i64) -> PostgresExternalMaintenanceStore {
-        PostgresExternalMaintenanceStore::new(legacy_pipeline_id, self.pool.clone())
+    fn store(&self, pipeline_id: &PipelineId) -> PostgresExternalMaintenanceStore {
+        PostgresExternalMaintenanceStore::new(pipeline_id, self.pool.clone())
     }
 }
 
@@ -188,7 +189,7 @@ impl MaintenanceMaterializer for PostgresMaintenanceMaterializer {
         &self,
         input: DuckLakeMaintenanceMaterialization,
     ) -> Result<(), MaintenanceMaterializationError> {
-        let store = self.store(input.identity.pipeline_id);
+        let store = self.store(&input.identity.pipeline_id);
         store.ensure_schema().await.map_err(MaintenanceMaterializationError::postgres)?;
         store
             .ensure_pipeline_state(
@@ -207,7 +208,7 @@ impl MaintenanceMaterializer for PostgresMaintenanceMaterializer {
         &self,
         identity: MaintenanceIdentity,
     ) -> Result<(), MaintenanceMaterializationError> {
-        let store = self.store(identity.pipeline_id);
+        let store = self.store(&identity.pipeline_id);
         store.ensure_schema().await.map_err(MaintenanceMaterializationError::postgres)?;
         store.delete_pipeline_state().await.map_err(MaintenanceMaterializationError::postgres)?;
 

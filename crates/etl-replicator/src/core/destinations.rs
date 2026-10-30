@@ -317,7 +317,7 @@ mod clickhouse {
 mod ducklake {
     use etl::{
         destination::PipelineDestination,
-        pipeline::{LegacyPipelineId, Pipeline, PipelineId},
+        pipeline::{Pipeline, PipelineId},
     };
     use etl_config::{
         default_ducklake_s3_url_style, default_ducklake_s3_use_ssl, parse_ducklake_s3_data_path,
@@ -392,10 +392,7 @@ mod ducklake {
         };
         let external_maintenance = DuckLakeExternalMaintenanceConfig {
             mode: maintenance_mode,
-            legacy_pipeline_id: LegacyPipelineId::try_from(&PipelineId::from(
-                &replicator_config.pipeline.id,
-            ))
-            .map_err(ReplicatorError::config)?,
+            pipeline_id: PipelineId::from(&replicator_config.pipeline.id),
         };
 
         let destination = DuckLakeDestination::builder(

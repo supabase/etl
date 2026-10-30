@@ -17,7 +17,7 @@ use etl::{
     error::{ErrorKind, EtlResult, Retryability},
     etl_error,
     event::{Event, EventPosition},
-    pipeline::LegacyPipelineId,
+    pipeline::PipelineId,
     schema::{
         ColumnAlterationKind, ColumnPresenceChangeReason, ColumnSchema, ReplicatedTableSchema,
         SchemaDiff, SchemaOperation, SchemaPlan, SnapshotId, TableId, TableName, TableSchema,
@@ -806,23 +806,23 @@ pub enum DuckLakeMaintenanceMode {
 }
 
 /// Runtime configuration for DuckLake external maintenance coordination.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DuckLakeExternalMaintenanceConfig {
     pub mode: DuckLakeMaintenanceMode,
-    pub legacy_pipeline_id: LegacyPipelineId,
+    pub pipeline_id: PipelineId,
 }
 
 impl DuckLakeExternalMaintenanceConfig {
-    pub const fn disabled() -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Disabled, legacy_pipeline_id: 0 }
+    pub fn disabled() -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Disabled, pipeline_id: 0.into() }
     }
 
-    pub const fn kubernetes(legacy_pipeline_id: LegacyPipelineId) -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Kubernetes, legacy_pipeline_id }
+    pub fn kubernetes(pipeline_id: impl Into<PipelineId>) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Kubernetes, pipeline_id: pipeline_id.into() }
     }
 
-    pub const fn postgres(legacy_pipeline_id: LegacyPipelineId) -> Self {
-        Self { mode: DuckLakeMaintenanceMode::Postgres, legacy_pipeline_id }
+    pub fn postgres(pipeline_id: impl Into<PipelineId>) -> Self {
+        Self { mode: DuckLakeMaintenanceMode::Postgres, pipeline_id: pipeline_id.into() }
     }
 }
 
@@ -2113,13 +2113,13 @@ where
 
                 let watcher_destination = destination.clone();
                 let maintenance_pool = metadata_pg_pool.clone();
-                let legacy_pipeline_id = external_maintenance.legacy_pipeline_id as i64;
+                let pipeline_id = external_maintenance.pipeline_id;
                 destination
                     .tasks
                     .spawn_with(move || async move {
                         if let Err(error) = run_postgres_external_maintenance_watcher(
                             watcher_destination,
-                            legacy_pipeline_id,
+                            pipeline_id,
                             maintenance_pool,
                         )
                         .await
