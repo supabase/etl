@@ -70,6 +70,12 @@ always temporary: PostgreSQL releases them when their session ends, including
 after failure or interrupted sync. An interrupted copy restarts from a fresh
 snapshot and slot.
 
+If a table-sync slot disappears during copy, ETL retries from scratch up to
+`table_error_retry_max_attempts`, then requires manual intervention. PostgreSQL
+can remove temporary slots after either connection loss or WAL-pressure
+termination, so persistent WAL pressure can cause repeated full copies before
+that limit is reached. Slot disappearance does not identify which cause occurred.
+
 ETL keeps a table-sync worker's concurrency capacity reserved until it observes
 that both the creating backend and the slot are gone. Delayed session teardown
 or an unavailable source can therefore delay new copies, without replacing

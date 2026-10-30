@@ -2,14 +2,14 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicI64, Ordering},
     },
     time::Duration,
 };
 
 use etl::{
-    data::TableRow,
+    data::{Cell, TableRow},
     destination::{
         Destination, DropTableForCopyResult, TableCopyBatchId, WriteEventsDurability,
         WriteEventsResult, WriteTableRowsResult,
@@ -239,6 +239,145 @@ async fn destination_conflicts_release_slots_and_preserve_healthy_progress() {
         .unwrap()
         .get(0);
     assert!(!temporary);
+}
+
+/// Losing only the snapshot-owning session retries the copy automatically,
+/// removes its partial rows, and leaves the apply session available for CDC.
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_connection_loss_retries_copy_from_fresh_snapshot() {
+    let database = spawn_source_database().await;
+    let table_name = test_table_name("sync_connection_loss");
+    let table_id = database
+        .create_table(table_name.clone(), true, &[("value", "int4 not null")])
+        .await
+        .unwrap();
+    database.insert_values(table_name.clone(), &["value"], &[&1_i32]).await.unwrap();
+    let publication = "sync_connection_loss_publication";
+    database.create_publication(publication, std::slice::from_ref(&table_name)).await.unwrap();
+    let store = NotifyingStore::new();
+    let memory = MemoryDestination::new(store.clone());
+    let destination = TestDestinationWrapper::wrap(memory.clone());
+    let copy = destination.hold_next(FaultyOp::WriteTableRows).await;
+    let retry_drop = destination.hold_next(FaultyOp::DropTableForCopy).await;
+    // Capture the error at publication because rollback removes it from the
+    // store before the retry starts.
+    let observed_error = Arc::new(Mutex::new(None));
+    let captured_error = Arc::clone(&observed_error);
+    let errored = store
+        .notify_on_table_state(table_id, move |state| {
+            let TableState::Errored { source_err, retry_policy, .. } = state else {
+                return false;
+            };
+            *captured_error.lock().unwrap() = Some((source_err.kind(), retry_policy.clone()));
+            true
+        })
+        .await;
+    let synced = store.notify_on_table_sync_complete(table_id).await;
+    let ready = store.notify_on_table_state_type(table_id, TableStateType::Ready).await;
+    let pipeline_id = rand::random();
+    let mut pipeline = PipelineBuilder::new(
+        database.config.clone(),
+        pipeline_id,
+        publication.to_owned(),
+        store.clone(),
+        destination.clone(),
+    )
+    .with_max_table_sync_workers(1)
+    .with_max_copy_connections_per_table(1)
+    .with_table_sync_monitor_refresh_interval_ms(100)
+    .with_retry_config(1000, 2)
+    .build();
+
+    pipeline.start().await.unwrap();
+
+    // The child has imported the snapshot and written a row. Its response
+    // stays held until the monitor has observed the parent session's loss.
+    copy.wait_reached().await;
+    assert_eq!(
+        memory.table_rows().await[&table_id],
+        vec![TableRow::new(vec![Cell::I64(1), Cell::I32(1)])]
+    );
+    let client = database.client.as_ref().unwrap();
+    let sync_slot: String =
+        EtlReplicationSlot::for_table_sync_worker(pipeline_id, table_id).try_into().unwrap();
+    let apply_slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
+    let sync = client
+        .query_one(
+            "select active_pid, temporary from pg_replication_slots where slot_name = $1",
+            &[&sync_slot],
+        )
+        .await
+        .unwrap();
+    let sync_pid: i32 = sync.get(0);
+    assert!(sync.get::<_, bool>(1));
+    let apply = client
+        .query_one(
+            "select active_pid, temporary from pg_replication_slots where slot_name = $1",
+            &[&apply_slot],
+        )
+        .await
+        .unwrap();
+    let apply_pid: i32 = apply.get(0);
+    assert!(!apply.get::<_, bool>(1));
+    assert_ne!(sync_pid, apply_pid);
+
+    let terminated: bool =
+        client.query_one("select pg_terminate_backend($1)", &[&sync_pid]).await.unwrap().get(0);
+    assert!(terminated);
+
+    errored.notified().await;
+    copy.release_ok();
+
+    let (error_kind, retry_policy) = observed_error.lock().unwrap().take().unwrap();
+    assert_eq!(error_kind, ErrorKind::ReplicationSlotNotFound);
+    assert!(matches!(retry_policy, TableRetryPolicy::TimedRetry { .. }));
+
+    retry_drop.wait_reached().await;
+
+    // The retry cannot establish its new snapshot until this reset completes.
+    // Replacing the row proves it does not reuse the abandoned snapshot.
+    client
+        .execute(&format!("delete from {}", table_name.as_quoted_identifier()), &[])
+        .await
+        .unwrap();
+    database.insert_values(table_name.clone(), &["value"], &[&2_i32]).await.unwrap();
+    retry_drop.release_ok();
+
+    synced.notified().await;
+    let delivered = destination
+        .wait_for_events(vec![EventCondition::TableCount(EventType::Insert, table_id, 1)])
+        .await;
+
+    database.insert_values(table_name, &["value"], &[&3_i32]).await.unwrap();
+
+    delivered.notified().await;
+    ready.notified().await;
+    let recovered_apply_pid: i32 = client
+        .query_one(
+            "select active_pid from pg_replication_slots where slot_name = $1",
+            &[&apply_slot],
+        )
+        .await
+        .unwrap()
+        .get(0);
+
+    pipeline.shutdown_and_wait().await.unwrap();
+
+    assert_eq!(recovered_apply_pid, apply_pid);
+    assert!(destination.was_table_dropped_for_copy(table_id).await);
+    assert_eq!(
+        memory.table_rows().await[&table_id],
+        vec![TableRow::new(vec![Cell::I64(2), Cell::I32(2)])]
+    );
+    assert!(destination.get_events().await.iter().any(|event| {
+        matches!(event, Event::Insert(insert)
+            if insert.replicated_table_schema.id() == table_id
+                && insert.table_row == TableRow::new(vec![Cell::I64(3), Cell::I32(3)]))
+    }));
+    assert_eq!(
+        store.get_table_state(table_id).await.unwrap().unwrap().as_type(),
+        TableStateType::Ready
+    );
 }
 
 /// A one-off failure to persist a copy error stops the pipeline while queued
