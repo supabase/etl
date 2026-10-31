@@ -552,16 +552,10 @@ fn write_error_tree(
         write!(f, "{prefix}{branch} ")?;
     }
 
+    write_etl_error_head(error, f)?;
+
     match &error.repr {
         ErrorRepr::Single(payload) => {
-            write!(f, "[{:?}] {}", payload.kind, payload.description)?;
-
-            if let Some(detail) = &payload.detail
-                && !detail.trim().is_empty()
-            {
-                write!(f, ": {}", detail.lines().collect::<Vec<_>>().join(" "))?;
-            }
-
             if let Some(source) = &payload.source {
                 let source_prefix = if is_root {
                     String::new()
@@ -574,13 +568,6 @@ fn write_error_tree(
             Ok(())
         }
         ErrorRepr::Many { errors, .. } => {
-            write!(
-                f,
-                "{} error{} occurred",
-                errors.len(),
-                if errors.len() == 1 { "" } else { "s" },
-            )?;
-
             let child_prefix = if is_root {
                 String::new()
             } else {

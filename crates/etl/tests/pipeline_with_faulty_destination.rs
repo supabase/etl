@@ -1,11 +1,11 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::time::Duration;
 
 use etl::{
-    data::{Cell, TableRow},
+    data::Cell,
     error::ErrorKind,
     event::{Event, EventType},
     pipeline::PipelineId,
-    schema::{TableId, TableName},
+    schema::TableId,
     store::{StateStore, TableRetryPolicy, TableState, TableStateType},
     test_utils::{
         database::{
@@ -14,9 +14,8 @@ use etl::{
         },
         event::{EventCondition, group_events_by_type_and_table_id},
         faults::{FaultAction, FaultyOp},
-        materialize::{FromTableRow, materialize_events},
         memory_destination::MemoryDestination,
-        notify::{DEFAULT_NOTIFY_TIMEOUT, TimedNotify},
+        notify::DEFAULT_NOTIFY_TIMEOUT,
         notifying_store::NotifyingStore,
         pipeline::{PipelineBuilder, create_pipeline},
         property::{block_on, run_expensive_property},
@@ -29,6 +28,13 @@ use etl_telemetry::tracing::init_test_tracing;
 use proptest::prelude::*;
 use rand::random;
 use tokio_postgres::{Client, types::PgLsn};
+
+use crate::support::cdc_workload::{
+    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
+    WorkloadDestination, WorkloadHistory, WorkloadRunner, WorkloadTables,
+    assert_workload_converged, create_workload_tables, read_source_rows, wait_for_notification,
+    workloads,
+};
 
 /// Returns the current WAL write position of the source.
 async fn current_wal_lsn(client: &Client) -> PgLsn {
@@ -48,16 +54,10 @@ fn table_insert_commit_lsns(events: &[Event], table_id: TableId) -> Vec<PgLsn> {
         .collect()
 }
 
-/// Maximum time for one roulette synchronization point.
-const ROULETTE_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// Destination wrapper used by the walsender roulette.
-type RouletteDestination = TestDestinationWrapper<MemoryDestination<NotifyingStore>>;
-
 /// Controls write-response handling around the walsender disconnect.
 #[derive(Clone, Copy, Debug)]
 enum WriteResponseTiming {
-    /// Disconnect after the prefix is acknowledged.
+    /// Disconnect after the fault transaction is acknowledged.
     Unheld,
     /// Release the in-flight response after disconnect so reconnect can
     /// proceed.
@@ -65,352 +65,134 @@ enum WriteResponseTiming {
 }
 
 /// One generated walsender roulette schedule.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct WalsenderRouletteCase {
-    /// Number of committed single-row transactions.
-    transaction_count: usize,
-    /// Non-empty proper prefix after which the walsender disconnects.
-    disconnect_after: usize,
+    /// Source transactions around the disconnect.
+    workload: Workload,
     /// Write-response schedule around the disconnect.
     response_timing: WriteResponseTiming,
 }
 
-/// Generates bounded workloads and disconnect schedules.
+/// Generates workloads and disconnect schedules.
 fn walsender_roulette_cases() -> impl Strategy<Value = WalsenderRouletteCase> {
     let response_timing = prop_oneof![
         Just(WriteResponseTiming::Unheld),
         Just(WriteResponseTiming::ReleaseThenWaitForReconnect),
     ];
 
-    (2usize..=8, response_timing)
-        .prop_flat_map(|(transaction_count, response_timing)| {
-            (Just(transaction_count), 1usize..transaction_count, Just(response_timing))
-        })
-        .prop_map(|(transaction_count, disconnect_after, response_timing)| WalsenderRouletteCase {
-            transaction_count,
-            disconnect_after,
-            response_timing,
-        })
+    (workloads(), response_timing)
+        .prop_map(|(workload, response_timing)| WalsenderRouletteCase { workload, response_timing })
 }
 
-/// Typed state for one row in the users table.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct UserRecord {
-    /// Source primary key.
-    id: i64,
-    /// Source user name.
-    name: String,
-    /// Source user age.
-    age: i32,
-}
-
-impl FromTableRow for UserRecord {
-    type Id = i64;
-
-    fn from_table_row(table_row: &TableRow) -> Option<Self> {
-        let [Cell::I64(id), Cell::String(name), Cell::I32(age)] = table_row.values() else {
-            return None;
-        };
-
-        Some(Self { id: *id, name: name.clone(), age: *age })
-    }
-
-    fn id(&self) -> Self::Id {
-        self.id
-    }
-}
-
-/// Returns whether the event history contains an insert for `user_id`.
-fn has_user_insert(events: &[Event], table_id: TableId, user_id: i64) -> bool {
-    events.iter().any(|event| {
-        let Event::Insert(insert) = event else {
-            return false;
-        };
-
-        insert.replicated_table_schema.id() == table_id
-            && matches!(
-                insert.table_row.values().first(),
-                Some(Cell::I64(recorded_id)) if *recorded_id == user_id
-            )
-    })
-}
-
-/// Registers a notification for one user insert.
-async fn notify_on_user_insert(
-    destination: &RouletteDestination,
-    table_id: TableId,
-    user_id: i64,
-) -> TimedNotify {
-    destination.notify_on_events(move |events| has_user_insert(events, table_id, user_id)).await
-}
-
-/// Waits for one bounded roulette synchronization point.
-async fn wait_for_notification(
-    notification: &TimedNotify,
-    description: impl Into<String>,
-) -> Result<(), TestCaseError> {
-    let description = description.into();
-    tokio::time::timeout(ROULETTE_TIMEOUT, notification.inner().notified())
-        .await
-        .map_err(|_| TestCaseError::fail(format!("timed out waiting for {description}")))
-}
-
-/// Mutable state used to execute one walsender roulette workload.
-struct WalsenderRouletteWorkload<'a> {
-    /// Source database receiving generated transactions.
-    database: &'a mut PgDatabase<Client>,
-    /// Qualified users table name.
-    users_table_name: &'a TableName,
-    /// Destination recording replicated events.
-    destination: &'a RouletteDestination,
-    /// Users table identifier.
-    table_id: TableId,
-    /// Apply replication slot name.
-    apply_slot_name: &'a str,
-}
-
-impl<'a> WalsenderRouletteWorkload<'a> {
-    /// Executes the generated transactions and disconnect schedule.
-    async fn run(
-        &mut self,
-        case: WalsenderRouletteCase,
-        users_sync_complete: &TimedNotify,
-    ) -> Result<(), TestCaseError> {
-        wait_for_notification(users_sync_complete, "users table synchronization to complete")
-            .await?;
-
-        for user_number in 1..case.disconnect_after {
-            self.insert_user(user_number).await?;
-        }
-
-        self.disconnect(case.disconnect_after, case.response_timing).await?;
-
-        for user_number in (case.disconnect_after + 1)..=case.transaction_count {
-            self.insert_user(user_number).await?;
-        }
-
-        Ok(())
-    }
-
-    /// Inserts one autocommit user transaction and waits for its delivery.
-    async fn insert_user(&mut self, user_number: usize) -> Result<(), TestCaseError> {
-        let user_id = i64::try_from(user_number).expect("roulette user number should fit in i64");
-        let delivered = notify_on_user_insert(self.destination, self.table_id, user_id).await;
-
-        insert_users_data(self.database, self.users_table_name, user_number..=user_number).await;
-
-        wait_for_notification(&delivered, format!("delivery of user {user_id}")).await
-    }
-
-    /// Executes the generated disconnect schedule.
-    async fn disconnect(
-        &mut self,
-        user_number: usize,
-        response_timing: WriteResponseTiming,
-    ) -> Result<(), TestCaseError> {
-        match response_timing {
-            WriteResponseTiming::Unheld => self.disconnect_after_delivered_write(user_number).await,
-            WriteResponseTiming::ReleaseThenWaitForReconnect => {
-                self.disconnect_with_held_write(user_number).await
-            }
-        }
-    }
-
-    /// Terminates the active apply walsender and maps failures.
-    async fn terminate_apply_walsender(&self) -> Result<i32, TestCaseError> {
-        let client = self.database.client.as_ref().unwrap();
-        let termination =
-            terminate_active_walsender(client, self.apply_slot_name).await.map_err(|error| {
-                TestCaseError::fail(format!("Failed to terminate active walsender: {error}"))
-            })?;
-
-        match termination {
-            WalsenderTermination::Inactive => {
-                Err(TestCaseError::fail("Apply walsender was not active at disconnect"))
-            }
-            WalsenderTermination::NotTerminated { pid } => Err(TestCaseError::fail(format!(
-                "Postgres did not terminate apply walsender {pid}"
-            ))),
-            WalsenderTermination::Terminated { pid } => Ok(pid),
-        }
-    }
-
-    /// Waits for a new apply walsender and maps failures.
-    async fn wait_for_reconnect(&self, old_pid: i32) -> Result<(), TestCaseError> {
-        let client = self.database.client.as_ref().unwrap();
-        let reconnect =
-            wait_for_new_walsender(client, self.apply_slot_name, old_pid, ROULETTE_TIMEOUT).await;
-        let new_pid = reconnect.map_err(|error| {
-            TestCaseError::fail(format!(
-                "Failed to query the apply walsender while waiting for reconnect: {error}"
-            ))
+/// Terminates the active apply walsender and maps failures.
+async fn terminate_apply_walsender(
+    client: &Client,
+    apply_slot_name: &str,
+) -> Result<i32, TestCaseError> {
+    let termination =
+        terminate_active_walsender(client, apply_slot_name).await.map_err(|error| {
+            TestCaseError::fail(format!("Failed to terminate active walsender: {error}"))
         })?;
 
-        prop_assert!(new_pid.is_some(), "Timed out waiting for the apply walsender to reconnect");
-
-        Ok(())
-    }
-
-    /// Disconnects after the scheduled write reaches the destination.
-    async fn disconnect_after_delivered_write(
-        &mut self,
-        user_number: usize,
-    ) -> Result<(), TestCaseError> {
-        self.insert_user(user_number).await?;
-
-        let old_pid = self.terminate_apply_walsender().await?;
-
-        self.wait_for_reconnect(old_pid).await
-    }
-
-    /// Disconnects while the scheduled write response is held.
-    async fn disconnect_with_held_write(
-        &mut self,
-        user_number: usize,
-    ) -> Result<(), TestCaseError> {
-        let user_id = i64::try_from(user_number).expect("roulette user number should fit in i64");
-        let delivered = notify_on_user_insert(self.destination, self.table_id, user_id).await;
-        let hold = self.destination.hold_next(FaultyOp::WriteEvents).await;
-
-        insert_users_data(self.database, self.users_table_name, user_number..=user_number).await;
-        tokio::time::timeout(ROULETTE_TIMEOUT, hold.wait_reached())
-            .await
-            .map_err(|_| TestCaseError::fail("timed out waiting for held write response"))?;
-
-        let old_pid = self.terminate_apply_walsender().await?;
-
-        // The failed apply attempt must observe this response before it can
-        // reconnect and replay the uncheckpointed batch.
-        hold.release_ok();
-
-        wait_for_notification(&delivered, format!("delivery of held user {user_id}")).await?;
-        self.wait_for_reconnect(old_pid).await
+    match termination {
+        WalsenderTermination::Inactive => {
+            Err(TestCaseError::fail("Apply walsender was not active at disconnect"))
+        }
+        WalsenderTermination::NotTerminated { pid } => {
+            Err(TestCaseError::fail(format!("Postgres did not terminate apply walsender {pid}")))
+        }
+        WalsenderTermination::Terminated { pid } => Ok(pid),
     }
 }
 
-/// Reads the committed users from the source table.
-async fn read_source_users(
+/// Waits for a new apply walsender and maps failures.
+async fn wait_for_apply_reconnect(
     client: &Client,
-    users_table_name: &TableName,
-) -> Result<BTreeMap<i64, UserRecord>, TestCaseError> {
-    let query = format!(
-        "select id, name, age from {} order by id",
-        users_table_name.as_quoted_identifier()
-    );
-    let rows = client
-        .query(&query, &[])
-        .await
-        .map_err(|error| TestCaseError::fail(format!("failed to read source users: {error}")))?;
-    let mut users = BTreeMap::new();
-
-    for row in rows {
-        let user = UserRecord { id: row.get(0), name: row.get(1), age: row.get(2) };
-        let previous = users.insert(user.id, user);
-        prop_assert!(previous.is_none(), "source returned a duplicate user ID");
-    }
-
-    Ok(users)
-}
-
-/// Compares acknowledged destination history with committed source state.
-fn assert_users_converged(
-    events: &[Event],
-    table_id: TableId,
-    source_users: &BTreeMap<i64, UserRecord>,
-    transaction_count: usize,
+    apply_slot_name: &str,
+    old_pid: i32,
 ) -> Result<(), TestCaseError> {
-    let materialized_users = materialize_events::<UserRecord>(events, Some(table_id));
-    let table_insert_count = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                Event::Insert(insert) if insert.replicated_table_schema.id() == table_id
-            )
-        })
-        .count();
+    let reconnect =
+        wait_for_new_walsender(client, apply_slot_name, old_pid, WORKLOAD_TIMEOUT).await;
+    let new_pid = reconnect.map_err(|error| {
+        TestCaseError::fail(format!(
+            "Failed to query the apply walsender while waiting for reconnect: {error}"
+        ))
+    })?;
 
-    prop_assert_eq!(
-        materialized_users.len(),
-        table_insert_count,
-        "every recorded insert must contain a complete users row"
-    );
-
-    let mut destination_users = BTreeMap::new();
-    let mut delivery_metadata = BTreeMap::<i64, (PgLsn, usize)>::new();
-
-    for event in events {
-        let Event::Insert(insert) = event else {
-            continue;
-        };
-        if insert.replicated_table_schema.id() != table_id {
-            continue;
-        }
-
-        let Some(Cell::I64(user_id)) = insert.table_row.values().first() else {
-            return Err(TestCaseError::fail("recorded users insert did not contain an int8 ID"));
-        };
-
-        if let Some((first_commit_lsn, delivery_count)) = delivery_metadata.get_mut(user_id) {
-            prop_assert_eq!(
-                *first_commit_lsn,
-                insert.commit_lsn,
-                "replayed insert for user {} changed its commit LSN",
-                user_id
-            );
-            *delivery_count += 1;
-        } else {
-            delivery_metadata.insert(*user_id, (insert.commit_lsn, 1));
-        }
-    }
-
-    for user in materialized_users {
-        if let Some(previous) = destination_users.get(&user.id) {
-            prop_assert_eq!(
-                previous,
-                &user,
-                "replayed insert for user {} changed its payload",
-                user.id
-            );
-        } else {
-            destination_users.insert(user.id, user);
-        }
-    }
-
-    prop_assert_eq!(
-        source_users.len(),
-        transaction_count,
-        "source did not contain every committed transaction"
-    );
-    prop_assert_eq!(
-        &destination_users,
-        source_users,
-        "materialized destination state did not converge to source state"
-    );
-    prop_assert_eq!(
-        delivery_metadata.len(),
-        source_users.len(),
-        "event history contained missing or unexpected user IDs"
-    );
-
-    for user_id in source_users.keys() {
-        let delivery_count =
-            delivery_metadata.get(user_id).map_or(0, |(_, delivery_count)| *delivery_count);
-        prop_assert!(
-            (1..=2).contains(&delivery_count),
-            "user {user_id} had {delivery_count} deliveries; expected one delivery or one replay"
-        );
-    }
+    prop_assert!(new_pid.is_some(), "Timed out waiting for the apply walsender to reconnect");
 
     Ok(())
 }
 
+/// Runs the generated workload and disconnect schedule against a running
+/// pipeline.
+async fn run_roulette_workload(
+    database: &PgDatabase<Client>,
+    tables: &WorkloadTables,
+    destination: &WorkloadDestination,
+    apply_slot_name: &str,
+    case: &WalsenderRouletteCase,
+) -> Result<WorkloadHistory, TestCaseError> {
+    let client = database.client.as_ref().unwrap();
+    let mut runner = WorkloadRunner::new(client, tables);
+    for tx in case.workload.before_fault() {
+        runner.execute_and_wait(tx, TxPhase::BeforeFault, destination).await?;
+    }
+
+    let mut straddle = match case.workload.straddle() {
+        Some(inserts) => Some(runner.open_straddle(&database.config, inserts).await?),
+        None => None,
+    };
+
+    match case.response_timing {
+        WriteResponseTiming::Unheld => {
+            runner.execute_and_wait(case.workload.fault_tx(), TxPhase::Fault, destination).await?;
+            let old_pid = terminate_apply_walsender(client, apply_slot_name).await?;
+            wait_for_apply_reconnect(client, apply_slot_name, old_pid).await?;
+        }
+        WriteResponseTiming::ReleaseThenWaitForReconnect => {
+            let hold = destination.hold_next(FaultyOp::WriteEvents).await;
+            let delivered = runner
+                .execute(case.workload.fault_tx(), TxPhase::Fault, Some(destination))
+                .await?
+                .expect("the fault transaction always commits");
+            tokio::time::timeout(WORKLOAD_TIMEOUT, hold.wait_reached())
+                .await
+                .map_err(|_| TestCaseError::fail("timed out waiting for held write response"))?;
+
+            let old_pid = terminate_apply_walsender(client, apply_slot_name).await?;
+
+            // The failed apply attempt must observe this response before it
+            // can reconnect and replay the uncheckpointed batch.
+            hold.release_ok();
+
+            wait_for_notification(&delivered, "delivery of the held fault transaction").await?;
+            wait_for_apply_reconnect(client, apply_slot_name, old_pid).await?;
+        }
+    }
+
+    for step in case.workload.after_fault() {
+        match step {
+            AfterFaultStep::Tx(tx) => {
+                runner.execute_and_wait(tx, TxPhase::AfterFault, destination).await?;
+            }
+            AfterFaultStep::CommitStraddle => {
+                let session = straddle.take().expect("planned straddle should be open");
+                runner.commit_straddle(session, destination).await?;
+            }
+        }
+    }
+
+    Ok(runner.into_history())
+}
+
 /// Runs one generated workload and fault schedule to convergence.
-async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), TestCaseError> {
-    let mut database = spawn_source_database().await;
-    let database_schema = setup_test_database_schema(&database, TableSelection::UsersOnly).await;
-    let users_schema = database_schema.users_schema();
-    let table_id = users_schema.id;
+async fn run_walsender_roulette_case(
+    case: &WalsenderRouletteCase,
+    coverage: &WorkloadCoverage,
+) -> Result<(), TestCaseError> {
+    let database = spawn_source_database().await;
+    let tables = create_workload_tables(&database, &case.workload).await;
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
@@ -420,28 +202,28 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
-        database_schema.publication_name(),
+        WORKLOAD_PUBLICATION.to_owned(),
         store.clone(),
         destination.clone(),
     );
-    let users_sync_complete = store.notify_on_table_sync_complete(table_id).await;
+    let mut sync_complete = Vec::new();
+    for table_id in tables.ids() {
+        sync_complete.push(store.notify_on_table_sync_complete(*table_id).await);
+    }
 
     pipeline
         .start()
         .await
         .map_err(|error| TestCaseError::fail(format!("pipeline failed to start: {error}")))?;
-    let workload_result = {
-        let mut workload = WalsenderRouletteWorkload {
-            database: &mut database,
-            users_table_name: &users_schema.name,
-            destination: &destination,
-            table_id,
-            apply_slot_name: &apply_slot_name,
-        };
-        workload.run(case, &users_sync_complete).await
-    };
+    let workload_result = async {
+        for notification in &sync_complete {
+            wait_for_notification(notification, "table synchronization to complete").await?;
+        }
+        run_roulette_workload(&database, &tables, &destination, &apply_slot_name, case).await
+    }
+    .await;
 
-    let shutdown_result = tokio::time::timeout(ROULETTE_TIMEOUT, pipeline.shutdown_and_wait())
+    let shutdown_result = tokio::time::timeout(WORKLOAD_TIMEOUT, pipeline.shutdown_and_wait())
         .await
         .map_err(|_| TestCaseError::fail("timed out waiting for pipeline shutdown"))
         .and_then(|result| {
@@ -449,14 +231,23 @@ async fn run_walsender_roulette_case(case: WalsenderRouletteCase) -> Result<(), 
                 .map_err(|error| TestCaseError::fail(format!("pipeline shutdown failed: {error}")))
         });
 
-    workload_result?;
+    let history = workload_result?;
     shutdown_result?;
 
-    let source_users =
-        read_source_users(database.client.as_ref().unwrap(), &users_schema.name).await?;
+    let source = read_source_rows(database.client.as_ref().unwrap(), &tables).await?;
     let events = destination.get_events().await;
+    let copied_rows = destination.get_table_rows().await;
 
-    assert_users_converged(&events, table_id, &source_users, case.transaction_count)
+    // A walsender disconnect may replay any unconfirmed suffix once.
+    assert_workload_converged(
+        &tables,
+        &copied_rows,
+        &events,
+        &source,
+        &history,
+        |_| 1..=2,
+        coverage,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1040,9 +831,12 @@ async fn apply_disconnect_at_randomized_positions_converges_without_loss() {
     init_test_tracing();
 
     let strategy = walsender_roulette_cases();
-    run_expensive_property("walsender roulette", &strategy, |case| {
-        block_on(run_walsender_roulette_case(*case))
+    let coverage = WorkloadCoverage::default();
+    let property = "walsender roulette";
+    run_expensive_property(property, &strategy, |case| {
+        block_on(run_walsender_roulette_case(case, &coverage))
     });
+    coverage.report(property);
 }
 
 /// A held acknowledgement cannot consume the entire process termination grace.
