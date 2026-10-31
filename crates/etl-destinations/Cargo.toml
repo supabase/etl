@@ -55,20 +55,6 @@ bigquery = [
     "tokio/fs",
     "dep:metrics",
 ]
-iceberg = [
-    "dep:iceberg",
-    "dep:iceberg-catalog-rest",
-    "dep:arrow",
-    "dep:tracing",
-    "dep:parquet",
-    "dep:uuid",
-    "dep:tokio",
-    "dep:reqwest",
-    "dep:async-trait",
-    "dep:serde",
-    "dep:serde_json",
-    "dep:secrecy",
-]
 clickhouse = [
     "dep:clickhouse",
     "dep:metrics",
@@ -104,13 +90,11 @@ snowflake = [
     "uuid/v5",
     "dep:zstd",
 ]
-# We assume that `test-utils` is always used in conjunction with `bigquery` or `iceberg` thus we only
-# put here the extra dependencies needed.
+# Additional dependencies for destination test helpers.
 test-utils = ["dep:async-trait", "dep:uuid", "etl/test-utils"]
 
 [dependencies]
 
-arrow = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 aws-lc-rs = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
@@ -126,12 +110,9 @@ gcp-bigquery-client = { workspace = true, optional = true, features = ["rust-tls
 humantime = { workspace = true, optional = true }
 hyper-rustls = { workspace = true, optional = true, features = ["aws-lc-rs", "http1", "webpki-tokio"] }
 hyper-util = { workspace = true, optional = true, features = ["client-legacy", "http1", "tokio"] }
-iceberg = { workspace = true, optional = true }
-iceberg-catalog-rest = { workspace = true, optional = true }
 jsonwebtoken = { workspace = true, optional = true }
 metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true, optional = true }
-parquet = { workspace = true, optional = true, features = ["async", "arrow"] }
 percent-encoding = { workspace = true, optional = true }
 pg_escape = { workspace = true, optional = true }
 pkcs8 = { workspace = true, optional = true }

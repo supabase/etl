@@ -20,7 +20,6 @@ pub use destination::{
     DestinationConfig, DestinationConfigWithoutSecrets, DestinationKind, DuckLakeCopyBufferConfig,
     DuckLakeMaintenanceMode, DuckLakeSortBy, DuckLakeSortColumn, DuckLakeSortDirection,
     DuckLakeSortNulls, DuckLakeTableSortConfig, DuckLakeTableSortingConfig, DuckLakeWriterConfig,
-    IcebergConfig, IcebergConfigWithoutSecrets,
 };
 pub use health::ReplicatorHealthConfig;
 pub use pipeline::{

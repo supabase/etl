@@ -4,7 +4,7 @@ use std::{
     env, fs,
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -19,13 +19,8 @@ const SOURCE_POSTGRES_SERVICE: &str = "source-postgres";
 const SOURCE_POSTGRES_READ_REPLICA_SERVICE: &str = "source-postgres-read-replica";
 /// Docker Compose service for ClickHouse.
 const CLICKHOUSE_SERVICE: &str = "clickhouse";
-/// Docker Compose service for the Iceberg REST catalog.
-const ICEBERG_CATALOG_SERVICE: &str = "catalog-lakekeeper-api";
 /// Interval between readiness probes.
 const READINESS_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-/// Maximum time to wait for an already-running Iceberg catalog.
-const ICEBERG_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Starts Docker services when needed, waits for Postgres, and runs migrations.
 pub(crate) fn prepare_local_databases() -> Result<InitConfig> {
     println!("🔧 Configuring database settings...");
@@ -219,53 +214,6 @@ fn wait_for_docker_services(compose: &DockerCompose, config: &InitConfig) -> Res
     Ok(())
 }
 
-/// Waits for the local Iceberg REST catalog when Docker Compose is in use.
-pub(crate) fn wait_for_iceberg_catalog() -> Result<()> {
-    let config = InitConfig::from_env();
-    if config.skip_docker {
-        println!("ℹ️  SKIP_DOCKER is set; skipping Iceberg catalog readiness check.");
-        return Ok(());
-    }
-
-    let compose = DockerCompose::detect()?;
-    if !compose_service_is_running(&compose, &config, ICEBERG_CATALOG_SERVICE)? {
-        bail!("Iceberg catalog is not running. Run `cargo x init` first.");
-    }
-
-    wait_until_with_timeout("Iceberg catalog", ICEBERG_READINESS_TIMEOUT, || {
-        let mut cmd = compose.command(&config);
-        cmd.args([
-            "exec",
-            "-T",
-            ICEBERG_CATALOG_SERVICE,
-            "/home/nonroot/lakekeeper",
-            "healthcheck",
-        ]);
-        command_succeeds_silent(&mut cmd)
-    })
-    .context("Iceberg catalog did not become ready; run `cargo x init` and check Docker logs")?;
-    println!("✅ Iceberg catalog is up and running on http://localhost:8182");
-    Ok(())
-}
-
-/// Returns whether a Docker Compose service is currently running.
-fn compose_service_is_running(
-    compose: &DockerCompose,
-    config: &InitConfig,
-    service: &str,
-) -> Result<bool> {
-    let output = compose
-        .command(config)
-        .args(["ps", "--services", "--filter", "status=running", service])
-        .output()
-        .context("Failed to inspect Docker Compose services")?;
-    if !output.status.success() {
-        bail!("Failed to inspect Docker Compose services");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).lines().any(|line| line == service))
-}
-
 /// Waits for an externally managed Postgres instance.
 fn wait_for_external_postgres(config: &InitConfig) -> Result<()> {
     wait_until("Postgres", || {
@@ -290,7 +238,7 @@ fn wait_for_external_postgres(config: &InitConfig) -> Result<()> {
     })?;
 
     println!("✅ Postgres is up and running");
-    println!("ℹ️  SKIP_DOCKER is set; skipping ClickHouse and Iceberg catalog readiness checks.");
+    println!("ℹ️  SKIP_DOCKER is set; skipping ClickHouse readiness checks.");
     Ok(())
 }
 
@@ -369,28 +317,6 @@ where
     }
 }
 
-/// Waits until a readiness probe succeeds or `timeout` elapses.
-fn wait_until_with_timeout<F>(description: &str, timeout: Duration, mut ready: F) -> Result<()>
-where
-    F: FnMut() -> Result<bool>,
-{
-    println!("⏳ Waiting for {description} to be ready...");
-    let deadline = Instant::now() + timeout;
-    loop {
-        if ready()? {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            bail!("Timed out waiting for {description}");
-        }
-
-        println!("waiting for {description}...");
-        thread::sleep(
-            READINESS_CHECK_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
-        );
-    }
-}
-
 /// Requires a command to be callable.
 pub(crate) fn require_command(program: &str, args: &[&str], message: &'static str) -> Result<()> {
     if command_succeeds(program, args) {
@@ -432,17 +358,4 @@ fn env_or(key: &str, default: &str) -> String {
 /// Returns a non-empty environment variable.
 fn optional_env(key: &str) -> Option<String> {
     env::var(key).ok().filter(|value| !value.is_empty())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bounded_readiness_wait_honors_timeout() {
-        let error =
-            wait_until_with_timeout("test service", Duration::ZERO, || Ok(false)).unwrap_err();
-
-        assert_eq!(error.to_string(), "Timed out waiting for test service");
-    }
 }

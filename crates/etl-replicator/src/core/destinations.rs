@@ -70,22 +70,6 @@ pub(super) async fn start(
                 Err(disabled_destination_error(DestinationKind::Ducklake))
             }
         }
-        DestinationKind::Iceberg => {
-            #[cfg(feature = "iceberg")]
-            {
-                pipeline::start(
-                    || iceberg::initialize(replicator_config, store),
-                    shutdown_signal,
-                    replicator_health,
-                )
-                .await
-            }
-
-            #[cfg(not(feature = "iceberg"))]
-            {
-                Err(disabled_destination_error(DestinationKind::Iceberg))
-            }
-        }
         DestinationKind::Snowflake => {
             #[cfg(feature = "snowflake")]
             {
@@ -109,7 +93,6 @@ pub(super) async fn start(
     not(feature = "bigquery"),
     not(feature = "clickhouse"),
     not(feature = "ducklake"),
-    not(feature = "iceberg"),
     not(feature = "snowflake")
 ))]
 fn disabled_destination_error(kind: DestinationKind) -> crate::error::ReplicatorError {
@@ -408,113 +391,6 @@ mod ducklake {
         .await?;
 
         Ok(Pipeline::new(replicator_config.pipeline, store, destination))
-    }
-}
-
-/// Iceberg destination startup.
-#[cfg(feature = "iceberg")]
-mod iceberg {
-    use std::collections::HashMap;
-
-    use etl::{config::IcebergConfig, destination::PipelineDestination, pipeline::Pipeline};
-    use etl_config::{Environment, shared::ReplicatorConfig};
-    use etl_destinations::iceberg::{
-        DestinationNamespace, IcebergClient, IcebergDestination, S3_ACCESS_KEY_ID, S3_ENDPOINT,
-        S3_SECRET_ACCESS_KEY,
-    };
-    use secrecy::ExposeSecret;
-
-    use crate::{
-        core::ReplicatorStore,
-        error::{ReplicatorError, ReplicatorResult},
-    };
-
-    /// Initializes the Iceberg destination pipeline.
-    pub(super) async fn initialize(
-        replicator_config: ReplicatorConfig,
-        store: ReplicatorStore,
-    ) -> ReplicatorResult<Pipeline<ReplicatorStore, impl PipelineDestination>> {
-        let client = match &replicator_config.destination {
-            etl_config::shared::DestinationConfig::Iceberg {
-                config:
-                    IcebergConfig::Supabase {
-                        project_ref,
-                        warehouse_name,
-                        catalog_token,
-                        s3_access_key_id,
-                        s3_secret_access_key,
-                        s3_region,
-                        ..
-                    },
-            } => {
-                let env = Environment::load().map_err(ReplicatorError::config)?;
-                IcebergClient::new_with_supabase_catalog(
-                    project_ref,
-                    env.get_supabase_domain(),
-                    catalog_token.expose_secret().to_owned(),
-                    warehouse_name.clone(),
-                    s3_access_key_id.expose_secret().to_owned(),
-                    s3_secret_access_key.expose_secret().to_owned(),
-                    s3_region.clone(),
-                )
-                .await
-                .map_err(ReplicatorError::config)?
-            }
-            etl_config::shared::DestinationConfig::Iceberg {
-                config:
-                    IcebergConfig::Rest {
-                        catalog_uri,
-                        warehouse_name,
-                        s3_access_key_id,
-                        s3_secret_access_key,
-                        s3_endpoint,
-                        ..
-                    },
-            } => IcebergClient::new_with_rest_catalog(
-                catalog_uri.clone(),
-                warehouse_name.clone(),
-                create_props(
-                    s3_access_key_id.expose_secret().to_owned(),
-                    s3_secret_access_key.expose_secret().to_owned(),
-                    s3_endpoint.clone(),
-                ),
-            )
-            .await
-            .map_err(ReplicatorError::config)?,
-            _ => unreachable!("Destination kind should match Iceberg config"),
-        };
-
-        let etl_config::shared::DestinationConfig::Iceberg { config } =
-            &replicator_config.destination
-        else {
-            unreachable!("Destination kind should match Iceberg config");
-        };
-        let namespace = match config {
-            IcebergConfig::Supabase { namespace, .. } | IcebergConfig::Rest { namespace, .. } => {
-                match namespace {
-                    Some(ns) => DestinationNamespace::Single(ns.clone()),
-                    None => DestinationNamespace::OnePerSchema,
-                }
-            }
-        };
-        let destination = IcebergDestination::new(client, namespace, store.clone());
-
-        Ok(Pipeline::new(replicator_config.pipeline, store, destination))
-    }
-
-    /// Creates Iceberg REST catalog S3 properties.
-    fn create_props(
-        s3_access_key_id: String,
-        s3_secret_access_key: String,
-        s3_endpoint: String,
-    ) -> HashMap<String, String> {
-        let mut props: HashMap<String, String> = HashMap::new();
-
-        props.insert(S3_ACCESS_KEY_ID.to_owned(), s3_access_key_id);
-        props.insert(S3_SECRET_ACCESS_KEY.to_owned(), s3_secret_access_key);
-        props.insert(S3_ENDPOINT.to_owned(), s3_endpoint);
-
-        props
     }
 }
 

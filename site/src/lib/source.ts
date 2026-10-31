@@ -174,13 +174,12 @@ function rewriteAgentCallouts(markdown: string) {
 /** Plain-text labels for `<DestinationStatus>` badges in the agent Markdown export. */
 const destinationStatusLabels: Record<string, string> = {
   'public-alpha': 'Public alpha',
-  deprecated: 'Deprecated',
 };
 
 function rewriteAgentLayout(markdown: string) {
   return markdown
     .replace(
-      /<DestinationStatus status="(public-alpha|deprecated)"\s*\/>/g,
+      /<DestinationStatus status="(public-alpha)"\s*\/>/g,
       (_match, status: string) => `**Status: ${destinationStatusLabels[status]}**`,
     )
     .replace(/^\s*<div className="fd-(?:steps|step)">\s*$/gm, '')

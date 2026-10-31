@@ -10,7 +10,6 @@ destination.
 | `bigquery` | Google BigQuery | Public alpha |
 | `ducklake` | DuckLake | Public alpha |
 | `snowflake` | Snowflake | Public alpha |
-| `iceberg` | Apache Iceberg | Deprecated |
 
 Public alpha describes the managed-service release stage. Local and self-hosted
 use of the open-source destinations is unrestricted.
@@ -31,7 +30,7 @@ cargo x seed
 cargo x run replicator
 ```
 
-Destinations: `bigquery`, `clickhouse`, `ducklake`, `iceberg`, `snowflake`.
+Destinations: `bigquery`, `clickhouse`, `ducklake`, `snowflake`.
 See [DEVELOPMENT.md](../../DEVELOPMENT.md). Do not commit
 `crates/etl-replicator/configuration/`.
 

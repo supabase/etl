@@ -17,7 +17,6 @@ mature cloud destination.**
 | `bigquery`   | Google BigQuery | Public alpha  | Most mature cloud destination             |
 | `ducklake`   | DuckLake        | Public alpha  | Evaluate for your workload                |
 | `snowflake`  | Snowflake       | Public alpha  | Evaluate for your workload                |
-| `iceberg`    | Apache Iceberg  | Deprecated    | Do not use for new deployments            |
 
 ## Status definitions
 
@@ -25,8 +24,6 @@ mature cloud destination.**
   behavior may change. Local and self-hosted use of the open-source destinations
   is unrestricted. Review limitations and test recovery and schema changes
   against your workload before production use.
-- **Deprecated:** Retained for compatibility but no longer recommended for new
-  deployments. Plan to move away from it.
 
 ## Row value handling
 
@@ -600,27 +597,6 @@ The configured Snowflake role must allow the ALTER. Unexpected schemas and
 metadata types remain errors. Customer-owned queries must support partial
 records before consuming them; automatic table upgrades do not update those
 queries. The materialization query requires `_cdc_missing_columns` to exist.
-
-## Iceberg
-
-<DestinationStatus status="deprecated" />
-
-The Apache Iceberg implementation is retained for compatibility and is not
-recommended for new deployments.
-
-### Limitations
-
-- Schema-change DDL is not supported. A newer relation schema is rejected even
-  when only a default, nullability, mapped-equivalent type, or publication mask
-  changed. Existing tables must match the exact generated Iceberg schema.
-- In `OnePerSchema` mode, source schema names are normalized into Iceberg
-  namespace names. The destination rejects different source schemas that map to
-  the same namespace within a pipeline, including during restart and recovery.
-  This check does not detect collisions with other pipelines or orphaned tables.
-- Apache Iceberg supports native schema evolution, but this deprecated ETL
-  adapter does not implement it and does not translate PostgreSQL defaults.
-- The destination is deprecated and is not receiving the same product
-  investment as the active destination implementations.
 
 ## Custom destinations and upstream support
 
