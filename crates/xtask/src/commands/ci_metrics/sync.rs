@@ -1000,7 +1000,7 @@ fn test_row(
         run_attempt,
         job_id,
         kind: test_manifest::KIND,
-        schema_version: i32::try_from(test_manifest::SCHEMA_VERSION).unwrap_or(i32::MAX),
+        schema_version: test_manifest::SCHEMA_VERSION,
         commit_sha: run.head_sha.clone(),
         payload: json!({
             "coverage": coverage,

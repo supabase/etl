@@ -154,7 +154,7 @@ jobs:
         with:
           name: test-results-${{ job.check_run_id }}
           path: target/test-results/manifest.json
-          if-no-files-found: ignore
+          if-no-files-found: warn
           retention-days: 14
       - name: Export coverage
         if: inputs.coverage

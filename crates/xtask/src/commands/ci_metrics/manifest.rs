@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn tests_manifest_parses_producer_output() {
+    fn parses_producer_test_manifest() {
         let manifest = parse_tests(&test_manifest_json()).unwrap();
         assert!(!manifest.coverage());
         assert_eq!(manifest.github().run_attempt(), 1);
@@ -525,7 +525,7 @@ mod tests {
     }
 
     #[test]
-    fn tests_manifest_rejects_other_jobs_and_versions() {
+    fn rejects_test_manifest_from_other_job_or_version() {
         for (pointer, value) in [
             ("/github/job_id", json!(1)),
             ("/github/run_id", json!(1)),
@@ -543,7 +543,7 @@ mod tests {
     }
 
     #[test]
-    fn tests_manifest_rejects_malformed_results() {
+    fn rejects_malformed_test_manifest() {
         for (pointer, value) in [
             ("/github/run_attempt", json!(0)),
             ("/tests/0/status", json!("skipped")),
