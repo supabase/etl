@@ -58,4 +58,14 @@ jobs:
             echo "::error::max_requests must be a number up to 700"
             exit 1
           fi
+          # GitHub masks only the whole secret. Mask the parts a database
+          # error could echo too, in case one ever escapes the collector's
+          # redaction: the user, its project ref, and the host.
+          rest="${CI_METRICS_DATABASE_URL#*://}"
+          user="${rest%%:*}"
+          host="${rest#*@}"
+          host="${host%%[:/?]*}"
+          for value in "$user" "${user#*.}" "$host"; do
+            if [[ -n "$value" ]]; then echo "::add-mask::$value"; fi
+          done
           cargo --locked xtask ci-metrics sync --repo "$GITHUB_REPOSITORY" --max-requests "$MAX_REQUESTS"
