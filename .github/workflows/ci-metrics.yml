@@ -45,7 +45,13 @@ jobs:
         with:
           rustflags: ''
           cache-key: ci-metrics
+          cache-workspaces: . -> target/xtask
           cache-on-failure: false
+
+      # Build scripts and proc macros of every dependency run while compiling,
+      # so the build gets no secrets; only the finished binary sees them.
+      - name: Build collector
+        run: cargo --locked build --quiet --target-dir target/xtask --package xtask
 
       - name: Sync
         env:
@@ -68,4 +74,4 @@ jobs:
           for value in "$user" "${user#*.}" "$host"; do
             if [[ -n "$value" ]]; then echo "::add-mask::$value"; fi
           done
-          cargo --locked xtask ci-metrics sync --repo "$GITHUB_REPOSITORY" --max-requests "$MAX_REQUESTS"
+          target/xtask/debug/xtask ci-metrics sync --repo "$GITHUB_REPOSITORY" --max-requests "$MAX_REQUESTS"
