@@ -5350,3 +5350,249 @@ fn verification_query_errors_redact_credentials() {
     assert!(message.contains("[redacted]"));
     assert!(message.contains("Catalog Error"));
 }
+
+/// One value stored and deleted by [`assert_full_identity_deletes_match`].
+type DeleteCase = (&'static str, PgType, i32, Cell);
+
+/// Stores every case on three write paths and deletes each row by its full
+/// image, returning the cases whose rows survived as `(path, case)`.
+///
+/// The table has one nullable column per case. Each row sets its own case's
+/// column and leaves the rest NULL, so every delete also matches NULL columns.
+/// Rows are written by copy, by streaming then flushing to Parquet, and by
+/// streaming inline. Write paths are chosen per batch, so callers group cases
+/// that share a path.
+async fn surviving_full_identity_deletes(
+    catalog_url: &Url,
+    data_url: &Url,
+    table_id: u32,
+    table: &str,
+    cases: &[DeleteCase],
+) -> Vec<(&'static str, &'static str)> {
+    use etl::event::InsertEvent;
+
+    const PATHS: [&str; 3] = ["copied", "flushed", "inlined"];
+
+    let mut columns = vec![ColumnSchema::new("id".to_owned(), PgType::INT4, -1, 1, false)];
+    for (index, (case, pg_type, typmod, _)) in cases.iter().enumerate() {
+        let ordinal = i32::try_from(index).unwrap() + 2;
+        columns.push(ColumnSchema::new(
+            (*case).to_owned(),
+            pg_type.clone(),
+            *typmod,
+            ordinal,
+            true,
+        ));
+    }
+    let schema = TableSchema::new(
+        TableId::new(table_id),
+        TableName::new("public".to_owned(), table.to_owned()),
+        columns,
+    );
+    let table_name = table_name_to_ducklake_table_name(&schema.name).unwrap();
+    let replicated = ReplicatedTableSchema::from_masks(
+        Arc::new(schema.clone()),
+        ReplicationMask::all(&schema),
+        IdentityMask::from_bytes(vec![1; cases.len() + 1]),
+    );
+    let store = MemoryStore::new();
+    store.store_table_schema(schema).await.unwrap();
+    let destination = new_unbuffered_destination(
+        catalog_url.clone(),
+        data_url.clone(),
+        1,
+        None,
+        None,
+        None,
+        None,
+        store,
+    )
+    .await
+    .unwrap();
+
+    let row = |path: usize, case: usize| {
+        let mut values = vec![Cell::Null; cases.len() + 1];
+        values[0] = Cell::I32(i32::try_from(path * 1_000 + case).unwrap());
+        values[case + 1] = cases[case].3.clone();
+        TableRow::new(values)
+    };
+    let inserts = |path: usize, commit_lsn: u64| {
+        (0..cases.len())
+            .map(|case| {
+                Event::Insert(InsertEvent {
+                    commit_lsn: PgLsn::from(commit_lsn),
+                    tx_ordinal: u64::try_from(case).unwrap(),
+                    replicated_table_schema: replicated.clone(),
+                    table_row: row(path, case),
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let copied = (0..cases.len()).map(|case| row(0, case)).collect();
+    destination.write_table_rows_for_tests(&replicated, copied).await.unwrap();
+    destination.write_events(inserts(1, 100)).await.unwrap();
+    let conn = open_lake_conn_when_tables_visible(catalog_url, data_url, &[&table_name]).await;
+    flush_inlined_rows(&conn, &table_name);
+    drop(conn);
+    destination.write_events(inserts(2, 200)).await.unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(catalog_url, data_url, &[&table_name]).await;
+    assert_eq!(count_rows(&conn, &table_name), i64::try_from(PATHS.len() * cases.len()).unwrap());
+    drop(conn);
+
+    let deletes = (0..PATHS.len())
+        .flat_map(|path| (0..cases.len()).map(move |case| (path, case)))
+        .enumerate()
+        .map(|(ordinal, (path, case))| {
+            Event::Delete(DeleteEvent {
+                commit_lsn: PgLsn::from(300u64),
+                tx_ordinal: u64::try_from(ordinal).unwrap(),
+                replicated_table_schema: replicated.clone(),
+                old_table_row: Some(OldTableRow::Full(row(path, case))),
+            })
+        })
+        .collect();
+    destination.write_events(deletes).await.unwrap();
+
+    let conn = open_lake_conn_when_tables_visible(catalog_url, data_url, &[&table_name]).await;
+    let mut statement = conn
+        .prepare(&format!("SELECT id FROM {} ORDER BY id", qualified_lake_table_name(&table_name)))
+        .unwrap();
+    let surviving_ids: Vec<i32> =
+        statement.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+    destination.shutdown().await.unwrap();
+
+    surviving_ids
+        .into_iter()
+        .map(|id| {
+            let id = usize::try_from(id).unwrap();
+            (PATHS[id / 1_000], cases[id % 1_000].0)
+        })
+        .collect()
+}
+
+/// Returns the Postgres `numeric(precision, scale)` type modifier.
+fn numeric_typmod(precision: i32, scale: i32) -> i32 {
+    ((precision << 16) | scale) + 4
+}
+
+/// FULL-identity deletes compare every column with a SQL literal, while rows
+/// are stored by Arrow (copy), the DuckDB appender (streaming), or SQL
+/// literals (arrays, infinities, `24:00`). DuckLake does not check affected
+/// rows, so a literal that does not equal its stored value would leave the
+/// row behind silently.
+#[tokio::test(flavor = "multi_thread")]
+async fn full_identity_delete_matches_stored_value_on_every_write_path() {
+    use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime, Utc};
+    use etl::data::{ArrayCell, PgNumeric, PgTime, PgTimeTz, Timestamp};
+
+    let lake = create_test_lake("full_identity_delete_matches_stored_value").await;
+
+    let json = |text: &str| Cell::Json(serde_json::from_str(text).unwrap());
+    let numeric = |text: &str| Cell::Numeric(text.parse::<PgNumeric>().unwrap());
+    let date = |year, month, day| NaiveDate::from_ymd_opt(year, month, day).unwrap();
+    let time = |hour, minute, second, micros| {
+        NaiveTime::from_hms_micro_opt(hour, minute, second, micros).unwrap()
+    };
+    let timestamp = |year, micros| {
+        Cell::Timestamp(Timestamp::Value(date(year, 2, 1).and_time(time(12, 34, 56, micros))))
+    };
+    let timestamptz = |year, micros| {
+        let naive = date(year, 2, 1).and_time(time(12, 34, 56, micros));
+        Cell::TimestampTz(Timestamp::Value(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)))
+    };
+    let timetz = |offset_secs| {
+        Cell::TimeTz(PgTimeTz::new(
+            time(1, 2, 3, 456_789),
+            FixedOffset::east_opt(offset_secs).unwrap(),
+        ))
+    };
+
+    // Copied through Arrow and streamed through the DuckDB appender.
+    let arrow_cases: Vec<DeleteCase> = vec![
+        ("f4_tenth", PgType::FLOAT4, -1, Cell::F32(0.1)),
+        ("f4_tiny", PgType::FLOAT4, -1, Cell::F32(1e-30)),
+        ("f4_nan", PgType::FLOAT4, -1, Cell::F32(f32::NAN)),
+        ("f4_negative_zero", PgType::FLOAT4, -1, Cell::F32(-0.0)),
+        ("f4_max", PgType::FLOAT4, -1, Cell::F32(f32::MAX)),
+        ("f8_17_digits", PgType::FLOAT8, -1, Cell::F64(123456.78901234567)),
+        ("f8_tiny", PgType::FLOAT8, -1, Cell::F64(1e-30)),
+        ("f8_sum", PgType::FLOAT8, -1, Cell::F64(0.1 + 0.2)),
+        ("f8_nan", PgType::FLOAT8, -1, Cell::F64(f64::NAN)),
+        ("f8_negative_zero", PgType::FLOAT8, -1, Cell::F64(-0.0)),
+        ("f8_max", PgType::FLOAT8, -1, Cell::F64(f64::MAX)),
+        ("f8_subnormal", PgType::FLOAT8, -1, Cell::F64(5e-324)),
+        ("f8_small", PgType::FLOAT8, -1, Cell::F64(1.2345e-25)),
+        ("numeric_10_2", PgType::NUMERIC, numeric_typmod(10, 2), numeric("1.10")),
+        ("numeric_10_2_min", PgType::NUMERIC, numeric_typmod(10, 2), numeric("-99999999.99")),
+        ("numeric_5_5", PgType::NUMERIC, numeric_typmod(5, 5), numeric("0.12345")),
+        (
+            "numeric_38_0",
+            PgType::NUMERIC,
+            numeric_typmod(38, 0),
+            numeric("99999999999999999999999999999999999999"),
+        ),
+        ("numeric_unconstrained", PgType::NUMERIC, -1, numeric("1.100")),
+        ("date_bc", PgType::DATE, -1, Cell::Date(Date::Value(date(-43, 2, 1)))),
+        ("date_far_future", PgType::DATE, -1, Cell::Date(Date::Value(date(12023, 2, 1)))),
+        ("timestamp_micros", PgType::TIMESTAMP, -1, timestamp(2026, 123_456)),
+        ("timestamp_bc", PgType::TIMESTAMP, -1, timestamp(-43, 1)),
+        ("timestamp_far_future", PgType::TIMESTAMP, -1, timestamp(12023, 999_999)),
+        ("timestamptz_micros", PgType::TIMESTAMPTZ, -1, timestamptz(2026, 123_456)),
+        ("timestamptz_bc", PgType::TIMESTAMPTZ, -1, timestamptz(-43, 1)),
+        ("timestamptz_far_future", PgType::TIMESTAMPTZ, -1, timestamptz(12023, 999_999)),
+        ("time_micros", PgType::TIME, -1, Cell::Time(PgTime::Value(time(23, 59, 59, 999_999)))),
+        ("timetz_east", PgType::TIMETZ, -1, timetz(5 * 3600 + 1800)),
+        ("timetz_west", PgType::TIMETZ, -1, timetz(-8 * 3600)),
+        ("text_escapes", PgType::TEXT, -1, Cell::String("a\\b'c\n\t".to_owned())),
+        ("bytea", PgType::BYTEA, -1, Cell::Bytes(vec![0, 1, 255, b'\\', b'\''])),
+    ];
+    // JSON columns rule out Arrow, so copy and streaming both use the appender.
+    let json_cases: Vec<DeleteCase> = vec![
+        ("json_exponent", PgType::JSONB, -1, json(r#"{"a":1e-7}"#)),
+        ("json_float", PgType::JSONB, -1, json(r#"{"a":1.0}"#)),
+        ("json_control", PgType::JSONB, -1, json(r#"{"s":"\u001f"}"#)),
+        ("json_big_integer", PgType::JSONB, -1, json(r#"{"n":12345678901234567890123}"#)),
+        ("json_key_order", PgType::JSONB, -1, json(r#"{"b":1,"a":2}"#)),
+        ("json_unicode", PgType::JSONB, -1, json(r#"{"s":"é😀"}"#)),
+    ];
+    // Any of these values sends its whole batch through SQL literals.
+    let sql_literal_cases: Vec<DeleteCase> = vec![
+        ("date_infinity", PgType::DATE, -1, Cell::Date(Date::PosInfinity)),
+        ("timestamp_infinity", PgType::TIMESTAMP, -1, Cell::Timestamp(Timestamp::PosInfinity)),
+        (
+            "timestamptz_negative_infinity",
+            PgType::TIMESTAMPTZ,
+            -1,
+            Cell::TimestampTz(Timestamp::NegInfinity),
+        ),
+        ("time_end_of_day", PgType::TIME, -1, Cell::Time(PgTime::EndOfDay)),
+        (
+            "float8_array",
+            PgType::FLOAT8_ARRAY,
+            -1,
+            Cell::Array(ArrayCell::F64(vec![Some(f64::NAN), None, Some(-0.0), Some(1e-30)])),
+        ),
+    ];
+
+    let mut surviving = Vec::new();
+    for (table_id, table, cases) in [
+        (900, "full_identity_arrow", &arrow_cases),
+        (901, "full_identity_json", &json_cases),
+        (902, "full_identity_sql_literal", &sql_literal_cases),
+    ] {
+        surviving.extend(
+            surviving_full_identity_deletes(
+                &lake.catalog_url,
+                &lake.data_url,
+                table_id,
+                table,
+                cases,
+            )
+            .await,
+        );
+    }
+
+    assert!(surviving.is_empty(), "deletes left rows behind (path, case): {surviving:?}");
+}
