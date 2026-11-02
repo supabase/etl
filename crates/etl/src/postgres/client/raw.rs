@@ -370,6 +370,11 @@ impl PgReplicationClient {
         self.client.is_closed()
     }
 
+    /// Returns the server process owning this connection.
+    pub(crate) fn backend_pid(&self) -> i32 {
+        self.client.backend_pid()
+    }
+
     /// Returns a receiver for background connection task updates.
     pub(crate) fn connection_updates_rx(&self) -> watch::Receiver<PostgresConnectionUpdate> {
         self.connection_updates_rx.clone()

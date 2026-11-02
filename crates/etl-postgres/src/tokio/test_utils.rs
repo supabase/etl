@@ -524,8 +524,10 @@ impl<G: GenericClient> PgDatabase<G> {
     ///
     /// This method temporarily sets `max_slot_wal_keep_size` to a small value
     /// (64kB), generates WAL until the slot becomes invalidated, and forces
-    /// checkpoints to trigger WAL cleanup. The configuration is reset and
-    /// temporary tables are cleaned up before this method returns.
+    /// checkpoints to trigger WAL cleanup. Temporary slots disappear when WAL
+    /// pressure terminates their owner, so disappearance also counts for a
+    /// slot verified temporary before this operation. The configuration is
+    /// reset and temporary tables are cleaned up before this method returns.
     ///
     /// Returns an error if PostgreSQL does not invalidate the slot before the
     /// deadline.
@@ -538,6 +540,14 @@ impl<G: GenericClient> PgDatabase<G> {
         const INVALIDATION_TIMEOUT: Duration = Duration::from_secs(60);
 
         let client = self.client.as_ref().unwrap();
+        let temporary: bool = client
+            .query_one(
+                "select temporary from pg_replication_slots where slot_name = $1",
+                &[&slot_name],
+            )
+            .await
+            .map_err(|error| error.to_string())?
+            .get(0);
 
         // Try to set max_slot_wal_keep_size very low, this requires superuser
         // privileges.
@@ -589,14 +599,16 @@ impl<G: GenericClient> PgDatabase<G> {
 
             iteration += 1;
 
-            // Check if slot is invalidated.
-            if let Ok(Some(_)) = client
+            // Permanent slots must remain observable as lost. Temporary slots
+            // are removed when PostgreSQL terminates their owning session.
+            let slot_state = client
                 .query_opt(
-                    "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1 AND wal_status = \
-                     'lost'",
+                    "select wal_status = 'lost' from pg_replication_slots where slot_name = $1",
                     &[&slot_name],
                 )
-                .await
+                .await;
+            if matches!(&slot_state, Ok(Some(row)) if row.get::<_, Option<bool>>(0) == Some(true))
+                || (temporary && matches!(slot_state, Ok(None)))
             {
                 info!(slot_name, iteration, "slot invalidated successfully");
                 invalidated = true;

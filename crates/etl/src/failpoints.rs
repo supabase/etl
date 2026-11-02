@@ -25,6 +25,8 @@ pub const APPLY_LOOP_EXPIRE_DURABILITY_FP: &str = "apply_loop.expire_durability_
 /// Suspends source intake while leaving timers and destination results
 /// pollable.
 pub const APPLY_LOOP_PAUSE_INTAKE_FP: &str = "apply_loop.pause_intake_fp";
+/// Signals that intake has stopped and graceful draining has begun.
+pub const APPLY_LOOP_ENTERED_SHUTDOWN_DRAIN_FP: &str = "apply_loop.entered_shutdown_drain_fp";
 
 /// Executes a configurable failpoint for testing error scenarios.
 ///

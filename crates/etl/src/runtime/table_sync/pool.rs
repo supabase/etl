@@ -1,20 +1,25 @@
 use std::{
     collections::HashMap,
     future::Future,
+    panic::AssertUnwindSafe,
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use futures::FutureExt;
 use tokio::{
-    sync::{Mutex, RwLock},
+    sync::{Mutex, RwLock, watch},
     task::{JoinError, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::{
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
-    runtime::table_sync::{TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState},
+    runtime::table_sync::{
+        TableSyncWorkerHandle, TableSyncWorkerResult, TableSyncWorkerState,
+        worker::table_sync_worker_panic_error,
+    },
     schema::TableId,
 };
 
@@ -61,15 +66,21 @@ pub(crate) struct TableSyncWorkerPool {
     workers_join_set: Mutex<JoinSet<(TableSyncWorkerId, EtlResult<TableSyncWorkerResult>)>>,
     /// Last known worker handle per table. Uses RwLock for cheap read access.
     workers: RwLock<HashMap<TableId, TableSyncWorkerHandle>>,
+    /// First fatal failure, retained even before pipeline supervision waits.
+    failure: watch::Sender<Option<EtlError>>,
+    /// Stops intake when a worker can no longer safely manage its table.
+    shutdown_token: CancellationToken,
 }
 
 impl TableSyncWorkerPool {
     /// Creates a new empty table sync worker pool.
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(shutdown_token: CancellationToken) -> Self {
         Self {
             next_run_id: AtomicU64::new(0),
             workers_join_set: Mutex::new(JoinSet::new()),
             workers: RwLock::new(HashMap::new()),
+            failure: watch::channel(None).0,
+            shutdown_token,
         }
     }
 
@@ -80,6 +91,8 @@ impl TableSyncWorkerPool {
     /// logs a warning and skips spawning. If no worker exists or the
     /// previous worker has finished, spawns a new worker with a unique run
     /// ID. Completed run results remain tracked until [`Self::wait_all`].
+    /// Fatal errors and panics also stop intake and wake
+    /// [`Self::wait_for_failure`].
     ///
     /// The locking order is: workers_join_set -> workers (write). This ensures
     /// that if [`Self::wait_all`] is in progress, this method blocks until it
@@ -109,9 +122,25 @@ impl TableSyncWorkerPool {
         let run_id = self.next_run_id.fetch_add(1, Ordering::Relaxed);
         let worker_id = TableSyncWorkerId { table_id, run_id };
 
-        // Spawn the worker task.
+        // Report fatal failures independently of draining the pool: apply may
+        // otherwise keep running indefinitely without joining this worker.
+        let failure = self.failure.clone();
+        let shutdown_token = self.shutdown_token.clone();
         let abort_handle = workers_join_set.spawn(async move {
-            let result = future.await;
+            let result = AssertUnwindSafe(future)
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|payload| Err(table_sync_worker_panic_error(payload)));
+            if let Err(error) = &result {
+                failure.send_if_modified(|first| {
+                    if first.is_some() {
+                        return false;
+                    }
+                    *first = Some(error.clone());
+                    true
+                });
+                shutdown_token.cancel();
+            }
             (worker_id, result)
         });
 
@@ -141,6 +170,15 @@ impl TableSyncWorkerPool {
         debug!(table_id = table_id.0, "retrieved active table sync worker state");
 
         Some(handle.state())
+    }
+
+    /// Observes the first fatal worker failure without locking the task set or
+    /// waiting for apply to stop. Ordinary table errors remain worker outcomes.
+    pub(crate) async fn wait_for_failure(&self) -> EtlError {
+        let mut failure = self.failure.subscribe();
+        // The pool retains the sender, and failures are never cleared.
+        let error = failure.wait_for(Option::is_some).await.unwrap();
+        error.as_ref().unwrap().clone()
     }
 
     /// Waits for all workers in the pool to complete.
@@ -229,33 +267,83 @@ impl TableSyncWorkerPool {
     }
 }
 
-impl Default for TableSyncWorkerPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use tokio::sync::oneshot;
+    use std::time::Duration;
 
-    use super::*;
+    use tokio::sync::oneshot;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::{
+        error::ErrorKind,
+        etl_error,
+        runtime::table_sync::{TableSyncWorkerId, TableSyncWorkerPool, TableSyncWorkerState},
+        schema::TableId,
+        store::TableState,
+    };
+
+    /// Fatal failures stop intake and remain observable by a late supervisor,
+    /// without requiring the apply worker or pool drain to finish first.
+    #[tokio::test]
+    async fn fatal_failure_reaches_supervision_before_pool_drain() {
+        let shutdown = CancellationToken::new();
+        let pool = TableSyncWorkerPool::new(shutdown.clone());
+        let table_id = TableId::new(1);
+        pool.spawn(table_id, TableSyncWorkerState::new(table_id, TableState::Init), async {
+            Err(etl_error!(ErrorKind::SourceQueryFailed, "Test persistence failure"))
+        })
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled()).await.unwrap();
+        let error = pool.wait_for_failure().await;
+        assert_eq!(error.kind(), ErrorKind::SourceQueryFailed);
+        assert_eq!(pool.workers_join_set.lock().await.len(), 1);
+        assert_eq!(
+            pool.wait_all(&CancellationToken::new()).await.unwrap_err().kind(),
+            error.kind()
+        );
+    }
+
+    /// Panics outside the recoverable attempt path are fatal supervision
+    /// failures too, including when they abandon an unconfirmed slot lease.
+    #[tokio::test]
+    async fn supervision_panic_stops_intake() {
+        let shutdown = CancellationToken::new();
+        let pool = TableSyncWorkerPool::new(shutdown.clone());
+        let table_id = TableId::new(1);
+        pool.spawn(table_id, TableSyncWorkerState::new(table_id, TableState::Init), async {
+            panic!("Test supervision panic");
+        })
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled()).await.unwrap();
+        assert_eq!(pool.wait_for_failure().await.kind(), ErrorKind::TableSyncWorkerPanic);
+        assert_eq!(
+            pool.wait_all(&CancellationToken::new()).await.unwrap_err().kind(),
+            ErrorKind::TableSyncWorkerPanic
+        );
+    }
 
     /// The escalation path joins every cancelled worker and preserves genuine
     /// failures instead of treating them as successful cancellation.
     #[tokio::test]
     async fn shutdown_deadline_joins_workers_and_preserves_errors() {
-        let pool = TableSyncWorkerPool::new();
+        let shutdown = CancellationToken::new();
+        let pool = TableSyncWorkerPool::new(shutdown.clone());
         let (lifetime, dropped) = oneshot::channel::<()>();
-        pool.workers_join_set.lock().await.spawn(async move {
+        let table_id = TableId::new(1);
+        pool.spawn(table_id, TableSyncWorkerState::new(table_id, TableState::Init), async move {
             let _lifetime = lifetime;
             std::future::pending().await
-        });
+        })
+        .await;
         let force_stop = CancellationToken::new();
         force_stop.cancel();
         pool.wait_all(&force_stop).await.unwrap();
         assert!(dropped.await.is_err());
         assert!(pool.workers_join_set.lock().await.is_empty());
+        assert!(pool.failure.borrow().is_none());
+        assert!(!shutdown.is_cancelled());
 
         let task = pool.workers_join_set.lock().await.spawn(async {
             (

@@ -317,7 +317,7 @@ pub enum ReplicationSlotPersistence {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ReplicationSlotConfig {
-    /// Whether apply and table-sync slots persist beyond their sessions.
+    /// Whether slots persist beyond their creating sessions.
     #[serde(default)]
     pub persistence: ReplicationSlotPersistence,
     /// Enables PostgreSQL failover support for logical replication slots.
@@ -376,6 +376,9 @@ pub struct PipelineConfig {
     #[serde(default)]
     pub store_pg_connection: Option<PgConnectionConfig>,
     /// Configuration for the pipeline's logical replication slots.
+    ///
+    /// These settings apply only to the apply-worker slot. Table-sync slots
+    /// are always temporary and have failover disabled.
     #[serde(default)]
     pub replication_slot: ReplicationSlotConfig,
     /// Batch processing configuration.

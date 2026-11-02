@@ -12,4 +12,6 @@ pub(crate) use apply::{ApplyWorker, ApplyWorkerHandle};
 pub(crate) use batch_memory_governor::BatchMemoryGovernor;
 pub(crate) use error_policy::{ErrorHandlingPolicy, build_error_handling_policy};
 pub(crate) use memory_monitor::{MemoryMonitor, MemoryMonitorSubscription};
-pub(crate) use table_sync::{TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState};
+pub(crate) use table_sync::{
+    TableSyncSlot, TableSyncWorker, TableSyncWorkerPool, TableSyncWorkerState,
+};

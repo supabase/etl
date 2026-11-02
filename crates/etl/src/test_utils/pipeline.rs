@@ -204,7 +204,7 @@ where
         self
     }
 
-    /// Sets persistence for apply and table-sync replication slots.
+    /// Sets apply-slot persistence. Table-sync slots are always temporary.
     pub fn with_replication_slot_persistence(
         mut self,
         persistence: ReplicationSlotPersistence,

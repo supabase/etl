@@ -227,6 +227,15 @@ impl ReplicationLagMonitor {
         self.source_pool.get_slot_state(slot_name).await
     }
 
+    /// Observes table-sync resource release through the shared source pool.
+    pub(crate) async fn table_sync_slot_is_released(
+        &self,
+        slot_name: &str,
+        backend_pid: i32,
+    ) -> EtlResult<bool> {
+        self.source_pool.table_sync_slot_is_released(slot_name, backend_pid).await
+    }
+
     /// Starts the single best-effort sampler owned by the pipeline.
     pub(crate) fn spawn_replication_lag_metrics_task(&self) -> AbortOnDropHandle<()> {
         let monitor = self.clone();

@@ -12,7 +12,7 @@ use tokio_postgres::types::PgLsn;
 
 use crate::{
     destination::DestinationTableMetadata,
-    error::{ErrorKind, EtlResult},
+    error::{ErrorKind, EtlError, EtlResult},
     etl_error,
     replication::{
         WorkerType,
@@ -23,7 +23,10 @@ use crate::{
         CachedStore, DestinationTablesMetadata, SchemaStore, StateStore, TableSchemaSnapshots,
         TableStateLifecycleStore, TableStateOperation, TableStates,
     },
-    test_utils::notify::TimedNotify,
+    test_utils::{
+        faults::{FaultAction, HoldHandle, apply_response_fault},
+        notify::TimedNotify,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,7 +42,21 @@ type TableStateCondition = (TableId, Arc<Notify>, Box<dyn Fn(&TableState) -> boo
 type TableSchemaCountCondition = (TableId, usize, Arc<Notify>);
 type TableSchemaPruneCondition = Arc<Notify>;
 
+/// A one-off state-write failure, optionally held at the persistence boundary.
+struct TableStateUpdateFailure {
+    /// Table whose next matching state update fails.
+    table_id: TableId,
+    /// State transition selected for failure.
+    state_type: TableStateType,
+    /// Original error returned without changing stored state.
+    error: EtlError,
+    /// Optional barrier controlling when the failure is returned.
+    hold: Option<FaultAction>,
+}
+
 struct Inner {
+    /// One matching state update fails before changing stored state.
+    table_state_update_failure: Option<TableStateUpdateFailure>,
     table_states: TableStates,
     table_state_history: HashMap<TableId, Vec<TableState>>,
     table_schemas: Arc<TableSchemaSnapshots>,
@@ -112,6 +129,7 @@ impl NotifyingStore {
     /// Creates an empty notifying store.
     pub fn new() -> Self {
         let inner = Inner {
+            table_state_update_failure: None,
             table_states: Arc::new(BTreeMap::new()),
             table_state_history: HashMap::new(),
             table_schemas: Arc::new(TableSchemaSnapshots::default()),
@@ -125,6 +143,32 @@ impl NotifyingStore {
         };
 
         Self { inner: Arc::new(RwLock::new(inner)) }
+    }
+
+    /// Fails the next update to this table and state type without mutating the
+    /// store. Other reads and writes continue to succeed.
+    pub async fn fail_next_table_state_update(
+        &self,
+        table_id: TableId,
+        state_type: TableStateType,
+        error: EtlError,
+    ) {
+        self.inner.write().await.table_state_update_failure =
+            Some(TableStateUpdateFailure { table_id, state_type, error, hold: None });
+    }
+
+    /// Holds a one-off state-write failure until [`HoldHandle::release_ok`]
+    /// returns the supplied error. Other store operations remain available.
+    pub async fn hold_next_table_state_update_failure(
+        &self,
+        table_id: TableId,
+        state_type: TableStateType,
+        error: EtlError,
+    ) -> HoldHandle {
+        let (hold, handle) = FaultAction::hold();
+        self.inner.write().await.table_state_update_failure =
+            Some(TableStateUpdateFailure { table_id, state_type, error, hold: Some(hold) });
+        handle
     }
 
     /// Returns the current table states.
@@ -317,6 +361,18 @@ impl StateStore for NotifyingStore {
     async fn update_table_states(&self, updates: Vec<(TableId, TableState)>) -> EtlResult<()> {
         let mut guard = self.inner.write().await;
         let inner = &mut *guard;
+
+        if inner.table_state_update_failure.as_ref().is_some_and(|failure| {
+            updates
+                .iter()
+                .any(|(id, state)| *id == failure.table_id && state.as_type() == failure.state_type)
+        }) {
+            let failure = inner.table_state_update_failure.take().unwrap();
+            // Holding one persistence result must not block unrelated reads,
+            // writes, or checkpointing behind the store's global lock.
+            drop(guard);
+            return apply_response_fault(failure.hold, Err(failure.error)).await;
+        }
 
         let states = Arc::make_mut(&mut inner.table_states);
         for (table_id, state) in updates {
