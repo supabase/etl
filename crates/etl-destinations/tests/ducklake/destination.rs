@@ -5433,7 +5433,7 @@ async fn surviving_full_identity_deletes(
     destination.write_table_rows_for_tests(&replicated, copied).await.unwrap();
     destination.write_events(inserts(1, 100)).await.unwrap();
     let conn = open_lake_conn_when_tables_visible(catalog_url, data_url, &[&table_name]).await;
-    flush_inlined_rows(&conn, &table_name);
+    assert_eq!(flush_inlined_rows(&conn, &table_name), i64::try_from(cases.len()).unwrap());
     drop(conn);
     destination.write_events(inserts(2, 200)).await.unwrap();
 
