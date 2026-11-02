@@ -41,5 +41,8 @@ tokio-rustls = { workspace = true }
 tracing = { workspace = true }
 x509-cert = { workspace = true }
 
+[dev-dependencies]
+proptest = { workspace = true }
+
 [lints]
 workspace = true
