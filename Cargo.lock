@@ -2087,7 +2087,6 @@ dependencies = [
  "etl-config",
  "futures",
  "pg_escape",
- "proptest",
  "rustls",
  "serde_json",
  "sqlx",
