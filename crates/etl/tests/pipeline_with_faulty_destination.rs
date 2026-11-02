@@ -153,7 +153,7 @@ async fn run_roulette_workload(
         WriteResponseTiming::ReleaseThenWaitForReconnect => {
             let hold = destination.hold_next(FaultyOp::WriteEvents).await;
             let delivered = runner
-                .execute(case.workload.fault_tx(), TxPhase::Fault, Some(destination))
+                .execute_notified(case.workload.fault_tx(), TxPhase::Fault, destination)
                 .await?
                 .expect("the fault transaction always commits");
             tokio::time::timeout(WORKLOAD_TIMEOUT, hold.wait_reached())

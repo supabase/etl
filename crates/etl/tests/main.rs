@@ -9,6 +9,7 @@ mod pipeline_dirty_restart;
 mod pipeline_failover;
 mod pipeline_read_replica;
 mod pipeline_replica_identity;
+mod pipeline_sync_crash;
 mod pipeline_temporary_slots;
 #[cfg(feature = "failpoints")]
 mod pipeline_with_failpoints;

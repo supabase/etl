@@ -166,7 +166,7 @@ async fn run_dirty_restart_case(
         }
         CrashTiming::WhileWriteResponseHeld => {
             let hold = first_destination.hold_next(FaultyOp::WriteEvents).await;
-            runner.execute(case.workload.fault_tx(), TxPhase::Fault, None).await?;
+            runner.execute(case.workload.fault_tx(), TxPhase::Fault).await?;
             tokio::time::timeout(WORKLOAD_TIMEOUT, hold.wait_reached())
                 .await
                 .map_err(|_| TestCaseError::fail("timed out waiting for held write response"))?;

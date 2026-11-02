@@ -54,7 +54,10 @@ pub(crate) const WORKLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const LARGE_NOTE_BYTES: usize = 4096;
 
 /// Destination wrapper used by workload properties.
-pub(crate) type WorkloadDestination = TestDestinationWrapper<MemoryDestination<NotifyingStore>>;
+///
+/// `S` is the store the inner destination records table metadata in.
+pub(crate) type WorkloadDestination<S = NotifyingStore> =
+    TestDestinationWrapper<MemoryDestination<S>>;
 
 /// Replica identity configured for one workload table.
 #[derive(Clone, Copy, Debug)]
@@ -118,6 +121,8 @@ struct WorkloadIntent {
     after_fault: Vec<TxIntent>,
     /// Position among the post-fault transactions where the straddle commits.
     straddle_commit: Index,
+    /// Whether a table copy is open while pre-fault transactions run.
+    copy_open_before_fault: bool,
 }
 
 /// Note value identified by a unique sequence number.
@@ -302,14 +307,15 @@ struct Planner {
     next_id: i64,
     /// Next unused note sequence number.
     next_note: u32,
-    /// Whether a straddling transaction holds table locks that block truncate.
-    straddle_open: bool,
+    /// Whether an open transaction or table copy holds a lock that blocks
+    /// truncate.
+    truncate_blocked: bool,
 }
 
 impl Planner {
     /// Creates a planner over empty tables.
     fn new() -> Self {
-        Self { tables: Default::default(), next_id: 1, next_note: 1, straddle_open: false }
+        Self { tables: Default::default(), next_id: 1, next_note: 1, truncate_blocked: false }
     }
 
     /// Allocates a unique note for `intent`.
@@ -373,8 +379,8 @@ impl Planner {
     /// Plans one operation and applies it to the model.
     ///
     /// Operations that need a row degrade to inserts on an empty table, and
-    /// truncate degrades to an insert while a straddling transaction holds a
-    /// lock that would block it.
+    /// truncate degrades to an insert while an open transaction or table copy
+    /// holds a lock that would block it.
     fn plan_op(&mut self, intent: OpIntent) -> PlannedOp {
         let op = match intent {
             OpIntent::Insert { table, note } => self.new_row(table, note),
@@ -394,7 +400,7 @@ impl Planner {
                 Some(id) => PlannedOp::Delete { table, id },
                 None => self.new_row(table, NoteIntent::Small),
             },
-            OpIntent::Truncate { table } if self.straddle_open => {
+            OpIntent::Truncate { table } if self.truncate_blocked => {
                 self.new_row(table, NoteIntent::Small)
             }
             OpIntent::Truncate { table } => PlannedOp::Truncate { table },
@@ -430,14 +436,16 @@ impl Planner {
 
         let (fault_intent, before_intents) =
             intent.before_fault.split_last().expect("generated workloads have a fault transaction");
+        self.truncate_blocked = intent.copy_open_before_fault;
         let before_fault = before_intents.iter().map(|tx| self.plan_tx(tx, false)).collect();
 
         let straddle = intent.straddle.as_ref().map(|inserts| {
-            self.straddle_open = true;
+            self.truncate_blocked = true;
             let ops = inserts.iter().map(|(table, note)| self.new_row(*table, *note)).collect();
             PlannedTx { ops, rollback: false }
         });
         let fault_tx = self.plan_tx(fault_intent, true);
+        self.truncate_blocked = straddle.is_some();
 
         let straddle_commit = intent.straddle_commit.index(intent.after_fault.len() + 1);
         let mut after_fault = Vec::with_capacity(intent.after_fault.len() + 1);
@@ -470,7 +478,7 @@ impl Planner {
         for op in &straddle.ops {
             self.apply(*op);
         }
-        self.straddle_open = false;
+        self.truncate_blocked = false;
         steps.push(AfterFaultStep::CommitStraddle);
     }
 }
@@ -513,19 +521,47 @@ fn identity_modes() -> impl Strategy<Value = IdentityMode> {
     prop_oneof![Just(IdentityMode::Default), Just(IdentityMode::Full)]
 }
 
-/// Generates planned workloads.
+/// Generates planned workloads, sometimes with a transaction left open across
+/// the fault.
 pub(crate) fn workloads() -> impl Strategy<Value = Workload> {
-    let inserts = vec((0..TABLE_COUNT, note_intents()), 1..=2);
+    plan_workloads(prop::option::weighted(0.4, vec((0..TABLE_COUNT, note_intents()), 1..=2)), false)
+}
+
+/// Generates planned workloads whose pre-fault transactions run while a table
+/// copy is open.
+///
+/// There is no transaction left open across the fault, because recovery can
+/// create a replication slot and slot creation waits for open transactions.
+/// Pre-fault transactions never truncate, because truncate waits for the open
+/// copy's lock.
+pub(crate) fn sync_workloads() -> impl Strategy<Value = Workload> {
+    plan_workloads(Just(None), true)
+}
+
+/// Plans workloads whose straddling transaction comes from `straddle`.
+///
+/// `copy_open_before_fault` keeps truncates out of pre-fault transactions.
+fn plan_workloads(
+    straddle: impl Strategy<Value = Option<Vec<(usize, NoteIntent)>>>,
+    copy_open_before_fault: bool,
+) -> impl Strategy<Value = Workload> {
     (
         [identity_modes(), identity_modes()],
         vec((0..TABLE_COUNT, note_intents()), 0..=4),
         vec(tx_intents(), 1..=4),
-        prop::option::weighted(0.4, inserts),
+        straddle,
         vec(tx_intents(), 0..=4),
         any::<Index>(),
     )
         .prop_map(
-            |(identities, initial_rows, before_fault, straddle, after_fault, straddle_commit)| {
+            move |(
+                identities,
+                initial_rows,
+                before_fault,
+                straddle,
+                after_fault,
+                straddle_commit,
+            )| {
                 Planner::new().plan(WorkloadIntent {
                     identities,
                     initial_rows,
@@ -533,6 +569,7 @@ pub(crate) fn workloads() -> impl Strategy<Value = Workload> {
                     straddle,
                     after_fault,
                     straddle_commit,
+                    copy_open_before_fault,
                 })
             },
         )
@@ -655,7 +692,10 @@ fn has_committed_xid(events: &[Event], xid: u32) -> bool {
 /// Registers a notification for the delivery of transaction `xid`'s commit.
 ///
 /// Register before the commit or restart that can deliver it.
-pub(crate) async fn notify_on_commit(destination: &WorkloadDestination, xid: u32) -> TimedNotify {
+pub(crate) async fn notify_on_commit<S>(
+    destination: &WorkloadDestination<S>,
+    xid: u32,
+) -> TimedNotify {
     destination.notify_on_events(move |events| has_committed_xid(events, xid)).await
 }
 
@@ -705,16 +745,41 @@ impl<'a> WorkloadRunner<'a> {
         Self { client, tables, history: WorkloadHistory::default() }
     }
 
-    /// Executes `tx` and returns a commit notification when `destination` is
-    /// given and the transaction commits.
-    ///
-    /// The notification is armed before `COMMIT`, so it cannot miss delivery.
+    /// Executes `tx` without waiting for its delivery.
     pub(crate) async fn execute(
         &mut self,
         tx: &PlannedTx,
         phase: TxPhase,
-        destination: Option<&WorkloadDestination>,
+    ) -> Result<(), TestCaseError> {
+        if let Some(xid) = self.run_until_commit(tx).await? {
+            self.commit(tx, phase, xid).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Executes `tx` and returns a commit notification for `destination`, or
+    /// [`None`] when the transaction rolls back.
+    ///
+    /// The notification is armed before `COMMIT`, so it cannot miss delivery.
+    pub(crate) async fn execute_notified<S>(
+        &mut self,
+        tx: &PlannedTx,
+        phase: TxPhase,
+        destination: &WorkloadDestination<S>,
     ) -> Result<Option<TimedNotify>, TestCaseError> {
+        let Some(xid) = self.run_until_commit(tx).await? else {
+            return Ok(None);
+        };
+        let committed = notify_on_commit(destination, xid).await;
+        self.commit(tx, phase, xid).await?;
+
+        Ok(Some(committed))
+    }
+
+    /// Runs `tx` up to its end, rolling back when planned, and returns the
+    /// transaction ID of a transaction that still needs to commit.
+    async fn run_until_commit(&mut self, tx: &PlannedTx) -> Result<Option<u32>, TestCaseError> {
         execute(self.client, "begin").await?;
         for op in &tx.ops {
             execute(self.client, &op.sql(self.tables)).await?;
@@ -727,24 +792,30 @@ impl<'a> WorkloadRunner<'a> {
             return Ok(None);
         }
 
-        let committed = match destination {
-            Some(destination) => Some(notify_on_commit(destination, xid).await),
-            None => None,
-        };
-        execute(self.client, "commit").await?;
-        self.history.committed.push(CommittedTx { xid, event_count: tx.ops.len(), phase });
-
-        Ok(committed)
+        Ok(Some(xid))
     }
 
-    /// Executes `tx` and waits until `destination` records its commit.
-    pub(crate) async fn execute_and_wait(
+    /// Commits the open transaction `xid` and records it in the history.
+    async fn commit(
         &mut self,
         tx: &PlannedTx,
         phase: TxPhase,
-        destination: &WorkloadDestination,
+        xid: u32,
     ) -> Result<(), TestCaseError> {
-        if let Some(committed) = self.execute(tx, phase, Some(destination)).await? {
+        execute(self.client, "commit").await?;
+        self.history.committed.push(CommittedTx { xid, event_count: tx.ops.len(), phase });
+
+        Ok(())
+    }
+
+    /// Executes `tx` and waits until `destination` records its commit.
+    pub(crate) async fn execute_and_wait<S>(
+        &mut self,
+        tx: &PlannedTx,
+        phase: TxPhase,
+        destination: &WorkloadDestination<S>,
+    ) -> Result<(), TestCaseError> {
+        if let Some(committed) = self.execute_notified(tx, phase, destination).await? {
             wait_for_notification(&committed, format!("delivery of {phase:?} transaction")).await?;
         }
 
@@ -768,10 +839,10 @@ impl<'a> WorkloadRunner<'a> {
     }
 
     /// Commits the straddling transaction and waits for its delivery.
-    pub(crate) async fn commit_straddle(
+    pub(crate) async fn commit_straddle<S>(
         &mut self,
         straddle: StraddleSession,
-        destination: &WorkloadDestination,
+        destination: &WorkloadDestination<S>,
     ) -> Result<(), TestCaseError> {
         let xid = straddle.xid;
         let committed = notify_on_commit(destination, xid).await;
@@ -872,6 +943,19 @@ pub(crate) async fn read_source_rows(
     }
 
     Ok(source)
+}
+
+/// Returns the tables a data event changes.
+fn data_event_table_ids(event: &Event) -> Vec<TableId> {
+    match event {
+        Event::Insert(insert) => vec![insert.replicated_table_schema.id()],
+        Event::Update(update) => vec![update.replicated_table_schema.id()],
+        Event::Delete(delete) => vec![delete.replicated_table_schema.id()],
+        Event::Truncate(truncate) => {
+            truncate.truncated_tables.iter().map(ReplicatedTableSchema::id).collect()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Renders the replay-relevant payload of a data event.
@@ -1080,11 +1164,13 @@ fn update_changes_key(update: &UpdateEvent) -> bool {
 ///
 /// Every committed transaction must be delivered with exactly its planned
 /// data events, each delivered a number of times within `deliveries(phase)`
-/// with an identical payload on replay. First deliveries must arrive in
-/// source position order. Rolled-back and unknown transactions must not
-/// appear. Copied rows plus the first delivery of each event must equal the
-/// committed source rows of every table; replays are checked for identity
-/// instead of being applied again. Passing cases are added to `coverage`.
+/// with an identical payload on replay. When `deliveries(phase)` admits zero,
+/// a table copy may have absorbed the transaction, so it may be missing or
+/// partial. First deliveries must arrive in source position order per table.
+/// Rolled-back and unknown transactions must not appear. Copied rows plus the
+/// first delivery of each event must equal the committed source rows of every
+/// table; replays are checked for identity instead of being applied again.
+/// Passing cases are added to `coverage`.
 pub(crate) fn assert_workload_converged(
     tables: &WorkloadTables,
     copied_rows: &HashMap<TableId, Vec<TableRow>>,
@@ -1114,6 +1200,7 @@ pub(crate) fn assert_workload_converged(
     // Delivery count and first payload per data event position, plus the
     // first deliveries in arrival order for materialization.
     let mut positions = BTreeMap::<(PgLsn, u64), (String, usize)>::new();
+    let mut last_table_positions = BTreeMap::<TableId, (PgLsn, u64)>::new();
     let mut first_deliveries = Vec::new();
     for event in events {
         let Some((commit_lsn, tx_ordinal, payload)) = data_event_payload(event) else {
@@ -1128,12 +1215,19 @@ pub(crate) fn assert_workload_converged(
                 *count += 1;
             }
             None => {
-                if let Some(((last_lsn, last_ordinal), _)) = positions.last_key_value() {
-                    prop_assert!(
-                        (*last_lsn, *last_ordinal) < (commit_lsn, tx_ordinal),
-                        "event {commit_lsn}/{tx_ordinal} was first delivered after \
-                         {last_lsn}/{last_ordinal}"
-                    );
+                // Each table's events must arrive in source order. Tables can
+                // interleave: a table catching up after its copy delivers
+                // positions older than another table's latest.
+                for table_id in data_event_table_ids(event) {
+                    if let Some((last_lsn, last_ordinal)) =
+                        last_table_positions.insert(table_id, (commit_lsn, tx_ordinal))
+                    {
+                        prop_assert!(
+                            (last_lsn, last_ordinal) < (commit_lsn, tx_ordinal),
+                            "table {table_id} event {commit_lsn}/{tx_ordinal} was first delivered \
+                             after {last_lsn}/{last_ordinal}"
+                        );
+                    }
                 }
                 positions.insert((commit_lsn, tx_ordinal), (payload, 1));
                 first_deliveries.push(event.clone());
@@ -1143,27 +1237,35 @@ pub(crate) fn assert_workload_converged(
 
     let mut expected_lsns = BTreeSet::new();
     for tx in &history.committed {
-        let commit_lsn = *commit_lsns.get(&tx.xid).ok_or_else(|| {
-            TestCaseError::fail(format!(
+        let allowed = deliveries(tx.phase);
+        // A range that admits zero deliveries marks transactions a table copy
+        // may absorb, so they can be missing or reach only some tables.
+        let may_be_absorbed = allowed.contains(&0);
+        let Some(&commit_lsn) = commit_lsns.get(&tx.xid) else {
+            prop_assert!(
+                may_be_absorbed,
                 "{:?} transaction {} was never delivered",
-                tx.phase, tx.xid
-            ))
-        })?;
+                tx.phase,
+                tx.xid
+            );
+            continue;
+        };
         expected_lsns.insert(commit_lsn);
 
         let tx_positions: Vec<usize> = positions
             .range((commit_lsn, 0)..=(commit_lsn, u64::MAX))
             .map(|(_, (_, count))| *count)
             .collect();
-        prop_assert_eq!(
-            tx_positions.len(),
-            tx.event_count,
-            "{:?} transaction {} delivered the wrong number of data events",
-            tx.phase,
-            tx.xid
-        );
+        if !may_be_absorbed {
+            prop_assert_eq!(
+                tx_positions.len(),
+                tx.event_count,
+                "{:?} transaction {} delivered the wrong number of data events",
+                tx.phase,
+                tx.xid
+            );
+        }
 
-        let allowed = deliveries(tx.phase);
         for count in tx_positions {
             prop_assert!(
                 allowed.contains(&count),
