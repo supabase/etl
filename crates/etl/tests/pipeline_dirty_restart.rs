@@ -21,9 +21,9 @@ use rand::random;
 use tokio_postgres::Client;
 
 use crate::support::cdc_workload::{
-    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
-    WorkloadRunner, assert_phase_delivered_once, assert_workload_converged, create_workload_tables,
-    notify_on_commit, read_source_rows, wait_for_notification, workloads,
+    AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload,
+    WorkloadCoverage, WorkloadRunner, assert_phase_delivered_once, assert_workload_converged,
+    create_workload_tables, notify_on_commit, read_source_rows, wait_for_notification, workloads,
 };
 
 /// Controls the destination response state when the pipeline crashes.
@@ -306,6 +306,7 @@ async fn run_dirty_restart_case(
             TxPhase::BeforeFault | TxPhase::Fault => 1..=2,
             TxPhase::AfterFault => 1..=1,
         },
+        DeliveryOrder::Source,
         coverage,
     )?;
 

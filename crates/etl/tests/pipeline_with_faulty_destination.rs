@@ -30,8 +30,8 @@ use rand::random;
 use tokio_postgres::{Client, types::PgLsn};
 
 use crate::support::cdc_workload::{
-    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
-    WorkloadDestination, WorkloadHistory, WorkloadRunner, WorkloadTables,
+    AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload,
+    WorkloadCoverage, WorkloadDestination, WorkloadHistory, WorkloadRunner, WorkloadTables,
     assert_workload_converged, create_workload_tables, read_source_rows, wait_for_notification,
     workloads,
 };
@@ -246,6 +246,7 @@ async fn run_walsender_roulette_case(
         &source,
         &history,
         |_| 1..=2,
+        DeliveryOrder::Source,
         coverage,
     )
 }

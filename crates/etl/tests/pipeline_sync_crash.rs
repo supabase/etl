@@ -29,9 +29,9 @@ use rand::random;
 use tokio_postgres::Client;
 
 use crate::support::cdc_workload::{
-    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
-    WorkloadRunner, assert_workload_converged, create_workload_tables, read_source_rows,
-    sync_workloads,
+    AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload,
+    WorkloadCoverage, WorkloadRunner, assert_workload_converged, create_workload_tables,
+    read_source_rows, sync_workloads,
 };
 
 /// How long the catchup crash waits for an event write before crashing anyway.
@@ -268,6 +268,8 @@ async fn run_sync_crash_case(
             TxPhase::BeforeFault | TxPhase::Fault => 0..=2,
             TxPhase::AfterFault => 1..=1,
         },
+        // A table catching up after its copy lags tables already streaming.
+        DeliveryOrder::PerTable,
         coverage,
     )
 }

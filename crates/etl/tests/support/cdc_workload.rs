@@ -1160,17 +1160,30 @@ fn update_changes_key(update: &UpdateEvent) -> bool {
     old_id != new_id
 }
 
+/// Source order that first deliveries of data events must follow.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DeliveryOrder {
+    /// One apply stream delivers every table, so all first deliveries follow
+    /// source position order.
+    Source,
+    /// Each table follows source position order, but tables may interleave: a
+    /// table catching up after its copy delivers positions older than another
+    /// table's latest.
+    PerTable,
+}
+
 /// Checks destination history against the executed workload and source.
 ///
 /// Every committed transaction must be delivered with exactly its planned
 /// data events, each delivered a number of times within `deliveries(phase)`
 /// with an identical payload on replay. When `deliveries(phase)` admits zero,
 /// a table copy may have absorbed the transaction, so it may be missing or
-/// partial. First deliveries must arrive in source position order per table.
+/// partial. First deliveries must follow `order`.
 /// Rolled-back and unknown transactions must not appear. Copied rows plus the
 /// first delivery of each event must equal the committed source rows of every
 /// table; replays are checked for identity instead of being applied again.
 /// Passing cases are added to `coverage`.
+#[expect(clippy::too_many_arguments)]
 pub(crate) fn assert_workload_converged(
     tables: &WorkloadTables,
     copied_rows: &HashMap<TableId, Vec<TableRow>>,
@@ -1178,6 +1191,7 @@ pub(crate) fn assert_workload_converged(
     source: &[BTreeMap<i64, WorkloadRecord>; TABLE_COUNT],
     history: &WorkloadHistory,
     deliveries: impl Fn(TxPhase) -> RangeInclusive<usize>,
+    order: DeliveryOrder,
     coverage: &WorkloadCoverage,
 ) -> Result<(), TestCaseError> {
     let mut commit_lsns = BTreeMap::<u32, PgLsn>::new();
@@ -1200,7 +1214,9 @@ pub(crate) fn assert_workload_converged(
     // Delivery count and first payload per data event position, plus the
     // first deliveries in arrival order for materialization.
     let mut positions = BTreeMap::<(PgLsn, u64), (String, usize)>::new();
-    let mut last_table_positions = BTreeMap::<TableId, (PgLsn, u64)>::new();
+    // Last first-delivered position per ordered stream: one shared stream for
+    // source order, one per table otherwise.
+    let mut last_positions = BTreeMap::<Option<TableId>, (PgLsn, u64)>::new();
     let mut first_deliveries = Vec::new();
     for event in events {
         let Some((commit_lsn, tx_ordinal, payload)) = data_event_payload(event) else {
@@ -1215,17 +1231,20 @@ pub(crate) fn assert_workload_converged(
                 *count += 1;
             }
             None => {
-                // Each table's events must arrive in source order. Tables can
-                // interleave: a table catching up after its copy delivers
-                // positions older than another table's latest.
-                for table_id in data_event_table_ids(event) {
+                let streams = match order {
+                    DeliveryOrder::Source => vec![None],
+                    DeliveryOrder::PerTable => {
+                        data_event_table_ids(event).into_iter().map(Some).collect()
+                    }
+                };
+                for stream in streams {
                     if let Some((last_lsn, last_ordinal)) =
-                        last_table_positions.insert(table_id, (commit_lsn, tx_ordinal))
+                        last_positions.insert(stream, (commit_lsn, tx_ordinal))
                     {
                         prop_assert!(
                             (last_lsn, last_ordinal) < (commit_lsn, tx_ordinal),
-                            "table {table_id} event {commit_lsn}/{tx_ordinal} was first delivered \
-                             after {last_lsn}/{last_ordinal}"
+                            "event {commit_lsn}/{tx_ordinal} was first delivered after \
+                             {last_lsn}/{last_ordinal} ({order:?} order)"
                         );
                     }
                 }
