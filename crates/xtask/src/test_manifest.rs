@@ -19,12 +19,12 @@ pub(crate) const ARTIFACT_PREFIX: &str = "test-results-";
 /// Manifest kind.
 pub(crate) const KIND: &str = "test";
 /// Manifest schema version.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: i32 = 1;
 
 /// Results of every test one CI job ran.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct TestManifest {
-    schema_version: u32,
+    schema_version: i32,
     kind: String,
     /// Whether the tests ran instrumented for coverage.
     coverage: bool,
