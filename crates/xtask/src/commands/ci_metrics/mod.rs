@@ -73,7 +73,16 @@ struct SyncArgs {
 }
 
 impl CiMetricsArgs {
+    /// Runs the command. Errors are flattened and stripped of the database
+    /// user, project ref and host, because they reach public CI logs: the
+    /// Supabase pooler echoes `user.project_ref` when it cannot find a project.
     pub(crate) async fn run(self) -> Result<()> {
+        let identifiers = connection_identifiers();
+        self.run_unredacted().await.map_err(|error| redact(&error, &identifiers))
+    }
+
+    /// Runs the command with errors as they are.
+    async fn run_unredacted(self) -> Result<()> {
         let mut conn = connect().await?;
         match self.command {
             CiMetricsCommand::Migrate => {
@@ -118,6 +127,36 @@ fn require_session_connection(port: u16) -> Result<()> {
     Ok(())
 }
 
+/// Returns the parts of `CI_METRICS_DATABASE_URL` that identify the database,
+/// longest first: the host and, for pooler users of the form
+/// `role.project_ref`, the user and the project ref. Postgres never echoes
+/// passwords, so they are not listed.
+fn connection_identifiers() -> Vec<String> {
+    let Some(options) =
+        env::var(DATABASE_URL_ENV).ok().and_then(|url| PgConnectOptions::from_str(&url).ok())
+    else {
+        return Vec::new();
+    };
+    let mut identifiers = vec![options.get_host().to_owned()];
+    let user = options.get_username();
+    if let Some((_, project_ref)) = user.split_once('.') {
+        identifiers.extend([user.to_owned(), project_ref.to_owned()]);
+    }
+    identifiers.retain(|identifier| !identifier.is_empty());
+    identifiers.sort_by_key(|identifier| std::cmp::Reverse(identifier.len()));
+    identifiers
+}
+
+/// Flattens `error` and its causes into one message with `identifiers`
+/// replaced.
+fn redact(error: &anyhow::Error, identifiers: &[String]) -> anyhow::Error {
+    let mut message = format!("{error:#}");
+    for identifier in identifiers {
+        message = message.replace(identifier.as_str(), "<redacted>");
+    }
+    anyhow::anyhow!(message)
+}
+
 /// Connects using `CI_METRICS_DATABASE_URL` without echoing it.
 async fn connect() -> Result<PgConnection> {
     let url = SecretString::from(
@@ -140,5 +179,26 @@ mod tests {
     fn transaction_pooler_is_refused() {
         assert!(require_session_connection(TRANSACTION_POOLER_PORT).is_err());
         assert!(require_session_connection(5432).is_ok());
+    }
+
+    /// Mirrors the pooler's error for an unknown project.
+    #[test]
+    fn errors_hide_database_identifiers() {
+        let identifiers = vec![
+            "aws-0-region.pooler.example.com".to_owned(),
+            "ci_writer.abcdefghijklmnopqrst".to_owned(),
+            "abcdefghijklmnopqrst".to_owned(),
+        ];
+        let error = anyhow::anyhow!(
+            "(ENOTFOUND) tenant/user ci_writer.abcdefghijklmnopqrst not found at \
+             aws-0-region.pooler.example.com, ref abcdefghijklmnopqrst"
+        )
+        .context("Failed to connect to the CI metrics database");
+
+        assert_eq!(
+            redact(&error, &identifiers).to_string(),
+            "Failed to connect to the CI metrics database: (ENOTFOUND) tenant/user <redacted> not \
+             found at <redacted>, ref <redacted>"
+        );
     }
 }
