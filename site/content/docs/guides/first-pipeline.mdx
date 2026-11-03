@@ -175,7 +175,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let config = PipelineConfig {
-        id: 1, // Unique per Postgres cluster. Local `cargo x setup replicator` also uses 1.
+        id: 1.into(), // Unique per Postgres cluster. Local `cargo x setup replicator` also uses 1.
         publication_name: "my_publication".to_string(),
         pg_connection: pg_config,
         store_pg_connection: None,

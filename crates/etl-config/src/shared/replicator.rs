@@ -128,7 +128,7 @@ mod tests {
 
     fn pipeline_config() -> PipelineConfig {
         PipelineConfig {
-            id: 1,
+            id: 1.into(),
             publication_name: "example_publication".to_owned(),
             replication_slot: Default::default(),
             pg_connection: PgConnectionConfig {
@@ -180,6 +180,10 @@ mod tests {
             sentry: None,
             supabase: None,
         };
+        config.pipeline.id = "03dg2o5teb2eucxr9ggh3uie6".parse().unwrap();
+        config.validate().unwrap();
+        ReplicatorConfigWithoutSecrets::from(config.clone()).validate().unwrap();
+
         config.pipeline.pg_connection.tls.enabled = true;
         let without_secrets = ReplicatorConfigWithoutSecrets::from(config.clone());
 

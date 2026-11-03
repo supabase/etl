@@ -3,7 +3,6 @@ use std::sync::Arc;
 use etl::{
     event::{Event, EventType},
     failpoints::{APPLY_LOOP_EXPIRE_DURABILITY_FP, etl_fail_point_active_for_parameter},
-    pipeline::PipelineId,
     schema::TableName,
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -89,7 +88,7 @@ async fn schema_change_batched_operations() {
 
     with_table_cleanup(&sql, &[&snowflake_table], || async {
         let store = NotifyingStore::new();
-        let pipeline_id: PipelineId = random();
+        let pipeline_id = random::<u64>();
         let client = Client::new(Arc::clone(&auth), pipeline_id);
         let raw_destination = Destination::new(client, store.clone());
         let destination_for_polling = raw_destination.clone();
@@ -227,7 +226,7 @@ async fn durability_deadline_advances_live_snowflake_checkpoint() {
 
     with_table_cleanup(&sql, &[&snowflake_table], || async {
         let store = NotifyingStore::new();
-        let pipeline_id: PipelineId = random();
+        let pipeline_id = random::<u64>();
         let raw_destination = Destination::new(Client::new(auth, pipeline_id), store.clone());
         let destination_for_polling = raw_destination.clone();
         let destination = TestDestinationWrapper::wrap(raw_destination);

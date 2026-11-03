@@ -728,7 +728,7 @@ mod tests {
     fn from_state_row_fails_on_missing_metadata() {
         let row = table_state::StoredTableStateRow {
             id: 1,
-            pipeline_id: 1,
+            legacy_pipeline_id: 1,
             table_id: sqlx::postgres::types::Oid(42),
             state: table_state::StoredTableStateType::Init,
             metadata: None,
@@ -742,7 +742,7 @@ mod tests {
     fn from_state_row_fails_on_invalid_json() {
         let row = table_state::StoredTableStateRow {
             id: 1,
-            pipeline_id: 1,
+            legacy_pipeline_id: 1,
             table_id: sqlx::postgres::types::Oid(42),
             state: table_state::StoredTableStateType::Init,
             metadata: Some(serde_json::json!({"type": "nonexistent_variant"})),
@@ -791,7 +791,7 @@ mod tests {
 
             let row = table_state::StoredTableStateRow {
                 id: 1,
-                pipeline_id: 1,
+                legacy_pipeline_id: 1,
                 table_id: sqlx::postgres::types::Oid(42),
                 state: stored_state_type,
                 metadata: Some(metadata),
@@ -916,7 +916,7 @@ mod tests {
 
             let row = table_state::StoredTableStateRow {
                 id: 1,
-                pipeline_id: 1,
+                legacy_pipeline_id: 1,
                 table_id: sqlx::postgres::types::Oid(42),
                 state: stored_state_type,
                 metadata: Some(metadata),

@@ -209,7 +209,7 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
     install_crypto_provider();
 
     let args = AppArgs::parse();
-    let pipeline_id = 1;
+    let legacy_pipeline_id = 1;
 
     let pg_connection_config = PgConnectionConfig {
         host: args.db_args.db_host,
@@ -222,10 +222,10 @@ async fn main_impl() -> Result<(), Box<dyn Error>> {
         keepalive: TcpKeepaliveConfig::default(),
     };
 
-    let store = PostgresStore::new(pipeline_id, pg_connection_config.clone()).await?;
+    let store = PostgresStore::new(legacy_pipeline_id, pg_connection_config.clone()).await?;
 
     let pipeline_config = PipelineConfig {
-        id: pipeline_id,
+        id: legacy_pipeline_id.into(),
         publication_name: args.publication,
         run_source_migrations: true,
         drain_on_shutdown: true,

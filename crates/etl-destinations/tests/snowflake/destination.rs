@@ -7,7 +7,7 @@ use etl::{
     },
     error::ErrorKind,
     event::{DeleteEvent, Event, InsertEvent, RelationEvent, TruncateEvent, UpdateEvent},
-    pipeline::PipelineId,
+    pipeline::LegacyPipelineId,
     schema::{
         ColumnSchema, PgLsn, ReplicatedTableSchema, ReplicationMask, SnapshotId, TableId,
         TableName, TableSchema, Type,
@@ -57,10 +57,10 @@ struct TestHarness {
 
 impl TestHarness {
     fn new() -> Self {
-        Self::with_pipeline_id(1)
+        Self::with_legacy_pipeline_id(1)
     }
 
-    fn with_pipeline_id(pipeline_id: PipelineId) -> Self {
+    fn with_legacy_pipeline_id(legacy_pipeline_id: LegacyPipelineId) -> Self {
         let config = load_test_config().clone_without_credentials();
         let auth = build_auth();
         let sql = SqlClient::new(
@@ -70,7 +70,7 @@ impl TestHarness {
         );
         let store = NotifyingStore::new();
 
-        let client = Client::new(Arc::clone(&auth), pipeline_id);
+        let client = Client::new(Arc::clone(&auth), legacy_pipeline_id);
         let destination = Destination::new(client, store.clone());
 
         Self { destination, sql, config, store }
@@ -254,7 +254,7 @@ async fn assert_status_default_absent(
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn boundary_underscore_names_survive_destination_lifecycle() {
-    let harness = TestHarness::with_pipeline_id(u64::MAX);
+    let harness = TestHarness::with_legacy_pipeline_id(u64::MAX);
     let cases = table_name_schemas();
     let names: Vec<_> = cases.iter().map(|(_, name)| name.to_uppercase()).collect();
     let cleanup_names: Vec<_> = names.iter().map(String::as_str).collect();
@@ -541,8 +541,8 @@ async fn write_table_rows_empty() {
 #[tokio::test]
 #[ignore = "requires Snowflake credentials"]
 async fn fresh_generation_rejects_existing_table_without_destination_metadata() {
-    let first = TestHarness::with_pipeline_id(1);
-    let second = TestHarness::with_pipeline_id(2);
+    let first = TestHarness::with_legacy_pipeline_id(1);
+    let second = TestHarness::with_legacy_pipeline_id(2);
     let src_table = format!("ETL_TEST_{}", uuid::Uuid::new_v4().simple()).to_uppercase();
     let sf_table = snowflake_table_name("public", &src_table);
     let table_id = TableId::new(1013);
@@ -889,9 +889,9 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
         // Simulate a crash after Snowflake durably applied the transaction but
         // before its source checkpoint advanced. The fresh destination must
         // therefore replay the whole transaction, including the first insert.
-        let pipeline_id: PipelineId = 1;
+        let legacy_pipeline_id: LegacyPipelineId = 1;
         let first_restarted_destination =
-            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+            Destination::new(Client::new(build_auth(), legacy_pipeline_id), harness.store.clone());
         let replay_status = invoke_write_events(
             &first_restarted_destination,
             WriteEventsDurability::RequireDurable,
@@ -922,7 +922,7 @@ async fn whole_transaction_replay_restores_post_truncate_rows() {
         // cycle must derive a new request ID and clear the previously restored
         // row before inserting it again.
         let second_restarted_destination =
-            Destination::new(Client::new(build_auth(), pipeline_id), harness.store.clone());
+            Destination::new(Client::new(build_auth(), legacy_pipeline_id), harness.store.clone());
         let second_replay_status = invoke_write_events(
             &second_restarted_destination,
             WriteEventsDurability::RequireDurable,
@@ -1042,10 +1042,8 @@ async fn cold_open_rejects_unexpected_column() {
             .await
             .expect("out-of-band alter table failed");
 
-        let restarted_destination = Destination::new(
-            Client::new(build_auth(), PipelineId::from(1_u64)),
-            harness.store.clone(),
-        );
+        let restarted_destination =
+            Destination::new(Client::new(build_auth(), 1_u64), harness.store.clone());
         let error = invoke_write_events(
             &restarted_destination,
             WriteEventsDurability::RequireDurable,
@@ -1193,10 +1191,8 @@ async fn schema_evolution_add_column_rejects_stale_replay() {
         // then replay the stream from before the schema change. The relation
         // has no offset of its own, so the destination must reject it before
         // considering whether the following rows were already committed.
-        let restarted_destination = Destination::new(
-            Client::new(build_auth(), PipelineId::from(1_u64)),
-            harness.store.clone(),
-        );
+        let restarted_destination =
+            Destination::new(Client::new(build_auth(), 1_u64), harness.store.clone());
         let replay_error = invoke_write_events(
             &restarted_destination,
             WriteEventsDurability::MayDefer,

@@ -7,8 +7,8 @@ pub use etl_config::{
     Config, Environment, LoadConfigError, ParseDucklakeUrlError, SerializableSecretString,
     libpq_tcp_host, load_config, parse_ducklake_s3_data_path, parse_ducklake_url,
     shared::{
-        BatchConfig, DestinationConfig, DestinationConfigWithoutSecrets, IcebergConfig,
-        IcebergConfigWithoutSecrets, IntoConnectOptions, InvalidatedSlotBehavior,
+        BatchConfig, DestinationConfig, DestinationConfigWithoutSecrets, HybridPipelineId,
+        IcebergConfig, IcebergConfigWithoutSecrets, IntoConnectOptions, InvalidatedSlotBehavior,
         MemoryBackpressureConfig, PgConnectionConfig, PgConnectionConfigWithoutSecrets,
         PgConnectionOptions, PgConnectionOptionsBuilder, PipelineConfig,
         PipelineConfigWithoutSecrets, ReplicationSlotConfig, ReplicationSlotPersistence,
