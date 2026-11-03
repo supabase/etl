@@ -110,9 +110,10 @@ async fn run_sync_crash_case(
     let table_ids = *tables.ids();
     let client = database.client.as_ref().unwrap();
 
-    let pipeline_id: PipelineId = u64::from(random::<u32>());
-    let first_store =
-        PostgresStore::new(pipeline_id, database.config.clone()).await.map_err(|error| {
+    let pipeline_id: PipelineId = u64::from(random::<u32>()).into();
+    let first_store = PostgresStore::new(pipeline_id.clone(), database.config.clone())
+        .await
+        .map_err(|error| {
             TestCaseError::fail(format!("failed to create the first Postgres store: {error}"))
         })?;
     // The destination records its table metadata in the pipeline's store, as
@@ -122,7 +123,7 @@ async fn run_sync_crash_case(
     let first_destination = TestDestinationWrapper::wrap(memory_destination.clone());
     let mut first_pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.clone(),
         WORKLOAD_PUBLICATION.to_owned(),
         first_store.clone(),
         first_destination.clone(),
@@ -169,9 +170,9 @@ async fn run_sync_crash_case(
     drop(first_store);
 
     let restarted_store =
-        PostgresStore::new(pipeline_id, database.config.clone()).await.map_err(|error| {
-            TestCaseError::fail(format!("failed to reopen the Postgres store: {error}"))
-        })?;
+        PostgresStore::new(pipeline_id.clone(), database.config.clone()).await.map_err(
+            |error| TestCaseError::fail(format!("failed to reopen the Postgres store: {error}")),
+        )?;
     let restarted_destination = TestDestinationWrapper::wrap(memory_destination.clone());
     let mut restarted_pipeline = create_pipeline(
         &database.config,

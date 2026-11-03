@@ -125,7 +125,7 @@ async fn render_metrics(
 /// task, which also performs recorder upkeep, and must stop it on shutdown.
 pub fn init_metrics(
     project_ref: Option<&str>,
-    pipeline_id: Option<u64>,
+    pipeline_id: Option<&str>,
     destination: Option<&str>,
 ) -> Result<AbortOnDropHandle<io::Result<()>>, MetricsError> {
     let listener = bind_listener(METRICS_PORT).map_err(MetricsError::Listener)?;
@@ -136,7 +136,7 @@ pub fn init_metrics(
     }
 
     if let Some(pipeline_id) = pipeline_id {
-        builder = builder.add_global_label("pipeline_id", pipeline_id.to_string());
+        builder = builder.add_global_label("pipeline_id", pipeline_id.to_owned());
     }
 
     if let Some(destination) = destination {

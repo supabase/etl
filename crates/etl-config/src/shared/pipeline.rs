@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::shared::{
-    PgConnectionConfig, PgConnectionConfigWithoutSecrets, TlsConfig, Validate, ValidationError,
+    HybridPipelineId, PgConnectionConfig, PgConnectionConfigWithoutSecrets, TlsConfig, Validate,
+    ValidationError,
 };
 
 /// Batch processing configuration for pipelines.
@@ -356,11 +357,12 @@ impl Validate for ReplicationSlotConfig {
 /// leaking secrets in the config into serialized forms.
 #[derive(Clone, Debug, Deserialize)]
 pub struct PipelineConfig {
-    /// The unique identifier for this pipeline.
+    /// The unique identifier for this pipeline, accepted as a string or an
+    /// unsigned integer with its representation preserved.
     ///
     /// A pipeline id determines isolation between pipelines, in terms of
     /// replication slots and state store.
-    pub id: u64,
+    pub id: HybridPipelineId,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// The connection configuration for the Postgres instance to which the
@@ -752,11 +754,12 @@ const fn default_drain_on_shutdown() -> bool {
 /// [`Serialize`] because it does not contains secrets so is safe to serialize.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineConfigWithoutSecrets {
-    /// The unique identifier for this pipeline.
+    /// The unique identifier for this pipeline, accepted as a string or an
+    /// unsigned integer with its representation preserved.
     ///
     /// A pipeline id determines isolation between pipelines, in terms of
     /// replication slots and state store.
-    pub id: u64,
+    pub id: HybridPipelineId,
     /// Name of the Postgres publication to use for logical replication.
     pub publication_name: String,
     /// The connection configuration for the Postgres instance to which the
@@ -1351,7 +1354,7 @@ mod tests {
     fn pipeline_config_store_pg_connection_defaults_to_pg_connection() {
         let pg_connection = pg_connection("replica.local", 5432);
         let config = PipelineConfig {
-            id: 1,
+            id: 1.into(),
             publication_name: "publication".to_owned(),
             pg_connection,
             store_pg_connection: None,
@@ -1382,7 +1385,7 @@ mod tests {
     #[test]
     fn pipeline_config_store_pg_connection_uses_override() {
         let config = PipelineConfig {
-            id: 1,
+            id: 1.into(),
             publication_name: "publication".to_owned(),
             pg_connection: pg_connection("replica.local", 5432),
             store_pg_connection: Some(pg_connection("primary.local", 6432)),

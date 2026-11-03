@@ -28,6 +28,7 @@ use crate::{
         ETL_REPLICATION_WAL_LAG_BYTES, PIPELINE_ID_LABEL, REPLICATION_PATH_LABEL,
         WORKER_TYPE_LABEL,
     },
+    pipeline::PipelineId,
     postgres::{OutOfBandSourcePool, client::SlotState},
     replication::WorkerType,
     schema::TableId,
@@ -143,7 +144,7 @@ struct WorkerSample {
 #[derive(Debug)]
 struct ReplicationLagSamplerLifetime {
     /// Pipeline whose series must no longer claim live measurements.
-    pipeline_id: u64,
+    pipeline_id: PipelineId,
 }
 
 impl Drop for ReplicationLagSamplerLifetime {
@@ -174,7 +175,7 @@ impl Drop for ReplicationLagSamplerLifetime {
 #[derive(Debug, Clone)]
 pub(crate) struct ReplicationLagMonitor {
     /// Pipeline identity scopes both slot selection and exported series.
-    pipeline_id: u64,
+    pipeline_id: PipelineId,
     /// Bounded source SQL pool shared with copy-slot validity checks.
     source_pool: OutOfBandSourcePool,
     /// Weak entries cannot keep completed workers alive.
@@ -186,7 +187,7 @@ pub(crate) struct ReplicationLagMonitor {
 impl ReplicationLagMonitor {
     /// Creates a lazy monitor; its owner starts and joins the sampling task.
     pub(crate) fn new(
-        pipeline_id: u64,
+        pipeline_id: PipelineId,
         connection: &PgConnectionConfig,
         refresh_interval: Duration,
     ) -> Self {
@@ -230,7 +231,7 @@ impl ReplicationLagMonitor {
     /// Starts the single best-effort sampler owned by the pipeline.
     pub(crate) fn spawn_replication_lag_metrics_task(&self) -> AbortOnDropHandle<()> {
         let monitor = self.clone();
-        let lifetime = ReplicationLagSamplerLifetime { pipeline_id: self.pipeline_id };
+        let lifetime = ReplicationLagSamplerLifetime { pipeline_id: self.pipeline_id.clone() };
 
         spawn_best_effort_task("replication lag sampler", async move {
             let _lifetime_guard = lifetime;
@@ -243,7 +244,7 @@ impl ReplicationLagMonitor {
                 let workers = monitor.snapshot();
                 let sample = match tokio::time::timeout(
                     SAMPLE_TIMEOUT,
-                    monitor.source_pool.sample_pipeline_lag(monitor.pipeline_id),
+                    monitor.source_pool.sample_pipeline_lag(&monitor.pipeline_id),
                 )
                 .await
                 {
@@ -362,7 +363,7 @@ mod tests {
     /// Builds a lazy monitor without opening a database connection.
     fn test_monitor() -> ReplicationLagMonitor {
         ReplicationLagMonitor::new(
-            1,
+            1.into(),
             &PgConnectionConfig {
                 host: "127.0.0.1".into(),
                 hostaddr: None,
@@ -553,9 +554,12 @@ mod tests {
         let database = crate::test_utils::database::spawn_source_database().await;
         let client = database.client.as_ref().unwrap();
         let handle = etl_telemetry::metrics::init_metrics_handle().unwrap();
-        let pipeline_id = rand::random();
-        let monitor =
-            ReplicationLagMonitor::new(pipeline_id, &database.config, Duration::from_secs(60));
+        let pipeline_id = rand::random::<u64>();
+        let monitor = ReplicationLagMonitor::new(
+            pipeline_id.into(),
+            &database.config,
+            Duration::from_secs(60),
+        );
         let mut slots = Vec::new();
         let mut points = Vec::new();
 
@@ -590,7 +594,7 @@ mod tests {
         let cdc =
             monitor.register_cdc(WorkerType::TableSync { table_id: TableId::new(2) }, points[1]);
         let workers = monitor.snapshot();
-        let source = monitor.source_pool.sample_pipeline_lag(pipeline_id).await.unwrap();
+        let source = monitor.source_pool.sample_pipeline_lag(&pipeline_id.into()).await.unwrap();
         let head = source.source_wal.decoding_lsn().unwrap();
         let read = |name: &str, path: &str| {
             handle.render().lines().find_map(|line| {

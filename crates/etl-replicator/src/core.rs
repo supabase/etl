@@ -92,7 +92,7 @@ async fn init_replicator_store(
     store_pg_connection_config: PgConnectionConfig,
     notification_client: Option<ErrorNotificationClient>,
 ) -> ReplicatorResult<ReplicatorStore> {
-    debug!(pipeline_id, "initializing replicator store");
+    debug!(%pipeline_id, "initializing replicator store");
 
     Ok(ErrorReportingStateStore::new(
         PostgresStore::new(pipeline_id, store_pg_connection_config).await?,
@@ -116,13 +116,15 @@ pub(crate) async fn start_replicator_with_config(
         spawn_health_server(replicator_config.health, replicator_health.clone())?;
 
     let replicator_result: ReplicatorResult<()> = async {
-        let pipeline_id = replicator_config.pipeline.id;
-
         // We initialize the store, using the optional store connection when the
         // replication connection points at a read replica.
         let store_pg_connection_config = replicator_config.pipeline.store_pg_connection().clone();
         let Some(result) = with_shutdown!(
-            init_replicator_store(pipeline_id, store_pg_connection_config, notification_client),
+            init_replicator_store(
+                PipelineId::from(&replicator_config.pipeline.id),
+                store_pg_connection_config,
+                notification_client
+            ),
             shutdown_signal.wait(),
         ) else {
             return Ok(());

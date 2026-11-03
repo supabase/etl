@@ -561,7 +561,7 @@ where
 
         let table_sync_worker_span = tracing::info_span!(
             "table_sync_worker",
-            pipeline_id = self.pipeline_id,
+            pipeline_id = %self.pipeline_id,
             publication_name = self.config.publication_name,
             table_id = self.table_id.0,
         );
@@ -698,7 +698,7 @@ where
         let ShutdownResult::Ok(replication_client) = with_shutdown!(
             PgReplicationClient::connect_for_table_sync_worker(
                 self.config.pg_connection.clone(),
-                self.pipeline_id,
+                self.pipeline_id.clone(),
                 self.table_id,
             ),
             self.shutdown_token,
@@ -708,7 +708,7 @@ where
         let mut replication_client = replication_client?;
 
         let table_sync_result = start_table_sync(
-            self.pipeline_id,
+            self.pipeline_id.clone(),
             Arc::clone(&self.config),
             &mut replication_client,
             self.table_id,
@@ -753,7 +753,7 @@ where
         });
 
         let apply_loop_result = ApplyLoop::start(
-            self.pipeline_id,
+            self.pipeline_id.clone(),
             start_lsn,
             Arc::clone(&self.config),
             &replication_client,
@@ -839,7 +839,7 @@ where
             .await?;
 
         let slot_name: String =
-            EtlReplicationSlot::for_table_sync_worker(self.pipeline_id, self.table_id)
+            EtlReplicationSlot::for_table_sync_worker(&self.pipeline_id, self.table_id)
                 .try_into()?;
         replication_client.delete_slot_if_exists(&slot_name).await?;
 

@@ -1,5 +1,7 @@
 //! PostgreSQL publication naming and membership queries.
 
+use std::fmt::Display;
+
 use pg_escape::quote_literal;
 
 /// Prefix used for publications created by Supabase ETL.
@@ -24,7 +26,7 @@ pub fn publication_table_ids_query(publication_name: &str) -> String {
 }
 
 /// Returns the deterministic ETL publication name for a pipeline.
-pub fn etl_publication_name(pipeline_id: i64) -> String {
+pub fn etl_publication_name(pipeline_id: impl Display) -> String {
     format!("{ETL_PUBLICATION_PREFIX}_{pipeline_id}")
 }
 

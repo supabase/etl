@@ -7,7 +7,7 @@ use etl::{
     },
     pipeline::Pipeline,
     postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
-    store::{MemoryStore, PostgresStore},
+    store::{MemoryStore, PostgresStore, StateStore, WorkerType},
     test_utils::memory_destination::MemoryDestination,
 };
 use etl_postgres::{
@@ -16,7 +16,7 @@ use etl_postgres::{
 };
 use etl_telemetry::tracing::init_test_tracing;
 use sqlx::{Connection, Executor, PgConnection, migrate::Migrator, postgres::PgConnectOptions};
-use tokio_postgres::Client;
+use tokio_postgres::{Client, types::PgLsn};
 use uuid::Uuid;
 
 const DEFAULT_DATABASE_HOST: &str = "localhost";
@@ -25,6 +25,7 @@ const DEFAULT_DATABASE_PASSWORD: &str = "postgres";
 const POSTGRES_STORE_BASE_VERSION: i64 = 20250827000000;
 const POSTGRES_STORE_PRE_COMPOSITE_SNAPSHOT_VERSION: i64 = 20260610120000;
 const POSTGRES_STORE_PRE_CREATING_STATUS_VERSION: i64 = 20260810120000;
+const POSTGRES_STORE_PRE_PIPELINE_ID_V2_VERSION: i64 = 20261002120100;
 const SOURCE_PRE_PUBLICATION_SCHEMA_CHANGE_VERSION: i64 = 20260415100000;
 const SOURCE_PRE_PRIMARY_KEY_DEFERRABILITY_VERSION: i64 = 20260724120000;
 const APP_NAME_TEST_MIGRATIONS: &str = "supabase_etl_test_migrations";
@@ -158,7 +159,7 @@ fn assert_migration_set_is_reversible(migration_set: &str, migrator: Migrator) {
 
 fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
     PipelineConfig {
-        id: 1,
+        id: 1.into(),
         publication_name: "missing_publication".to_owned(),
         pg_connection,
         store_pg_connection: None,
@@ -241,6 +242,88 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
+}
+
+/// Old and upgraded writers share numeric keys without backfilling other
+/// pipelines.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_id_v2_preserves_shared_state_and_legacy_writers() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator()
+        .run_direct(Some(POSTGRES_STORE_PRE_PIPELINE_ID_V2_VERSION), &mut conn, false)
+        .await
+        .unwrap();
+    conn.execute(
+        "insert into etl.replication_progress (pipeline_id, worker_type, flush_lsn)
+         values (150, 'apply', '0/A'), (151, 'apply', '0/B')",
+    )
+    .await
+    .unwrap();
+
+    let (first, second) = tokio::join!(
+        PostgresStore::new(150, database.config.clone()),
+        PostgresStore::new(151, database.config.clone()),
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert!(
+        query_bool(
+            &database,
+            "select count(*) = 2 and bool_and(pipeline_id_v2 is null) from \
+             etl.replication_progress"
+        )
+        .await
+    );
+
+    let client = database.client.as_ref().unwrap();
+    let (legacy, upgraded) = tokio::join!(
+        client.execute(
+            "insert into etl.replication_progress (pipeline_id, worker_type, table_id, flush_lsn)
+             values (151, 'table_sync', 42, '0/C')",
+            &[],
+        ),
+        first.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)),
+    );
+    legacy.unwrap();
+    assert_eq!(upgraded.unwrap(), PgLsn::from(100));
+    second.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(200)).await.unwrap();
+    assert_eq!(
+        first.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+        Some(PgLsn::from(100))
+    );
+    assert_eq!(
+        second.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+        Some(PgLsn::from(200))
+    );
+    assert!(
+        query_bool(
+            &database,
+            "select count(*) = 3 and bool_and(case
+             when table_id is null then pipeline_id_v2 is not null and pipeline_id_v2 = \
+             pipeline_id::text
+             else pipeline_id_v2 is null end) from etl.replication_progress"
+        )
+        .await
+    );
+
+    let versions = applied_migration_versions(&database).await;
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
+    assert_eq!(applied_migration_versions(&database).await, versions);
+    drop((first, second));
+    postgres_store_migrator()
+        .undo(&mut conn, POSTGRES_STORE_PRE_PIPELINE_ID_V2_VERSION)
+        .await
+        .unwrap();
+    assert!(query_bool(&database, "select count(*) = 3 from etl.replication_progress").await);
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
+    assert!(
+        query_bool(
+            &database,
+            "select bool_and(pipeline_id_v2 is null) from etl.replication_progress"
+        )
+        .await
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
