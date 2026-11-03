@@ -1812,7 +1812,7 @@ async fn keyless_partitioned_root_fails_to_decode_leaf_update() {
 
     let store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
