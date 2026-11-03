@@ -55,7 +55,7 @@ use etl_destinations::ducklake::{
 };
 #[cfg(feature = "test-utils")]
 use etl_destinations::ducklake::{
-    arm_fail_after_atomic_batch_commit_once_for_tests,
+    DuckLakeExternalMaintenanceConfig, arm_fail_after_atomic_batch_commit_once_for_tests,
     arm_fail_after_copy_batch_commit_once_for_tests, arm_fail_drop_table_for_copy_once_for_tests,
     arm_fail_pool_refresh_once_for_tests, arm_pause_next_copy_append_for_tests,
     ducklake_staging_table_creations_for_tests, pool_refresh_failure_armed_for_tests,
@@ -91,6 +91,8 @@ use crate::support::ducklake::{
     catalog_attach_target, create_test_lake, ducklake_load_sql, open_verification_connection,
     path_to_file_url,
 };
+#[cfg(feature = "test-utils")]
+use crate::support::transaction_pooler::TransactionPoolerGuard;
 
 // ── helpers
 // ───────────────────────────────────────────────────────────────────
@@ -5605,8 +5607,6 @@ async fn full_identity_delete_matches_stored_value_on_every_write_path() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires TESTS_DUCKLAKE_DIRECT_URL and TESTS_DUCKLAKE_POOLER_URL"]
 async fn transaction_pooler_catalog_roundtrip() {
-    let _permit = acquire_ducklake_test_hook_guard().await;
-    reset_ducklake_test_hooks();
     let direct = Url::parse(&std::env::var("TESTS_DUCKLAKE_DIRECT_URL").unwrap()).unwrap();
     let pooler = Url::parse(&std::env::var("TESTS_DUCKLAKE_POOLER_URL").unwrap()).unwrap();
     let writer = if std::env::var_os("TESTS_DUCKLAKE_POOLED_WRITER").is_some() {
@@ -5614,9 +5614,41 @@ async fn transaction_pooler_catalog_roundtrip() {
     } else {
         direct.clone()
     };
+    catalog_pooler_roundtrip(direct, writer, pooler).await;
+}
+
+/// Covers transaction-pooler protocol safety in the regular Postgres suite.
+#[cfg(feature = "test-utils")]
+#[tokio::test(flavor = "multi_thread")]
+async fn catalog_metadata_pins_backend_and_keeps_coordination_direct() {
+    let lake = create_test_lake("catalog_pooler_protocol").await;
+    catalog_pooler_roundtrip(
+        lake.catalog_url.clone(),
+        lake.catalog_url.clone(),
+        lake.catalog_url.clone(),
+    )
+    .await;
+}
+
+/// Exercises both metadata and coordination routing through a strict protocol
+/// guard.
+#[cfg(feature = "test-utils")]
+async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url) {
+    let _permit = acquire_ducklake_test_hook_guard().await;
+    reset_ducklake_test_hooks();
+    // The optional pooled-writer experiment changes catalog_url itself. Its
+    // session-dependent coordination path is outside that experiment's scope.
+    let test_coordination = writer == direct;
+    let guard = TransactionPoolerGuard::start(&pooler).await;
+    let pooler = guard.url().clone();
     let directory = tempfile::tempdir().unwrap();
     let data = path_to_file_url(directory.path());
     let metadata_schema = format!("pooler_{}", uuid::Uuid::new_v4().simple());
+    let pipeline_id = format!("pooler_{}", uuid::Uuid::new_v4().simple());
+    let coordination_pool =
+        PgPoolOptions::new().max_connections(1).connect(direct.as_str()).await.unwrap();
+    let coordination_store =
+        PostgresExternalMaintenanceStore::new(pipeline_id.clone(), coordination_pool.clone());
     let schema = make_schema(1, "public", "pooler_rows");
     let replicated = make_replicated_table_schema(&schema);
     let table = table_name_to_ducklake_table_name(&schema.name).unwrap();
@@ -5640,10 +5672,31 @@ async fn transaction_pooler_catalog_roundtrip() {
     let destination = DuckLakeDestination::builder(writer.clone(), data.clone(), 2, store.clone())
         .catalog_pooler_url(Some(pooler.clone()))
         .metadata_schema(Some(metadata_schema.clone()))
+        .external_maintenance(if test_coordination {
+            DuckLakeExternalMaintenanceConfig::postgres(pipeline_id)
+        } else {
+            DuckLakeExternalMaintenanceConfig::disabled()
+        })
         .copy_buffer(DuckLakeCopyBufferConfig { enabled: false, ..Default::default() })
         .build()
         .await
         .unwrap();
+
+    if test_coordination {
+        // Let the watcher create and migrate its own coordination schema. A
+        // pooled coordination connection would be rejected by the
+        // protocol guard.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if coordination_store.load_state().await.is_ok_and(|state| state.exists) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
 
     // Retry an acknowledged-on-the-server commit without duplicating its rows.
     arm_fail_after_copy_batch_commit_once_for_tests(&table.id());
@@ -5721,4 +5774,7 @@ async fn transaction_pooler_catalog_roundtrip() {
         .map_err(RedactedDuckDbError::from)
         .unwrap();
     assert_eq!(rows, vec![(2, "second".to_owned())]);
+    drop(conn);
+    coordination_pool.close().await;
+    guard.shutdown().await;
 }

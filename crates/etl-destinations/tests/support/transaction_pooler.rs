@@ -1,0 +1,150 @@
+//! A local Postgres protocol proxy that rejects session-dependent queries.
+
+use std::{
+    io,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
+
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    task::JoinSet,
+};
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+use url::Url;
+
+/// Rejects named statements and preparation that releases a backend before
+/// bind.
+///
+/// Unlike a lightly loaded pooler, this detects the prepare/execute gap on
+/// every connection. The upstream must be a disposable local server accepting
+/// plaintext.
+pub struct TransactionPoolerGuard {
+    url: Url,
+    violations: Arc<AtomicUsize>,
+    stop: CancellationToken,
+    task: AbortOnDropHandle<()>,
+}
+
+impl TransactionPoolerGuard {
+    /// Starts a protocol guard in front of a local Postgres server or pooler.
+    pub async fn start(upstream: &Url) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut url = upstream.clone();
+        url.set_host(Some("127.0.0.1")).unwrap();
+        url.set_port(Some(listener.local_addr().unwrap().port())).unwrap();
+        url.set_query(Some("sslmode=disable"));
+        let upstream = (upstream.host_str().unwrap().to_owned(), upstream.port().unwrap_or(5432));
+        let violations = Arc::new(AtomicUsize::new(0));
+        let task_violations = Arc::clone(&violations);
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
+        let task = AbortOnDropHandle::new(tokio::spawn(async move {
+            let mut clients = JoinSet::new();
+            loop {
+                tokio::select! {
+                    () = task_stop.cancelled() => break,
+
+                    accepted = listener.accept() => {
+                        let (client, _) = accepted.unwrap();
+                        let upstream = upstream.clone();
+                        let violations = Arc::clone(&task_violations);
+                        clients.spawn(async move {
+                            let server = TcpStream::connect(upstream).await.unwrap();
+                            if let Err(error) = guard_connection(client, server, violations).await {
+                                assert!(matches!(error.kind(), io::ErrorKind::UnexpectedEof
+                                    | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe));
+                            }
+                        });
+                    }
+
+                    Some(result) = clients.join_next() => result.unwrap(),
+                }
+            }
+            clients.abort_all();
+            while let Some(result) = clients.join_next().await {
+                if let Err(error) = result {
+                    assert!(error.is_cancelled());
+                }
+            }
+        }));
+        Self { url, violations, stop, task }
+    }
+
+    /// Returns the guarded endpoint, preserving the upstream's database
+    /// identity.
+    pub fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// Joins all connections and verifies that no query required session state.
+    pub async fn shutdown(self) {
+        self.stop.cancel();
+        self.task.await.unwrap();
+        assert_eq!(self.violations.load(Ordering::Relaxed), 0);
+    }
+}
+
+/// Reads a length-prefixed Postgres message body, including its length header.
+async fn read_body(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
+    let length = reader.read_u32().await?;
+    if !(4..=16 * 1024 * 1024).contains(&length) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid test protocol frame"));
+    }
+    let mut body = vec![0; usize::try_from(length).unwrap()];
+    body[..4].copy_from_slice(&length.to_be_bytes());
+    reader.read_exact(&mut body[4..]).await?;
+    Ok(body)
+}
+
+/// Forwards protocol frames while checking the backend's transaction
+/// boundaries.
+async fn forward_messages(
+    mut reader: impl AsyncRead + Unpin,
+    mut writer: impl AsyncWrite + Unpin,
+    from_server: bool,
+    violations: Arc<AtomicUsize>,
+) -> io::Result<()> {
+    let mut prepared = false;
+    loop {
+        let tag = reader.read_u8().await?;
+        let body = read_body(&mut reader).await?;
+        if from_server && tag == b'1' {
+            prepared = true;
+        }
+        let released_preparation =
+            from_server && tag == b'Z' && prepared && body.get(4) == Some(&b'I');
+        let named_statement = !from_server && tag == b'P' && body.get(4) != Some(&0);
+        if released_preparation || named_statement {
+            violations.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        if from_server && tag == b'Z' {
+            prepared = false;
+        }
+        writer.write_u8(tag).await?;
+        writer.write_all(&body).await?;
+    }
+}
+
+/// Forwards startup, then stops both directions as soon as either side closes.
+async fn guard_connection(
+    mut client: TcpStream,
+    mut server: TcpStream,
+    violations: Arc<AtomicUsize>,
+) -> io::Result<()> {
+    client.set_nodelay(true)?;
+    server.set_nodelay(true)?;
+    let startup = read_body(&mut client).await?;
+    server.write_all(&startup).await?;
+    let (client_read, client_write) = client.split();
+    let (server_read, server_write) = server.split();
+    tokio::select! {
+        result = forward_messages(client_read, server_write, false, Arc::clone(&violations)) => result,
+
+        result = forward_messages(server_read, client_write, true, violations) => result,
+    }
+}

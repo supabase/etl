@@ -168,8 +168,8 @@ fn validate_ducklake_table_shape(schema: &ReplicatedTableSchema) -> EtlResult<()
 }
 
 /// Builds the shared Postgres metadata pool used by background samplers.
-/// Catalog queries must use `.persistent(false)` because a transaction pooler
-/// can assign a different backend between queries.
+/// Catalog queries must use unnamed statements inside explicit transactions so
+/// transaction poolers keep preparation and execution on the same backend.
 fn build_ducklake_metadata_pg_pool(
     catalog_url: &Url,
     catalog_pooler_url: Option<&Url>,
@@ -2132,7 +2132,9 @@ where
                 use crate::ducklake::external_maintenance::run_postgres_external_maintenance_watcher;
 
                 let watcher_destination = destination.clone();
-                let maintenance_pool = metadata_pg_pool.clone();
+                // Migrations use session state; store queries cache prepared
+                // statements. Coordination therefore needs a direct pool.
+                let maintenance_pool = build_ducklake_metadata_pg_pool(&catalog_url, None)?;
                 let pipeline_id = external_maintenance.pipeline_id;
                 destination
                     .tasks
@@ -2981,20 +2983,26 @@ where
             quote_postgres_identifier(self.metadata_schema.as_ref()),
             quote_postgres_identifier("ducklake_schema")
         );
-        let active: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
-            .persistent(false)
-            .bind(table_name.schema())
-            .bind(table_name.table())
-            .fetch_all(&self.metadata_pg_pool)
-            .await
-            .map_err(|source| {
-                classified_error_with_detail(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake table sort order query failed",
-                    format!("table={table_name}"),
-                    source,
-                )
-            })?;
+        let active: Vec<(String, String, String)> = async {
+            let mut transaction = self.metadata_pg_pool.begin().await?;
+            let result = sqlx::query_as(AssertSqlSafe(sql))
+                .persistent(false)
+                .bind(table_name.schema())
+                .bind(table_name.table())
+                .fetch_all(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table sort order query failed",
+                format!("table={table_name}"),
+                source,
+            )
+        })?;
         let active = active
             .into_iter()
             .map(|(expression, direction, null_order)| ActiveDuckLakeSortColumn {
@@ -4203,18 +4211,24 @@ where
             quote_postgres_identifier(self.metadata_schema.as_ref()),
             quote_postgres_identifier("ducklake_schema")
         );
-        let rows: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
-            .persistent(false)
-            .fetch_all(&self.metadata_pg_pool)
-            .await
-            .map_err(|source| {
-                classified_error_with_detail(
-                    ErrorKind::DestinationQueryFailed,
-                    "DuckLake table list query failed",
-                    format!("metadata_schema={}", self.metadata_schema.as_ref()),
-                    source,
-                )
-            })?;
+        let rows: Vec<(String, String)> = async {
+            let mut transaction = self.metadata_pg_pool.begin().await?;
+            let result = sqlx::query_as(AssertSqlSafe(sql))
+                .persistent(false)
+                .fetch_all(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+            Ok::<_, sqlx::Error>(result)
+        }
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake table list query failed",
+                format!("metadata_schema={}", self.metadata_schema.as_ref()),
+                source,
+            )
+        })?;
         Ok(rows
             .into_iter()
             .map(|(schema_name, table_name)| DuckLakeTableName::new(schema_name, table_name))
@@ -5851,12 +5865,18 @@ mod tests {
             );
             let sql =
                 format!("select pending_replay_epoch from {epochs_table} where table_name = $1;");
-            let pending_replay_epoch = sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(sql))
-                .persistent(false)
-                .bind(table_name.id())
-                .fetch_one(&destination.metadata_pg_pool)
-                .await
-                .expect("failed to read pending replay epoch");
+            let pending_replay_epoch = async {
+                let mut transaction = destination.metadata_pg_pool.begin().await?;
+                let result = sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(sql))
+                    .persistent(false)
+                    .bind(table_name.id())
+                    .fetch_one(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                Ok::<_, sqlx::Error>(result)
+            }
+            .await
+            .expect("failed to read pending replay epoch");
             assert_eq!(pending_replay_epoch, None);
         }
 

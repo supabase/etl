@@ -168,18 +168,27 @@ DuckLake destinations accept an optional secret `catalog_pooler_url`, also
 configurable as `APP_DESTINATION__DUCKLAKE__CATALOG_POOLER_URL`. The replicator
 and external maintenance runner use it for SQLx catalog queries, including
 metrics, maintenance discovery, and replay-epoch bookkeeping. These queries
-use unnamed statements so they work with Supavisor transaction pooling.
+use unnamed statements inside explicit transactions. SQLx prepares and executes
+in separate protocol exchanges; the transaction pins both to the same backend.
+Disabling statement persistence alone does not prevent backend reassignment.
 When the URL is absent, they use `catalog_url`. A configured pooler failure
 does not silently fall back to the direct endpoint.
 
 DuckDB writes, initial-copy flushes, checkpoints, and file maintenance continue
-to use `catalog_url`. Source logical replication is also unchanged. Switching
+to use `catalog_url`. Postgres maintenance coordination also uses a separate
+direct pool because its migrations and prepared queries rely on session state.
+Source logical replication is also unchanged. Switching
 DuckDB writers requires separate validation of transaction, retry, and
 connection-limit behavior against the deployed DuckDB/Postgres extension and
 pooler versions.
 
-The ignored `transaction_pooler_catalog_roundtrip` integration test exercises
-post-commit retries, replay reset, restart, checkpoints, and maintenance. Point
+The regular `catalog_metadata_pins_backend_and_keeps_coordination_direct` test
+uses a protocol guard that rejects named statements and preparation outside an
+explicit transaction. It exercises post-commit retries, replay reset, restart,
+checkpoints, maintenance, and direct coordination migrations.
+
+The ignored `transaction_pooler_catalog_roundtrip` runs the same checks against
+a real transaction pooler. Point
 `TESTS_DUCKLAKE_DIRECT_URL` and `TESTS_DUCKLAKE_POOLER_URL` at the same disposable
 local catalog, then run:
 
