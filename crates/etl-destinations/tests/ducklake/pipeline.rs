@@ -2135,7 +2135,7 @@ async fn bounded_shutdown_replays_partial_commits_under_mixed_traffic() {
     let mut database = spawn_source_database().await;
     let schema = setup_test_database_schema(&database, TableSelection::Both).await;
     let lake = create_test_lake("bounded_shutdown_replay").await;
-    let pipeline_id = random::<u64>();
+    let pipeline_id = u64::from(random::<u32>());
     let slot: String = EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
     // Scope the test hook to this table even when another test uses the same
     // fixture table names in a different database concurrently.

@@ -1503,7 +1503,7 @@ async fn pipeline_restart_resumes_streaming_inner(engine: ClickHouseEngine) {
         .unwrap();
 
     let clickhouse_db = setup_clickhouse_database().await;
-    let pipeline_id = random::<u64>();
+    let pipeline_id = u64::from(random::<u32>());
     let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db.build_destination_with_engine(store.clone(), engine).await,

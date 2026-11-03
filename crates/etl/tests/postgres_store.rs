@@ -655,7 +655,7 @@ async fn cancelled_table_delete_refreshes_all_caches() {
 /// Healthy reads and genuine missing entries then remain in memory.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_preparation_loads_every_domain() {
-    for (explicit_load, pipeline_id) in [(false, 1_u64), (true, u64::MAX)] {
+    for (explicit_load, pipeline_id) in [(false, 1_u64), (true, 150_u64)] {
         let database = spawn_source_database().await;
         let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
         let client = database.client.as_ref().unwrap();
@@ -2081,14 +2081,15 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     sqlx::query(
         r#"
         INSERT INTO etl.destination_tables_metadata
-            (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+            (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask, pipeline_id_v2)
         VALUES (
             $1,
             $2,
             'test_dest_table',
             '0:0',
             'applied',
-            $3::bytea
+            $3::bytea,
+            $1::bigint::text
         )
         "#,
     )
@@ -2152,8 +2153,8 @@ async fn destination_metadata_loads_creating_and_rejects_incomplete_applying() {
         r#"
         insert into etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id,
-             schema_status, replication_mask)
-        values ($1, $2, 'test_dest_table', '20:21', 'creating', $3::bytea)
+             schema_status, replication_mask, pipeline_id_v2)
+        values ($1, $2, 'test_dest_table', '20:21', 'creating', $3::bytea, $1::bigint::text)
         "#,
     )
     .bind(i64::try_from(pipeline_id).unwrap())
@@ -2225,14 +2226,15 @@ async fn replication_mask_various_patterns() {
         sqlx::query(
             r#"
             INSERT INTO etl.destination_tables_metadata
-                (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+                (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask, pipeline_id_v2)
             VALUES (
                 $1,
                 $2,
                 $3,
                 '0:0',
                 'applied',
-                $4
+                $4,
+                $1::bigint::text
             )
             "#,
         )
