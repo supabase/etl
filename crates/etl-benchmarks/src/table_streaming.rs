@@ -51,9 +51,9 @@ pub struct RunArgs {
     /// Destination options.
     #[command(flatten)]
     destination: DestinationArgs,
-    /// Legacy numeric pipeline ID used by this benchmark.
-    #[arg(long = "pipeline-id", default_value_t = 2)]
-    legacy_pipeline_id: u64,
+    /// Pipeline ID used by this benchmark.
+    #[arg(long = "pipeline-id", default_value = "03dg2o5teb2eucxr9ggh3uie6")]
+    pipeline_id: String,
     /// Publication name.
     #[arg(long, default_value = "bench_streaming_pub")]
     publication_name: String,
@@ -91,7 +91,7 @@ struct TableStreamingReport {
     workload: &'static str,
     destination: DestinationType,
     #[serde(rename = "pipeline_id")]
-    legacy_pipeline_id: u64,
+    pipeline_id: String,
     publication_name: String,
     table_ids: Vec<u32>,
     table_count: usize,
@@ -171,7 +171,7 @@ async fn run(args: RunArgs) -> Result<()> {
     let store = NotifyingStore::new();
     let destination_started = Instant::now();
     let destination =
-        BenchDestination::new(&args.destination, args.legacy_pipeline_id, store.clone()).await?;
+        BenchDestination::new(&args.destination, &args.pipeline_id, store.clone()).await?;
     let destination_init_ms = duration_millis(destination_started.elapsed());
     if args.destination_settle_ms > 0 {
         tokio::time::sleep(Duration::from_millis(args.destination_settle_ms)).await;
@@ -183,7 +183,7 @@ async fn run(args: RunArgs) -> Result<()> {
         let notifications = register_table_sync_notifications(&store, &table_ids).await?;
 
         let config = pipeline_config(
-            args.legacy_pipeline_id,
+            &args.pipeline_id,
             args.publication_name.clone(),
             &args.pg,
             &args.tuning,
@@ -260,10 +260,9 @@ async fn run(args: RunArgs) -> Result<()> {
     }
     .await;
 
-    let cleanup_result =
-        cleanup_replication_slots(&args.pg, args.legacy_pipeline_id, &table_ids).await;
+    let cleanup_result = cleanup_replication_slots(&args.pg, &args.pipeline_id, &table_ids).await;
     let destination_cleanup_result =
-        cleanup_destination(&args.destination, args.legacy_pipeline_id).await;
+        cleanup_destination(&args.destination, &args.pipeline_id).await;
     let StreamingPhaseTimings {
         pipeline_start_ms,
         ready_wait_ms,
@@ -287,7 +286,7 @@ async fn run(args: RunArgs) -> Result<()> {
         benchmark: "table_streaming",
         workload: "tpcc",
         destination: args.destination.destination,
-        legacy_pipeline_id: args.legacy_pipeline_id,
+        pipeline_id: args.pipeline_id,
         publication_name: args.publication_name,
         table_count: table_ids.len(),
         table_ids,

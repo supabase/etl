@@ -5,7 +5,6 @@ use etl::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
-    error::ErrorKind,
     pipeline::Pipeline,
     postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
     store::{MemoryStore, PostgresStore, StateStore, WorkerType},
@@ -160,7 +159,7 @@ fn assert_migration_set_is_reversible(migration_set: &str, migrator: Migrator) {
 
 fn pipeline_config(pg_connection: PgConnectionConfig) -> PipelineConfig {
     PipelineConfig {
-        id: 1.into(),
+        id: "1".into(),
         publication_name: "missing_publication".to_owned(),
         pg_connection,
         store_pg_connection: None,
@@ -238,58 +237,11 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert!(!source_helper_exists(&database).await);
     assert!(!postgres_store_table_exists(&database).await);
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
 
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
-}
-
-/// Invalid numeric identities fail before store initialization migrates the
-/// database.
-#[tokio::test(flavor = "multi_thread")]
-async fn postgres_store_rejects_pipeline_ids_outside_bigint_range_before_migrations() {
-    let database = spawn_unmigrated_database().await;
-    let max_pipeline_id = u64::try_from(i64::MAX).unwrap();
-
-    for pipeline_id in [max_pipeline_id + 1, u64::MAX] {
-        let error = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::ConfigError);
-        assert_eq!(
-            error.description(),
-            Some("Postgres store pipeline identity exceeds the bigint range")
-        );
-    }
-
-    assert!(!postgres_store_table_exists(&database).await);
-}
-
-/// Numeric boundary identities retain matching keys across checkpoint writes
-/// and reloads.
-#[tokio::test(flavor = "multi_thread")]
-async fn postgres_store_accepts_pipeline_ids_at_bigint_boundaries() {
-    let database = spawn_unmigrated_database().await;
-
-    for pipeline_id in [0, u64::try_from(i64::MAX).unwrap()] {
-        let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
-        drop(store);
-
-        let reloaded = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
-        assert_eq!(
-            reloaded.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
-            Some(PgLsn::from(100))
-        );
-    }
-
-    assert!(
-        query_bool(
-            &database,
-            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
-             etl.replication_progress"
-        )
-        .await
-    );
 }
 
 /// Backfilled keys preserve shared checkpoints and require dual-writing
@@ -310,8 +262,8 @@ async fn pipeline_id_v2_preserves_shared_state() {
     .unwrap();
 
     let (first, second) = tokio::join!(
-        PostgresStore::new(150, database.config.clone()),
-        PostgresStore::new(151, database.config.clone()),
+        PostgresStore::new("150", database.config.clone()),
+        PostgresStore::new("151", database.config.clone()),
     );
     let first = first.unwrap();
     let second = second.unwrap();
@@ -854,7 +806,7 @@ async fn source_then_postgres_store_migrations_can_share_sqlx_history() {
     run_source_migrations(&database.config).await.unwrap();
     assert_eq!(applied_migration_versions(&database).await, source_migration_versions());
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     run_source_migrations(&database.config).await.unwrap();
 
     assert!(source_helper_exists(&database).await);
@@ -868,9 +820,9 @@ async fn postgres_store_then_source_migrations_can_share_sqlx_history() {
 
     let database = spawn_unmigrated_database().await;
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     run_source_migrations(&database.config).await.unwrap();
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
 
     assert!(source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
@@ -1053,7 +1005,7 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
     init_test_tracing();
 
     let database = spawn_unmigrated_database().await;
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
 
     let client = database.client.as_ref().expect("database client should be initialized");
     client
@@ -1221,7 +1173,7 @@ async fn split_migrations_can_be_reverted_independently() {
 
     let database = spawn_unmigrated_database().await;
 
-    let _store = PostgresStore::new(1, database.config.clone()).await.unwrap();
+    let _store = PostgresStore::new("1", database.config.clone()).await.unwrap();
     run_source_migrations(&database.config).await.unwrap();
 
     assert!(source_helper_exists(&database).await);

@@ -6,7 +6,7 @@
 //! without adding a second durable schema state machine.
 
 use etl::{
-    pipeline::LegacyPipelineId,
+    pipeline::PipelineId,
     schema::{ReplicatedTableSchema, TableId},
 };
 use sha2::{Digest, Sha256};
@@ -15,6 +15,7 @@ use tracing::warn;
 use crate::snowflake::{
     Error, Result,
     auth::TokenProvider,
+    identity::legacy_compatible_pipeline_id,
     materialization::view_query,
     sql::{quote_identifier, quote_string_literal},
     sql_client::SqlClient,
@@ -33,18 +34,14 @@ pub(super) struct CompanionView {
     /// offline.
     pending: String,
     /// Exact owner prefix; the remaining comment is the definition fingerprint.
-    /// The pipeline ID remains a JSON number to recognize existing views.
+    /// Numeric owner markers are retained to recognize existing views.
     owner: String,
 }
 
 impl CompanionView {
     /// Derives names from recorded destination ownership, never a new source
     /// name.
-    pub(super) fn new(
-        legacy_pipeline_id: LegacyPipelineId,
-        table_id: TableId,
-        table: &str,
-    ) -> Self {
+    pub(super) fn new(pipeline_id: PipelineId, table_id: TableId, table: &str) -> Self {
         // Snowflake identifiers allow 255 characters. Reserve room for the
         // temporary suffix too; the fallback prefix cannot be a raw table name.
         let name = if table.chars().count() + "_CURRENT_PENDING".len() > 255 {
@@ -57,7 +54,11 @@ impl CompanionView {
             name,
             owner: format!(
                 "supabase-etl:view:v1:{}:",
-                serde_json::json!([legacy_pipeline_id, table_id.into_inner(), table])
+                serde_json::json!([
+                    legacy_compatible_pipeline_id(pipeline_id.as_str()),
+                    table_id.into_inner(),
+                    table
+                ])
             ),
         }
     }
@@ -243,7 +244,7 @@ mod tests {
 
     #[test]
     fn companion_names_do_not_collide_with_encoded_source_names() {
-        let view = CompanionView::new(150, TableId::new(42), "PUBLIC_USERS");
+        let view = CompanionView::new("150".into(), TableId::new(42), "PUBLIC_USERS");
         assert_eq!(view.owner, "supabase-etl:view:v1:[150,42,\"PUBLIC_USERS\"]:");
         let long = format!("a{}b", "_".repeat(61));
         let parts = [
@@ -273,13 +274,13 @@ mod tests {
             .collect::<std::collections::HashSet<_>>();
         for length in [239, 240] {
             let name = "é".repeat(length);
-            let view = CompanionView::new(1, TableId::new(1), &name);
+            let view = CompanionView::new("1".into(), TableId::new(1), &name);
             assert_eq!(view.name.starts_with("_ETL_"), length == 240);
             assert!(view.pending.chars().count() <= 255);
         }
         let mut views = std::collections::HashSet::new();
         for name in &raw {
-            let view = CompanionView::new(1, TableId::new(1), name);
+            let view = CompanionView::new("1".into(), TableId::new(1), name);
             assert!(view.pending.chars().count() <= 255);
             assert!(!raw.contains(&view.name));
             assert!(!raw.contains(&view.pending));

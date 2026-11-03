@@ -10,7 +10,7 @@ use etl::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
         notifying_store::NotifyingStore,
-        pipeline::create_pipeline,
+        pipeline::{create_pipeline, random_pipeline_id},
         test_destination_wrapper::TestDestinationWrapper,
     },
 };
@@ -19,7 +19,6 @@ use etl_destinations::clickhouse::test_utils::{
     redact_clickhouse_error, setup_clickhouse_database,
 };
 use etl_telemetry::tracing::init_test_tracing;
-use rand::random;
 
 use crate::support::{
     clickhouse::{current_state_query, optimize_final_cleanup_sql, table_engine_query},
@@ -70,7 +69,7 @@ async fn replacing_merge_tree_rejects_pkless_source_table() {
     // --- WHEN: pipeline runs under ReplacingMergeTree ---
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
@@ -80,7 +79,7 @@ async fn replacing_merge_tree_rejects_pkless_source_table() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination,
@@ -133,7 +132,7 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
@@ -144,7 +143,7 @@ async fn replacing_merge_tree_same_lsn_tx_insert_then_update_keeps_update() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -236,7 +235,7 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
@@ -247,7 +246,7 @@ async fn replacing_merge_tree_same_lsn_tx_delete_then_insert_keeps_insert() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -327,7 +326,7 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
@@ -338,7 +337,7 @@ async fn replacing_merge_tree_current_view_exposes_user_columns_and_current_stat
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -429,7 +428,7 @@ async fn composite_pk_pk_order_by_matches_pk_ordinal() {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = clickhouse_db
         .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
         .await;
@@ -438,7 +437,7 @@ async fn composite_pk_pk_order_by_matches_pk_ordinal() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store,
         destination,
@@ -510,7 +509,7 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
@@ -521,7 +520,7 @@ async fn replacing_merge_tree_streamed_update_wins_over_initial_copy_row() {
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -599,7 +598,7 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
 
     let clickhouse_db = setup_clickhouse_database().await;
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = TestDestinationWrapper::wrap(
         clickhouse_db
             .build_destination_with_engine(store.clone(), ClickHouseEngine::ReplacingMergeTree)
@@ -610,7 +609,7 @@ async fn replacing_merge_tree_optimize_cleanup_physically_removes_tombstoned_row
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store,
         destination.clone(),
@@ -711,12 +710,12 @@ async fn unowned_table_runs(first: ClickHouseEngine, second: ClickHouseEngine) {
     // First pipeline run: creates the CH table under `first` and shuts down.
     {
         let store = NotifyingStore::new();
-        let pipeline_id = random::<u64>();
+        let pipeline_id = random_pipeline_id();
         let destination = clickhouse_db.build_destination_with_engine(store.clone(), first).await;
         let table_sync_complete_notify = store.notify_on_table_sync_complete(table_id).await;
         let mut pipeline = create_pipeline(
             &database.config,
-            pipeline_id,
+            pipeline_id.as_str(),
             publication_name.to_owned(),
             store,
             destination,
@@ -729,14 +728,14 @@ async fn unowned_table_runs(first: ClickHouseEngine, second: ClickHouseEngine) {
     // WHEN: a second pipeline configures the OTHER engine for the same
     // destination database
     let store = NotifyingStore::new();
-    let pipeline_id = random::<u64>();
+    let pipeline_id = random_pipeline_id();
     let destination = clickhouse_db.build_destination_with_engine(store.clone(), second).await;
     let table_errored_notify =
         store.notify_on_table_state_type(table_id, TableStateType::Errored).await;
 
     let mut pipeline = create_pipeline(
         &database.config,
-        pipeline_id,
+        pipeline_id.as_str(),
         publication_name.to_owned(),
         store.clone(),
         destination,

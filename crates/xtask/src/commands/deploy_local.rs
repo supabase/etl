@@ -34,7 +34,7 @@ const BUILD_CONTEXT_PATHS: &[&str] = &["Cargo.toml", "Cargo.lock", ".cargo", "cr
 /// Base config file name mounted into the replicator config directory.
 const BASE_CONFIG_FILE: &str = "base.json";
 /// Default local pipeline id.
-const DEFAULT_LEGACY_PIPELINE_ID: &str = "1";
+const DEFAULT_PIPELINE_ID: &str = "03dg2o5teb2eucxr9ggh3uie6";
 /// Default publication created by `cargo x seed`.
 const DEFAULT_PUBLICATION_NAME: &str = "seed_pub";
 /// Default host name for reaching host-published services from local k8s pods.
@@ -161,7 +161,7 @@ struct DeployLocalConfig {
     /// Whether a non-OrbStack context is allowed.
     allow_non_local_context: bool,
     /// Pipeline id written to the generated local config.
-    legacy_pipeline_id: u64,
+    pipeline_id: String,
     /// Publication name written to the generated local config.
     publication_name: String,
     /// Source Postgres host written to the generated local config.
@@ -203,7 +203,8 @@ impl DeployLocalConfig {
             skip_build: args.skip_build,
             skip_wait: args.skip_wait,
             allow_non_local_context: args.allow_non_local_context,
-            legacy_pipeline_id: parse_env_or("REPLICATOR_PIPELINE_ID", DEFAULT_LEGACY_PIPELINE_ID)?,
+            pipeline_id: env::var("REPLICATOR_PIPELINE_ID")
+                .unwrap_or_else(|_| DEFAULT_PIPELINE_ID.to_owned()),
             publication_name: env_or("REPLICATOR_PUBLICATION_NAME", DEFAULT_PUBLICATION_NAME),
             postgres_host: env_or("REPLICATOR_POSTGRES_HOST", DEFAULT_POSTGRES_HOST),
             postgres_port: parse_env_or("REPLICATOR_POSTGRES_PORT", DEFAULT_POSTGRES_PORT)?,
@@ -561,7 +562,7 @@ fn local_replicator_config(config: &DeployLocalConfig) -> Result<Vec<u8>> {
             }
         },
         "pipeline": {
-            "id": config.legacy_pipeline_id,
+            "id": config.pipeline_id,
             "publication_name": config.publication_name,
             "pg_connection": {
                 "host": config.postgres_host,
@@ -683,7 +684,7 @@ mod tests {
             skip_build: true,
             skip_wait: true,
             allow_non_local_context: false,
-            legacy_pipeline_id: 1,
+            pipeline_id: "03dg2o5teb2eucxr9ggh3uie6".into(),
             publication_name: "seed_pub".to_owned(),
             postgres_host: "127.0.0.1".to_owned(),
             postgres_port: 5430,
@@ -725,7 +726,7 @@ mod tests {
                     }
                 },
                 "pipeline": {
-                    "id": 1,
+                    "id": "1",
                     "publication_name": "seed_pub",
                     "pg_connection": {
                         "host": "127.0.0.1",

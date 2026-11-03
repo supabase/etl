@@ -26,7 +26,7 @@ fn parse_lsn(lsn: &str) -> sqlx::Result<PgLsn> {
 /// branches match the partial indexes for null and non-null table IDs.
 pub async fn load_replication_checkpoints<'c, E>(
     executor: E,
-    legacy_pipeline_id: i64,
+    pipeline_id: &str,
 ) -> sqlx::Result<Vec<(Option<TableId>, PgLsn)>>
 where
     E: PgExecutor<'c>,
@@ -35,14 +35,14 @@ where
         r#"
         select table_id, flush_lsn::text
         from etl.replication_progress
-        where pipeline_id = $1 and table_id is null
+        where pipeline_id_v2 = $1 and table_id is null
         union all
         select table_id, flush_lsn::text
         from etl.replication_progress
-        where pipeline_id = $1 and table_id is not null
+        where pipeline_id_v2 = $1 and table_id is not null
         "#,
     )
-    .bind(legacy_pipeline_id)
+    .bind(pipeline_id)
     .fetch_all(executor)
     .await?;
 
@@ -59,7 +59,6 @@ where
 pub async fn upsert_replication_checkpoint<'c, E>(
     executor: E,
     pipeline_id: &str,
-    legacy_pipeline_id: i64,
     worker_type: &'static str,
     table_id: Option<TableId>,
     checkpoint_lsn: PgLsn,
@@ -72,11 +71,10 @@ where
         sqlx::query_scalar(
             r#"
             insert into etl.replication_progress
-                (pipeline_id, worker_type, table_id, flush_lsn, pipeline_id_v2)
-            values ($1, $2::etl.replication_worker_type, $3, $4::pg_lsn, $5)
-            on conflict (pipeline_id, worker_type, table_id) where table_id is not null
+                (pipeline_id_v2, worker_type, table_id, flush_lsn)
+            values ($1, $2::etl.replication_worker_type, $3, $4::pg_lsn)
+            on conflict (pipeline_id_v2, worker_type, table_id) where table_id is not null
             do update set
-                pipeline_id_v2 = excluded.pipeline_id_v2,
                 flush_lsn = greatest(excluded.flush_lsn, etl.replication_progress.flush_lsn),
                 updated_at = case
                     when excluded.flush_lsn > etl.replication_progress.flush_lsn
@@ -86,22 +84,20 @@ where
             returning flush_lsn::text
             "#,
         )
-        .bind(legacy_pipeline_id)
+        .bind(pipeline_id)
         .bind(worker_type)
         .bind(SqlxTableId(table_id.into_inner()))
         .bind(checkpoint_lsn)
-        .bind(pipeline_id)
         .fetch_one(executor)
         .await?
     } else {
         sqlx::query_scalar(
             r#"
             insert into etl.replication_progress
-                (pipeline_id, worker_type, flush_lsn, pipeline_id_v2)
-            values ($1, $2::etl.replication_worker_type, $3::pg_lsn, $4)
-            on conflict (pipeline_id, worker_type) where table_id is null
+                (pipeline_id_v2, worker_type, flush_lsn)
+            values ($1, $2::etl.replication_worker_type, $3::pg_lsn)
+            on conflict (pipeline_id_v2, worker_type) where table_id is null
             do update set
-                pipeline_id_v2 = excluded.pipeline_id_v2,
                 flush_lsn = greatest(excluded.flush_lsn, etl.replication_progress.flush_lsn),
                 updated_at = case
                     when excluded.flush_lsn > etl.replication_progress.flush_lsn
@@ -111,10 +107,9 @@ where
             returning flush_lsn::text
             "#,
         )
-        .bind(legacy_pipeline_id)
+        .bind(pipeline_id)
         .bind(worker_type)
         .bind(checkpoint_lsn)
-        .bind(pipeline_id)
         .fetch_one(executor)
         .await?
     };
@@ -125,7 +120,7 @@ where
 /// Deletes the persisted replication checkpoint for a pipeline worker.
 pub async fn delete_replication_checkpoint<'c, E>(
     executor: E,
-    legacy_pipeline_id: i64,
+    pipeline_id: &str,
     worker_type: &'static str,
     table_id: Option<TableId>,
 ) -> sqlx::Result<u64>
@@ -136,12 +131,12 @@ where
         sqlx::query(
             r#"
             delete from etl.replication_progress
-            where pipeline_id = $1
+            where pipeline_id_v2 = $1
               and worker_type = $2::etl.replication_worker_type
               and table_id = $3
             "#,
         )
-        .bind(legacy_pipeline_id)
+        .bind(pipeline_id)
         .bind(worker_type)
         .bind(SqlxTableId(table_id.into_inner()))
         .execute(executor)
@@ -150,12 +145,12 @@ where
         sqlx::query(
             r#"
             delete from etl.replication_progress
-            where pipeline_id = $1
+            where pipeline_id_v2 = $1
               and worker_type = $2::etl.replication_worker_type
               and table_id is null
             "#,
         )
-        .bind(legacy_pipeline_id)
+        .bind(pipeline_id)
         .bind(worker_type)
         .execute(executor)
         .await?
@@ -167,11 +162,11 @@ where
 /// Deletes the persisted checkpoint for a specific table-sync worker.
 pub async fn delete_replication_checkpoint_for_table<'c, E>(
     executor: E,
-    legacy_pipeline_id: i64,
+    pipeline_id: &str,
     table_id: TableId,
 ) -> sqlx::Result<u64>
 where
     E: PgExecutor<'c>,
 {
-    delete_replication_checkpoint(executor, legacy_pipeline_id, "table_sync", Some(table_id)).await
+    delete_replication_checkpoint(executor, pipeline_id, "table_sync", Some(table_id)).await
 }
