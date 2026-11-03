@@ -244,10 +244,10 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
 }
 
-/// Old and upgraded writers share numeric keys without backfilling other
-/// pipelines.
+/// Backfilled keys preserve shared checkpoints and require dual-writing
+/// clients.
 #[tokio::test(flavor = "multi_thread")]
-async fn pipeline_id_v2_preserves_shared_state_and_legacy_writers() {
+async fn pipeline_id_v2_preserves_shared_state() {
     let database = spawn_unmigrated_database().await;
     let mut conn = migration_connection(&database.config).await;
     postgres_store_migrator()
@@ -270,7 +270,7 @@ async fn pipeline_id_v2_preserves_shared_state_and_legacy_writers() {
     assert!(
         query_bool(
             &database,
-            "select count(*) = 2 and bool_and(pipeline_id_v2 is null) from \
+            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
              etl.replication_progress"
         )
         .await
@@ -285,7 +285,7 @@ async fn pipeline_id_v2_preserves_shared_state_and_legacy_writers() {
         ),
         first.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)),
     );
-    legacy.unwrap();
+    assert!(legacy.is_err());
     assert_eq!(upgraded.unwrap(), PgLsn::from(100));
     second.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(200)).await.unwrap();
     assert_eq!(
@@ -299,10 +299,8 @@ async fn pipeline_id_v2_preserves_shared_state_and_legacy_writers() {
     assert!(
         query_bool(
             &database,
-            "select count(*) = 3 and bool_and(case
-             when table_id is null then pipeline_id_v2 is not null and pipeline_id_v2 = \
-             pipeline_id::text
-             else pipeline_id_v2 is null end) from etl.replication_progress"
+            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
+             etl.replication_progress"
         )
         .await
     );
@@ -315,12 +313,152 @@ async fn pipeline_id_v2_preserves_shared_state_and_legacy_writers() {
         .undo(&mut conn, POSTGRES_STORE_PRE_PIPELINE_ID_V2_VERSION)
         .await
         .unwrap();
-    assert!(query_bool(&database, "select count(*) = 3 from etl.replication_progress").await);
+    assert!(query_bool(&database, "select count(*) = 2 from etl.replication_progress").await);
     postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
     assert!(
         query_bool(
             &database,
-            "select bool_and(pipeline_id_v2 is null) from etl.replication_progress"
+            "select bool_and(pipeline_id_v2 = pipeline_id::text) from etl.replication_progress"
+        )
+        .await
+    );
+}
+
+/// Backfill preserves every state field and enforces matching string
+/// identities.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_id_backfill_preserves_rows_and_enforces_consistency() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator().run_direct(Some(20261029140000), &mut conn, false).await.unwrap();
+    conn.execute(
+        "insert into etl.replication_state (pipeline_id, table_id, state, is_current, metadata)
+         values (150, 42, 'init', false, '{\"attempt\":1}'), (150, 42, 'ready', true, null);
+         insert into etl.table_schemas (pipeline_id, table_id, schema_name, table_name, \
+         snapshot_id)
+         values (150, 42, 'public', 'synthetic_items', '0/A'),
+                (150, 42, 'public', 'synthetic_items', '0/B');
+         insert into etl.destination_tables_metadata
+             (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, \
+         replication_mask)
+         values (150, 42, 'synthetic_items', '0/B', 'applied', decode('ff', 'hex'));
+         insert into etl.replication_progress (pipeline_id, worker_type, table_id, flush_lsn)
+         values (150, 'apply', null, '0/A'), (150, 'table_sync', 42, '0/B'), (-1, 'apply', null, \
+         '0/C');
+         update etl.replication_progress set pipeline_id_v2 = '150' where pipeline_id = 150 and \
+         table_id is null;",
+    )
+    .await
+    .unwrap();
+    let tables = [
+        "replication_state",
+        "table_schemas",
+        "destination_tables_metadata",
+        "replication_progress",
+    ];
+    let client = database.client.as_ref().unwrap();
+    let mut snapshots = Vec::new();
+    for table in tables {
+        let query = format!(
+            "select jsonb_agg(to_jsonb(t) - 'pipeline_id_v2' order by id)::text from etl.{table} t"
+        );
+        snapshots.push(client.query_one(&query, &[]).await.unwrap().get::<_, String>(0));
+    }
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
+    for (table, before) in tables.into_iter().zip(&snapshots) {
+        let query = format!(
+            "select jsonb_agg(to_jsonb(t) - 'pipeline_id_v2' order by id)::text from etl.{table} t"
+        );
+        assert_eq!(client.query_one(&query, &[]).await.unwrap().get::<_, String>(0), *before);
+        assert!(
+            query_bool(
+                &database,
+                &format!(
+                    "select bool_and(pipeline_id_v2 = case when pipeline_id < 0 then \
+                     (pipeline_id::numeric + 18446744073709551616)::text else pipeline_id::text \
+                     end) from etl.{table}"
+                )
+            )
+            .await
+        );
+        let error = client
+            .execute(&format!("update etl.{table} set pipeline_id_v2 = 'conflicting-id'"), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(&tokio_postgres::error::SqlState::CHECK_VIOLATION));
+        let error = client
+            .execute(&format!("update etl.{table} set pipeline_id_v2 = null"), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Some(&tokio_postgres::error::SqlState::NOT_NULL_VIOLATION));
+    }
+    assert!(
+        query_bool(
+            &database,
+            "select count(*) = 5 and bool_and(i.indisunique and i.indisvalid)
+         from pg_index i join pg_class c on c.oid = i.indexrelid
+         join pg_namespace n on n.oid = c.relnamespace
+         where n.nspname = 'etl' and c.relname in (
+             'uq_replication_state_current_true_v2', 'uq_table_schemas_pipeline_table_snapshot_v2',
+             'uq_destination_tables_metadata_pipeline_table_v2',
+             'uq_replication_progress_pipeline_apply_v2', \
+             'uq_replication_progress_pipeline_table_sync_v2')"
+        )
+        .await
+    );
+    postgres_store_migrator().undo(&mut conn, 20261029140000).await.unwrap();
+    assert!(
+        query_bool(
+            &database,
+            "select bool_and(pipeline_id_v2 = case when pipeline_id = -1 then \
+             '18446744073709551615' else '150' end) from etl.replication_progress"
+        )
+        .await
+    );
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
+}
+
+/// A conflicting identity rolls back every backfill update and schema change.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipeline_id_backfill_conflict_rolls_back_atomically() {
+    let database = spawn_unmigrated_database().await;
+    let mut conn = migration_connection(&database.config).await;
+    postgres_store_migrator().run_direct(Some(20261029140000), &mut conn, false).await.unwrap();
+    conn.execute(
+        "insert into etl.replication_progress (pipeline_id, pipeline_id_v2, worker_type, \
+         flush_lsn)
+         values (150, null, 'apply', '0/A'), (151, 'conflicting-id', 'apply', '0/B')",
+    )
+    .await
+    .unwrap();
+    assert!(postgres_store_migrator().run_direct(None, &mut conn, false).await.is_err());
+    assert!(
+        query_bool(
+            &database,
+            "select count(*) = 2 and bool_and(case when pipeline_id = 150 then pipeline_id_v2 is \
+             null
+         else pipeline_id_v2 = 'conflicting-id' end) from etl.replication_progress"
+        )
+        .await
+    );
+    assert!(
+        query_bool(
+            &database,
+            "select not exists (select 1 from pg_indexes where schemaname = 'etl'
+         and indexname = 'uq_replication_state_current_true_v2')"
+        )
+        .await
+    );
+    conn.execute(
+        "update etl.replication_progress set pipeline_id_v2 = '151' where pipeline_id = 151",
+    )
+    .await
+    .unwrap();
+    postgres_store_migrator().run_direct(None, &mut conn, false).await.unwrap();
+    assert!(
+        query_bool(
+            &database,
+            "select bool_and(pipeline_id_v2 = pipeline_id::text) from etl.replication_progress"
         )
         .await
     );
@@ -638,9 +776,10 @@ async fn composite_snapshot_migration_preserves_legacy_message_lsn_ordering() {
                 pipeline_id,
                 table_id,
                 schema_name,
-                table_name
+                table_name,
+                pipeline_id_v2
             )
-            values ($1, $2, 'public', 'new_initial_items')
+            values ($1, $2, 'public', 'new_initial_items', $1::bigint::text)
             returning snapshot_id",
             &[&1_i64, &new_initial_table_id],
         )
@@ -1033,9 +1172,10 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 table_id,
                 schema_name,
                 table_name,
-                snapshot_id
+                snapshot_id,
+                pipeline_id_v2
             )
-            values ($1, $2, $3, $4, '0:1')
+            values ($1, $2, $3, $4, '0:1', $1::bigint::text)
             returning id",
             &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
         )
@@ -1049,9 +1189,10 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 table_id,
                 schema_name,
                 table_name,
-                snapshot_id
+                snapshot_id,
+                pipeline_id_v2
             )
-            values ($1, $2, $3, $4, '0:2')
+            values ($1, $2, $3, $4, '0:2', $1::bigint::text)
             returning id",
             &[&11_i64, &table_id, &"public", &"migration_snapshot_items"],
         )
@@ -1100,7 +1241,8 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 snapshot_id,
                 previous_snapshot_id,
                 schema_status,
-                replication_mask
+                replication_mask,
+                pipeline_id_v2
             )
             values (
                 $1,
@@ -1109,7 +1251,8 @@ async fn postgres_store_schema_storage_down_migration_keeps_destination_snapshot
                 '0:2',
                 '0:1',
                 'applied',
-                decode('0101', 'hex')
+                decode('0101', 'hex'),
+                $1::bigint::text
             )",
             &[&11_i64, &table_id, &"destination_snapshot_items"],
         )

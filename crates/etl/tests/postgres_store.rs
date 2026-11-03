@@ -2081,14 +2081,15 @@ async fn replication_mask_loads_correctly_from_string_bytea() {
     sqlx::query(
         r#"
         INSERT INTO etl.destination_tables_metadata
-            (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+            (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask, pipeline_id_v2)
         VALUES (
             $1,
             $2,
             'test_dest_table',
             '0:0',
             'applied',
-            $3::bytea
+            $3::bytea,
+            $1::bigint::text
         )
         "#,
     )
@@ -2152,8 +2153,8 @@ async fn destination_metadata_loads_creating_and_rejects_incomplete_applying() {
         r#"
         insert into etl.destination_tables_metadata
             (pipeline_id, table_id, destination_table_id, snapshot_id,
-             schema_status, replication_mask)
-        values ($1, $2, 'test_dest_table', '20:21', 'creating', $3::bytea)
+             schema_status, replication_mask, pipeline_id_v2)
+        values ($1, $2, 'test_dest_table', '20:21', 'creating', $3::bytea, $1::bigint::text)
         "#,
     )
     .bind(i64::try_from(pipeline_id).unwrap())
@@ -2225,14 +2226,15 @@ async fn replication_mask_various_patterns() {
         sqlx::query(
             r#"
             INSERT INTO etl.destination_tables_metadata
-                (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask)
+                (pipeline_id, table_id, destination_table_id, snapshot_id, schema_status, replication_mask, pipeline_id_v2)
             VALUES (
                 $1,
                 $2,
                 $3,
                 '0:0',
                 'applied',
-                $4
+                $4,
+                $1::bigint::text
             )
             "#,
         )
