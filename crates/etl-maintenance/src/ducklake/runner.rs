@@ -1500,8 +1500,10 @@ fn format_query_error_detail(sql: &str) -> String {
 /// Configuration for one external DuckLake maintenance run.
 #[derive(Clone)]
 pub struct DuckLakeMaintenanceConfig {
-    /// DuckLake PostgreSQL catalog URL.
+    /// Direct DuckLake PostgreSQL catalog URL used by maintenance writes.
     pub catalog_url: Url,
+    /// Optional transaction-pooler URL for SQLx catalog metadata queries.
+    pub catalog_pooler_url: Option<Url>,
     /// DuckLake data path.
     pub data_path: Url,
     /// Optional S3-compatible storage config.
@@ -1527,6 +1529,7 @@ impl fmt::Debug for DuckLakeMaintenanceConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DuckLakeMaintenanceConfig")
             .field("catalog_url", &"[redacted]")
+            .field("catalog_pooler_url", &"[redacted]")
             .field("s3", &self.s3)
             .field("metadata_schema", &self.metadata_schema)
             .finish_non_exhaustive()
@@ -1665,7 +1668,10 @@ pub async fn run_maintenance_once(
         "ducklake external maintenance metadata schema resolved"
     );
     let metadata_pg_pool = PgPoolOptions::new().max_connections(1).connect_lazy_with(
-        ducklake_catalog_metadata_connect_options(&config.catalog_url).map_err(|source| {
+        ducklake_catalog_metadata_connect_options(
+            config.catalog_pooler_url.as_ref().unwrap_or(&config.catalog_url),
+        )
+        .map_err(|source| {
             etl_error!(
                 ErrorKind::ConfigError,
                 "Invalid DuckLake PostgreSQL catalog URL",
@@ -1858,8 +1864,11 @@ async fn list_ducklake_tables(
         quote_identifier(metadata_schema),
         quote_identifier("ducklake_schema")
     );
-    let rows: Vec<(String, String)> =
-        sqlx::query_as(AssertSqlSafe(sql)).fetch_all(metadata_pg_pool).await.map_err(|source| {
+    let rows: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+        .persistent(false)
+        .fetch_all(metadata_pg_pool)
+        .await
+        .map_err(|source| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake table list query failed",
@@ -1907,8 +1916,11 @@ async fn load_replay_epoch_state(
         quote_identifier(metadata_schema),
         quote_identifier(REPLAY_EPOCHS_TABLE)
     );
-    let rows: Vec<(String, String, Option<String>)> =
-        sqlx::query_as(AssertSqlSafe(sql)).fetch_all(metadata_pg_pool).await.map_err(|source| {
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(sql))
+        .persistent(false)
+        .fetch_all(metadata_pg_pool)
+        .await
+        .map_err(|source| {
             etl_error!(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake replay epoch query failed",
@@ -1942,6 +1954,7 @@ async fn postgres_metadata_table_exists(
              WHERE table_schema = $1 AND table_name = $2
          );",
     )
+    .persistent(false)
     .bind(metadata_schema)
     .bind(table_name)
     .fetch_one(metadata_pg_pool)
@@ -1972,6 +1985,7 @@ async fn postgres_metadata_column_exists(
              where table_schema = $1 and table_name = $2 and column_name = $3
          )",
     )
+    .persistent(false)
     .bind(metadata_schema)
     .bind(table_name)
     .bind(column_name)
@@ -3094,6 +3108,7 @@ impl DuckLakePendingInlineSizeSampler {
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
+            .persistent(false)
             .bind(&table_name.schema_name)
             .bind(&table_name.table_name)
             .fetch_one(&self.pool)
@@ -3226,6 +3241,7 @@ async fn query_table_storage_metrics(
         _active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
+        .persistent(false)
         .bind(&table_name.schema_name)
         .bind(&table_name.table_name)
         .fetch_one(metadata_pg_pool)

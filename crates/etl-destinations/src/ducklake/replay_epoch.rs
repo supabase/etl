@@ -43,7 +43,7 @@ pub(super) async fn ensure_replay_epoch_table_exists(
            );"#
     );
 
-    sqlx::query(AssertSqlSafe(sql)).execute(pool).await.map_err(|source| {
+    sqlx::query(AssertSqlSafe(sql)).persistent(false).execute(pool).await.map_err(|source| {
         classified_error(
             ErrorKind::DestinationQueryFailed,
             "DuckLake replay epoch table creation failed",
@@ -56,7 +56,7 @@ pub(super) async fn ensure_replay_epoch_table_exists(
     // transition.
     let sql =
         format!("alter table {table_name} add column if not exists pending_replay_epoch text;");
-    sqlx::query(AssertSqlSafe(sql)).execute(pool).await.map_err(|source| {
+    sqlx::query(AssertSqlSafe(sql)).persistent(false).execute(pool).await.map_err(|source| {
         classified_error(
             ErrorKind::DestinationQueryFailed,
             "DuckLake pending replay epoch column creation failed",
@@ -78,6 +78,7 @@ pub(super) async fn read_table_replay_epoch(
     let table_id = table_name.id();
 
     let replay_epoch = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
+        .persistent(false)
         .bind(&table_id)
         .fetch_optional(pool)
         .await
@@ -118,6 +119,7 @@ pub(super) async fn begin_table_replay_epoch_transition(
     let new_pending_replay_epoch = new_replay_epoch();
 
     let pending_replay_epoch = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
+        .persistent(false)
         .bind(&table_id)
         .bind(LEGACY_REPLAY_EPOCH)
         .bind(&new_pending_replay_epoch)
@@ -156,6 +158,7 @@ pub(super) async fn complete_table_replay_epoch_transition(
     let table_id = table_name.id();
 
     let completed_replay_epoch = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
+        .persistent(false)
         .bind(&table_id)
         .bind(pending_replay_epoch)
         .fetch_optional(pool)

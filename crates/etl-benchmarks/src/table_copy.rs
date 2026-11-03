@@ -532,6 +532,7 @@ async fn run_ducklake_compaction(args: &RunArgs) -> Result<Option<DuckLakeCompac
         let max_tables_per_run = u32::try_from(args.table_ids.len()).unwrap_or(u32::MAX).max(1);
         let maintenance_config = DuckLakeMaintenanceConfig {
             catalog_url,
+            catalog_pooler_url: None,
             data_path,
             s3: None,
             metadata_schema: None,

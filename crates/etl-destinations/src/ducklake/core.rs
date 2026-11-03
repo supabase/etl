@@ -168,7 +168,13 @@ fn validate_ducklake_table_shape(schema: &ReplicatedTableSchema) -> EtlResult<()
 }
 
 /// Builds the shared Postgres metadata pool used by background samplers.
-fn build_ducklake_metadata_pg_pool(catalog_url: &Url) -> EtlResult<PgPool> {
+/// Catalog queries must use `.persistent(false)` because a transaction pooler
+/// can assign a different backend between queries.
+fn build_ducklake_metadata_pg_pool(
+    catalog_url: &Url,
+    catalog_pooler_url: Option<&Url>,
+) -> EtlResult<PgPool> {
+    let catalog_url = catalog_pooler_url.unwrap_or(catalog_url);
     let options = ducklake_catalog_metadata_connect_options(catalog_url).map_err(|source| {
         classified_error(
             ErrorKind::ConfigError,
@@ -601,8 +607,10 @@ pub struct DuckLakeDestination<S> {
 /// policies start with their existing defaults and can be configured without
 /// adding another constructor for each combination.
 pub struct DuckLakeDestinationBuilder<S> {
-    /// DuckLake PostgreSQL catalog URL.
+    /// Direct DuckLake PostgreSQL catalog URL used by DuckDB writers.
     catalog_url: Url,
+    /// Optional transaction-pooler URL used only for SQLx catalog queries.
+    catalog_pooler_url: Option<Url>,
     /// Parquet data path.
     data_path: Url,
     /// Number of warm DuckDB connections per pool.
@@ -635,6 +643,7 @@ impl<S> DuckLakeDestinationBuilder<S> {
     fn new(catalog_url: Url, data_path: Url, pool_size: u32, store: S) -> Self {
         Self {
             catalog_url,
+            catalog_pooler_url: None,
             data_path,
             pool_size,
             s3: None,
@@ -648,6 +657,13 @@ impl<S> DuckLakeDestinationBuilder<S> {
             external_maintenance: DuckLakeExternalMaintenanceConfig::default(),
             store,
         }
+    }
+
+    /// Routes SQLx catalog queries through a transaction pooler when supplied.
+    /// DuckDB writes continue to use the direct catalog URL.
+    pub fn catalog_pooler_url(mut self, catalog_pooler_url: Option<Url>) -> Self {
+        self.catalog_pooler_url = catalog_pooler_url;
+        self
     }
 
     /// Sets optional S3 credentials and endpoint configuration.
@@ -730,6 +746,7 @@ where
         );
         DuckLakeDestination::new_inner(
             self.catalog_url,
+            self.catalog_pooler_url,
             self.data_path,
             self.pool_size,
             self.s3,
@@ -1776,6 +1793,7 @@ where
     ) -> EtlResult<Self> {
         Self::new_inner(
             catalog_url,
+            None,
             data_path,
             pool_size,
             s3,
@@ -1844,6 +1862,7 @@ where
     #[expect(clippy::too_many_arguments)]
     async fn new_inner(
         catalog_url: Url,
+        catalog_pooler_url: Option<Url>,
         data_path: Url,
         pool_size: u32,
         s3: Option<S3Config>,
@@ -1991,7 +2010,8 @@ where
             }
         };
         let metadata_schema = Arc::<str>::from(metadata_schema);
-        let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog_url)?;
+        let metadata_pg_pool =
+            build_ducklake_metadata_pg_pool(&catalog_url, catalog_pooler_url.as_ref())?;
         ensure_replay_epoch_table_exists(&metadata_pg_pool, metadata_schema.as_ref()).await?;
         let table_creation_slots = Arc::new(Semaphore::new(1));
         let applied_batches_table_created = Arc::new(AtomicBool::new(false));
@@ -2962,6 +2982,7 @@ where
             quote_postgres_identifier("ducklake_schema")
         );
         let active: Vec<(String, String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+            .persistent(false)
             .bind(table_name.schema())
             .bind(table_name.table())
             .fetch_all(&self.metadata_pg_pool)
@@ -4183,6 +4204,7 @@ where
             quote_postgres_identifier("ducklake_schema")
         );
         let rows: Vec<(String, String)> = sqlx::query_as(AssertSqlSafe(sql))
+            .persistent(false)
             .fetch_all(&self.metadata_pg_pool)
             .await
             .map_err(|source| {
@@ -4447,6 +4469,31 @@ mod tests {
     };
 
     const POSTGRES_SCANNER_EXTENSION_FILE: &str = "postgres_scanner.duckdb_extension";
+
+    /// Pooler routing must preserve its independent identity and connection
+    /// options.
+    #[tokio::test]
+    async fn metadata_pool_prefers_pooler_and_preserves_direct_fallback() {
+        let direct = Url::parse("postgres://direct@direct.example.com:5432/catalog").unwrap();
+        let pooler =
+            Url::parse("postgres://reader.tenant@pooler.example.com:6543/catalog?sslmode=require")
+                .unwrap();
+        let pool = build_ducklake_metadata_pg_pool(&direct, Some(&pooler)).unwrap();
+        let options = pool.connect_options();
+        assert_eq!(options.get_host(), "pooler.example.com");
+        assert_eq!(options.get_port(), 6543);
+        assert_eq!(options.get_username(), "reader.tenant");
+        assert!(matches!(options.get_ssl_mode(), sqlx::postgres::PgSslMode::Require));
+        pool.close().await;
+
+        let pool = build_ducklake_metadata_pg_pool(&direct, None).unwrap();
+        assert_eq!(pool.connect_options().get_host(), "direct.example.com");
+        assert_eq!(pool.connect_options().get_port(), 5432);
+        pool.close().await;
+
+        let invalid = Url::parse("file:///tmp/catalog").unwrap();
+        assert!(build_ducklake_metadata_pg_pool(&direct, Some(&invalid)).is_err());
+    }
 
     /// Returns a unique table-copy batch ID for direct unit-test calls.
     fn test_table_copy_batch_id() -> TableCopyBatchId {
@@ -5805,6 +5852,7 @@ mod tests {
             let sql =
                 format!("select pending_replay_epoch from {epochs_table} where table_name = $1;");
             let pending_replay_epoch = sqlx::query_scalar::<_, Option<String>>(AssertSqlSafe(sql))
+                .persistent(false)
                 .bind(table_name.id())
                 .fetch_one(&destination.metadata_pg_pool)
                 .await
@@ -5856,8 +5904,8 @@ mod tests {
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
                 .expect("failed to resolve metadata schema");
-            let metadata_pg_pool =
-                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog, None)
+                .expect("failed to create metadata pool");
             let _rows_flushed =
                 flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
                     .expect("failed to materialize inlined rows for storage metrics test");
@@ -5927,8 +5975,8 @@ mod tests {
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
                 .expect("failed to resolve metadata schema");
-            let metadata_pg_pool =
-                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog, None)
+                .expect("failed to create metadata pool");
             let _rows_flushed =
                 flush_table_inlined_data(&conn, table_name.schema(), table_name.table())
                     .expect("failed to materialize inlined rows for catalog metrics test");
@@ -5999,8 +6047,8 @@ mod tests {
             let conn = open_lake_conn_when_table_visible(&catalog, &data, &table_name).await;
             let metadata_schema = resolve_ducklake_metadata_schema_blocking(&conn)
                 .expect("failed to resolve metadata schema");
-            let metadata_pg_pool =
-                build_ducklake_metadata_pg_pool(&catalog).expect("failed to create metadata pool");
+            let metadata_pg_pool = build_ducklake_metadata_pg_pool(&catalog, None)
+                .expect("failed to create metadata pool");
             let metrics = query_catalog_maintenance_metrics(&metadata_pg_pool, &metadata_schema)
                 .await
                 .expect("failed to query catalog maintenance metrics");

@@ -162,6 +162,37 @@ and set `ETL_DUCKDB_EXTENSION_ROOT` to the absolute path of
 `vendor/duckdb/extensions`. The stable release publishes extensions for
 `linux_amd64`, `linux_arm64`, `osx_amd64`, and `osx_arm64`.
 
+### Catalog connection pooling
+
+DuckLake destinations accept an optional secret `catalog_pooler_url`, also
+configurable as `APP_DESTINATION__DUCKLAKE__CATALOG_POOLER_URL`. The replicator
+and external maintenance runner use it for SQLx catalog queries, including
+metrics, maintenance discovery, and replay-epoch bookkeeping. These queries
+use unnamed statements so they work with Supavisor transaction pooling.
+When the URL is absent, they use `catalog_url`. A configured pooler failure
+does not silently fall back to the direct endpoint.
+
+DuckDB writes, initial-copy flushes, checkpoints, and file maintenance continue
+to use `catalog_url`. Source logical replication is also unchanged. Switching
+DuckDB writers requires separate validation of transaction, retry, and
+connection-limit behavior against the deployed DuckDB/Postgres extension and
+pooler versions.
+
+The ignored `transaction_pooler_catalog_roundtrip` integration test exercises
+post-commit retries, replay reset, restart, checkpoints, and maintenance. Point
+`TESTS_DUCKLAKE_DIRECT_URL` and `TESTS_DUCKLAKE_POOLER_URL` at the same disposable
+local catalog, then run:
+
+```bash
+cargo nextest run --locked -p etl-destinations --all-features --test main \
+  --run-ignored ignored-only -E 'test(transaction_pooler_catalog_roundtrip)'
+```
+
+The default test uses the direct writer and pooled SQLx metadata. To investigate
+writer compatibility separately, set `TESTS_DUCKLAKE_POOLED_WRITER=1`. Run with
+pooler capacity below the writer's connection demand as well as normal capacity;
+a passing unconstrained smoke test alone does not establish production safety.
+
 ## Migrations
 
 SQL is grouped by its owning subsystem:

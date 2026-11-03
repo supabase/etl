@@ -466,6 +466,7 @@ pub(super) async fn query_table_storage_metrics(
         active_delete_bytes,
         deleted_rows,
     ): (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(AssertSqlSafe(sql))
+        .persistent(false)
         .bind(table_name.schema())
         .bind(table_name.table())
         .fetch_one(metadata_pg_pool)
@@ -505,8 +506,11 @@ pub(super) async fn query_catalog_maintenance_metrics(
         files_scheduled_for_deletion_total,
         files_scheduled_for_deletion_bytes,
         oldest_scheduled_deletion_epoch_ms,
-    ): (i64, i64, Option<i64>, i64, i64, Option<i64>) =
-        sqlx::query_as(AssertSqlSafe(sql)).fetch_one(metadata_pg_pool).await.map_err(|source| {
+    ): (i64, i64, Option<i64>, i64, i64, Option<i64>) = sqlx::query_as(AssertSqlSafe(sql))
+        .persistent(false)
+        .fetch_one(metadata_pg_pool)
+        .await
+        .map_err(|source| {
             classified_error_with_detail(
                 ErrorKind::DestinationQueryFailed,
                 "DuckLake catalog maintenance metrics query failed",

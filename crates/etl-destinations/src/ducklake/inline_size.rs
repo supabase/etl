@@ -37,6 +37,7 @@ impl DuckLakePendingInlineSizeSampler {
     ) -> EtlResult<DuckLakePendingInlineDataSizes> {
         let sql = pending_inline_data_bytes_query(&self.metadata_schema);
         let inlined_bytes: i64 = sqlx::query_scalar(AssertSqlSafe(sql))
+            .persistent(false)
             .bind(table_name.schema())
             .bind(table_name.table())
             .fetch_one(&self.pool)
