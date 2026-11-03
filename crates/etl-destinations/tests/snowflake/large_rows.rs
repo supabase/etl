@@ -36,7 +36,7 @@ use etl_destinations::snowflake::{
     AuthManager, CdcMeta, CdcOperation, ChannelStatusResponse, Client, Destination, Error,
     HttpExchanger, InsertRowsResponse, OffsetToken, OpenChannelResponse, RestStreamClient, Result,
     RowBatch, RowBatchBuilder, SnowpipeError, SqlClient, StreamClient,
-    test_utils::{load_test_config, query_rows},
+    test_utils::{load_test_config, query_rows, random_text, structured_text},
 };
 use sha2::{Digest, Sha256};
 
@@ -236,39 +236,6 @@ fn insert_event(schema: &ReplicatedTableSchema, lsn: u64, ordinal: u64, row: Tab
         replicated_table_schema: schema.clone(),
         table_row: row,
     })
-}
-
-fn random_text(len: usize, seed: u64) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut state = seed;
-    (0..len)
-        .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ALPHABET[((state >> 33) % 62) as usize] as char
-        })
-        .collect()
-}
-
-/// 256-byte records, each with `random_len` random letters and fixed
-/// structure. 88 random letters compress about 3.8x, 40 about 6x.
-fn structured_text(len: usize, seed: u64, random_len: usize) -> String {
-    let random = random_text((len / 256 + 1) * random_len, seed);
-    let mut payload = String::with_capacity(len + 256);
-    for chunk in random.as_bytes().chunks_exact(random_len) {
-        let start = payload.len();
-        payload.push_str("{\"token\":\"");
-        payload.push_str(std::str::from_utf8(chunk).unwrap());
-        payload.push_str("\",\"padding\":\"");
-        while payload.len() < start + 253 {
-            payload.push('0');
-        }
-        payload.push_str("\"}\n");
-        if payload.len() >= len {
-            break;
-        }
-    }
-    payload.truncate(len);
-    payload
 }
 
 fn sha256_hex(payload: &str) -> String {

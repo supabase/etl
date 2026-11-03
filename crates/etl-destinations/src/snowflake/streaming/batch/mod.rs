@@ -309,6 +309,7 @@ mod tests {
         Error,
         encoding::{CdcMeta, CdcOperation, serialize_row},
         streaming::batch::limits::{BatchLimits, REQUEST_LIMIT_BYTES},
+        test_utils::{random_text, structured_text},
     };
 
     const REQUEST_LIMIT: usize = 64 * 1024;
@@ -349,39 +350,6 @@ mod tests {
             CdcMeta::new(CdcOperation::Insert, offset.as_ref()),
             &offset,
         )
-    }
-
-    fn random_text(len: usize, seed: u64) -> String {
-        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-        let mut state = seed;
-        (0..len)
-            .map(|_| {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                ALPHABET[((state >> 33) % 62) as usize] as char
-            })
-            .collect()
-    }
-
-    /// 256-byte records with 88 random letters each: realistic structured text
-    /// with a compression ratio near 4.
-    fn structured_text(len: usize, seed: u64) -> String {
-        let random = random_text((len / 256 + 1) * 88, seed);
-        let mut payload = String::with_capacity(len + 256);
-        for chunk in random.as_bytes().chunks_exact(88) {
-            let start = payload.len();
-            payload.push_str("{\"token\":\"");
-            payload.push_str(std::str::from_utf8(chunk).unwrap());
-            payload.push_str("\",\"padding\":\"");
-            while payload.len() < start + 253 {
-                payload.push('0');
-            }
-            payload.push_str("\"}\n");
-            if payload.len() >= len {
-                break;
-            }
-        }
-        payload.truncate(len);
-        payload
     }
 
     fn serialized_len(ordinal: u64, payload: &str) -> usize {
@@ -707,7 +675,7 @@ mod tests {
     #[test]
     fn production_limits_accept_a_thirteen_megabyte_compressible_row() {
         let mut builder = RowBatchBuilder::new(TableId::new(1));
-        let payload = structured_text(13_600_000, 1);
+        let payload = structured_text(13_600_000, 1, 88);
 
         assert!(push(&mut builder, 1, payload.clone()).unwrap().is_empty());
         let batches: Vec<RowBatch> = builder.finish().unwrap().into_iter().collect();
@@ -755,7 +723,7 @@ mod tests {
         let mut batches = Vec::new();
         for ordinal in 1..=32 {
             batches.extend(
-                push(&mut builder, ordinal, structured_text(1024 * 1024, ordinal)).unwrap(),
+                push(&mut builder, ordinal, structured_text(1024 * 1024, ordinal, 88)).unwrap(),
             );
         }
         batches.extend(builder.finish().unwrap());
