@@ -5,6 +5,7 @@ use etl::{
         BatchConfig, IntoConnectOptions, InvalidatedSlotBehavior, MemoryBackpressureConfig,
         PgConnectionConfig, PgConnectionOptions, PipelineConfig, TableSyncCopyConfig,
     },
+    error::ErrorKind,
     pipeline::Pipeline,
     postgres::migrations::{ETL_SCHEMA_LOCK_ID, run_source_migrations},
     store::{MemoryStore, PostgresStore, StateStore, WorkerType},
@@ -242,6 +243,53 @@ async fn postgres_store_startup_runs_only_postgres_store_migrations() {
     assert!(!source_helper_exists(&database).await);
     assert!(postgres_store_table_exists(&database).await);
     assert_eq!(applied_migration_versions(&database).await, postgres_store_migration_versions());
+}
+
+/// Invalid numeric identities fail before store initialization migrates the
+/// database.
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_store_rejects_pipeline_ids_outside_bigint_range_before_migrations() {
+    let database = spawn_unmigrated_database().await;
+    let max_pipeline_id = u64::try_from(i64::MAX).unwrap();
+
+    for pipeline_id in [max_pipeline_id + 1, u64::MAX] {
+        let error = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ConfigError);
+        assert_eq!(
+            error.description(),
+            Some("Postgres store pipeline identity exceeds the bigint range")
+        );
+    }
+
+    assert!(!postgres_store_table_exists(&database).await);
+}
+
+/// Numeric boundary identities retain matching keys across checkpoint writes
+/// and reloads.
+#[tokio::test(flavor = "multi_thread")]
+async fn postgres_store_accepts_pipeline_ids_at_bigint_boundaries() {
+    let database = spawn_unmigrated_database().await;
+
+    for pipeline_id in [0, u64::try_from(i64::MAX).unwrap()] {
+        let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+        store.upsert_replication_checkpoint(WorkerType::Apply, PgLsn::from(100)).await.unwrap();
+        drop(store);
+
+        let reloaded = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
+        assert_eq!(
+            reloaded.get_replication_checkpoint(WorkerType::Apply).await.unwrap(),
+            Some(PgLsn::from(100))
+        );
+    }
+
+    assert!(
+        query_bool(
+            &database,
+            "select count(*) = 2 and bool_and(pipeline_id_v2 = pipeline_id::text) from \
+             etl.replication_progress"
+        )
+        .await
+    );
 }
 
 /// Backfilled keys preserve shared checkpoints and require dual-writing
