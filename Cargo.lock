@@ -3963,6 +3963,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6672,16 +6681,19 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "etl-config",
  "k8s-openapi",
  "kube",
  "pg_escape",
+ "quick-xml",
  "reqwest",
  "schemars",
  "secrecy",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "toml",
