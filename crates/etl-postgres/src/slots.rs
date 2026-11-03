@@ -17,9 +17,16 @@ pub const APPLY_WORKER_PREFIX: &str = "supabase_etl_apply";
 /// Prefix used for table-sync-worker replication slots.
 pub const TABLE_SYNC_WORKER_PREFIX: &str = "supabase_etl_table_sync";
 
-/// Room for the pipeline ID after both separators and a ten-digit table OID.
-const MAX_PIPELINE_ID_LENGTH: usize =
-    MAX_SLOT_NAME_LENGTH - TABLE_SYNC_WORKER_PREFIX.len() - 2 - 10;
+/// Combined length of the two underscores surrounding the pipeline ID.
+const TABLE_SYNC_SLOT_SEPARATOR_LENGTH: usize = 2;
+/// Maximum decimal length of a PostgreSQL table OID (`u32::MAX`).
+const MAX_TABLE_OID_LENGTH: usize = 10;
+
+/// Room for the pipeline ID after the slot prefix, separators, and table OID.
+const MAX_PIPELINE_ID_LENGTH: usize = MAX_SLOT_NAME_LENGTH
+    - TABLE_SYNC_WORKER_PREFIX.len()
+    - TABLE_SYNC_SLOT_SEPARATOR_LENGTH
+    - MAX_TABLE_OID_LENGTH;
 
 /// A pipeline ID cannot be represented in every generated replication slot
 /// name.
