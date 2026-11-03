@@ -27,7 +27,7 @@ use std::{
     error::Error as _,
     sync::{
         Arc,
-        atomic::{AtomicI64, Ordering},
+        atomic::{AtomicI64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -76,7 +76,10 @@ use etl_destinations::clickhouse::{
 use etl_telemetry::tracing::init_test_tracing;
 use parking_lot::Mutex;
 use proptest::{option, prelude::*};
-use tokio::sync::oneshot;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt},
+    sync::oneshot,
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -1137,6 +1140,90 @@ async fn validate_connectivity_fails_against_unreachable_clickhouse() {
     // WHEN: connectivity is validated.
     // THEN: it fails.
     assert!(client.validate_connectivity().await.is_err());
+}
+
+/// Builds a destination behind a proxy that answers its first `failures`
+/// connections with `response` and forwards later ones to the test
+/// ClickHouse. Also returns the number of connections the proxy accepted.
+async fn destination_behind_flaky_proxy(
+    failures: usize,
+    response: &'static str,
+) -> (ClickHouseDestination<MemoryStore>, Arc<AtomicUsize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let upstream = get_clickhouse_url().socket_addrs(|| None).unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let accepted = Arc::clone(&connections);
+    tokio::spawn(async move {
+        loop {
+            let (client, _) = listener.accept().await.unwrap();
+            let fail = accepted.fetch_add(1, Ordering::SeqCst) < failures;
+            let upstream = upstream.clone();
+            tokio::spawn(async move {
+                let mut client = tokio::io::BufReader::new(client);
+                if fail {
+                    // Answer after the request head, as a proxy does: hyper
+                    // rejects a response that arrives before its request.
+                    // Then drain until the client closes, so a reset cannot
+                    // replace the response.
+                    let mut line = String::new();
+                    while client.read_line(&mut line).await? > 2 {
+                        line.clear();
+                    }
+                    client.get_mut().write_all(response.as_bytes()).await?;
+                    tokio::io::copy(&mut client, &mut tokio::io::sink()).await?;
+                } else {
+                    let mut server = tokio::net::TcpStream::connect(&upstream[..]).await?;
+                    tokio::io::copy_bidirectional(client.get_mut(), &mut server).await?;
+                }
+                std::io::Result::Ok(())
+            });
+        }
+    });
+
+    let destination = ClickHouseDestination::new(
+        proxy_url,
+        get_clickhouse_user(),
+        get_clickhouse_password(),
+        "default",
+        ClickHouseInserterConfig::default(),
+        ClickHouseClientConfig::default(),
+        MemoryStore::new(),
+    )
+    .unwrap();
+    (destination, connections)
+}
+
+/// The startup engine check retries a proxy's own 5xx error body and then
+/// succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_support_check_retries_proxy_server_errors() {
+    // GIVEN: a proxy that answers the first probe with its own 502 body.
+    let bad_gateway =
+        "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 11\r\nConnection: close\r\n\r\nBad Gateway";
+    let (destination, connections) = destination_behind_flaky_proxy(1, bad_gateway).await;
+
+    // WHEN: the engine support check runs.
+    destination.validate_engine_support().await.unwrap();
+
+    // THEN: it succeeded on the second attempt.
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+}
+
+/// The startup engine check does not retry a proxy's client error body.
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_support_check_fails_fast_on_proxy_client_errors() {
+    // GIVEN: a proxy that rejects every probe with its own 403 body.
+    let forbidden =
+        "HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nConnection: close\r\n\r\nForbidden";
+    let (destination, connections) = destination_behind_flaky_proxy(usize::MAX, forbidden).await;
+
+    // WHEN: the engine support check runs.
+    let error = destination.validate_engine_support().await.unwrap_err();
+
+    // THEN: it failed permanently after one attempt.
+    assert_eq!(error.retryability(), Retryability::Permanent);
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
 }
 
 /// Creates a synthetic composite snapshot ID for tests.

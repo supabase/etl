@@ -43,10 +43,25 @@ use crate::{
         },
     },
     recovery::{ensure_destination_schema_matches_metadata, ensure_relation_schema_transition},
+    retry::{RetryPolicy, retry_with_backoff},
     table_name::try_stringify_table_name,
 };
 
 const MAX_ERROR_COLUMN_NAMES: usize = 12;
+
+/// Retry policy for the startup server version probe.
+///
+/// An idle or briefly unreachable destination can miss one probe budget at
+/// startup. Four retries with 2, 4, 8, and 16 second delays absorb that
+/// without hiding a destination that stays down: with each of the five
+/// attempts allowed the full connectivity check budget, a destination that
+/// never answers fails startup after up to about 90 seconds. Only retryable
+/// errors are retried.
+const SERVER_VERSION_PROBE_RETRY_POLICY: RetryPolicy = RetryPolicy {
+    max_retries: 4,
+    initial_delay: Duration::from_secs(2),
+    max_delay: Duration::from_secs(16),
+};
 
 /// Postgres CDC operation kind. Written to the `cdc_operation` column as the
 /// matching uppercase string (`"INSERT"`, `"UPDATE"`, `"DELETE"`) so downstream
@@ -1028,8 +1043,27 @@ where
 
     /// Probes the server version and rejects unsupported engine/version pairs.
     /// Currently the only gate: ReplacingMergeTree requires CH >= 23.5.
+    ///
+    /// Retryable probe failures, such as timeouts and proxy 5xx responses, are
+    /// retried with bounded exponential backoff before startup fails.
     pub async fn validate_engine_support(&self) -> EtlResult<()> {
-        let server_version = self.writer.client.server_version().await?;
+        let server_version = retry_with_backoff(
+            SERVER_VERSION_PROBE_RETRY_POLICY,
+            |_| false,
+            |delay| delay,
+            |attempt| {
+                warn!(
+                    error = %attempt.error,
+                    retry_index = attempt.retry_index,
+                    max_retries = attempt.max_retries,
+                    delay_ms = attempt.sleep_delay.as_millis(),
+                    "clickhouse server version probe failed, retrying"
+                );
+            },
+            || self.writer.client.server_version(),
+        )
+        .await
+        .map_err(|failure| failure.last_error)?;
         ensure_engine_supported(self.writer.inserter_config.engine, server_version)
     }
 
