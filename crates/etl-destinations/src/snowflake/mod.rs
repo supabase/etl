@@ -15,7 +15,7 @@ mod view;
 #[cfg(test)]
 mod test_server;
 
-#[cfg(feature = "test-utils")]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 use etl::schema::ColumnNameMapping;

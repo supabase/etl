@@ -14,6 +14,7 @@ use etl::{
 };
 use etl_destinations::snowflake::{
     CdcMeta, CdcOperation, Error as SnowflakeError, OffsetToken, RowBatch, RowBatchBuilder,
+    test_utils::{random_text, structured_text},
 };
 use serde::Serialize;
 
@@ -119,40 +120,6 @@ impl Workload {
     }
 }
 
-/// Generates deterministic ASCII text without external randomness or
-/// credentials.
-fn random_text(len: usize, seed: u64) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut state = seed;
-    (0..len)
-        .map(|_| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ALPHABET[((state >> 33) % 62) as usize] as char
-        })
-        .collect()
-}
-
-/// Builds 256-byte records containing 88 pseudo-random letters plus padding.
-fn structured_text(len: usize, seed: u64) -> String {
-    let random = random_text((len / 256 + 1) * 88, seed);
-    let mut payload = String::with_capacity(len + 256);
-    for chunk in random.as_bytes().chunks_exact(88) {
-        let start = payload.len();
-        payload.push_str("{\"token\":\"");
-        payload.push_str(std::str::from_utf8(chunk).unwrap());
-        payload.push_str("\",\"padding\":\"");
-        while payload.len() < start + 253 {
-            payload.push('0');
-        }
-        payload.push_str("\"}\n");
-        if payload.len() >= len {
-            break;
-        }
-    }
-    payload.truncate(len);
-    payload
-}
-
 /// Prebuilt rows borrowed by the timed loop, as in the production copy path.
 struct PreparedRows {
     /// Ordinary rows cycled by input index.
@@ -183,12 +150,12 @@ impl PreparedRows {
     ) -> Result<Vec<TableRow>> {
         let count = rows.min(MAX_PAYLOAD_VARIANT_BYTES / row_bytes).max(1);
         let shared = matches!(shape, PayloadShape::NearDuplicate)
-            .then(|| structured_text(row_bytes, seed * 1_000_003));
+            .then(|| structured_text(row_bytes, seed * 1_000_003, 88));
         (0..count)
             .map(|i| {
                 let variant_seed = seed * 1_000_003 + u64::try_from(i)?;
                 let payload = match shape {
-                    PayloadShape::Structured => structured_text(row_bytes, variant_seed),
+                    PayloadShape::Structured => structured_text(row_bytes, variant_seed, 88),
                     PayloadShape::NearDuplicate => {
                         let mut payload = shared.as_ref().unwrap().clone();
                         payload.replace_range(..16, &format!("{i:016x}"));
