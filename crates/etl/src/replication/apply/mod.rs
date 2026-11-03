@@ -936,7 +936,7 @@ where
         );
 
         let worker_type = worker_context.worker_type();
-        let slot_name: String = worker_type.build_etl_replication_slot(pipeline_id).try_into()?;
+        let slot_name: String = worker_type.build_etl_replication_slot(&pipeline_id).try_into()?;
 
         // No events or background tasks exist until the replication handshake
         // completes, so stalled protocol setup can be cancelled as one unit.
@@ -4281,7 +4281,7 @@ mod apply_worker {
         info!(table_id = table_id.0, "creating table sync worker");
 
         TableSyncWorker::new(
-            ctx.pipeline_id,
+            ctx.pipeline_id.clone(),
             Arc::clone(&ctx.config),
             table_id,
             ctx.store.clone(),

@@ -30,7 +30,8 @@ pub struct StoredTableStateRow {
     /// Durable state row identifier.
     pub id: i64,
     /// Pipeline that owns the table state.
-    pub pipeline_id: i64,
+    #[sqlx(rename = "pipeline_id")]
+    pub legacy_pipeline_id: i64,
     /// Source table identifier.
     pub table_id: SqlxTableId,
     /// Stored lifecycle state.
@@ -55,7 +56,7 @@ impl StoredTableStateRow {
 /// Retrieves the current table state records of all tables of a pipeline.
 pub async fn get_table_state_rows<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
 ) -> sqlx::Result<Vec<StoredTableStateRow>>
 where
     E: PgExecutor<'c>,
@@ -67,7 +68,7 @@ where
         where pipeline_id = $1 and is_current = true
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .fetch_all(executor)
     .await?;
 
@@ -80,7 +81,8 @@ where
 /// history chaining.
 pub async fn update_table_state_raw<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    pipeline_id: &str,
+    legacy_pipeline_id: i64,
     table_id: TableId,
     state: StoredTableStateType,
     metadata: serde_json::Value,
@@ -98,14 +100,16 @@ where
             where pipeline_id = $1 and table_id = $2 and is_current = true
             returning id
         )
-        insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
-        values ($1, $2, $3, $4, (select id from mark_old), true)
+        insert into etl.replication_state
+            (pipeline_id, table_id, state, metadata, prev, is_current, pipeline_id_v2)
+        values ($1, $2, $3, $4, (select id from mark_old), true, $5)
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(state)
     .bind(metadata)
+    .bind(pipeline_id)
     .execute(executor)
     .await?;
 
@@ -118,7 +122,7 @@ where
 /// returning the restored state if successful.
 pub async fn rollback_table_state<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
     table_id: TableId,
 ) -> sqlx::Result<Option<StoredTableStateRow>>
 where
@@ -141,7 +145,7 @@ where
         returning id, pipeline_id, table_id, state, metadata, prev, is_current
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .fetch_optional(executor)
     .await
@@ -155,7 +159,8 @@ where
 /// table states as one atomic operation.
 pub async fn replace_table_state_raw(
     txn: &mut Transaction<'_, Postgres>,
-    pipeline_id: i64,
+    pipeline_id: &str,
+    legacy_pipeline_id: i64,
     table_id: TableId,
     state: StoredTableStateType,
     metadata: serde_json::Value,
@@ -166,22 +171,24 @@ pub async fn replace_table_state_raw(
         where pipeline_id = $1 and table_id = $2
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .execute(&mut **txn)
     .await?;
 
     let row = sqlx::query_as(
         r#"
-        insert into etl.replication_state (pipeline_id, table_id, state, metadata, prev, is_current)
-        values ($1, $2, $3, $4, null, true)
+        insert into etl.replication_state
+            (pipeline_id, table_id, state, metadata, prev, is_current, pipeline_id_v2)
+        values ($1, $2, $3, $4, null, true, $5)
         returning id, pipeline_id, table_id, state, metadata, prev, is_current
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .bind(state)
     .bind(metadata)
+    .bind(pipeline_id)
     .fetch_one(&mut **txn)
     .await?;
 
@@ -192,7 +199,7 @@ pub async fn replace_table_state_raw(
 ///
 /// Removes all table state records including historical entries for the
 /// specified pipeline. Used during pipeline cleanup.
-pub async fn delete_table_states<'c, E>(executor: E, pipeline_id: i64) -> sqlx::Result<u64>
+pub async fn delete_table_states<'c, E>(executor: E, legacy_pipeline_id: i64) -> sqlx::Result<u64>
 where
     E: PgExecutor<'c>,
 {
@@ -202,7 +209,7 @@ where
         where pipeline_id = $1
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .execute(executor)
     .await?;
 
@@ -212,7 +219,7 @@ where
 /// Deletes all table state entries for a specific table in a pipeline.
 pub async fn delete_table_state<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
     table_id: TableId,
 ) -> sqlx::Result<u64>
 where
@@ -224,7 +231,7 @@ where
         where pipeline_id = $1 and table_id = $2
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .execute(executor)
     .await?;
@@ -239,7 +246,7 @@ where
 /// tables in a pipeline, such as cleaning up replication slots.
 pub async fn get_pipeline_table_ids<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
 ) -> sqlx::Result<Vec<TableId>>
 where
     E: PgExecutor<'c>,
@@ -251,7 +258,7 @@ where
         where pipeline_id = $1 and is_current = true
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .fetch_all(executor)
     .await?;
 

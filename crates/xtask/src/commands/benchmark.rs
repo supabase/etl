@@ -151,7 +151,7 @@ impl BenchmarkArgs {
 
         let tpcc_threads =
             self.tpcc_threads.unwrap_or_else(|| recommended_threads(self.warehouses));
-        let pipeline_id_base = benchmark_pipeline_id_base()?;
+        let legacy_pipeline_id_base = benchmark_legacy_pipeline_id_base()?;
 
         print_configuration(&[
             ("Database", format!("{}@{}:{}", self.database, self.host, self.port)),
@@ -160,7 +160,7 @@ impl BenchmarkArgs {
             ("Streaming workload", "tpcc".to_owned()),
             ("Measured samples", self.samples.to_string()),
             ("Warmup samples", self.warmup_samples.to_string()),
-            ("Pipeline id base", pipeline_id_base.to_string()),
+            ("Pipeline id base", legacy_pipeline_id_base.to_string()),
             ("Destination", self.destination.as_arg().to_owned()),
             ("Memory backpressure", memory_backpressure_label(self.enable_memory_backpressure)),
             ("Memory budget ratio", format_decimal(f64::from(self.memory_budget_ratio), 2)),
@@ -204,7 +204,7 @@ impl BenchmarkArgs {
                 &selected_tables,
                 &table_ids,
                 expected_row_count,
-                pipeline_id_base,
+                legacy_pipeline_id_base,
                 self.output_dir.join("table_copy.json"),
             )?);
             print_done("Table copy", "finished");
@@ -216,7 +216,7 @@ impl BenchmarkArgs {
             print_phase("Table streaming", "preparing benchmark");
             table_streaming_report = Some(self.run_table_streaming_samples(
                 tpcc_threads,
-                pipeline_id_base,
+                legacy_pipeline_id_base,
                 self.output_dir.join("table_streaming.json"),
             )?);
             print_done("Table streaming", "finished");
@@ -471,14 +471,15 @@ impl BenchmarkArgs {
         selected_tables: &[String],
         table_ids: &str,
         expected_row_count: u64,
-        pipeline_id_base: u64,
+        legacy_pipeline_id_base: u64,
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
         let total_samples = self.total_sample_count();
         for sample_idx in 0..total_samples {
-            let pipeline_id = sample_pipeline_id(pipeline_id_base, 0, sample_idx)?;
-            let publication_name = format!("bench_pub_{pipeline_id}");
+            let legacy_pipeline_id =
+                sample_legacy_pipeline_id(legacy_pipeline_id_base, 0, sample_idx)?;
+            let publication_name = format!("bench_pub_{legacy_pipeline_id}");
             let sample_report_path =
                 self.sample_report_path("table_copy", sample_idx.saturating_add(1));
             let sample_label = self.sample_label(sample_idx);
@@ -490,7 +491,7 @@ impl BenchmarkArgs {
                 &publication_name,
                 table_ids,
                 expected_row_count,
-                pipeline_id,
+                legacy_pipeline_id,
                 sample_report_path.clone(),
             )?;
             self.drop_publication(&publication_name)?;
@@ -521,7 +522,7 @@ impl BenchmarkArgs {
         publication_name: &str,
         table_ids: &str,
         expected_row_count: u64,
-        pipeline_id: u64,
+        legacy_pipeline_id: u64,
         report_path: PathBuf,
     ) -> Result<Value> {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
@@ -532,7 +533,7 @@ impl BenchmarkArgs {
             "--report-path".to_owned(),
             report_path.display().to_string(),
             "--pipeline-id".to_owned(),
-            pipeline_id.to_string(),
+            legacy_pipeline_id.to_string(),
             "--publication-name".to_owned(),
             publication_name.to_owned(),
             "--table-ids".to_owned(),
@@ -547,15 +548,16 @@ impl BenchmarkArgs {
     fn run_table_streaming_samples(
         &self,
         tpcc_threads: u16,
-        pipeline_id_base: u64,
+        legacy_pipeline_id_base: u64,
         report_path: PathBuf,
     ) -> Result<Value> {
         let selected_tables = self.validated_tpcc_tables()?;
         let mut measured_reports = Vec::with_capacity(usize::from(self.samples));
         let total_samples = self.total_sample_count();
         for sample_idx in 0..total_samples {
-            let pipeline_id = sample_pipeline_id(pipeline_id_base, 1, sample_idx)?;
-            let publication_name = format!("bench_streaming_pub_{pipeline_id}");
+            let legacy_pipeline_id =
+                sample_legacy_pipeline_id(legacy_pipeline_id_base, 1, sample_idx)?;
+            let publication_name = format!("bench_streaming_pub_{legacy_pipeline_id}");
             let sample_report_path =
                 self.sample_report_path("table_streaming", sample_idx.saturating_add(1));
             let sample_label = self.sample_label(sample_idx);
@@ -564,7 +566,7 @@ impl BenchmarkArgs {
             let report = self.run_table_streaming(
                 &publication_name,
                 tpcc_threads,
-                pipeline_id,
+                legacy_pipeline_id,
                 &selected_tables,
                 sample_report_path.clone(),
             )?;
@@ -595,7 +597,7 @@ impl BenchmarkArgs {
         &self,
         publication_name: &str,
         tpcc_threads: u16,
-        pipeline_id: u64,
+        legacy_pipeline_id: u64,
         selected_tables: &[String],
         report_path: PathBuf,
     ) -> Result<Value> {
@@ -607,7 +609,7 @@ impl BenchmarkArgs {
             "--report-path".to_owned(),
             report_path.display().to_string(),
             "--pipeline-id".to_owned(),
-            pipeline_id.to_string(),
+            legacy_pipeline_id.to_string(),
             "--publication-name".to_owned(),
             publication_name.to_owned(),
             "--tpcc-warehouses".to_owned(),
@@ -808,7 +810,7 @@ fn memory_backpressure_label(enabled: bool) -> String {
     }
 }
 
-fn benchmark_pipeline_id_base() -> Result<u64> {
+fn benchmark_legacy_pipeline_id_base() -> Result<u64> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .context("system clock is before Unix epoch")?
@@ -834,7 +836,7 @@ fn check_command(command: &str) -> Result<()> {
     bail!("required command '{command}' was not found")
 }
 
-fn sample_pipeline_id(base: u64, benchmark_offset: u64, sample_idx: usize) -> Result<u64> {
+fn sample_legacy_pipeline_id(base: u64, benchmark_offset: u64, sample_idx: usize) -> Result<u64> {
     let sample_offset = u64::try_from(sample_idx)
         .context("benchmark sample index does not fit in pipeline id")?
         .checked_mul(2)

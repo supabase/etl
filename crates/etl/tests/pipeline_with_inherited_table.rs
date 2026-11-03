@@ -101,7 +101,7 @@ async fn assert_inheritance_copy_scope(
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
-        rand::random(),
+        rand::random::<u64>(),
         "inheritance_test".to_owned(),
         store.clone(),
         destination.clone(),

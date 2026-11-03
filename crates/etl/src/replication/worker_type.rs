@@ -2,7 +2,7 @@ use std::fmt::{Display, Formatter};
 
 use etl_postgres::slots::EtlReplicationSlot;
 
-use crate::schema::TableId;
+use crate::{pipeline::PipelineId, schema::TableId};
 
 /// Type of worker driving replication.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -18,11 +18,14 @@ pub enum WorkerType {
 
 impl WorkerType {
     /// Builds an [`EtlReplicationSlot`] for this worker type.
-    pub(crate) fn build_etl_replication_slot(&self, pipeline_id: u64) -> EtlReplicationSlot {
+    pub(crate) fn build_etl_replication_slot(
+        &self,
+        pipeline_id: &PipelineId,
+    ) -> EtlReplicationSlot {
         match self {
-            Self::Apply => EtlReplicationSlot::Apply { pipeline_id },
+            Self::Apply => EtlReplicationSlot::for_apply_worker(pipeline_id),
             Self::TableSync { table_id } => {
-                EtlReplicationSlot::TableSync { pipeline_id, table_id: *table_id }
+                EtlReplicationSlot::for_table_sync_worker(pipeline_id, *table_id)
             }
         }
     }

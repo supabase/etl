@@ -1,7 +1,6 @@
 use etl::{
     data::{Cell, OldTableRow, PartialTableRow, TableRow, UpdatedTableRow},
     event::{DeleteEvent, Event, EventType, UpdateEvent},
-    pipeline::PipelineId,
     test_utils::{
         database::{spawn_source_database, test_table_name},
         event::EventCondition,
@@ -231,7 +230,7 @@ async fn run_replica_identity_scenario(
         .await
         .unwrap();
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,

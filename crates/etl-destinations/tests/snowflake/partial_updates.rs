@@ -326,7 +326,7 @@ async fn postgres_external_toast(full_identity: bool) {
         .to_uppercase();
     with_table_cleanup(&sql, &[&physical], || async {
         let store = NotifyingStore::new();
-        let pipeline_id = rand::random();
+        let pipeline_id = rand::random::<u64>();
         let raw_destination =
             Destination::new(Client::new(Arc::clone(&auth), pipeline_id), store.clone());
         let polling = raw_destination.clone();

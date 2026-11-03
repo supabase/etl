@@ -19,3 +19,16 @@ coordinated.
 
 Use [GitHub issues](https://github.com/supabase/etl/issues) for non-sensitive
 bugs and feature requests.
+
+## Security Maintainers
+
+The security maintainers for this repository are:
+
+| Name                 | GitHub                                           |
+|----------------------|--------------------------------------------------|
+| Jordan McQueen       | [@jmqd](https://github.com/jmqd)                 |
+| Riccardo Busetti     | [@iambriccardo](https://github.com/iambriccardo) |
+| Victor Farazdagi     | [@farazdagi](https://github.com/farazdagi)       |
+| Alexander Alexandrov | [@aalexandrov](https://github.com/aalexandrov)   |
+| Benjamin Coenen      | [@bnjjj](https://github.com/bnjjj)               |
+| Mrinal Paliwal       | [@mnpw](https://github.com/mnpw)                 |

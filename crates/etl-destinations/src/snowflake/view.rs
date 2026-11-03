@@ -6,7 +6,7 @@
 //! without adding a second durable schema state machine.
 
 use etl::{
-    pipeline::PipelineId,
+    pipeline::LegacyPipelineId,
     schema::{ReplicatedTableSchema, TableId},
 };
 use sha2::{Digest, Sha256};
@@ -33,13 +33,18 @@ pub(super) struct CompanionView {
     /// offline.
     pending: String,
     /// Exact owner prefix; the remaining comment is the definition fingerprint.
+    /// The pipeline ID remains a JSON number to recognize existing views.
     owner: String,
 }
 
 impl CompanionView {
     /// Derives names from recorded destination ownership, never a new source
     /// name.
-    pub(super) fn new(pipeline: PipelineId, table_id: TableId, table: &str) -> Self {
+    pub(super) fn new(
+        legacy_pipeline_id: LegacyPipelineId,
+        table_id: TableId,
+        table: &str,
+    ) -> Self {
         // Snowflake identifiers allow 255 characters. Reserve room for the
         // temporary suffix too; the fallback prefix cannot be a raw table name.
         let name = if table.chars().count() + "_CURRENT_PENDING".len() > 255 {
@@ -52,7 +57,7 @@ impl CompanionView {
             name,
             owner: format!(
                 "supabase-etl:view:v1:{}:",
-                serde_json::json!([pipeline, table_id.into_inner(), table])
+                serde_json::json!([legacy_pipeline_id, table_id.into_inner(), table])
             ),
         }
     }
@@ -238,6 +243,8 @@ mod tests {
 
     #[test]
     fn companion_names_do_not_collide_with_encoded_source_names() {
+        let view = CompanionView::new(150, TableId::new(42), "PUBLIC_USERS");
+        assert_eq!(view.owner, "supabase-etl:view:v1:[150,42,\"PUBLIC_USERS\"]:");
         let long = format!("a{}b", "_".repeat(61));
         let parts = [
             "public",

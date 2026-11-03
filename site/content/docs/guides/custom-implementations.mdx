@@ -581,7 +581,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let destination = HttpDestination::new("https://your-endpoint.example.com".to_string())?;
 
     let config = PipelineConfig {
-        id: 1,
+        id: 1.into(),
         publication_name: "my_publication".to_string(),
         pg_connection: pg_config,
         store_pg_connection: None,
