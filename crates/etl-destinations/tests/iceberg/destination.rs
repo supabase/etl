@@ -4,7 +4,6 @@ use etl::{
     data::{Cell, TableRow},
     destination::{Destination, DestinationTableMetadata, WriteEventsDurability},
     event::{Event, EventType, InsertEvent, TruncateEvent},
-    pipeline::PipelineId,
     schema::{ColumnSchema, PgLsn, ReplicatedTableSchema, TableId, TableName, TableSchema, Type},
     store::{MemoryStore, SchemaStore, StateStore},
     test_utils::{
@@ -359,7 +358,7 @@ async fn run_table_copy_test(destination_namespace: DestinationNamespace) {
     .await;
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
@@ -509,7 +508,7 @@ async fn run_cdc_streaming_test(destination_namespace: DestinationNamespace) {
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();
@@ -796,7 +795,7 @@ async fn run_cdc_streaming_with_truncate_test(destination_namespace: Destination
         .unwrap();
 
     let store = NotifyingStore::new();
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
 
     let lakekeeper_client = LakekeeperClient::new(LAKEKEEPER_URL);
     let (warehouse_name, warehouse_id) = lakekeeper_client.create_warehouse().await.unwrap();

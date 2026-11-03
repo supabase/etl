@@ -244,7 +244,8 @@ define_type_mappings! {
 /// same transaction to replace a schema version atomically.
 pub async fn upsert_table_schema<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    pipeline_id: &str,
+    legacy_pipeline_id: i64,
     table_schema: &TableSchema,
 ) -> Result<i64, sqlx::Error>
 where
@@ -253,10 +254,12 @@ where
     sqlx::query_scalar(
         r#"
         insert into etl.table_schemas
-            (pipeline_id, table_id, schema_name, table_name, snapshot_id, primary_key_deferrable)
-        values ($1, $2, $3, $4, $5, $6)
+            (pipeline_id, table_id, schema_name, table_name, snapshot_id, primary_key_deferrable,
+             pipeline_id_v2)
+        values ($1, $2, $3, $4, $5, $6, $7)
         on conflict (pipeline_id, table_id, snapshot_id)
         do update set
+            pipeline_id_v2 = excluded.pipeline_id_v2,
             schema_name = excluded.schema_name,
             table_name = excluded.table_name,
             primary_key_deferrable = excluded.primary_key_deferrable,
@@ -264,12 +267,13 @@ where
         returning id
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(i64::from(table_schema.id.into_inner()))
     .bind(&table_schema.name.schema)
     .bind(&table_schema.name.name)
     .bind(table_schema.snapshot_id.to_string())
     .bind(table_schema.primary_key_deferrable)
+    .bind(pipeline_id)
     .fetch_one(executor)
     .await
 }
@@ -334,7 +338,7 @@ where
 /// lookups. Obsolete versions are removed by durable-checkpoint pruning.
 pub async fn load_table_schemas<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
 ) -> Result<Vec<TableSchema>, sqlx::Error>
 where
     E: PgExecutor<'c>,
@@ -361,7 +365,7 @@ where
         order by ts.id, tc.ordinal_position
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .fetch_all(executor)
     .await?;
 
@@ -403,7 +407,7 @@ where
 /// records.
 pub async fn delete_table_schemas_for_all_tables<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
 ) -> Result<u64, sqlx::Error>
 where
     E: PgExecutor<'c>,
@@ -414,7 +418,7 @@ where
         where pipeline_id = $1
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .execute(executor)
     .await?;
 
@@ -426,7 +430,7 @@ where
 /// Also cascades to `etl.table_columns` via FK.
 pub async fn delete_table_schema_for_table<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
     table_id: TableId,
 ) -> Result<u64, sqlx::Error>
 where
@@ -438,7 +442,7 @@ where
         where pipeline_id = $1 and table_id = $2
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(SqlxTableId(table_id.into_inner()))
     .execute(executor)
     .await?;
@@ -461,7 +465,7 @@ where
 /// order.
 pub async fn delete_obsolete_table_schema_versions<'c, E>(
     executor: E,
-    pipeline_id: i64,
+    legacy_pipeline_id: i64,
     retention_snapshot_ids: &BTreeMap<TableId, SnapshotId>,
 ) -> Result<u64, sqlx::Error>
 where
@@ -518,7 +522,7 @@ where
           ) < (rs.commit_lsn, rs.message_lsn)
         "#,
     )
-    .bind(pipeline_id)
+    .bind(legacy_pipeline_id)
     .bind(table_ids)
     .bind(retention_snapshot_id_values)
     .execute(executor)

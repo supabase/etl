@@ -3,7 +3,6 @@
 use etl::{
     error::ErrorKind,
     event::EventType,
-    pipeline::PipelineId,
     test_utils::{
         database::TEST_DATABASE_SCHEMA,
         event::{EventCondition, group_events_by_type_and_table_id},
@@ -46,7 +45,7 @@ async fn pipeline_multigres_failover() {
     let table_id = users_schema.id;
     insert_users_data(&mut multigres, &users_schema.name, 1..=1).await;
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let apply_slot_name: String =
         EtlReplicationSlot::for_apply_worker(pipeline_id).try_into().unwrap();
 

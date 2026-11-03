@@ -862,7 +862,7 @@ where
             if !table_rows.is_empty() {
                 histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
                 let append_request = self.client.create_append_request(
-                    self.pipeline_id,
+                    self.pipeline_id.clone(),
                     request_index,
                     &self.dataset_id,
                     physical_table_id,
@@ -1299,7 +1299,7 @@ where
                     histogram!(ETL_BQ_APPEND_BATCHES_BATCH_SIZE).record(table_rows.len() as f64);
 
                     let append_request = self.client.create_append_request(
-                        self.pipeline_id,
+                        self.pipeline_id.clone(),
                         request_index,
                         &self.dataset_id,
                         physical_table_id,
@@ -2238,7 +2238,7 @@ mod tests {
             BigQueryClient::from_test_client(client),
             "test_dataset".to_owned(),
             None,
-            1,
+            1.into(),
             MemoryStore::new(),
         )
     }
@@ -2265,7 +2265,7 @@ mod tests {
                 ColumnSchema::new("name".to_owned(), Type::TEXT, -1, 2, true),
             ],
         ));
-        let replication_mask = etl::schema::ReplicationMask::all(&table_schema);
+        let replication_mask = ReplicationMask::all(&table_schema);
         let identity_mask = match identity_type {
             IdentityType::Full => IdentityMask::from_bytes(vec![1, 1]),
             IdentityType::PrimaryKey => IdentityMask::from_bytes(vec![1, 0]),

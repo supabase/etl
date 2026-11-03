@@ -4,7 +4,6 @@ use etl::{
     data::{Cell, TableRow},
     error::ErrorKind,
     event::{Event, EventType},
-    pipeline::PipelineId,
     schema::{TableId, TableName},
     test_utils::{
         database::{spawn_source_database, test_table_name},
@@ -109,7 +108,7 @@ async fn assert_selective_partition_initial_copy_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline_with_table_sync_copy_config(
         &database.config,
         pipeline_id,
@@ -224,7 +223,7 @@ async fn assert_nested_partition_pipeline_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -349,7 +348,7 @@ async fn assert_nested_partition_pipeline_row_filter_case(
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = PipelineBuilder::new(
         database.config.clone(),
         pipeline_id,
@@ -410,7 +409,7 @@ async fn assert_partition_identity_row_filter(publish_via_partition_root: bool) 
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(store.clone()));
     let mut pipeline = create_pipeline(
         &database.config,
-        random(),
+        random::<u64>(),
         "filtered_partition_pub".to_owned(),
         store.clone(),
         destination.clone(),
@@ -517,7 +516,7 @@ async fn partitioned_table_copy_replicates_existing_data() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -629,7 +628,7 @@ async fn partitioned_table_copy_and_streams_new_data_from_new_partition() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -723,7 +722,7 @@ async fn new_partition_with_leaf_identity_is_discovered_after_restart() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -846,7 +845,7 @@ async fn partition_drop_does_not_emit_delete_or_truncate() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -941,7 +940,7 @@ async fn parent_table_truncate_does_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1010,7 +1009,7 @@ async fn child_table_truncate_does_not_emit_truncate_event() {
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1094,7 +1093,7 @@ async fn partition_detach_with_explicit_publication_does_not_replicate_detached_
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1204,7 +1203,7 @@ async fn partition_detach_with_all_tables_publication_does_not_replicate_detache
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1325,7 +1324,7 @@ async fn partition_detach_with_all_tables_publication_does_replicate_detached_in
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1443,7 +1442,7 @@ async fn partition_detach_with_schema_publication_does_not_replicate_detached_in
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
@@ -1578,7 +1577,7 @@ async fn partition_detach_with_schema_publication_does_replicate_detached_insert
     let state_store = NotifyingStore::new();
     let destination = TestDestinationWrapper::wrap(MemoryDestination::new(state_store.clone()));
 
-    let pipeline_id: PipelineId = random();
+    let pipeline_id = random::<u64>();
     let mut pipeline = create_pipeline(
         &database.config,
         pipeline_id,
