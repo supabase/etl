@@ -9,18 +9,20 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
+use secrecy::SecretString;
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::github::GitHubClient;
 
 const DEFAULT_ARTIFACT_NAME: &str = "benchmark-results";
 const DEFAULT_CURRENT_DIR: &str = "target/bench-results";
 const DEFAULT_WORKFLOW: &str = "benchmark.yml";
 /// Run manifest uploaded beside the reports; not itself a report.
 const MANIFEST_FILE_NAME: &str = "manifest.json";
-const GITHUB_API_BASE: &str = "https://api.github.com";
-const GITHUB_API_VERSION: &str = "2022-11-28";
-const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_USER_AGENT: &str = "supabase-etl-benchmark-compare";
+/// Largest benchmark artifact archive downloaded as a baseline.
+const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 /// Workflow runs requested per listing page.
 const RUNS_PER_PAGE: usize = 30;
 /// Listing pages searched for a baseline before giving up.
@@ -84,7 +86,8 @@ const TABLE_STREAMING_METRICS: &[Metric] = &[
         policy: RegressionPolicy::LowerIsBetter { max_increase_pct: 20.0 },
     },
 ];
-const CONFIG_KEYS: &[&str] = &[
+/// Report fields that describe benchmark configuration rather than results.
+pub(crate) const CONFIG_KEYS: &[&str] = &[
     "destination",
     "workload",
     "table_count",
@@ -190,19 +193,12 @@ struct CodeCompare {
 }
 
 struct GitHubContext {
-    token: String,
     repo: String,
     current_run_id: u64,
     ref_name: String,
     /// Event that triggered the current run; baselines must share it.
     event_name: String,
     current_sha: Option<String>,
-}
-
-struct GitHubClient {
-    client: reqwest::Client,
-    token: String,
-    repo: String,
 }
 
 /// Creates a temporary directory for downloading and extracting previous
@@ -266,7 +262,7 @@ impl BenchmarkCompareArgs {
             return Ok(Some(PreviousSource { reports, run: None, code_compare: None }));
         }
 
-        let Some(context) = self.github_context() else {
+        let Some((context, token)) = self.github_context() else {
             eprintln!(
                 "GitHub Actions environment is incomplete; pass --previous-dir for local \
                  comparisons."
@@ -274,7 +270,7 @@ impl BenchmarkCompareArgs {
             return Ok(None);
         };
 
-        let client = GitHubClient::new(context.token.clone(), context.repo.clone())?;
+        let client = GitHubClient::new(token, context.repo.clone(), GITHUB_USER_AGENT)?;
         let Some((reports, run, code_compare)) =
             self.load_github_previous_reports(&client, &context).await?
         else {
@@ -284,14 +280,14 @@ impl BenchmarkCompareArgs {
         Ok(Some(PreviousSource { reports, run: Some(run), code_compare }))
     }
 
-    fn github_context(&self) -> Option<GitHubContext> {
-        let token = env::var("GITHUB_TOKEN").ok()?;
+    fn github_context(&self) -> Option<(GitHubContext, SecretString)> {
+        let token = SecretString::from(env::var("GITHUB_TOKEN").ok()?);
         let repo = env::var("GITHUB_REPOSITORY").ok()?;
         let current_run_id = env::var("GITHUB_RUN_ID").ok()?.parse().ok()?;
         let ref_name = self.ref_name.clone().or_else(|| env::var("GITHUB_REF_NAME").ok())?;
         let event_name = env::var("GITHUB_EVENT_NAME").ok()?;
         let current_sha = env::var("GITHUB_SHA").ok();
-        Some(GitHubContext { token, repo, current_run_id, ref_name, event_name, current_sha })
+        Some((GitHubContext { repo, current_run_id, ref_name, event_name, current_sha }, token))
     }
 
     async fn load_github_previous_reports(
@@ -300,9 +296,9 @@ impl BenchmarkCompareArgs {
         context: &GitHubContext,
     ) -> Result<Option<(Reports, WorkflowRun, Option<CodeCompare>)>> {
         for page in 1..=MAX_RUN_PAGES {
-            let runs = client
-                .workflow_runs(&self.workflow, &context.ref_name, &context.event_name, page)
-                .await?;
+            let runs =
+                workflow_runs(client, &self.workflow, &context.ref_name, &context.event_name, page)
+                    .await?;
             let last_page = runs.len() < RUNS_PER_PAGE;
             for run in runs {
                 // One failed destination job fails the whole run, so the run
@@ -312,7 +308,7 @@ impl BenchmarkCompareArgs {
                     continue;
                 }
 
-                let Some(artifact) = client.find_artifact(run.id, &self.artifact_name).await?
+                let Some(artifact) = find_artifact(client, run.id, &self.artifact_name).await?
                 else {
                     continue;
                 };
@@ -322,7 +318,7 @@ impl BenchmarkCompareArgs {
                 let extract_dir = temp_dir.path().join("extract");
                 fs::create_dir_all(&extract_dir)
                     .with_context(|| format!("failed to create {}", extract_dir.display()))?;
-                client.download_artifact(&artifact.archive_download_url, &archive_path).await?;
+                download_artifact(client, &artifact.archive_download_url, &archive_path).await?;
                 unzip_archive(&archive_path, &extract_dir)?;
                 let reports = load_reports(&extract_dir).with_context(|| {
                     format!(
@@ -352,89 +348,68 @@ impl BenchmarkCompareArgs {
     }
 }
 
-impl GitHubClient {
-    fn new(token: String, repo: String) -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .user_agent(GITHUB_USER_AGENT)
-            .build()
-            .context("failed to build GitHub HTTP client")?;
-        Ok(Self { client, token, repo })
-    }
+/// Lists one page of completed runs on `ref_name` triggered by `event_name`,
+/// newest first.
+///
+/// Scheduled runs compare only with scheduled runs, so a manual run with a
+/// larger runner or custom inputs never becomes the nightly baseline.
+async fn workflow_runs(
+    client: &GitHubClient,
+    workflow: &str,
+    ref_name: &str,
+    event_name: &str,
+    page: usize,
+) -> Result<Vec<WorkflowRun>> {
+    let path = format!("actions/workflows/{}/runs", encode_path_segment(workflow));
+    let query = [
+        ("branch", ref_name.to_owned()),
+        ("event", event_name.to_owned()),
+        ("status", "completed".to_owned()),
+        ("per_page", RUNS_PER_PAGE.to_string()),
+        ("page", page.to_string()),
+    ];
+    let payload: WorkflowRunsResponse = client
+        .get(&path, &query)
+        .await
+        .context("failed to list benchmark workflow runs")?
+        .error_for_status("GitHub workflow run listing")?
+        .json()
+        .context("failed to parse GitHub workflow run listing")?;
+    Ok(payload.workflow_runs)
+}
 
-    /// Lists one page of completed runs on `ref_name` triggered by
-    /// `event_name`, newest first.
-    ///
-    /// Scheduled runs compare only with scheduled runs, so a manual run with a
-    /// larger runner or custom inputs never becomes the nightly baseline.
-    async fn workflow_runs(
-        &self,
-        workflow: &str,
-        ref_name: &str,
-        event_name: &str,
-        page: usize,
-    ) -> Result<Vec<WorkflowRun>> {
-        let url = format!(
-            "{GITHUB_API_BASE}/repos/{}/actions/workflows/{}/runs",
-            self.repo,
-            encode_path_segment(workflow)
-        );
-        let response = self
-            .client
-            .get(url)
-            .query(&[("branch", ref_name), ("event", event_name), ("status", "completed")])
-            .query(&[("per_page", RUNS_PER_PAGE), ("page", page)])
-            .bearer_auth(&self.token)
-            .header("Accept", GITHUB_ACCEPT)
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .send()
-            .await
-            .context("failed to list benchmark workflow runs")?;
-        let response = response.error_for_status().context("GitHub workflow run listing failed")?;
-        let payload: WorkflowRunsResponse =
-            response.json().await.context("failed to parse GitHub workflow run listing")?;
-        Ok(payload.workflow_runs)
-    }
+/// Returns the unexpired artifact named `artifact_name` on run `run_id`.
+async fn find_artifact(
+    client: &GitHubClient,
+    run_id: u64,
+    artifact_name: &str,
+) -> Result<Option<Artifact>> {
+    let path = format!("actions/runs/{run_id}/artifacts");
+    let payload: ArtifactsResponse = client
+        .get(&path, &[("per_page", "100".to_owned())])
+        .await
+        .with_context(|| format!("failed to list artifacts for workflow run {run_id}"))?
+        .error_for_status(&format!("GitHub artifact listing for run {run_id}"))?
+        .json()
+        .with_context(|| format!("failed to parse artifacts for workflow run {run_id}"))?;
+    Ok(payload
+        .artifacts
+        .into_iter()
+        .find(|artifact| artifact.name == artifact_name && !artifact.expired))
+}
 
-    async fn find_artifact(&self, run_id: u64, artifact_name: &str) -> Result<Option<Artifact>> {
-        let url = format!("{GITHUB_API_BASE}/repos/{}/actions/runs/{run_id}/artifacts", self.repo);
-        let response = self
-            .client
-            .get(url)
-            .query(&[("per_page", "100")])
-            .bearer_auth(&self.token)
-            .header("Accept", GITHUB_ACCEPT)
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .send()
-            .await
-            .with_context(|| format!("failed to list artifacts for workflow run {run_id}"))?;
-        let response = response
-            .error_for_status()
-            .with_context(|| format!("GitHub artifact listing failed for run {run_id}"))?;
-        let payload: ArtifactsResponse = response
-            .json()
-            .await
-            .with_context(|| format!("failed to parse artifacts for workflow run {run_id}"))?;
-        Ok(payload
-            .artifacts
-            .into_iter()
-            .find(|artifact| artifact.name == artifact_name && !artifact.expired))
+/// Downloads an artifact archive to `output_path`.
+async fn download_artifact(client: &GitHubClient, url: &str, output_path: &Path) -> Result<()> {
+    let response = client
+        .get_url(url, MAX_ARTIFACT_BYTES)
+        .await
+        .context("failed to download benchmark artifact")?
+        .error_for_status("GitHub artifact download")?;
+    if response.truncated() {
+        bail!("benchmark artifact exceeds {MAX_ARTIFACT_BYTES} bytes");
     }
-
-    async fn download_artifact(&self, url: &str, output_path: &Path) -> Result<()> {
-        let response = self
-            .client
-            .get(url)
-            .bearer_auth(&self.token)
-            .header("Accept", GITHUB_ACCEPT)
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-            .send()
-            .await
-            .context("failed to download benchmark artifact")?;
-        let response = response.error_for_status().context("GitHub artifact download failed")?;
-        let bytes = response.bytes().await.context("failed to read benchmark artifact")?;
-        fs::write(output_path, bytes)
-            .with_context(|| format!("failed to write {}", output_path.display()))
-    }
+    fs::write(output_path, response.into_body())
+        .with_context(|| format!("failed to write {}", output_path.display()))
 }
 
 fn load_reports(dir: &Path) -> Result<Reports> {

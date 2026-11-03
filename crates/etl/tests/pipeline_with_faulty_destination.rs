@@ -29,8 +29,8 @@ use rand::random;
 use tokio_postgres::{Client, types::PgLsn};
 
 use crate::support::cdc_workload::{
-    AfterFaultStep, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload, WorkloadCoverage,
-    WorkloadDestination, WorkloadHistory, WorkloadRunner, WorkloadTables,
+    AfterFaultStep, DeliveryOrder, TxPhase, WORKLOAD_PUBLICATION, WORKLOAD_TIMEOUT, Workload,
+    WorkloadCoverage, WorkloadDestination, WorkloadHistory, WorkloadRunner, WorkloadTables,
     assert_workload_converged, create_workload_tables, read_source_rows, wait_for_notification,
     workloads,
 };
@@ -152,7 +152,7 @@ async fn run_roulette_workload(
         WriteResponseTiming::ReleaseThenWaitForReconnect => {
             let hold = destination.hold_next(FaultyOp::WriteEvents).await;
             let delivered = runner
-                .execute(case.workload.fault_tx(), TxPhase::Fault, Some(destination))
+                .execute_notified(case.workload.fault_tx(), TxPhase::Fault, destination)
                 .await?
                 .expect("the fault transaction always commits");
             tokio::time::timeout(WORKLOAD_TIMEOUT, hold.wait_reached())
@@ -245,6 +245,7 @@ async fn run_walsender_roulette_case(
         &source,
         &history,
         |_| 1..=2,
+        DeliveryOrder::Source,
         coverage,
     )
 }
