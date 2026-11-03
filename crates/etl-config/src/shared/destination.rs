@@ -570,8 +570,10 @@ pub enum DestinationConfig {
     Ducklake {
         /// Direct DuckLake catalog URL used by DuckDB writers.
         catalog_url: SecretString,
-        /// Optional transaction-pooler URL for SQLx catalog metadata queries.
-        /// Falls back to `catalog_url` when absent.
+        /// Optional transaction-pooler URL for background SQLx metadata
+        /// queries. Falls back to `catalog_url` when absent.
+        /// Destination replay bookkeeping and Postgres maintenance
+        /// coordination always use `catalog_url`.
         #[serde(default)]
         catalog_pooler_url: Option<SecretString>,
         /// DuckLake data path.

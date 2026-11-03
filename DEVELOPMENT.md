@@ -166,26 +166,36 @@ and set `ETL_DUCKDB_EXTENSION_ROOT` to the absolute path of
 
 DuckLake destinations accept an optional secret `catalog_pooler_url`, also
 configurable as `APP_DESTINATION__DUCKLAKE__CATALOG_POOLER_URL`. The replicator
-and external maintenance runner use it for SQLx catalog queries, including
-metrics, maintenance discovery, and replay-epoch bookkeeping. These queries
-use unnamed statements inside explicit transactions. SQLx prepares and executes
-in separate protocol exchanges; the transaction pins both to the same backend.
-Disabling statement persistence alone does not prevent backend reassignment.
-When the URL is absent, they use `catalog_url`. A configured pooler failure
-does not silently fall back to the direct endpoint.
+and external maintenance runner use it for SQLx background catalog queries,
+including metrics and maintenance discovery. These queries use unnamed
+statements inside explicit transactions. SQLx prepares and executes in separate
+protocol exchanges; the transaction pins both to the same backend. Disabling
+statement persistence alone does not prevent backend reassignment. A configured
+pooler failure does not silently fall back to the direct endpoint.
+
+Destination replay-epoch reads and transitions keep using `catalog_url`, with
+autocommit and normal prepared-statement caching. This avoids adding explicit
+transaction round trips to copy batches and streaming replay checks. Each
+transition remains atomic as a single SQL statement. Postgres maintenance
+coordination shares this direct SQLx pool because its migrations and prepared
+queries rely on session state. The direct pool is capped at one connection per
+destination. Background metadata uses its own one-connection pool when a pooler
+is configured; otherwise it shares the direct pool and its connection limit.
+The maintenance runner's replay-state discovery remains pooled.
 
 DuckDB writes, initial-copy flushes, checkpoints, and file maintenance continue
-to use `catalog_url`. Postgres maintenance coordination also uses a separate
-direct pool because its migrations and prepared queries rely on session state.
-Source logical replication is also unchanged. Switching
+to use `catalog_url`. Source logical replication is also unchanged. Switching
 DuckDB writers requires separate validation of transaction, retry, and
 connection-limit behavior against the deployed DuckDB/Postgres extension and
 pooler versions.
 
-The regular `catalog_metadata_pins_backend_and_keeps_coordination_direct` test
+The regular
+`catalog_metadata_pins_backend_and_keeps_replay_and_coordination_direct` test
 uses a protocol guard that rejects named statements and preparation outside an
-explicit transaction. It exercises post-commit retries, replay reset, restart,
-checkpoints, maintenance, and direct coordination migrations.
+explicit transaction. It verifies that destination replay bookkeeping bypasses
+the pooler while background reads and maintenance discovery reach it. It also
+exercises post-commit retries, replay reset, restart, checkpoints, and direct
+coordination migrations.
 
 The ignored `transaction_pooler_catalog_roundtrip` runs the same checks against
 a real transaction pooler. Point

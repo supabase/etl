@@ -1,3 +1,7 @@
+//! Replay bookkeeping uses a direct catalog connection. Each transition is a
+//! single atomic SQL statement, so autocommit and prepared-statement caching
+//! avoid explicit transaction round trips in copy and streaming replay checks.
+
 use etl::{
     error::{ErrorKind, EtlResult},
     etl_error,
@@ -43,15 +47,7 @@ pub(super) async fn ensure_replay_epoch_table_exists(
            );"#
     );
 
-    async {
-        let mut transaction = pool.begin().await?;
-        let result =
-            sqlx::query(AssertSqlSafe(sql)).persistent(false).execute(&mut *transaction).await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
+    sqlx::query(AssertSqlSafe(sql)).execute(pool).await.map_err(|source| {
         classified_error(
             ErrorKind::DestinationQueryFailed,
             "DuckLake replay epoch table creation failed",
@@ -64,15 +60,7 @@ pub(super) async fn ensure_replay_epoch_table_exists(
     // transition.
     let sql =
         format!("alter table {table_name} add column if not exists pending_replay_epoch text;");
-    async {
-        let mut transaction = pool.begin().await?;
-        let result =
-            sqlx::query(AssertSqlSafe(sql)).persistent(false).execute(&mut *transaction).await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
+    sqlx::query(AssertSqlSafe(sql)).execute(pool).await.map_err(|source| {
         classified_error(
             ErrorKind::DestinationQueryFailed,
             "DuckLake pending replay epoch column creation failed",
@@ -93,26 +81,19 @@ pub(super) async fn read_table_replay_epoch(
     let sql = format!("select replay_epoch from {epochs_table} where table_name = $1;");
     let table_id = table_name.id();
 
-    let replay_epoch = async {
-        let mut transaction = pool.begin().await?;
-        let result = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
-            .persistent(false)
-            .bind(&table_id)
-            .fetch_optional(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        classified_error_with_detail(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake replay epoch lookup failed",
-            format!("table={table_id}"),
-            source,
-        )
-    })?
-    .unwrap_or_else(|| LEGACY_REPLAY_EPOCH.to_owned());
+    let replay_epoch = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
+        .bind(&table_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake replay epoch lookup failed",
+                format!("table={table_id}"),
+                source,
+            )
+        })?
+        .unwrap_or_else(|| LEGACY_REPLAY_EPOCH.to_owned());
 
     Ok(replay_epoch)
 }
@@ -140,27 +121,20 @@ pub(super) async fn begin_table_replay_epoch_transition(
     let table_id = table_name.id();
     let new_pending_replay_epoch = new_replay_epoch();
 
-    let pending_replay_epoch = async {
-        let mut transaction = pool.begin().await?;
-        let result = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
-            .persistent(false)
-            .bind(&table_id)
-            .bind(LEGACY_REPLAY_EPOCH)
-            .bind(&new_pending_replay_epoch)
-            .fetch_one(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        classified_error_with_detail(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake replay epoch transition failed to begin",
-            format!("table={table_id}"),
-            source,
-        )
-    })?;
+    let pending_replay_epoch = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
+        .bind(&table_id)
+        .bind(LEGACY_REPLAY_EPOCH)
+        .bind(&new_pending_replay_epoch)
+        .fetch_one(pool)
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake replay epoch transition failed to begin",
+                format!("table={table_id}"),
+                source,
+            )
+        })?;
 
     Ok(pending_replay_epoch)
 }
@@ -185,26 +159,19 @@ pub(super) async fn complete_table_replay_epoch_transition(
     );
     let table_id = table_name.id();
 
-    let completed_replay_epoch = async {
-        let mut transaction = pool.begin().await?;
-        let result = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
-            .persistent(false)
-            .bind(&table_id)
-            .bind(pending_replay_epoch)
-            .fetch_optional(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        Ok::<_, sqlx::Error>(result)
-    }
-    .await
-    .map_err(|source| {
-        classified_error_with_detail(
-            ErrorKind::DestinationQueryFailed,
-            "DuckLake replay epoch transition failed to complete",
-            format!("table={table_id}"),
-            source,
-        )
-    })?;
+    let completed_replay_epoch = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql))
+        .bind(&table_id)
+        .bind(pending_replay_epoch)
+        .fetch_optional(pool)
+        .await
+        .map_err(|source| {
+            classified_error_with_detail(
+                ErrorKind::DestinationQueryFailed,
+                "DuckLake replay epoch transition failed to complete",
+                format!("table={table_id}"),
+                source,
+            )
+        })?;
 
     if completed_replay_epoch.is_none() {
         return Err(etl_error!(

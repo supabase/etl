@@ -5620,7 +5620,7 @@ async fn transaction_pooler_catalog_roundtrip() {
 /// Covers transaction-pooler protocol safety in the regular Postgres suite.
 #[cfg(feature = "test-utils")]
 #[tokio::test(flavor = "multi_thread")]
-async fn catalog_metadata_pins_backend_and_keeps_coordination_direct() {
+async fn catalog_metadata_pins_backend_and_keeps_replay_and_coordination_direct() {
     let lake = create_test_lake("catalog_pooler_protocol").await;
     catalog_pooler_roundtrip(
         lake.catalog_url.clone(),
@@ -5630,8 +5630,8 @@ async fn catalog_metadata_pins_backend_and_keeps_coordination_direct() {
     .await;
 }
 
-/// Exercises both metadata and coordination routing through a strict protocol
-/// guard.
+/// Exercises pooled metadata and direct replay/coordination routing through a
+/// strict protocol guard.
 #[cfg(feature = "test-utils")]
 async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url) {
     let _permit = acquire_ducklake_test_hook_guard().await;
@@ -5719,9 +5719,20 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url) {
         )
         .await
         .unwrap();
+    // Background catalog reads must actually use the pooler, while the copy
+    // retry and replay reset above must keep their epoch queries direct.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while guard.prepared_queries() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
     destination.shutdown().await.unwrap();
     drop(destination);
     reset_ducklake_test_hooks();
+    assert_eq!(guard.replay_epoch_queries(), 0, "replay bookkeeping must bypass the pooler");
+    let metadata_queries_before_maintenance = guard.prepared_queries();
 
     let writer_config = DuckLakeWriterConfig::default();
     let target_file_size = writer_config.target_file_size().to_owned();
@@ -5752,6 +5763,11 @@ async fn catalog_pooler_roundtrip(direct: Url, writer: Url, pooler: Url) {
     })
     .await
     .unwrap();
+
+    assert!(
+        guard.prepared_queries() > metadata_queries_before_maintenance,
+        "maintenance discovery must use the pooler"
+    );
 
     let restarted = DuckLakeDestination::builder(writer, data.clone(), 1, store)
         .catalog_pooler_url(Some(pooler))

@@ -16,6 +16,14 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use url::Url;
 
+/// Protocol observations shared by all guarded connections.
+#[derive(Default)]
+struct ProtocolStats {
+    violations: AtomicUsize,
+    preparations: AtomicUsize,
+    replay_epoch_queries: AtomicUsize,
+}
+
 /// Rejects named statements and preparation that releases a backend before
 /// bind.
 ///
@@ -24,7 +32,7 @@ use url::Url;
 /// plaintext.
 pub struct TransactionPoolerGuard {
     url: Url,
-    violations: Arc<AtomicUsize>,
+    stats: Arc<ProtocolStats>,
     stop: CancellationToken,
     task: AbortOnDropHandle<()>,
 }
@@ -38,8 +46,8 @@ impl TransactionPoolerGuard {
         url.set_port(Some(listener.local_addr().unwrap().port())).unwrap();
         url.set_query(Some("sslmode=disable"));
         let upstream = (upstream.host_str().unwrap().to_owned(), upstream.port().unwrap_or(5432));
-        let violations = Arc::new(AtomicUsize::new(0));
-        let task_violations = Arc::clone(&violations);
+        let stats = Arc::new(ProtocolStats::default());
+        let task_stats = Arc::clone(&stats);
         let stop = CancellationToken::new();
         let task_stop = stop.clone();
         let task = AbortOnDropHandle::new(tokio::spawn(async move {
@@ -51,10 +59,10 @@ impl TransactionPoolerGuard {
                     accepted = listener.accept() => {
                         let (client, _) = accepted.unwrap();
                         let upstream = upstream.clone();
-                        let violations = Arc::clone(&task_violations);
+                        let stats = Arc::clone(&task_stats);
                         clients.spawn(async move {
                             let server = TcpStream::connect(upstream).await.unwrap();
-                            if let Err(error) = guard_connection(client, server, violations).await {
+                            if let Err(error) = guard_connection(client, server, stats).await {
                                 assert!(matches!(error.kind(), io::ErrorKind::UnexpectedEof
                                     | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe));
                             }
@@ -71,7 +79,7 @@ impl TransactionPoolerGuard {
                 }
             }
         }));
-        Self { url, violations, stop, task }
+        Self { url, stats, stop, task }
     }
 
     /// Returns the guarded endpoint, preserving the upstream's database
@@ -80,11 +88,21 @@ impl TransactionPoolerGuard {
         &self.url
     }
 
+    /// Returns the number of statements prepared through the pooled endpoint.
+    pub fn prepared_queries(&self) -> usize {
+        self.stats.preparations.load(Ordering::Relaxed)
+    }
+
+    /// Returns the number of pooled statements accessing replay-epoch state.
+    pub fn replay_epoch_queries(&self) -> usize {
+        self.stats.replay_epoch_queries.load(Ordering::Relaxed)
+    }
+
     /// Joins all connections and verifies that no query required session state.
     pub async fn shutdown(self) {
         self.stop.cancel();
         self.task.await.unwrap();
-        assert_eq!(self.violations.load(Ordering::Relaxed), 0);
+        assert_eq!(self.stats.violations.load(Ordering::Relaxed), 0);
     }
 }
 
@@ -106,12 +124,22 @@ async fn forward_messages(
     mut reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin,
     from_server: bool,
-    violations: Arc<AtomicUsize>,
+    stats: Arc<ProtocolStats>,
 ) -> io::Result<()> {
     let mut prepared = false;
     loop {
         let tag = reader.read_u8().await?;
         let body = read_body(&mut reader).await?;
+        if !from_server && tag == b'P' {
+            stats.preparations.fetch_add(1, Ordering::Relaxed);
+            let mut fields = body[4..].split(|byte| *byte == 0);
+            let _statement_name = fields.next();
+            if let Some(sql) = fields.next()
+                && String::from_utf8_lossy(sql).contains("__etl_replay_epochs")
+            {
+                stats.replay_epoch_queries.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         if from_server && tag == b'1' {
             prepared = true;
         }
@@ -119,7 +147,7 @@ async fn forward_messages(
             from_server && tag == b'Z' && prepared && body.get(4) == Some(&b'I');
         let named_statement = !from_server && tag == b'P' && body.get(4) != Some(&0);
         if released_preparation || named_statement {
-            violations.fetch_add(1, Ordering::Relaxed);
+            stats.violations.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         if from_server && tag == b'Z' {
@@ -134,7 +162,7 @@ async fn forward_messages(
 async fn guard_connection(
     mut client: TcpStream,
     mut server: TcpStream,
-    violations: Arc<AtomicUsize>,
+    stats: Arc<ProtocolStats>,
 ) -> io::Result<()> {
     client.set_nodelay(true)?;
     server.set_nodelay(true)?;
@@ -143,8 +171,8 @@ async fn guard_connection(
     let (client_read, client_write) = client.split();
     let (server_read, server_write) = server.split();
     tokio::select! {
-        result = forward_messages(client_read, server_write, false, Arc::clone(&violations)) => result,
+        result = forward_messages(client_read, server_write, false, Arc::clone(&stats)) => result,
 
-        result = forward_messages(server_read, client_write, true, violations) => result,
+        result = forward_messages(server_read, client_write, true, stats) => result,
     }
 }
