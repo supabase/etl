@@ -726,7 +726,7 @@ mod tests {
                     }
                 },
                 "pipeline": {
-                    "id": "1",
+                    "id": "03dg2o5teb2eucxr9ggh3uie6",
                     "publication_name": "seed_pub",
                     "pg_connection": {
                         "host": "127.0.0.1",
