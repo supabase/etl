@@ -2012,7 +2012,9 @@ where
         let metadata_schema = Arc::<str>::from(metadata_schema);
         let metadata_pg_pool =
             build_ducklake_metadata_pg_pool(&catalog_url, catalog_pooler_url.as_ref())?;
-        ensure_replay_epoch_table_exists(&metadata_pg_pool, metadata_schema.as_ref()).await?;
+        // Keep SQLx transaction state out of the enclosing startup future.
+        Box::pin(ensure_replay_epoch_table_exists(&metadata_pg_pool, metadata_schema.as_ref()))
+            .await?;
         let table_creation_slots = Arc::new(Semaphore::new(1));
         let applied_batches_table_created = Arc::new(AtomicBool::new(false));
         let streaming_progress_table_created = Arc::new(AtomicBool::new(false));
