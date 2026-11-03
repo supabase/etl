@@ -88,12 +88,16 @@ cargo nextest run --locked -p etl --all-features --test main -E 'test(migrations
 
 ## Pipeline identity backfill
 
-Deploy the dual-writing release (#1180) to all writers sharing a source database
+Deploy the dual-writing release to all writers sharing a source database
 before deploying the backfill migration. Store initialization applies it to all
 four state tables, including historical rows and other pipelines in that database.
 It fills only missing string IDs and requires them to match the existing numeric
-IDs. Conflicts abort the entire transaction; existing identities are not replaced.
+IDs. Negative stored IDs or conflicting string IDs abort the entire transaction;
+existing identities are not replaced.
 
 The migration adds non-null checks and matching string-key indexes while retaining
-numeric-key reads and indexes. Index creation locks metadata writes until commit.
+numeric-key reads and indexes. The transaction locks metadata tables before
+updating rows; active pipelines wait for commit before their metadata operations
+continue. If that wait exceeds a writer's query timeout, the writer may need to
+restart after the migration commits.
 Rollback removes the new constraints and indexes but preserves populated strings.

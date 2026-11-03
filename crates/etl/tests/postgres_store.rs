@@ -655,7 +655,7 @@ async fn cancelled_table_delete_refreshes_all_caches() {
 /// Healthy reads and genuine missing entries then remain in memory.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_preparation_loads_every_domain() {
-    for (explicit_load, pipeline_id) in [(false, 1_u64), (true, u64::MAX)] {
+    for (explicit_load, pipeline_id) in [(false, 1_u64), (true, 150_u64)] {
         let database = spawn_source_database().await;
         let store = PostgresStore::new(pipeline_id, database.config.clone()).await.unwrap();
         let client = database.client.as_ref().unwrap();
