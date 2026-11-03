@@ -36,7 +36,10 @@ pub(crate) struct RetryAttempt<'a, E> {
     pub(crate) base_delay: Duration,
     /// Final delay that will be slept.
     #[cfg_attr(
-        all(not(test), not(any(feature = "bigquery", feature = "snowflake"))),
+        all(
+            not(test),
+            not(any(feature = "bigquery", feature = "clickhouse", feature = "snowflake"))
+        ),
         expect(dead_code, reason = "DuckLake logs its own retry delay")
     )]
     pub(crate) sleep_delay: Duration,
