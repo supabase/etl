@@ -175,14 +175,13 @@ struct DuckLakeArgs {
     duckdb_log_dump_path: Option<String>,
 }
 
+/// Entry point — handles error reporting and process exit.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
     if let Err(e) = main_impl().await {
         error!("{e}");
         std::process::exit(1);
     }
-
-    Ok(())
 }
 
 fn init_tracing() {

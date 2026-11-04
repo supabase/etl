@@ -527,7 +527,7 @@ impl BenchmarkArgs {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args)?;
+        self.push_destination_args(&mut args);
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
@@ -602,7 +602,7 @@ impl BenchmarkArgs {
         let mut args = vec!["--log-target".to_owned(), "terminal".to_owned(), "run".to_owned()];
         self.push_common_benchmark_args(&mut args);
         self.push_tuning_args(&mut args);
-        self.push_destination_args(&mut args)?;
+        self.push_destination_args(&mut args);
         args.extend([
             "--report-path".to_owned(),
             report_path.display().to_string(),
@@ -692,7 +692,8 @@ impl BenchmarkArgs {
         }
     }
 
-    fn push_destination_args(&self, args: &mut Vec<String>) -> Result<()> {
+    /// Appends command-line arguments for the selected benchmark destination.
+    fn push_destination_args(&self, args: &mut Vec<String>) {
         args.extend(["--destination".to_owned(), self.destination.as_arg().to_owned()]);
 
         match self.destination {
@@ -729,8 +730,6 @@ impl BenchmarkArgs {
             Destination::Snowflake => {}
             Destination::Null => {}
         }
-
-        Ok(())
     }
 
     fn psql_query(&self, database: &str, sql: &str) -> Result<String> {

@@ -167,15 +167,13 @@ impl ReplicatorSetup {
     }
 
     /// Replaces the BigQuery service-account key when this setup is BigQuery.
-    pub(super) fn set_bigquery_service_account_key(&mut self, key: &str) -> Result<()> {
+    pub(super) fn set_bigquery_service_account_key(&mut self, key: &str) {
         match &mut self.destination {
             DestinationSetup::BigQuery { service_account_key, .. } => {
                 *service_account_key = key.to_owned();
-                Ok(())
             }
             _ => {
                 println!("Ignoring --bq-sa-key-file because the destination is not bigquery.");
-                Ok(())
             }
         }
     }

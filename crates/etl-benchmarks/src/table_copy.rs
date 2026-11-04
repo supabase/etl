@@ -192,9 +192,8 @@ async fn run(args: RunArgs) -> Result<()> {
 
         config.validate().context("Invalid pipeline config")?;
 
-        let table_copy_notifications = register_table_copy_notifications(&store, &args.table_ids)
-            .await
-            .context("Failed to register table-copy notifications")?;
+        let table_copy_notifications =
+            register_table_copy_notifications(&store, &args.table_ids).await;
 
         let mut pipeline = Pipeline::new(config, store, destination.clone());
 
@@ -386,10 +385,11 @@ struct TableCopyNotifications {
     errored: TimedNotify,
 }
 
+/// Registers completion and error notifications before table copy starts.
 async fn register_table_copy_notifications(
     store: &NotifyingStore,
     table_ids: &[u32],
-) -> Result<Vec<TableCopyNotifications>> {
+) -> Vec<TableCopyNotifications> {
     let mut notifications = Vec::with_capacity(table_ids.len());
     for table_id in table_ids {
         let table_id = *table_id;
@@ -401,7 +401,7 @@ async fn register_table_copy_notifications(
         notifications.push(TableCopyNotifications { table_id, finished, errored });
     }
 
-    Ok(notifications)
+    notifications
 }
 
 async fn wait_for_table_copies(
