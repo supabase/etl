@@ -170,3 +170,19 @@ where
 {
     delete_replication_checkpoint(executor, pipeline_id, "table_sync", Some(table_id)).await
 }
+
+/// Deletes all persisted worker checkpoints for a pipeline.
+pub async fn delete_replication_checkpoints<'c, E>(
+    executor: E,
+    pipeline_id: &str,
+) -> sqlx::Result<u64>
+where
+    E: PgExecutor<'c>,
+{
+    let result = sqlx::query("delete from etl.replication_progress where pipeline_id_v2 = $1")
+        .bind(pipeline_id)
+        .execute(executor)
+        .await?;
+
+    Ok(result.rows_affected())
+}
