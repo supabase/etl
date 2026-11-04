@@ -60,7 +60,7 @@ use crate::{
     pipeline::PipelineId,
     postgres::{
         ReplicationMessageStream,
-        client::{PgReplicationClient, PostgresConnectionUpdate},
+        client::{PgReplicationClient, PostgresConnectionUpdate, SlotCreationMonitor},
         codec::{
             DDL_MESSAGE_PREFIX, SchemaChangeMessage, delete_message_payload_bytes,
             insert_message_payload_bytes, parse_event_from_begin_message,
@@ -187,6 +187,8 @@ pub(crate) struct ApplyWorkerContext<S, D> {
     pub(crate) replication_lag_monitor: ReplicationLagMonitor,
     /// Pipeline-owned durability age, retained through worker retries.
     pub(crate) durability_monitor: DurabilityMonitor,
+    /// Pipeline-owned slot creation observations for child table-sync workers.
+    pub(crate) slot_creation_monitor: SlotCreationMonitor,
     /// Cancellation token for graceful termination.
     pub(crate) shutdown_token: CancellationToken,
     /// Semaphore controlling maximum concurrent table sync workers.
@@ -4286,6 +4288,7 @@ mod apply_worker {
             ctx.store.clone(),
             ctx.destination.clone(),
             ctx.replication_lag_monitor.clone(),
+            ctx.slot_creation_monitor.clone(),
             ctx.shutdown_token.clone(),
             Arc::clone(&ctx.table_sync_worker_permits),
             ctx.memory_monitor.clone(),

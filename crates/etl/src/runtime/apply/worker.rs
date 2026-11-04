@@ -19,7 +19,9 @@ use crate::{
         ERROR_TYPE_LABEL, ETL_SLOT_INVALIDATIONS_TOTAL, ETL_WORKER_ERRORS_TOTAL, WORKER_TYPE_LABEL,
     },
     pipeline::PipelineId,
-    postgres::client::{GetOrCreateSlotResult, PgReplicationClient, SlotState},
+    postgres::client::{
+        GetOrCreateSlotResult, PgReplicationClient, SlotCreationMonitor, SlotState,
+    },
     replication::{
         ApplyLoop, ApplyLoopResult, ApplyWorkerContext, DurabilityMonitor, ReplicationLagMonitor,
         WorkerContext, WorkerType,
@@ -97,6 +99,8 @@ pub(crate) struct ApplyWorker<S, D> {
     replication_lag_monitor: ReplicationLagMonitor,
     /// Outstanding durability survives individual apply-loop attempts.
     durability_monitor: DurabilityMonitor,
+    /// Slot creation observations shared with all table-sync workers.
+    slot_creation_monitor: SlotCreationMonitor,
     shutdown_token: CancellationToken,
     table_sync_worker_permits: Arc<Semaphore>,
     memory_monitor: MemoryMonitor,
@@ -119,6 +123,7 @@ impl<S, D> ApplyWorker<S, D> {
         destination: D,
         replication_lag_monitor: ReplicationLagMonitor,
         durability_monitor: DurabilityMonitor,
+        slot_creation_monitor: SlotCreationMonitor,
         shutdown_token: CancellationToken,
         table_sync_worker_permits: Arc<Semaphore>,
         memory_monitor: MemoryMonitor,
@@ -138,6 +143,7 @@ impl<S, D> ApplyWorker<S, D> {
             destination,
             replication_lag_monitor,
             durability_monitor,
+            slot_creation_monitor,
             shutdown_token,
             table_sync_worker_permits,
             memory_monitor,
@@ -281,6 +287,7 @@ where
                     self.pipeline_id.clone(),
                 )
                 .await?;
+                replication_client.set_slot_creation_monitor(self.slot_creation_monitor.clone());
                 let start_lsn = get_start_lsn(
                     self.pipeline_id.clone(),
                     &mut replication_client,
@@ -306,6 +313,7 @@ where
             destination: self.destination.clone(),
             replication_lag_monitor: self.replication_lag_monitor.clone(),
             durability_monitor: self.durability_monitor.clone(),
+            slot_creation_monitor: self.slot_creation_monitor.clone(),
             shutdown_token: self.shutdown_token.clone(),
             table_sync_worker_permits: Arc::clone(&self.table_sync_worker_permits),
             memory_monitor: self.memory_monitor.clone(),
